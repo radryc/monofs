@@ -1,0 +1,355 @@
+{{define "content"}}
+<div class="header">
+    <h1>Replication Status</h1>
+    <p>Monitor data replication and failover across all routers</p>
+</div>
+
+<!-- Drain Mode Warning Banner -->
+<div id="drainWarning" style="display: none; background: rgba(245, 158, 11, 0.15); border-left: 4px solid var(--warning); padding: 16px; margin-bottom: 20px; border-radius: 8px;">
+    <div style="display: flex; align-items: center; gap: 12px;">
+        <span style="font-size: 24px;">🚧</span>
+        <div>
+            <div style="font-weight: 600; color: var(--warning); margin-bottom: 4px;">CLUSTER IN DRAIN MODE</div>
+            <div style="color: var(--text-secondary); font-size: 14px;">
+                <span id="drainReason"></span> - Failover is disabled. Started <span id="drainTime"></span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="grid grid-cols-3">
+    <div class="stat-card">
+        <span class="stat-icon">🛡️</span>
+        <div class="stat-label">Active Failovers</div>
+        <div class="stat-value" id="activeFailovers">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">🔄</span>
+        <div class="stat-label">Syncing Nodes</div>
+        <div class="stat-value" id="syncingNodes">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">📊</span>
+        <div class="stat-label">Replication Factor</div>
+        <div class="stat-value" id="replicationFactor">-</div>
+    </div>
+</div>
+
+<div class="card" id="failoverSection" style="display: none;">
+    <div class="card-header" style="background: rgba(245, 158, 11, 0.15); margin: -24px -24px 20px; padding: 16px 24px; border-radius: 12px 12px 0 0;">
+        <h2 class="card-title" style="color: var(--warning);">⚠️ Active Failovers</h2>
+    </div>
+    <div id="failoverList"></div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <div class="toolbar">
+            <h2 class="card-title">Node Replication Status</h2>
+            <div class="toolbar-group">
+                <label class="muted" style="font-size: 12px;">Router</label>
+                <select id="routerSelector" class="select"></select>
+            </div>
+        </div>
+    </div>
+    <div id="replicationTable">
+        <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<div class="grid grid-cols-2">
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">Replication Health</h2>
+        </div>
+        <div id="replicationHealth"></div>
+    </div>
+    
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">Data Distribution</h2>
+        </div>
+        <div id="dataDistribution"></div>
+    </div>
+</div>
+
+<script>
+    let routerData = null;
+
+    function setRouterOptions() {
+        const select = document.getElementById('routerSelector');
+        if (!select || !routerData) return;
+        const options = [
+            { name: 'All Routers', value: 'all' },
+            ...routerData.routers.map(r => ({ name: r.name || r.url || 'router', value: r.name || r.url || 'router' }))
+        ];
+        select.innerHTML = options.map(opt => `<option value="${opt.value}">${opt.name}</option>`).join('');
+    }
+
+    function getSelectedRouter() {
+        const select = document.getElementById('routerSelector');
+        return select ? select.value : 'all';
+    }
+
+    function dedupeNodes(nodes) {
+        const map = new Map();
+        nodes.forEach(node => {
+            const key = `${node.id}|${node.address}`;
+            if (!map.has(key)) {
+                map.set(key, { 
+                    ...node, 
+                    _routers: new Set([node._router || 'local']),
+                    _covered_by: node.covered_by ? new Set([node.covered_by]) : new Set(),
+                    _backing_up: new Set(node.backing_up || [])
+                });
+                return;
+            }
+            const existing = map.get(key);
+            existing.healthy = existing.healthy || node.healthy;
+            existing.file_count = Math.max(existing.file_count || 0, node.file_count || 0);
+            existing.weight = Math.max(existing.weight || 0, node.weight || 0);
+            if (existing.status !== 'ACTIVE' && node.status) {
+                existing.status = node.status;
+            }
+            existing._routers.add(node._router || 'local');
+            if (node.covered_by) {
+                existing._covered_by.add(node.covered_by);
+            }
+            // Merge backing_up arrays from all routers
+            (node.backing_up || []).forEach(n => existing._backing_up.add(n));
+        });
+        return Array.from(map.values()).map(n => ({
+            ...n,
+            _routers: Array.from(n._routers),
+            _covered_by: Array.from(n._covered_by),
+            _backing_up: Array.from(n._backing_up)
+        }));
+    }
+
+    async function loadReplicationStatus() {
+        try {
+            const response = await fetch('/api/routers');
+            routerData = await response.json();
+            const routers = routerData.routers || [];
+            setRouterOptions();
+
+            const selected = getSelectedRouter();
+            const scopedRouters = selected === 'all'
+                ? routers
+                : routers.filter(r => (r.name || r.url || 'router') === selected);
+
+            const scopedStatuses = scopedRouters.flatMap(r => (r.status?.nodes || []).map(n => ({
+                ...n,
+                _router: r.name || r.url || 'router'
+            })));
+            const uniqueNodes = dedupeNodes(scopedStatuses);
+            const scopedFailovers = scopedRouters.reduce((acc, r) => {
+                const failovers = r.status?.failovers || {};
+                Object.entries(failovers).forEach(([k, v]) => {
+                    acc[`${r.name || r.url || 'router'}:${k}`] = v;
+                });
+                return acc;
+            }, {});
+            
+            // Check for drain mode
+            const drainModes = scopedRouters.map(r => r.status?.drain_mode).filter(d => d?.active);
+            if (drainModes.length > 0) {
+                const drain = drainModes[0];
+                document.getElementById('drainWarning').style.display = 'block';
+                document.getElementById('drainReason').textContent = drain.reason || 'planned maintenance';
+                const drainDate = new Date(drain.drained_at * 1000);
+                document.getElementById('drainTime').textContent = drainDate.toLocaleString();
+            } else {
+                document.getElementById('drainWarning').style.display = 'none';
+            }
+            
+            // Count failovers and syncing nodes
+            const failoverCount = Object.keys(scopedFailovers || {}).length;
+            const syncingCount = uniqueNodes.filter(n => n.status === 'SYNCING').length;
+            
+            document.getElementById('activeFailovers').textContent = failoverCount;
+            document.getElementById('syncingNodes').textContent = syncingCount;
+            document.getElementById('replicationFactor').textContent = '2x'; // TODO: make configurable
+            
+            // Show failover section if there are active failovers
+            if (failoverCount > 0) {
+                document.getElementById('failoverSection').style.display = 'block';
+                document.getElementById('failoverList').innerHTML = Object.entries(scopedFailovers).map(([failed, backup]) => {
+                    const routerName = failed.split(':')[0];
+                    const nodeName = failed.split(':').slice(1).join(':');
+                    return `
+                    <div style="padding: 16px; margin-bottom: 12px; background: rgba(245, 158, 11, 0.1); border-left: 4px solid var(--warning); border-radius: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <div style="font-weight: 600; margin-bottom: 4px;">
+                                    <span style="color: var(--danger);">❌ ${nodeName}</span> 
+                                    <span style="color: var(--text-secondary);">→</span> 
+                                    <span style="color: var(--success);">✅ ${backup}</span>
+                                </div>
+                                <div style="font-size: 13px; color: var(--text-secondary);">
+                                    ${backup} is covering traffic for ${nodeName}
+                                </div>
+                                <div class="muted" style="font-size: 12px; margin-top: 4px;">Router: ${routerName}</div>
+                            </div>
+                            <span class="badge badge-warning">Active</span>
+                        </div>
+                    </div>
+                `;
+                }).join('');
+            } else {
+                document.getElementById('failoverSection').style.display = 'none';
+            }
+            
+            // Render replication table
+            document.getElementById('replicationTable').innerHTML = `
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Node</th>
+                            <th>Router</th>
+                            <th>Status</th>
+                            <th>Files Stored</th>
+                            <th>Backup Status</th>
+                            <th>Sync Progress</th>
+                            <th>Health</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${uniqueNodes.map(node => {
+                            let statusBadge = '';
+                            let syncProgress = '';
+                            
+                            if (node.status === 'STAGING') {
+                                statusBadge = '<span class="badge badge-warning">⏳ Staging</span>';
+                                syncProgress = '<span style="color: var(--text-secondary);">Pending</span>';
+                            } else if (node.status === 'SYNCING') {
+                                statusBadge = '<span class="badge badge-info">🔄 Syncing</span>';
+                                const percent = (node.sync_progress * 100).toFixed(0);
+                                syncProgress = `
+                                    <div style="min-width: 120px;">
+                                        <div style="font-size: 12px; margin-bottom: 4px;">${percent}%</div>
+                                        <div class="progress">
+                                            <div class="progress-bar" style="width: ${percent}%"></div>
+                                        </div>
+                                    </div>
+                                `;
+                            } else if (node.healthy) {
+                                statusBadge = '<span class="badge badge-success">✅ Active</span>';
+                                syncProgress = '<span style="color: var(--success);">Complete</span>';
+                            } else {
+                                statusBadge = '<span class="badge badge-danger">❌ Failed</span>';
+                                syncProgress = '<span style="color: var(--danger);">N/A</span>';
+                            }
+                            
+                            // Show backup status - either covering other nodes or being covered
+                            const coveredByNodes = node._covered_by && node._covered_by.length > 0 ? node._covered_by : (node.covered_by ? [node.covered_by] : []);
+                            const backingUpNodes = node._backing_up && node._backing_up.length > 0 ? node._backing_up : (node.backing_up || []);
+                            
+                            let backupStatusDisplay;
+                            if (coveredByNodes.length > 0) {
+                                // This node is failed and being covered by others
+                                backupStatusDisplay = `<span style="color: var(--info); font-weight: 600;">Covered by: ${coveredByNodes.join(', ')}</span>`;
+                            } else if (backingUpNodes.length > 0) {
+                                // This node is healthy and covering failed nodes
+                                backupStatusDisplay = `<span style="color: var(--warning); font-weight: 600;">Covering: ${backingUpNodes.join(', ')}</span>`;
+                            } else {
+                                backupStatusDisplay = '<span style="color: var(--text-secondary);">-</span>';
+                            }
+                            
+                            const healthIndicator = node.healthy 
+                                ? '<span class="status-indicator healthy"></span>' 
+                                : '<span class="status-indicator unhealthy"></span>';
+                            
+                            return `
+                                <tr>
+                                    <td><strong>${node.id}</strong></td>
+                                    <td>${(node._routers || [node._router || 'local']).join(', ')}</td>
+                                    <td>${statusBadge}</td>
+                                    <td>${(node.file_count || 0).toLocaleString()}</td>
+                                    <td>${backupStatusDisplay}</td>
+                                    <td>${syncProgress}</td>
+                                    <td>${healthIndicator}</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+            
+            // Render replication health
+            const healthyNodes = uniqueNodes.filter(n => n.healthy).length;
+            const totalNodes = uniqueNodes.length;
+            const healthPercent = totalNodes > 0 ? (healthyNodes / totalNodes * 100) : 0;
+            
+            let healthStatus = 'Excellent';
+            let healthColor = 'var(--success)';
+            if (healthPercent < 50) {
+                healthStatus = 'Critical';
+                healthColor = 'var(--danger)';
+            } else if (healthPercent < 80) {
+                healthStatus = 'Degraded';
+                healthColor = 'var(--warning)';
+            }
+            
+            document.getElementById('replicationHealth').innerHTML = `
+                <div style="padding: 20px; text-align: center;">
+                    <div style="font-size: 64px; margin-bottom: 16px;">
+                        ${healthPercent === 100 ? '✅' : healthPercent > 50 ? '⚠️' : '❌'}
+                    </div>
+                    <div style="font-size: 24px; font-weight: 600; margin-bottom: 8px; color: ${healthColor};">
+                        ${healthStatus}
+                    </div>
+                    <div style="color: var(--text-secondary); margin-bottom: 16px;">
+                        ${healthyNodes} of ${totalNodes} nodes healthy
+                    </div>
+                    <div class="progress">
+                        <div class="progress-bar" style="width: ${healthPercent}%"></div>
+                    </div>
+                </div>
+            `;
+            
+            // Render data distribution
+            const totalFiles = uniqueNodes.reduce((sum, node) => sum + (node.file_count || 0), 0);
+            const avgFiles = totalNodes > 0 ? (totalFiles / totalNodes) : 0;
+            
+            document.getElementById('dataDistribution').innerHTML = `
+                <div style="padding: 20px;">
+                    ${uniqueNodes.map(node => {
+                        const percent = totalFiles > 0 ? ((node.file_count || 0) / totalFiles * 100) : 0;
+                        return `
+                            <div style="margin-bottom: 16px;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 13px;">
+                                    <span style="font-weight: 600;">${node.id}</span>
+                                    <span style="color: var(--text-secondary);">${(node.file_count || 0).toLocaleString()} files (${percent.toFixed(1)}%)</span>
+                                </div>
+                                <div class="progress">
+                                    <div class="progress-bar" style="width: ${percent}%"></div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                    <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-secondary);">
+                        <div>Total: ${totalFiles.toLocaleString()} files</div>
+                        <div>Average: ${avgFiles.toFixed(0)} files per node</div>
+                    </div>
+                </div>
+            `;
+        } catch (err) {
+            console.error('Failed to load replication status:', err);
+        }
+    }
+
+    document.addEventListener('change', (event) => {
+        if (event.target && event.target.id === 'routerSelector') {
+            loadReplicationStatus();
+        }
+    });
+    
+    loadReplicationStatus();
+    setInterval(loadReplicationStatus, 15000);
+</script>
+{{end}}

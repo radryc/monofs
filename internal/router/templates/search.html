@@ -1,0 +1,658 @@
+{{define "content"}}
+<div class="header">
+    <h1>🔍 Code Search</h1>
+    <p>Search across all indexed repositories using Zoekt</p>
+</div>
+
+<!-- Search Form -->
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Search Query</h2>
+    </div>
+    <div style="padding: 20px;">
+        <div style="display: flex; gap: 12px; margin-bottom: 16px;">
+            <input type="text" id="searchQuery" class="input" 
+                   placeholder="Enter search query... (supports Zoekt syntax)"
+                   style="flex: 1; font-family: monospace;" autofocus>
+            <button onclick="executeSearch()" class="btn btn-primary" id="searchBtn">
+                🔍 Search
+            </button>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: var(--text-secondary); align-items: center;">
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                <input type="checkbox" id="caseSensitive" style="accent-color: var(--primary);"> 
+                Case Sensitive
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                <input type="checkbox" id="regexMode" style="accent-color: var(--primary);"> 
+                Regex Mode
+            </label>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <label>Repository:</label>
+                <select id="repoFilter" class="select" style="min-width: 180px;">
+                    <option value="">All Repositories</option>
+                </select>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <label>File Pattern:</label>
+                <input type="text" id="filePattern" class="input" placeholder="e.g., *.go" style="width: 120px; font-size: 13px;">
+            </div>
+        </div>
+        
+        <!-- Syntax Help -->
+        <details style="margin-top: 16px;">
+            <summary style="font-size: 13px; color: var(--primary); cursor: pointer;">Zoekt Query Syntax Help</summary>
+            <div style="margin-top: 12px; background: rgba(15, 23, 42, 0.6); border-radius: 8px; padding: 16px; font-size: 13px;">
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;">
+                    <div>
+                        <h4 style="font-weight: 600; margin-bottom: 8px;">Basic Patterns</h4>
+                        <ul style="list-style: none; font-family: monospace; font-size: 12px; color: var(--text-secondary);">
+                            <li style="margin: 4px 0;"><code style="color: var(--info);">word</code> - literal search</li>
+                            <li style="margin: 4px 0;"><code style="color: var(--info);">"exact phrase"</code> - quoted phrase</li>
+                            <li style="margin: 4px 0;"><code style="color: var(--info);">word1 word2</code> - AND (both words)</li>
+                            <li style="margin: 4px 0;"><code style="color: var(--info);">word1 or word2</code> - OR search</li>
+                            <li style="margin: 4px 0;"><code style="color: var(--info);">-word</code> - exclude word</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h4 style="font-weight: 600; margin-bottom: 8px;">Filters</h4>
+                        <ul style="list-style: none; font-family: monospace; font-size: 12px; color: var(--text-secondary);">
+                            <li style="margin: 4px 0;"><code style="color: var(--info);">file:\.go$</code> - file path regex</li>
+                            <li style="margin: 4px 0;"><code style="color: var(--info);">lang:go</code> - language filter</li>
+                            <li style="margin: 4px 0;"><code style="color: var(--info);">repo:name</code> - repository filter</li>
+                            <li style="margin: 4px 0;"><code style="color: var(--info);">case:yes</code> - case sensitive</li>
+                            <li style="margin: 4px 0;"><code style="color: var(--info);">sym:funcName</code> - symbol search</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </details>
+    </div>
+</div>
+
+<!-- Results Area -->
+<div id="resultsArea" style="margin-top: 24px;">
+    <!-- Empty State -->
+    <div id="emptyState" class="card" style="padding: 60px 20px; text-align: center;">
+        <div style="font-size: 48px; margin-bottom: 16px;">🔍</div>
+        <h3 style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">Start Searching</h3>
+        <p style="color: var(--text-secondary); max-width: 400px; margin: 0 auto;">
+            Enter a search query above to find code across all indexed repositories.
+            Use Zoekt syntax for advanced queries.
+        </p>
+    </div>
+
+    <!-- Loading State -->
+    <div id="loadingState" class="card" style="padding: 60px 20px; text-align: center; display: none;">
+        <div class="loader" style="margin: 0 auto 16px;"></div>
+        <p style="color: var(--text-secondary);">Searching...</p>
+    </div>
+
+    <!-- Error State -->
+    <div id="errorState" class="card" style="padding: 40px 20px; text-align: center; display: none; border-color: var(--danger);">
+        <div style="font-size: 36px; margin-bottom: 12px;">❌</div>
+        <h3 style="font-size: 16px; font-weight: 600; color: var(--danger); margin-bottom: 8px;">Search Failed</h3>
+        <p id="errorMessage" style="color: var(--text-secondary);"></p>
+    </div>
+
+    <!-- Results -->
+    <div id="searchResults" style="display: none;">
+        <!-- Results Header -->
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <div id="resultsInfo" style="color: var(--text-secondary);"></div>
+            <div id="searchTime" style="font-size: 12px; color: var(--text-secondary);"></div>
+        </div>
+
+        <!-- Results Container -->
+        <div id="resultsContainer"></div>
+
+        <!-- Pagination -->
+        <div id="pagination" style="display: none; justify-content: center; align-items: center; gap: 16px; margin-top: 24px;">
+            <button onclick="prevPage()" id="prevBtn" class="btn">← Previous</button>
+            <span id="pageInfo" style="color: var(--text-secondary);"></span>
+            <button onclick="nextPage()" id="nextBtn" class="btn">Next →</button>
+        </div>
+    </div>
+</div>
+
+<!-- File Viewer Modal -->
+<div id="fileViewerModal" class="modal" style="display: none;">
+    <div class="modal-overlay" onclick="closeFileViewer()"></div>
+    <div class="modal-content" style="max-width: 90%; max-height: 85vh;">
+        <!-- Modal Header -->
+        <div class="modal-header">
+            <div style="display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;">
+                <span style="font-size: 24px;">📄</span>
+                <div style="min-width: 0; flex: 1;">
+                    <h3 id="viewerFileName" style="font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></h3>
+                    <p id="viewerFilePath" style="font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></p>
+                </div>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <button onclick="copyFileContent()" class="btn" style="padding: 8px 12px; font-size: 13px;" title="Copy content">📋 Copy</button>
+                <button onclick="toggleFullScreen()" class="btn" style="padding: 8px 12px;" title="Toggle Fullscreen">⛶</button>
+                <button onclick="closeFileViewer()" class="btn" style="padding: 8px 12px;">✕</button>
+            </div>
+        </div>
+
+        <!-- File Content -->
+        <div style="flex: 1; overflow: hidden; display: flex; flex-direction: column; position: relative;">
+            <div id="viewerLoading" style="padding: 40px; text-align: center;">
+                <div class="loader" style="margin: 0 auto 12px;"></div>
+                <p style="color: var(--text-secondary);">Loading file...</p>
+            </div>
+            <div id="viewerContent" style="flex: 1; overflow: auto; display: none; background: #0d1117;">
+                <pre id="codeContent" style="margin: 0; font-size: 13px; font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace; line-height: 1.35; tab-size: 4;"><code></code></pre>
+            </div>
+            <div id="viewerError" style="padding: 40px; text-align: center; display: none;">
+                <div style="font-size: 36px; margin-bottom: 12px;">❌</div>
+                <p id="viewerErrorMessage" style="color: var(--danger);"></p>
+            </div>
+        </div>
+
+        <!-- Modal Footer -->
+        <div class="modal-footer">
+            <span id="viewerInfo" style="font-size: 12px; color: var(--text-secondary);">Read-only view</span>
+            <span id="viewerLineInfo" style="font-size: 12px; color: var(--text-secondary);"></span>
+        </div>
+    </div>
+</div>
+
+<style>
+.loader {
+    width: 32px;
+    height: 32px;
+    border: 3px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    display: inline-block;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.input {
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(109, 94, 252, 0.2);
+}
+
+.input::placeholder {
+    color: var(--text-secondary);
+}
+
+.select {
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.select:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+/* Search result card */
+.result-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.result-card:hover {
+    border-color: var(--primary);
+    background: rgba(109, 94, 252, 0.05);
+}
+
+.result-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.result-file {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.result-line {
+    color: var(--info);
+}
+
+.result-repo {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-left: auto;
+}
+
+.result-path {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.result-code {
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-family: monospace;
+    font-size: 13px;
+    overflow-x: auto;
+    white-space: pre;
+}
+
+.result-code .line-num {
+    color: var(--text-secondary);
+    margin-right: 12px;
+    user-select: none;
+}
+
+.search-match {
+    background: rgba(245, 158, 11, 0.4);
+    color: #fde68a;
+    padding: 1px 3px;
+    border-radius: 3px;
+}
+
+/* Modal styles */
+.modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.modal-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(4px);
+}
+
+.modal-content {
+    position: relative;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+.modal-content.fullscreen {
+    width: 100vw;
+    height: 100vh;
+    max-width: none !important;
+    max-height: none !important;
+    border-radius: 0;
+    border: none;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: space-between;
+    padding: 12px 20px;
+    border-top: 1px solid var(--border);
+    background: rgba(15, 23, 42, 0.5);
+}
+
+/* Code viewer line styles */
+.code-line {
+    display: flex; /* Flex layout for side-by-side line num and code */
+    padding: 0;
+    min-height: 18px;
+}
+
+.code-line:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.code-line.highlighted {
+    background: rgba(234, 179, 8, 0.2);
+}
+
+.code-line.highlighted .line-number {
+    color: #eab308;
+    background: rgba(234, 179, 8, 0.1);
+}
+
+.line-number {
+    display: inline-block;
+    width: 3.5em; /* Fixed width */
+    padding-right: 10px;
+    text-align: right;
+    color: #485261;
+    user-select: none;
+    border-right: 1px solid #30363d;
+    margin-right: 10px;
+    background: #0d1117; /* Matches editor background */
+    flex-shrink: 0;
+}
+
+.code-text {
+    white-space: pre;
+    flex-grow: 1;
+    min-width: 0; /* Allow text overflow */
+}
+</style>
+
+<script>
+// State
+let allResults = [];
+let currentPage = 1;
+const resultsPerPage = 10;
+let currentStorageId = '';
+let currentFilePath = '';
+let currentFileContent = '';
+
+// Initialize
+document.addEventListener('DOMContentLoaded', () => {
+    loadRepositories();
+    
+    // Enter key to search
+    document.getElementById('searchQuery').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') executeSearch();
+    });
+
+    // Close modal on escape
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeFileViewer();
+    });
+});
+
+// Load repositories for filter dropdown
+async function loadRepositories() {
+    try {
+        const response = await fetch('/api/search/indexes');
+        const data = await response.json();
+        const select = document.getElementById('repoFilter');
+        
+        if (data.indexes) {
+            data.indexes.forEach(idx => {
+                if (idx.status === 3) { // Ready
+                    const option = document.createElement('option');
+                    option.value = idx.storage_id;
+                    option.textContent = idx.display_path || idx.storage_id.substring(0, 20);
+                    select.appendChild(option);
+                }
+            });
+        }
+    } catch (e) {
+        console.error('Failed to load repositories:', e);
+    }
+}
+
+// Execute search
+async function executeSearch() {
+    const query = document.getElementById('searchQuery').value.trim();
+    if (!query) return;
+
+    showLoading();
+    currentPage = 1;
+
+    try {
+        const response = await fetch('/api/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                query: query,
+                storage_id: document.getElementById('repoFilter').value,
+                case_sensitive: document.getElementById('caseSensitive').checked,
+                regex: document.getElementById('regexMode').checked,
+                max_results: 500,
+                file_patterns: document.getElementById('filePattern').value ? 
+                    [document.getElementById('filePattern').value] : []
+            })
+        });
+
+        if (!response.ok) throw new Error(await response.text());
+
+        const data = await response.json();
+        allResults = data.results || [];
+        
+        displayResults(data);
+    } catch (e) {
+        showError(e.message);
+    }
+}
+
+function showLoading() {
+    document.getElementById('emptyState').style.display = 'none';
+    document.getElementById('searchResults').style.display = 'none';
+    document.getElementById('errorState').style.display = 'none';
+    document.getElementById('loadingState').style.display = 'block';
+}
+
+function showError(message) {
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'none';
+    document.getElementById('searchResults').style.display = 'none';
+    document.getElementById('errorState').style.display = 'block';
+    document.getElementById('errorMessage').textContent = message;
+}
+
+function displayResults(data) {
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'none';
+    document.getElementById('errorState').style.display = 'none';
+    document.getElementById('searchResults').style.display = 'block';
+
+    const total = allResults.length;
+    const truncated = data.truncated ? ' (truncated)' : '';
+    document.getElementById('resultsInfo').innerHTML = 
+        `Found <strong>${total}</strong> results${truncated}`;
+    
+    if (data.duration_ms) {
+        document.getElementById('searchTime').textContent = 
+            `Search took ${data.duration_ms.toFixed(1)}ms`;
+    }
+
+    renderPage();
+}
+
+function renderPage() {
+    const container = document.getElementById('resultsContainer');
+    const start = (currentPage - 1) * resultsPerPage;
+    const end = start + resultsPerPage;
+    const pageResults = allResults.slice(start, end);
+    const totalPages = Math.ceil(allResults.length / resultsPerPage);
+
+    container.innerHTML = pageResults.map((result, idx) => {
+        const fileName = result.file_path.split('/').pop();
+        const repoName = result.display_path || (result.storage_id ? result.storage_id.substring(0, 12) : 'unknown');
+        
+        // Highlight matches in line content
+        let lineContent = escapeHtml(result.line_content);
+        if (result.matches && result.matches.length > 0) {
+            // Sort matches by start position in reverse order to preserve indices
+            const sortedMatches = [...result.matches].sort((a, b) => b.start - a.start);
+            for (const m of sortedMatches) {
+                const before = lineContent.slice(0, m.start);
+                const match = lineContent.slice(m.start, m.end);
+                const after = lineContent.slice(m.end);
+                lineContent = before + '<span class="search-match">' + match + '</span>' + after;
+            }
+        }
+
+        return `
+            <div class="result-card" onclick="openFileViewer('${escapeAttr(result.storage_id)}', '${escapeAttr(result.file_path)}', ${result.line_number})">
+                <div class="result-header">
+                    <span>📄</span>
+                    <span class="result-file">${escapeHtml(fileName)}</span>
+                    <span style="color: var(--text-secondary);">:</span>
+                    <span class="result-line">${result.line_number}</span>
+                    <span class="result-repo">${escapeHtml(repoName)}</span>
+                </div>
+                <div class="result-path">${escapeHtml(result.file_path)}</div>
+                <div class="result-code"><span class="line-num">${result.line_number}</span>${lineContent}</div>
+            </div>
+        `;
+    }).join('');
+
+    // Update pagination
+    const pagination = document.getElementById('pagination');
+    if (totalPages > 1) {
+        pagination.style.display = 'flex';
+        document.getElementById('pageInfo').textContent = `Page ${currentPage} of ${totalPages}`;
+        document.getElementById('prevBtn').disabled = currentPage === 1;
+        document.getElementById('nextBtn').disabled = currentPage === totalPages;
+    } else {
+        pagination.style.display = 'none';
+    }
+}
+
+function prevPage() {
+    if (currentPage > 1) {
+        currentPage--;
+        renderPage();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+}
+
+function nextPage() {
+    const totalPages = Math.ceil(allResults.length / resultsPerPage);
+    if (currentPage < totalPages) {
+        currentPage++;
+        renderPage();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+}
+
+// File Viewer
+async function openFileViewer(storageId, filePath, lineNumber) {
+    currentStorageId = storageId;
+    currentFilePath = filePath;
+
+    const modal = document.getElementById('fileViewerModal');
+    const fileName = filePath.split('/').pop();
+    
+    document.getElementById('viewerFileName').textContent = fileName;
+    document.getElementById('viewerFilePath').textContent = filePath;
+    document.getElementById('viewerLineInfo').textContent = `Line ${lineNumber}`;
+    
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    // Show loading
+    document.getElementById('viewerLoading').style.display = 'block';
+    document.getElementById('viewerContent').style.display = 'none';
+    document.getElementById('viewerError').style.display = 'none';
+
+    try {
+        const response = await fetch('/api/file/content', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                storage_id: storageId,
+                file_path: filePath
+            })
+        });
+
+        if (!response.ok) throw new Error(await response.text());
+
+        const data = await response.json();
+        currentFileContent = data.content;
+        displayFileContent(data.content, lineNumber);
+    } catch (e) {
+        document.getElementById('viewerLoading').style.display = 'none';
+        document.getElementById('viewerError').style.display = 'block';
+        document.getElementById('viewerErrorMessage').textContent = e.message;
+    }
+}
+
+async function copyFileContent() {
+    if (!currentFileContent) return;
+    try {
+        await navigator.clipboard.writeText(currentFileContent);
+        const btn = document.querySelector('button[onclick="copyFileContent()"]');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '✅ Copied!';
+        setTimeout(() => btn.innerHTML = originalText, 2000);
+    } catch (err) {
+        console.error('Failed to copy', err);
+    }
+}
+
+function toggleFullScreen() {
+    const modalContent = document.querySelector('#fileViewerModal .modal-content');
+    modalContent.classList.toggle('fullscreen');
+}
+
+function displayFileContent(content, highlightLine) {
+    document.getElementById('viewerLoading').style.display = 'none';
+    document.getElementById('viewerContent').style.display = 'block';
+
+    const lines = content.split('\n');
+    const codeContent = document.getElementById('codeContent').querySelector('code');
+    
+    codeContent.innerHTML = lines.map((line, idx) => {
+        const lineNum = idx + 1;
+        const isHighlighted = lineNum === highlightLine;
+        return `<span class="code-line${isHighlighted ? ' highlighted' : ''}" id="line-${lineNum}">` +
+               `<span class="line-number">${lineNum}</span><span class="code-text">${escapeHtml(line) || ' '}</span></span>`;
+    }).join(''); // Join with empty string to avoid double spacing in pre tag
+
+    // Scroll to highlighting line
+    setTimeout(() => {
+        const highlightedLine = document.getElementById(`line-${highlightLine}`);
+        if (highlightedLine) {
+            highlightedLine.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }, 100);
+}
+
+function closeFileViewer() {
+    document.getElementById('fileViewerModal').style.display = 'none';
+    document.body.style.overflow = '';
+}
+
+// Utilities
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function escapeAttr(text) {
+    if (!text) return '';
+    return text.replace(/'/g, "\\'").replace(/"/g, '\\"');
+}
+</script>
+{{end}}

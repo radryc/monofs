@@ -1,0 +1,47 @@
+# Build stage
+FROM golang:1.24-alpine AS builder
+
+RUN apk add --no-cache git
+
+WORKDIR /app
+
+# Copy go mod files first for better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the search binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o /monofs-search ./cmd/monofs-search
+
+# Runtime stage
+FROM alpine:3.21
+
+# Install git (needed for cloning repos during indexing), Go (needed for go mod download), and ca-certificates
+RUN apk add --no-cache git go ca-certificates tzdata
+
+# Create non-root user for security
+RUN addgroup -S monofs && adduser -S monofs -G monofs
+
+# Create directories for indexes and cache
+RUN mkdir -p /data/indexes /data/cache && chown -R monofs:monofs /data
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /monofs-search /app/monofs-search
+
+# Switch to non-root user
+USER monofs
+
+# Expose gRPC port
+EXPOSE 9100
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:9100/health || exit 1
+
+# Default command with resource-conscious defaults
+ENTRYPOINT ["/app/monofs-search"]
+CMD ["--port=9100", "--index-dir=/data/indexes", "--cache-dir=/data/cache", "--workers=2", "--queue-size=100"]

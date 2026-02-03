@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MonoFS Router - Repository Ingestion</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 50px auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header img {
+            display: block;
+            margin: 0 auto 16px;
+        }
+        
+        .header h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+            display: block;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .form-group {
+            margin-bottom: 25px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+            font-size: 14px;
+        }
+        
+        input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        input::placeholder {
+            color: #999;
+        }
+        
+        .help-text {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        button {
+            width: 100%;
+            padding: 14px 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .status {
+            margin-top: 30px;
+            padding: 16px;
+            border-radius: 8px;
+            display: none;
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .status.info {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            color: #1976d2;
+        }
+        
+        .status.success {
+            background: #e8f5e9;
+            border-left: 4px solid #4caf50;
+            color: #388e3c;
+        }
+        
+        .status.error {
+            background: #ffebee;
+            border-left: 4px solid #f44336;
+            color: #c62828;
+        }
+        
+        .status-icon {
+            margin-right: 8px;
+        }
+        
+        .loader {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .nodes-section {
+            margin-top: 40px;
+            padding-top: 30px;
+            border-top: 2px solid #f0f0f0;
+        }
+        
+        .nodes-section h2 {
+            font-size: 20px;
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .node-list {
+            display: grid;
+            gap: 12px;
+        }
+        
+        .node {
+            padding: 12px 16px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .node-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .node-id {
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .node-address {
+            color: #666;
+            font-size: 13px;
+        }
+        
+        .node-status {
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        .node-status.healthy {
+            background: #e8f5e9;
+            color: #388e3c;
+        }
+        
+        .node-status.unhealthy {
+            background: #ffebee;
+            color: #c62828;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <img src="/static/static/monofs.png" alt="MonoFS" style="width: 100px; height: auto;">
+            <h1>MonoFS Router</h1>
+            <p>Ingest Git repositories into the distributed filesystem</p>
+        </div>
+        
+        <div class="content">
+            <form id="ingestForm">
+                <div class="form-group">
+                    <label for="repo_url">Repository URL</label>
+                    <input 
+                        type="text" 
+                        id="repo_url" 
+                        name="repo_url" 
+                        required 
+                        placeholder="https://github.com/user/repo.git"
+                    >
+                    <div class="help-text">Enter the full Git repository URL (HTTP/HTTPS)</div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="branch">Branch</label>
+                    <input 
+                        type="text" 
+                        id="branch" 
+                        name="branch" 
+                        placeholder="main"
+                        value="main"
+                    >
+                    <div class="help-text">Git branch to ingest (defaults to 'main')</div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="repo_id">Repository ID</label>
+                    <input 
+                        type="text" 
+                        id="repo_id" 
+                        name="repo_id" 
+                        placeholder="github_com/user/repo (auto-generated from URL)"
+                    >
+                    <div class="help-text">Unique identifier for this repository (leave empty to auto-generate from URL)</div>
+                </div>
+                
+                <button type="submit" id="submitBtn">
+                    Ingest Repository
+                </button>
+            </form>
+            
+            <div id="status" class="status"></div>
+            
+            <div class="nodes-section">
+                <h2>Ingested Repositories</h2>
+                <div id="repoList" class="node-list">
+                    <div style="text-align: center; padding: 20px; color: #999;">
+                        Loading repositories...
+                    </div>
+                </div>
+            </div>
+
+            <div class="nodes-section">
+                <h2>Backend Nodes</h2>
+                <div id="nodeList" class="node-list">
+                    <div style="text-align: center; padding: 20px; color: #999;">
+                        Loading nodes...
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Normalize repository URL to filesystem path format
+        function normalizeRepoURL(repoURL) {
+            try {
+                const url = new URL(repoURL);
+                // Replace dots with underscores in host
+                const host = url.hostname.replace(/\./g, '_');
+                // Get path without leading slash and .git suffix
+                let path = url.pathname.replace(/^\//, '').replace(/\.git$/, '');
+                
+                if (path) {
+                    return host + '/' + path;
+                }
+                return host;
+            } catch (e) {
+                // If URL parsing fails, return as-is
+                return repoURL;
+            }
+        }
+        
+        // Auto-update Repository ID when URL changes
+        document.getElementById('repo_url').addEventListener('input', (e) => {
+            const repoIdField = document.getElementById('repo_id');
+            // Only auto-fill if the field is empty or was previously auto-filled
+            if (!repoIdField.value || repoIdField.dataset.autoFilled === 'true') {
+                const normalized = normalizeRepoURL(e.target.value);
+                if (normalized && e.target.value) {
+                    repoIdField.value = normalized;
+                    repoIdField.dataset.autoFilled = 'true';
+                }
+            }
+        });
+        
+        // Track manual changes to repo_id
+        document.getElementById('repo_id').addEventListener('input', (e) => {
+            if (e.target.value) {
+                e.target.dataset.autoFilled = 'false';
+            }
+        });
+        
+        // Load ingested repositories
+        async function loadRepositories() {
+            try {
+                const response = await fetch('/api/repositories');
+                const data = await response.json();
+                
+                const repoList = document.getElementById('repoList');
+                
+                if (!data.repositories || data.repositories.length === 0) {
+                    repoList.innerHTML = '<div style="text-align: center; padding: 20px; color: #999;">No repositories ingested yet</div>';
+                    return;
+                }
+                
+                repoList.innerHTML = data.repositories.map(repo => {
+                    const date = new Date(repo.ingested_at * 1000);
+                    return `
+                        <div class="node">
+                            <div class="node-info">
+                                <div>
+                                    <div class="node-id">${repo.repo_id}</div>
+                                    <div class="node-address">${repo.repo_url} (${repo.branch})</div>
+                                    <div class="node-address" style="font-size: 11px; color: #888;">
+                                        ${repo.files_count} files • Ingested ${date.toLocaleString()}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="node-status healthy">
+                                ✓ Active
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (err) {
+                console.error('Failed to load repositories:', err);
+            }
+        }
+
+        // Load backend nodes on page load
+        async function loadNodes() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                const nodeList = document.getElementById('nodeList');
+                
+                if (!data.nodes || data.nodes.length === 0) {
+                    nodeList.innerHTML = '<div style="text-align: center; padding: 20px; color: #999;">No nodes registered</div>';
+                    return;
+                }
+                
+                nodeList.innerHTML = data.nodes.map(node => {
+                    // NEW: Build status display with node state
+                    let statusBadge = '';
+                    if (node.status === 'STAGING') {
+                        statusBadge = '<div class="node-status" style="background: #fff3e0; color: #e65100;">⏳ Staging</div>';
+                    } else if (node.status === 'SYNCING') {
+                        statusBadge = `<div class="node-status" style="background: #e3f2fd; color: #1976d2;">🔄 Syncing ${node.sync_progress?.toFixed(0) || 0}%</div>`;
+                    } else if (node.healthy) {
+                        statusBadge = '<div class="node-status healthy">✓ Healthy</div>';
+                    } else {
+                        statusBadge = '<div class="node-status unhealthy">✗ Unhealthy</div>';
+                    }
+                    
+                    // NEW: Add backup info if present
+                    let backupInfo = '';
+                    if (node.backing_up && node.backing_up.length > 0) {
+                        backupInfo = `<div class="node-address" style="font-size: 11px; color: #ff6f00;">
+                            🛡️ Backing up: ${node.backing_up.join(', ')}
+                        </div>`;
+                    }
+                    
+                    return `
+                        <div class="node">
+                            <div class="node-info">
+                                <div>
+                                    <div class="node-id">${node.id}</div>
+                                    <div class="node-address">${node.address} • Weight: ${node.weight}</div>
+                                    ${backupInfo}
+                                </div>
+                            </div>
+                            ${statusBadge}
+                        </div>
+                    `;
+                }).join('');
+                
+                // NEW: Show failover mappings if any exist
+                if (data.failovers && Object.keys(data.failovers).length > 0) {
+                    const failoverSection = Object.entries(data.failovers).map(([failed, backup]) => `
+                        <div class="node" style="background: #fff3e0; border-left: 4px solid #ff9800;">
+                            <div class="node-info">
+                                <div>
+                                    <div class="node-id">⚠️ Failover Active</div>
+                                    <div class="node-address">${failed} → ${backup} (covering)</div>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('');
+                    nodeList.innerHTML += failoverSection;
+                }
+            } catch (err) {
+                console.error('Failed to load nodes:', err);
+            }
+        }
+        
+        // Show status message
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.className = `status ${type}`;
+            
+            const icons = {
+                info: '<span class="loader"></span>',
+                success: '<span class="status-icon">✓</span>',
+                error: '<span class="status-icon">✗</span>'
+            };
+            
+            status.innerHTML = icons[type] + message;
+            status.style.display = 'block';
+        }
+        
+        // Handle form submission
+        document.getElementById('ingestForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const formData = new FormData(e.target);
+            const submitBtn = document.getElementById('submitBtn');
+            
+            // Disable submit button
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Ingesting...';
+            
+            showStatus('Cloning repository and ingesting files...', 'info');
+            
+            try {
+                const response = await fetch('/api/ingest', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    showStatus(`✓ Success! Ingested ${data.files} files.`, 'success');
+                    e.target.reset();
+                    document.getElementById('branch').value = 'main';
+                    // Reload repositories list
+                    loadRepositories();
+                } else {
+                    showStatus(`✗ Error: ${data.message || 'Ingestion failed'}`, 'error');
+                }
+            } catch (err) {
+                showStatus(`✗ Error: ${err.message}`, 'error');
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Ingest Repository';
+            }
+        });
+        
+        // Load initial data on page load
+        loadNodes();
+        loadRepositories();
+        
+        // Refresh data every 10 seconds
+        setInterval(loadNodes, 10000);
+        setInterval(loadRepositories, 10000);
+    </script>
+</body>
+</html>

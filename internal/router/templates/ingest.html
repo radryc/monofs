@@ -1,0 +1,543 @@
+{{define "content"}}
+<style>
+.input {
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    color: var(--text-primary);
+    font-size: 14px;
+    width: 100%;
+    transition: all 0.2s;
+}
+
+.input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(109, 94, 252, 0.2);
+}
+
+.input::placeholder {
+    color: var(--text-secondary);
+}
+
+.select-dark {
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: var(--text-primary);
+    font-size: 13px;
+    width: 100%;
+    cursor: pointer;
+}
+
+.select-dark:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(109, 94, 252, 0.2);
+}
+</style>
+
+<div class="header">
+    <h1 id="pageTitle">Ingest Source</h1>
+    <p id="pageSubtitle">Add a source to the cluster</p>
+</div>
+
+<div class="grid grid-cols-2">
+    <div class="card">
+        <form id="ingestForm" style="padding: 20px;">
+            <!-- Ingestion Type Selection (moved to top) -->
+            <div style="margin-bottom: 24px;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">
+                    Source Type <span style="color: var(--danger);">*</span>
+                </label>
+                <select 
+                    id="ingestion_type" 
+                    name="ingestion_type"
+                    class="select-dark"
+                    onchange="updateFormFields()"
+                >
+                    <option value="git" selected>Git Repository</option>
+                    <option value="go">Go Modules</option>
+                    <option value="s3" disabled>S3 Bucket (Coming Soon)</option>
+                    <option value="file" disabled>Local Filesystem (Coming Soon)</option>
+                </select>
+            </div>
+
+            <!-- Dynamic Source Field -->
+            <div style="margin-bottom: 24px;">
+                <label id="sourceLabel" style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">
+                    Repository URL <span style="color: var(--danger);">*</span>
+                </label>
+                <input 
+                    type="text" 
+                    id="source" 
+                    name="source" 
+                    required 
+                    placeholder="https://github.com/user/repo.git"
+                    class="input"
+                    oninput="clearValidationError()"
+                >
+                <div id="sourceHelp" style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                    Git repository URL (supports GitHub, GitLab, etc.)
+                </div>
+                <div id="sourceError" style="font-size: 12px; color: var(--danger); margin-top: 4px; display: none;"></div>
+            </div>
+            
+            <!-- Dynamic Ref Field -->
+            <div id="refField" style="margin-bottom: 24px;">
+                <label id="refLabel" style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">
+                    Branch
+                </label>
+                <input 
+                    type="text" 
+                    id="ref" 
+                    name="ref" 
+                    placeholder="main"
+                    class="input"
+                    oninput="clearValidationError()"
+                >
+                <div id="refHelp" style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                    Branch name (optional, defaults to "main")
+                </div>
+                <div id="refError" style="font-size: 12px; color: var(--danger); margin-top: 4px; display: none;"></div>
+            </div>
+            
+            <!-- Advanced Options -->
+            <details style="margin-bottom: 24px; border: 1px solid var(--border); border-radius: 8px; padding: 12px;">
+                <summary style="cursor: pointer; font-weight: 600; color: var(--text-primary); user-select: none;">
+                    ⚙️ Advanced Options
+                </summary>
+                <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+                    <div style="margin-bottom: 16px;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 500; color: var(--text-primary); font-size: 14px;">
+                            Source ID (optional)
+                        </label>
+                        <input 
+                            type="text" 
+                            id="source_id" 
+                            name="source_id" 
+                            placeholder="Auto-generated from source"
+                            class="input"
+                            style="font-size: 13px; padding: 10px 12px;"
+                        >
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                            Custom display path for this source
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 16px;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 500; color: var(--text-primary); font-size: 14px;">
+                            Storage Backend
+                        </label>
+                        <select 
+                            id="fetch_type" 
+                            name="fetch_type"
+                            class="select-dark"
+                        >
+                            <option value="git" selected>Git (Lazy Fetch)</option>
+                            <option value="gomod">Go Module Cache</option>
+                            <option value="s3" disabled>S3 Storage (Coming Soon)</option>
+                            <option value="local" disabled>Local Cache (Coming Soon)</option>
+                        </select>
+                    </div>
+
+                    <input type="hidden" id="replicate_data" name="replicate_data" value="false">
+                </div>
+            </details>
+            
+            <button type="submit" id="submitBtn" class="btn btn-primary" style="width: 100%; padding: 14px; font-size: 15px; font-weight: 600;">
+                <span id="submitText">Ingest Repository</span>
+            </button>
+        </form>
+        
+        <div id="status" style="margin: 20px; padding: 16px; border-radius: 8px; display: none;"></div>
+    </div>
+    
+    <div class="card">
+        <div style="padding: 20px;">
+            <div id="helpDescription" style="margin-bottom: 24px;">
+                <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.7;">
+                    Enter any public Git repository URL. The system will clone, index, and distribute the files across cluster nodes automatically.
+                </div>
+            </div>
+            
+            <div style="background: #f0f9ff; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+                <div style="font-weight: 600; margin-bottom: 8px; color: #0369a1; font-size: 14px;">
+                    Examples
+                </div>
+                <div id="examplesContent" style="font-size: 13px; color: #0c4a6e; line-height: 1.8;">
+                    <div style="font-family: monospace;">https://github.com/user/repo.git</div>
+                    <div style="font-family: monospace;">https://gitlab.com/group/project.git</div>
+                    <div style="font-family: monospace;">git@github.com:user/repo.git</div>
+                </div>
+            </div>
+            
+            <div style="background: #fefce8; padding: 16px; border-radius: 8px; border-left: 3px solid #facc15;">
+                <div style="font-weight: 600; margin-bottom: 4px; color: #854d0e; font-size: 13px;">
+                    ℹ️ What happens during ingestion
+                </div>
+                <ul id="processSteps" style="margin: 8px 0 0 20px; font-size: 12px; color: #713f12; line-height: 1.7;">
+                    <li>Repository is cloned and analyzed</li>
+                    <li>Files are distributed using HRW sharding</li>
+                    <li>Content is fetched on-demand when accessed</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const typeConfig = {
+    git: {
+        pageTitle: 'Ingest Repository',
+        pageSubtitle: 'Add a Git repository to the cluster',
+        sourceLabel: 'Repository URL',
+        sourcePlaceholder: 'https://github.com/user/repo.git',
+        sourceHelp: 'Git repository URL (supports GitHub, GitLab, etc.)',
+        refLabel: 'Branch',
+        refPlaceholder: 'main',
+        refHelp: 'Branch name (optional, defaults to "main")',
+        refVisible: true,
+        examples: [
+            'https://github.com/user/repo.git',
+            'https://gitlab.com/group/project.git',
+            'git@github.com:user/repo.git'
+        ],
+        helpDescription: 'Enter any public Git repository URL. The system will clone, index, and distribute the files across cluster nodes automatically.',
+        processSteps: [
+            'Repository is cloned and analyzed',
+            'Files are distributed using HRW sharding',
+            'Content is fetched on-demand when accessed'
+        ],
+        validateSource: (val) => {
+            if (!val) return 'Repository URL is required';
+            if (!val.match(/^(https?:\/\/|git@)/)) {
+                return 'Must be a valid Git URL (starts with http://, https://, or git@)';
+            }
+            return null;
+        },
+        validateRef: (val) => null,
+        submitText: 'Ingest Repository',
+        defaultFetchType: 'git'
+    },
+    go: {
+        pageTitle: 'Ingest Go Module',
+        pageSubtitle: 'Add a Go module to the cluster',
+        sourceLabel: 'Module Path',
+        sourcePlaceholder: 'github.com/google/uuid@v1.3.0',
+        sourceHelp: 'Go module path with version (module@version)',
+        refLabel: 'Version',
+        refPlaceholder: 'v1.0.0',
+        refHelp: 'Semantic version (required if not included in module path above)',
+        refVisible: true,
+        refDynamic: true,
+        examples: [
+            'github.com/google/uuid@v1.3.0',
+            'golang.org/x/crypto@v0.17.0',
+            'github.com/gin-gonic/gin@v1.9.1'
+        ],
+        helpDescription: 'Enter a Go module path with version. The system will download from the Go module proxy, index all files, and distribute them across cluster nodes.',
+        processSteps: [
+            'Module is downloaded from GOPROXY',
+            'Files are extracted and indexed',
+            'Content is distributed using HRW sharding'
+        ],
+        validateSource: (val) => {
+            if (!val) return 'Module path is required';
+            if (val.includes('@')) {
+                const parts = val.split('@');
+                if (parts.length !== 2) return 'Invalid format, use module@version';
+                if (!parts[1].match(/^v\d+\.\d+\.\d+/)) {
+                    return 'Version must follow semver (e.g., v1.2.3)';
+                }
+            }
+            if (!val.includes('/')) {
+                return 'Module path must contain at least one slash';
+            }
+            return null;
+        },
+        validateRef: (val) => {
+            if (val && !val.match(/^v\d+\.\d+\.\d+/)) {
+                return 'Version must follow semver (e.g., v1.2.3)';
+            }
+            return null;
+        },
+        submitText: 'Ingest Module',
+        defaultFetchType: 'gomod'
+    },
+    s3: {
+        pageTitle: 'Ingest S3 Bucket',
+        pageSubtitle: 'Add an S3 bucket to the cluster',
+        sourceLabel: 'Bucket Name',
+        sourcePlaceholder: 'my-bucket',
+        sourceHelp: 'S3 bucket name',
+        refLabel: 'Prefix',
+        refPlaceholder: 'path/to/files',
+        refHelp: 'Optional path prefix within bucket',
+        refVisible: true,
+        examples: [
+            'my-bucket',
+            'company-data',
+            'backups-2024'
+        ],
+        helpDescription: 'Enter an S3 bucket name. The system will index all objects and make them available through the filesystem.',
+        processSteps: [
+            'Bucket contents are listed',
+            'Object metadata is indexed',
+            'Files are distributed and fetched on-demand'
+        ],
+        validateSource: (val) => {
+            if (!val) return 'Bucket name is required';
+            if (!val.match(/^[a-z0-9][a-z0-9-]*[a-z0-9]$/)) {
+                return 'Invalid bucket name format (lowercase, numbers, hyphens)';
+            }
+            return null;
+        },
+        validateRef: (val) => null,
+        submitText: 'Ingest Bucket',
+        defaultFetchType: 's3'
+    }
+};
+
+function updateFormFields() {
+    const type = document.getElementById('ingestion_type').value;
+    const config = typeConfig[type];
+    
+    if (!config) return;
+    
+    // Update page title
+    document.getElementById('pageTitle').textContent = config.pageTitle;
+    document.getElementById('pageSubtitle').textContent = config.pageSubtitle;
+    
+    // Update source field
+    document.getElementById('sourceLabel').innerHTML = 
+        config.sourceLabel + ' <span style="color: var(--danger);">*</span>';
+    document.getElementById('source').placeholder = config.sourcePlaceholder;
+    document.getElementById('sourceHelp').textContent = config.sourceHelp;
+    
+    // Update ref field
+    const refField = document.getElementById('refField');
+    refField.style.display = config.refVisible ? 'block' : 'none';
+    document.getElementById('refLabel').textContent = config.refLabel;
+    document.getElementById('ref').placeholder = config.refPlaceholder;
+    document.getElementById('refHelp').textContent = config.refHelp;
+    
+    // Update submit button
+    document.getElementById('submitText').textContent = config.submitText;
+    
+    // Update examples
+    const examplesHtml = config.examples.map(ex => 
+        `<div style="font-family: monospace;">${ex}</div>`
+    ).join('');
+    document.getElementById('examplesContent').innerHTML = examplesHtml;
+    
+    // Update help description
+    document.getElementById('helpDescription').innerHTML = 
+        `<div style="font-size: 13px; color: var(--text-secondary); line-height: 1.7;">${config.helpDescription}</div>`;
+    
+    // Update process steps
+    const stepsHtml = config.processSteps.map(step => `<li>${step}</li>`).join('');
+    document.getElementById('processSteps').innerHTML = stepsHtml;
+    
+    // Update fetch type default
+    document.getElementById('fetch_type').value = config.defaultFetchType;
+    
+    // For Go modules, update ref field based on source
+    if (config.refDynamic) {
+        updateGoModuleRefField();
+    } else {
+        // Reset ref field to normal state
+        const refInput = document.getElementById('ref');
+        refInput.disabled = false;
+        refInput.style.backgroundColor = '';
+        refInput.style.cursor = '';
+    }
+    
+    // Clear any errors
+    clearValidationError();
+}
+
+function clearValidationError() {
+    document.getElementById('sourceError').style.display = 'none';
+    document.getElementById('refError').style.display = 'none';
+}
+
+function validateForm() {
+    const type = document.getElementById('ingestion_type').value;
+    const config = typeConfig[type];
+    const source = document.getElementById('source').value.trim();
+    const ref = document.getElementById('ref').value.trim();
+    
+    clearValidationError();
+    
+    // Validate source
+    const sourceError = config.validateSource(source);
+    if (sourceError) {
+        document.getElementById('sourceError').textContent = sourceError;
+        document.getElementById('sourceError').style.display = 'block';
+        showStatus(`✗ ${sourceError}`, 'error');
+        return false;
+    }
+    
+    // Validate ref
+    const refError = config.validateRef(ref);
+    if (refError) {
+        document.getElementById('refError').textContent = refError;
+        document.getElementById('refError').style.display = 'block';
+        showStatus(`✗ ${refError}`, 'error');
+        return false;
+    }
+    
+    return true;
+}
+
+// Normalize source to filesystem path format
+function normalizeRepoURL(source) {
+    const type = document.getElementById('ingestion_type').value;
+    
+    // For Go modules, keep as-is (preserve dots, slashes, and @version)
+    if (type === 'go') {
+        return source;
+    }
+    
+    // For Git repositories, convert URL to path format
+    try {
+        const url = new URL(source);
+        const host = url.hostname; // Keep dots in hostname
+        let path = url.pathname.replace(/^\//, '').replace(/\.git$/, '');
+        if (path) {
+            return host + '/' + path;
+        }
+        return host;
+    } catch (e) {
+        // Not a valid URL, return as-is
+        return source;
+    }
+}
+
+// Update Go module ref field based on source content
+function updateGoModuleRefField() {
+    const type = document.getElementById('ingestion_type').value;
+    if (type !== 'go') return;
+    
+    const source = document.getElementById('source').value;
+    const refInput = document.getElementById('ref');
+    const refHelp = document.getElementById('refHelp');
+    
+    // Check if source contains @version
+    if (source.includes('@')) {
+        // Version is in source, disable ref field
+        refInput.disabled = true;
+        refInput.value = '';
+        refInput.style.backgroundColor = 'var(--bg-secondary)';
+        refInput.style.cursor = 'not-allowed';
+        refInput.style.opacity = '0.6';
+        refHelp.textContent = 'Version is already specified in module path above';
+        refHelp.style.color = 'var(--text-secondary)';
+        refHelp.style.fontStyle = 'italic';
+    } else {
+        // No version in source, enable ref field
+        refInput.disabled = false;
+        refInput.style.backgroundColor = '';
+        refInput.style.cursor = '';
+        refInput.style.opacity = '';
+        refHelp.textContent = 'Semantic version (required if not included in module path above)';
+        refHelp.style.color = 'var(--text-secondary)';
+        refHelp.style.fontStyle = '';
+    }
+}
+
+// Auto-update Source ID when source changes
+document.getElementById('source').addEventListener('input', (e) => {
+    const sourceIdField = document.getElementById('source_id');
+    if (!sourceIdField.value || sourceIdField.dataset.autoFilled === 'true') {
+        const normalized = normalizeRepoURL(e.target.value);
+        if (normalized && e.target.value) {
+            sourceIdField.value = normalized;
+            sourceIdField.dataset.autoFilled = 'true';
+        }
+    }
+    
+    // Update Go module ref field state
+    const type = document.getElementById('ingestion_type').value;
+    if (type === 'go') {
+        updateGoModuleRefField();
+    }
+});
+
+document.getElementById('source_id').addEventListener('input', (e) => {
+    if (e.target.value) {
+        e.target.dataset.autoFilled = 'false';
+    }
+});
+
+// Show status message
+function showStatus(message, type) {
+    const status = document.getElementById('status');
+    status.style.display = 'block';
+    
+    const styles = {
+        info: { bg: '#e3f2fd', border: 'var(--info)', color: '#1976d2', icon: '<div class="loader"></div>' },
+        success: { bg: '#e8f5e9', border: 'var(--success)', color: '#388e3c', icon: '✓' },
+        error: { bg: '#ffebee', border: 'var(--danger)', color: '#c62828', icon: '✗' }
+    };
+    
+    const style = styles[type];
+    status.style.background = style.bg;
+    status.style.borderLeft = `4px solid ${style.border}`;
+    status.style.color = style.color;
+    status.innerHTML = `<div style="display: flex; align-items: center; gap: 8px;"><span>${style.icon}</span><span>${message}</span></div>`;
+}
+
+// Handle form submission with validation
+document.getElementById('ingestForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    if (!validateForm()) {
+        return;
+    }
+    
+    const type = document.getElementById('ingestion_type').value;
+    const config = typeConfig[type];
+    const formData = new FormData(e.target);
+    const submitBtn = document.getElementById('submitBtn');
+    
+    submitBtn.disabled = true;
+    document.getElementById('submitText').textContent = 'Starting...';
+    
+    showStatus('Starting ingestion...', 'info');
+    
+    try {
+        const response = await fetch('/api/ingest', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok && data.success) {
+            showStatus('✓ Ingestion started! Redirecting to repositories page...', 'success');
+            e.target.reset();
+            updateFormFields(); // Reset to default type
+            
+            setTimeout(() => {
+                window.location.href = '/repositories';
+            }, 1500);
+        } else {
+            showStatus(`✗ Error: ${data.message || 'Failed to start ingestion'}`, 'error');
+            submitBtn.disabled = false;
+            document.getElementById('submitText').textContent = config.submitText;
+        }
+    } catch (err) {
+        showStatus(`✗ Error: ${err.message}`, 'error');
+        submitBtn.disabled = false;
+        document.getElementById('submitText').textContent = config.submitText;
+    }
+});
+
+// Initialize form on page load
+updateFormFields();
+</script>
+{{end}}
