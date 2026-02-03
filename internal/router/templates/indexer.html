@@ -1,0 +1,371 @@
+{{define "content"}}
+<div class="header">
+    <h1>Search Indexer</h1>
+    <p>Manage Zoekt search indexes for repositories</p>
+</div>
+
+<!-- Search Stats -->
+<div class="grid grid-cols-4" id="statsGrid" style="margin-bottom: 24px;">
+    <div class="stat-card">
+        <div class="stat-icon">📚</div>
+        <div class="stat-label">Indexed Repos</div>
+        <div class="stat-value" id="totalIndexes">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">❌</div>
+        <div class="stat-label">Failed Jobs</div>
+        <div class="stat-value" id="failedJobs" style="color: var(--danger);">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">⚠️</div>
+        <div class="stat-label">Rejected (Queue Full)</div>
+        <div class="stat-value" id="rejectedJobs" style="color: var(--warning);">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">🔍</div>
+        <div class="stat-label">Searches</div>
+        <div class="stat-value" id="searchCount">-</div>
+    </div>
+</div>
+
+<!-- Additional Stats Row -->
+<div class="grid grid-cols-4" id="statsGrid2" style="margin-bottom: 24px;">
+    <div class="stat-card">
+        <div class="stat-icon">📄</div>
+        <div class="stat-label">Total Files</div>
+        <div class="stat-value" id="totalFiles">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">💾</div>
+        <div class="stat-label">Index Size</div>
+        <div class="stat-value" id="indexSize">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">📥</div>
+        <div class="stat-label">Queue Length</div>
+        <div class="stat-value" id="queueLength">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">⚡</div>
+        <div class="stat-label">Active Jobs</div>
+        <div class="stat-value" id="activeJobs">-</div>
+    </div>
+</div>
+
+<!-- Failed Indexes -->
+<div class="card" id="failedCard" style="display: none; margin-bottom: 24px;">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 class="card-title">❌ Failed Repositories</h2>
+        <span class="badge badge-danger" id="failedCount">0</span>
+    </div>
+    <div style="padding: 0;">
+        <table class="table" id="failedTable">
+            <thead>
+                <tr>
+                    <th>Repository</th>
+                    <th>Error Message</th>
+                    <th>Last Attempted</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="failedTableBody">
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Index Status -->
+<div class="card">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 class="card-title">📊 Index Status</h2>
+        <button class="btn btn-primary" onclick="rebuildAll()" style="font-size: 13px; padding: 8px 16px;">
+            🔄 Rebuild All
+        </button>
+    </div>
+    <div style="padding: 0;">
+        <table class="table" id="indexTable">
+            <thead>
+                <tr>
+                    <th>Repository</th>
+                    <th>Status</th>
+                    <th>Files</th>
+                    <th>Index Size</th>
+                    <th>Last Indexed</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="indexTableBody">
+                <tr><td colspan="6" style="text-align: center; padding: 20px;">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+// Format bytes to human readable
+function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+// Format date
+function formatDate(dateStr) {
+    if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return '-';
+    const d = new Date(dateStr);
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+}
+
+// Get status badge
+function getStatusBadge(status) {
+    const badges = {
+        1: '<span class="badge badge-warning">Queued</span>',
+        2: '<span class="badge badge-info">Indexing</span>',
+        3: '<span class="badge badge-success">Ready</span>',
+        4: '<span class="badge badge-danger">Error</span>',
+        5: '<span class="badge">Not Found</span>'
+    };
+    return badges[status] || '<span class="badge">Unknown</span>';
+}
+
+// Load search stats
+async function loadStats() {
+    try {
+        const resp = await fetch('/api/search/stats');
+        if (!resp.ok) {
+            document.getElementById('statsGrid').innerHTML = '<div class="muted" style="padding: 20px;">Search service not available</div>';
+            return;
+        }
+        const data = await resp.json();
+        document.getElementById('totalIndexes').textContent = data.total_indexes || 0;
+        document.getElementById('totalFiles').textContent = (data.total_files_indexed || 0).toLocaleString();
+        document.getElementById('indexSize').textContent = formatBytes(data.total_index_size_bytes);
+        document.getElementById('searchCount').textContent = (data.searches_total || 0).toLocaleString();
+        document.getElementById('failedJobs').textContent = data.jobs_failed || 0;
+        document.getElementById('rejectedJobs').textContent = data.jobs_rejected || 0;
+        document.getElementById('queueLength').textContent = data.queue_length || 0;
+        document.getElementById('activeJobs').textContent = data.active_jobs || 0;
+        
+        // Highlight if there are failures
+        const failedEl = document.getElementById('failedJobs');
+        if ((data.jobs_failed || 0) > 0) {
+            failedEl.style.color = 'var(--danger)';
+            failedEl.style.fontWeight = 'bold';
+        }
+        const rejectedEl = document.getElementById('rejectedJobs');
+        if ((data.jobs_rejected || 0) > 0) {
+            rejectedEl.style.color = 'var(--warning)';
+            rejectedEl.style.fontWeight = 'bold';
+        }
+    } catch (err) {
+        console.error('Failed to load stats:', err);
+    }
+}
+
+// Load indexes list
+async function loadIndexes() {
+    try {
+        const resp = await fetch('/api/search/indexes');
+        if (!resp.ok) {
+            document.getElementById('indexTableBody').innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px;">Search service not available</td></tr>';
+            return;
+        }
+        const data = await resp.json();
+        
+        if (!data.indexes || data.indexes.length === 0) {
+            document.getElementById('indexTableBody').innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px; color: var(--text-secondary);">No repositories indexed yet. Ingest a repository to enable search.</td></tr>';
+            document.getElementById('failedCard').style.display = 'none';
+            return;
+        }
+        
+        // Separate failed and successful indexes
+        const failedIndexes = data.indexes.filter(idx => idx.status === 4); // INDEX_STATUS_ERROR
+        const successIndexes = data.indexes.filter(idx => idx.status !== 4);
+        
+        // Update failed repositories table
+        const failedTbody = document.getElementById('failedTableBody');
+        const failedCard = document.getElementById('failedCard');
+        
+        if (failedIndexes.length > 0) {
+            failedCard.style.display = 'block';
+            document.getElementById('failedCount').textContent = failedIndexes.length;
+            
+            failedTbody.innerHTML = failedIndexes.map(idx => `
+                <tr>
+                    <td>
+                        <div style="font-weight: 500;">${escapeHtml(idx.display_path || idx.storage_id?.substring(0, 16))}</div>
+                        <div style="font-size: 11px; color: var(--text-secondary);">${idx.storage_id?.substring(0, 12)}...</div>
+                    </td>
+                    <td>
+                        <div style="color: var(--danger); font-size: 13px; max-width: 500px; word-wrap: break-word;">
+                            ${escapeHtml(idx.error_message || 'Unknown error')}
+                        </div>
+                    </td>
+                    <td style="font-size: 12px;">${formatDate(idx.last_indexed)}</td>
+                    <td>
+                        <button class="btn btn-primary" style="font-size: 12px; padding: 4px 12px;" onclick="rebuildIndex('${idx.storage_id}')">
+                            🔄 Retry
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+        } else {
+            failedCard.style.display = 'none';
+        }
+        
+        // Update successful indexes table
+        const tbody = document.getElementById('indexTableBody');
+        if (successIndexes.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px; color: var(--text-secondary);">No successfully indexed repositories yet.</td></tr>';
+            return;
+        }
+        
+        tbody.innerHTML = successIndexes.map(idx => `
+            <tr>
+                <td>
+                    <div style="font-weight: 500;">${escapeHtml(idx.display_path || idx.storage_id?.substring(0, 16))}</div>
+                    <div style="font-size: 11px; color: var(--text-secondary);">${idx.storage_id?.substring(0, 12)}...</div>
+                </td>
+                <td>${getStatusBadge(idx.status)}</td>
+                <td>${(idx.files_count || 0).toLocaleString()}</td>
+                <td>${formatBytes(idx.index_size_bytes)}</td>
+                <td style="font-size: 12px;">${formatDate(idx.last_indexed)}</td>
+                <td>
+                    <button class="btn" style="font-size: 12px; padding: 4px 12px;" onclick="rebuildIndex('${idx.storage_id}')">
+                        🔄 Rebuild
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    } catch (err) {
+        console.error('Failed to load indexes:', err);
+    }
+}
+
+// Escape HTML
+function escapeHtml(text) {
+    if (!text) return '';
+    return text.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+// Rebuild single index
+async function rebuildIndex(storageId) {
+    try {
+        const resp = await fetch('/api/search/rebuild', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                storage_id: storageId,
+                force: true
+            })
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            alert('Failed to queue rebuild: ' + (data.error || data.message || 'Unknown error'));
+            return;
+        }
+        if (data.queued) {
+            alert('Rebuild queued successfully');
+            loadIndexes();
+        } else {
+            alert('Failed to queue rebuild: ' + (data.message || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+    }
+}
+
+// Rebuild all indexes
+async function rebuildAll() {
+    if (!confirm('Are you sure you want to rebuild all indexes? This may take a while.')) {
+        return;
+    }
+    
+    try {
+        const resp = await fetch('/api/search/rebuild', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                all: true,
+                force: true
+            })
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            alert('Failed to rebuild: ' + (data.error || 'Unknown error'));
+            return;
+        }
+        alert(`Queued ${data.queued_count || 0} repositories for re-indexing`);
+        loadIndexes();
+    } catch (err) {
+        alert('Error: ' + err.message);
+    }
+}
+
+// Initial load
+loadStats();
+loadIndexes();
+
+// Auto-refresh index status
+setInterval(loadIndexes, 10000);
+setInterval(loadStats, 30000);
+</script>
+
+<style>
+.loader {
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    display: inline-block;
+    margin-right: 8px;
+    vertical-align: middle;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.input {
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(109, 94, 252, 0.2);
+}
+
+.input::placeholder {
+    color: var(--text-secondary);
+}
+
+.select {
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.select:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+pre code {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+</style>
+{{end}}

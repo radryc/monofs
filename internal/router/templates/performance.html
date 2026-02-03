@@ -1,0 +1,362 @@
+{{define "content"}}
+<div class="header">
+    <h1>Performance Analytics</h1>
+    <p>Identify resource usage patterns and bottleneck clients</p>
+</div>
+
+<div class="grid grid-cols-4" id="perfStats">
+    <div class="stat-card">
+        <div class="stat-icon">⚡</div>
+        <div class="stat-info">
+            <div class="stat-value" id="totalOps">-</div>
+            <div class="stat-label">Total Operations</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">📊</div>
+        <div class="stat-info">
+            <div class="stat-value" id="totalData">-</div>
+            <div class="stat-label">Total Data Read</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">💻</div>
+        <div class="stat-info">
+            <div class="stat-value" id="activeClients">-</div>
+            <div class="stat-label">Active Clients</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">📈</div>
+        <div class="stat-info">
+            <div class="stat-value" id="avgOpsClient">-</div>
+            <div class="stat-label">Avg Ops/Client</div>
+        </div>
+    </div>
+</div>
+
+<div class="grid grid-cols-2">
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">🏆 Top Clients by Operations</h2>
+        </div>
+        <div id="topOpsTable">
+            <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                <div class="loader"></div> Loading...
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">💾 Top Clients by Data Read</h2>
+        </div>
+        <div id="topDataTable">
+            <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                <div class="loader"></div> Loading...
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">📊 Client Resource Distribution</h2>
+    </div>
+    <div id="resourceChart" style="padding: 20px;">
+        <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 class="card-title">All Clients Performance</h2>
+        <div style="display: flex; gap: 8px;">
+            <select id="sortBy" class="form-control" style="width: auto;" onchange="loadPerformance()">
+                <option value="ops">Sort by Operations</option>
+                <option value="data">Sort by Data Read</option>
+                <option value="uptime">Sort by Uptime</option>
+            </select>
+            <button class="btn btn-primary" onclick="loadPerformance()">🔄 Refresh</button>
+        </div>
+    </div>
+    <div id="allClientsTable">
+        <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<script>
+    function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    function formatNumber(num) {
+        if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+        if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+        return num.toString();
+    }
+
+    function formatDuration(seconds) {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (hours > 24) {
+            const days = Math.floor(hours / 24);
+            return `${days}d ${hours % 24}h`;
+        }
+        if (hours > 0) return `${hours}h ${minutes}m`;
+        if (minutes > 0) return `${minutes}m`;
+        return `${seconds}s`;
+    }
+
+    function getUsageLevel(percentage) {
+        if (percentage > 50) return { color: 'var(--danger)', label: 'High' };
+        if (percentage > 25) return { color: 'var(--warning)', label: 'Medium' };
+        return { color: 'var(--success)', label: 'Low' };
+    }
+
+    function renderTopTable(clients, metric, containerId) {
+        const top5 = [...clients]
+            .sort((a, b) => (b[metric] || 0) - (a[metric] || 0))
+            .slice(0, 5);
+        
+        const maxVal = top5.length > 0 ? (top5[0][metric] || 1) : 1;
+        
+        if (top5.length === 0) {
+            document.getElementById(containerId).innerHTML = `
+                <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
+                    No clients connected
+                </div>
+            `;
+            return;
+        }
+        
+        document.getElementById(containerId).innerHTML = top5.map((client, i) => {
+            const val = client[metric] || 0;
+            const percentage = (val / maxVal) * 100;
+            const displayVal = metric === 'bytes_read' ? formatBytes(val) : formatNumber(val);
+            
+            return `
+                <div style="margin-bottom: 16px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                        <span style="font-weight: 600;">
+                            ${i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '  '} 
+                            ${client.hostname || 'Unknown'}
+                        </span>
+                        <span style="font-weight: 700; color: var(--primary);">${displayVal}</span>
+                    </div>
+                    <div class="progress" style="height: 8px;">
+                        <div class="progress-bar" style="width: ${percentage}%;"></div>
+                    </div>
+                    <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+                        ${client.mount_point || '-'}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function renderResourceChart(clients) {
+        if (clients.length === 0) {
+            document.getElementById('resourceChart').innerHTML = `
+                <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
+                    No clients to analyze
+                </div>
+            `;
+            return;
+        }
+
+        const totalOps = clients.reduce((sum, c) => sum + (c.operations_count || 0), 0);
+        const totalBytes = clients.reduce((sum, c) => sum + (c.bytes_read || 0), 0);
+        
+        // Show distribution bars
+        const sorted = [...clients].sort((a, b) => (b.operations_count || 0) - (a.operations_count || 0));
+        
+        document.getElementById('resourceChart').innerHTML = `
+            <div style="margin-bottom: 24px;">
+                <div style="font-size: 14px; font-weight: 600; margin-bottom: 12px;">Operations Distribution</div>
+                <div style="display: flex; height: 40px; border-radius: 8px; overflow: hidden;">
+                    ${sorted.map((c, i) => {
+                        const pct = totalOps > 0 ? ((c.operations_count || 0) / totalOps * 100) : 0;
+                        const colors = ['#6d5efc', '#14b8a6', '#f59e0b', '#f43f5e', '#38bdf8', '#10b981'];
+                        return pct > 0.5 ? `
+                            <div style="width: ${pct}%; background: ${colors[i % colors.length]}; 
+                                        display: flex; align-items: center; justify-content: center;
+                                        font-size: 10px; font-weight: 600; color: white;"
+                                 title="${c.hostname}: ${formatNumber(c.operations_count || 0)} ops (${pct.toFixed(1)}%)">
+                                ${pct > 8 ? (c.hostname?.substring(0, 10) || '?') : ''}
+                            </div>
+                        ` : '';
+                    }).join('')}
+                </div>
+            </div>
+            <div>
+                <div style="font-size: 14px; font-weight: 600; margin-bottom: 12px;">Data Read Distribution</div>
+                <div style="display: flex; height: 40px; border-radius: 8px; overflow: hidden;">
+                    ${sorted.map((c, i) => {
+                        const pct = totalBytes > 0 ? ((c.bytes_read || 0) / totalBytes * 100) : 0;
+                        const colors = ['#6d5efc', '#14b8a6', '#f59e0b', '#f43f5e', '#38bdf8', '#10b981'];
+                        return pct > 0.5 ? `
+                            <div style="width: ${pct}%; background: ${colors[i % colors.length]}; 
+                                        display: flex; align-items: center; justify-content: center;
+                                        font-size: 10px; font-weight: 600; color: white;"
+                                 title="${c.hostname}: ${formatBytes(c.bytes_read || 0)} (${pct.toFixed(1)}%)">
+                                ${pct > 8 ? (c.hostname?.substring(0, 10) || '?') : ''}
+                            </div>
+                        ` : '';
+                    }).join('')}
+                </div>
+            </div>
+            <div style="margin-top: 16px; display: flex; flex-wrap: wrap; gap: 12px;">
+                ${sorted.slice(0, 6).map((c, i) => {
+                    const colors = ['#6d5efc', '#14b8a6', '#f59e0b', '#f43f5e', '#38bdf8', '#10b981'];
+                    return `
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <div style="width: 12px; height: 12px; border-radius: 3px; background: ${colors[i % colors.length]};"></div>
+                            <span style="font-size: 12px;">${c.hostname || 'Unknown'}</span>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
+    }
+
+    async function loadPerformance() {
+        try {
+            const response = await fetch('/api/clients');
+            const data = await response.json();
+            
+            const clients = data.clients || [];
+            const sortBy = document.getElementById('sortBy').value;
+            
+            // Calculate totals
+            let totalOps = 0, totalBytes = 0;
+            clients.forEach(c => {
+                totalOps += c.operations_count || 0;
+                totalBytes += c.bytes_read || 0;
+            });
+            
+            const activeClients = clients.filter(c => c.state === 1).length;
+            const avgOps = clients.length > 0 ? Math.round(totalOps / clients.length) : 0;
+            
+            // Update stats
+            document.getElementById('totalOps').textContent = formatNumber(totalOps);
+            document.getElementById('totalData').textContent = formatBytes(totalBytes);
+            document.getElementById('activeClients').textContent = activeClients;
+            document.getElementById('avgOpsClient').textContent = formatNumber(avgOps);
+            
+            // Render top tables
+            renderTopTable(clients, 'operations_count', 'topOpsTable');
+            renderTopTable(clients, 'bytes_read', 'topDataTable');
+            
+            // Render resource chart
+            renderResourceChart(clients);
+            
+            // Sort clients
+            let sorted = [...clients];
+            if (sortBy === 'ops') {
+                sorted.sort((a, b) => (b.operations_count || 0) - (a.operations_count || 0));
+            } else if (sortBy === 'data') {
+                sorted.sort((a, b) => (b.bytes_read || 0) - (a.bytes_read || 0));
+            } else {
+                sorted.sort((a, b) => (a.connected_at || 0) - (b.connected_at || 0));
+            }
+            
+            if (sorted.length === 0) {
+                document.getElementById('allClientsTable').innerHTML = `
+                    <div style="text-align: center; padding: 60px; color: var(--text-secondary);">
+                        <div style="font-size: 48px; margin-bottom: 16px;">📊</div>
+                        <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">No Performance Data</div>
+                        <div>Connect clients to start collecting metrics</div>
+                    </div>
+                `;
+                return;
+            }
+            
+            document.getElementById('allClientsTable').innerHTML = `
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Client</th>
+                            <th>Operations</th>
+                            <th>% of Total Ops</th>
+                            <th>Data Read</th>
+                            <th>% of Total Data</th>
+                            <th>Uptime</th>
+                            <th>Ops/Hour</th>
+                            <th>Impact</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${sorted.map((client, i) => {
+                            const ops = client.operations_count || 0;
+                            const bytes = client.bytes_read || 0;
+                            const opsPct = totalOps > 0 ? (ops / totalOps * 100) : 0;
+                            const dataPct = totalBytes > 0 ? (bytes / totalBytes * 100) : 0;
+                            const now = new Date();
+                            const connectedAt = new Date(client.connected_at * 1000);
+                            const uptimeSeconds = Math.max(1, Math.floor((now - connectedAt) / 1000));
+                            const opsPerHour = Math.round(ops / (uptimeSeconds / 3600));
+                            const impact = getUsageLevel(Math.max(opsPct, dataPct));
+                            
+                            return `
+                                <tr>
+                                    <td style="font-weight: 600; color: var(--text-secondary);">${i + 1}</td>
+                                    <td>
+                                        <div style="font-weight: 600;">${client.hostname || 'Unknown'}</div>
+                                        <div style="font-size: 11px; color: var(--text-secondary);">${client.mount_point || '-'}</div>
+                                    </td>
+                                    <td style="font-weight: 700;">${formatNumber(ops)}</td>
+                                    <td>
+                                        <div style="display: flex; align-items: center; gap: 8px;">
+                                            <div class="progress" style="width: 60px; height: 6px;">
+                                                <div class="progress-bar" style="width: ${opsPct}%;"></div>
+                                            </div>
+                                            <span>${opsPct.toFixed(1)}%</span>
+                                        </div>
+                                    </td>
+                                    <td style="font-weight: 700;">${formatBytes(bytes)}</td>
+                                    <td>
+                                        <div style="display: flex; align-items: center; gap: 8px;">
+                                            <div class="progress" style="width: 60px; height: 6px;">
+                                                <div class="progress-bar" style="width: ${dataPct}%;"></div>
+                                            </div>
+                                            <span>${dataPct.toFixed(1)}%</span>
+                                        </div>
+                                    </td>
+                                    <td>${formatDuration(uptimeSeconds)}</td>
+                                    <td>${formatNumber(opsPerHour)}</td>
+                                    <td>
+                                        <span class="badge" style="background: ${impact.color}20; color: ${impact.color}; border: 1px solid ${impact.color}40;">
+                                            ${impact.label}
+                                        </span>
+                                    </td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+        } catch (error) {
+            console.error('Failed to load performance data:', error);
+            document.getElementById('allClientsTable').innerHTML = `
+                <div style="text-align: center; padding: 40px; color: var(--danger);">
+                    Failed to load data: ${error.message}
+                </div>
+            `;
+        }
+    }
+
+    // Initial load and auto-refresh
+    loadPerformance();
+    setInterval(loadPerformance, 15000); // Refresh every 15 seconds
+</script>
+{{end}}

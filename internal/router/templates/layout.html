@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.Title}} - MonoFS</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --primary: #6d5efc;
+            --primary-dark: #5547d7;
+            --secondary: #14b8a6;
+            --success: #10b981;
+            --danger: #f43f5e;
+            --warning: #f59e0b;
+            --info: #38bdf8;
+            --bg-main: #0f172a;
+            --bg-card: rgba(15, 23, 42, 0.78);
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --border: rgba(148, 163, 184, 0.2);
+            --shadow: rgba(2, 6, 23, 0.5);
+            --shadow-lg: rgba(15, 23, 42, 0.8);
+            --glass: rgba(15, 23, 42, 0.6);
+            --glass-strong: rgba(15, 23, 42, 0.85);
+            --gradient: radial-gradient(1200px circle at 20% -10%, rgba(109, 94, 252, 0.3), transparent 40%),
+                        radial-gradient(1200px circle at 90% 10%, rgba(20, 184, 166, 0.25), transparent 45%),
+                        linear-gradient(180deg, #0b1120 0%, #0f172a 100%);
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--gradient);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.5);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.3);
+            border-radius: 5px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(148, 163, 184, 0.5);
+        }
+        
+        .layout {
+            display: flex;
+            min-height: 100vh;
+        }
+        
+        .sidebar {
+            width: 260px;
+            background: var(--glass-strong);
+            border-right: 1px solid var(--border);
+            padding: 20px 0;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+            backdrop-filter: blur(18px);
+        }
+        
+        .logo {
+            padding: 0 20px 20px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .logo img {
+            display: block;
+            margin: 0 auto 12px;
+        }
+        
+        .logo h1 {
+            font-size: 20px;
+            background: linear-gradient(135deg, #c7d2fe 0%, #5eead4 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-weight: 700;
+        }
+        
+        .logo p {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+        
+        .nav {
+            padding: 0 10px;
+        }
+        
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            margin: 4px 0;
+            border-radius: 8px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: all 0.2s;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        .nav-item:hover {
+            background: rgba(148, 163, 184, 0.08);
+            color: #e2e8f0;
+        }
+        
+        .nav-item.active {
+            background: linear-gradient(135deg, rgba(109, 94, 252, 0.35) 0%, rgba(20, 184, 166, 0.35) 100%);
+            color: #e2e8f0;
+            border: 1px solid rgba(109, 94, 252, 0.4);
+        }
+        
+        .nav-icon {
+            font-size: 18px;
+            width: 20px;
+            text-align: center;
+        }
+        
+        .main {
+            margin-left: 260px;
+            flex: 1;
+            padding: 30px;
+        }
+        
+        .header {
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        
+        .header p {
+            color: var(--text-secondary);
+            font-size: 15px;
+        }
+        
+        .card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 16px 40px var(--shadow);
+            margin-bottom: 24px;
+            border: 1px solid var(--border);
+            backdrop-filter: blur(18px);
+        }
+        
+        .card-header {
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .grid {
+            display: grid;
+            gap: 20px;
+        }
+        
+        .grid-cols-2 {
+            grid-template-columns: repeat(2, 1fr);
+        }
+        
+        .grid-cols-3 {
+            grid-template-columns: repeat(3, 1fr);
+        }
+        
+        .grid-cols-4 {
+            grid-template-columns: repeat(4, 1fr);
+        }
+        
+        @media (max-width: 1200px) {
+            .grid-cols-4 {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .sidebar {
+                transform: translateX(-100%);
+            }
+            
+            .main {
+                margin-left: 0;
+            }
+            
+            .grid-cols-2,
+            .grid-cols-3,
+            .grid-cols-4 {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, rgba(30, 41, 59, 0.7), rgba(15, 23, 42, 0.9));
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 12px 28px var(--shadow);
+            border: 1px solid var(--border);
+            backdrop-filter: blur(14px);
+        }
+        
+        .stat-label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        
+        .stat-icon {
+            font-size: 24px;
+            opacity: 0.2;
+            float: right;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        .badge-success {
+            background: rgba(16, 185, 129, 0.18);
+            color: #a7f3d0;
+        }
+        
+        .badge-danger {
+            background: rgba(244, 63, 94, 0.18);
+            color: #fda4af;
+        }
+        
+        .badge-warning {
+            background: rgba(245, 158, 11, 0.2);
+            color: #fde68a;
+        }
+        
+        .badge-info {
+            background: rgba(56, 189, 248, 0.2);
+            color: #bae6fd;
+        }
+        
+        .progress {
+            height: 8px;
+            background: rgba(148, 163, 184, 0.2);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary) 0%, var(--secondary) 100%);
+            transition: width 0.3s;
+        }
+        
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            text-decoration: none;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, rgba(109, 94, 252, 0.9) 0%, rgba(20, 184, 166, 0.9) 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .table th {
+            text-align: left;
+            padding: 12px;
+            background: rgba(15, 23, 42, 0.6);
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+        
+        .table td {
+            padding: 12px;
+            border-top: 1px solid rgba(148, 163, 184, 0.12);
+        }
+        
+        .table tr:hover {
+            background: rgba(148, 163, 184, 0.08);
+        }
+        
+        .loader {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid var(--border);
+            border-top: 2px solid var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-indicator.healthy {
+            background: var(--success);
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+        }
+        
+        .status-indicator.unhealthy {
+            background: var(--danger);
+            box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+        }
+        
+        .status-indicator.warning {
+            background: var(--warning);
+            box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+        }
+
+        .toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .toolbar-group {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .select {
+            appearance: none;
+            padding: 8px 32px 8px 12px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.7);
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+            position: relative;
+        }
+
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            background: rgba(109, 94, 252, 0.18);
+            color: #c7d2fe;
+        }
+
+        .muted {
+            color: var(--text-secondary);
+        }
+
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border-radius: 999px;
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            background: rgba(148, 163, 184, 0.16);
+            color: #e2e8f0;
+        }
+
+        .divider {
+            height: 1px;
+            background: var(--border);
+            margin: 16px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="layout">
+        <div class="sidebar">
+            <div class="logo">
+                <img src="/static/static/monofs.png" alt="MonoFS" style="width: 150px; height: auto; margin-bottom: 12px;">
+                <p>Distributed Build Filesystem</p>
+                <p id="versionInfo" style="font-size: 10px; color: #94a3b8; margin-top: 8px;">Loading...</p>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-item {{if eq .Page "dashboard"}}active{{end}}">
+                    <span class="nav-icon">📊</span>
+                    Dashboard
+                </a>
+                <a href="/search" class="nav-item {{if eq .Page "search"}}active{{end}}">
+                    <span class="nav-icon">🔍</span>
+                    Search
+                </a>
+                <a href="/cluster" class="nav-item {{if eq .Page "cluster"}}active{{end}}">
+                    <span class="nav-icon">🌐</span>
+                    MetaStores
+                </a>
+                <a href="/clients" class="nav-item {{if eq .Page "clients"}}active{{end}}">
+                    <span class="nav-icon">💻</span>
+                    Clients
+                </a>
+                <a href="/performance" class="nav-item {{if eq .Page "performance"}}active{{end}}">
+                    <span class="nav-icon">⚡</span>
+                    Performance
+                </a>
+                <a href="/replication" class="nav-item {{if eq .Page "replication"}}active{{end}}">
+                    <span class="nav-icon">🛡️</span>
+                    Replication
+                </a>
+                <a href="/ingest" class="nav-item {{if eq .Page "ingest"}}active{{end}}">
+                    <span class="nav-icon">⬆️</span>
+                    Ingest
+                </a>
+                <a href="/repositories" class="nav-item {{if eq .Page "repositories"}}active{{end}}">
+                    <span class="nav-icon">📦</span>
+                    Repositories
+                </a>
+                <a href="/indexer" class="nav-item {{if eq .Page "indexer"}}active{{end}}">
+                    <span class="nav-icon">📑</span>
+                    Indexer
+                </a>
+                <a href="/fetchers" class="nav-item {{if eq .Page "fetchers"}}active{{end}}">
+                    <span class="nav-icon">🔄</span>
+                    Fetchers
+                </a>
+            </nav>
+        </div>
+        
+        <div class="main">
+            {{template "content" .}}
+        </div>
+    </div>
+    <script>
+        // Fetch and display version info
+        fetch('/api/status')
+            .then(res => res.json())
+            .then(data => {
+                if (data.version) {
+                    const v = data.version;
+                    const versionText = `v${v.version} (${v.commit.substring(0, 7)})`;
+                    document.getElementById('versionInfo').textContent = versionText;
+                    document.getElementById('versionInfo').title = `Built: ${v.build_time}`;
+                }
+            })
+            .catch(() => {});
+    </script>
+</body>
+</html>

@@ -1,0 +1,599 @@
+{{define "content"}}
+<div class="header">
+    <h1>Dashboard</h1>
+    <p>Overview across all routers in your MonoFS deployment</p>
+</div>
+
+<div class="grid grid-cols-4">
+    <div class="stat-card">
+        <span class="stat-icon">🧭</span>
+        <div class="stat-label">Routers</div>
+        <div class="stat-value" id="totalRouters">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">🌐</span>
+        <div class="stat-label">Total MetaStore Nodes</div>
+        <div class="stat-value" id="totalNodes">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">✅</span>
+        <div class="stat-label">Healthy MetaStore Nodes</div>
+        <div class="stat-value" id="healthyNodes">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">📦</span>
+        <div class="stat-label">Repositories</div>
+        <div class="stat-value" id="totalRepos">-</div>
+    </div>
+
+    <div class="stat-card">
+        <span class="stat-icon">💻</span>
+        <div class="stat-label">Connected Clients</div>
+        <div class="stat-value" id="connectedClients">-</div>
+    </div>
+
+    <div class="stat-card">
+        <span class="stat-icon">📄</span>
+        <div class="stat-label">Total Files</div>
+        <div class="stat-value" id="totalFiles">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">🔄</span>
+        <div class="stat-label">Fetchers</div>
+        <div class="stat-value" id="totalFetchers">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">💾</span>
+        <div class="stat-label">Cache Hit Rate</div>
+        <div class="stat-value" id="fetcherCacheHit">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">🔍</span>
+        <div class="stat-label">Search Indexes</div>
+        <div class="stat-value" id="searchIndexes">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">📊</span>
+        <div class="stat-label">Total Searches</div>
+        <div class="stat-value" id="totalSearches">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">⚡</span>
+        <div class="stat-label">Avg Search Time</div>
+        <div class="stat-value" id="avgSearchTime">-</div>
+    </div>
+    
+    <div class="stat-card">
+        <span class="stat-icon">📥</span>
+        <div class="stat-label">Data Fetched</div>
+        <div class="stat-value" id="dataFetched">-</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <div class="toolbar">
+            <div>
+                <h2 class="card-title">Routers Overview</h2>
+                <p class="muted" style="margin-top: 6px; font-size: 13px;">Status and health by router</p>
+            </div>
+            <div class="toolbar-group">
+                <span class="pill" id="routerRefresh">Updating...</span>
+            </div>
+        </div>
+    </div>
+    <div id="routerCards">
+        <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<div class="grid grid-cols-4">
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">Cluster Health</h2>
+        </div>
+        <div id="clusterHealth">
+            <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+                <div class="loader"></div> Loading...
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">Fetcher Cluster</h2>
+        </div>
+        <div id="fetcherClusterStatus">
+            <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+                <div class="loader"></div> Loading...
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">Search Engine</h2>
+        </div>
+        <div id="searchEngineStatus">
+            <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+                <div class="loader"></div> Loading...
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">Recent Activity</h2>
+        </div>
+        <div id="recentActivity">
+            <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+                <div class="loader"></div> Loading...
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <div class="toolbar">
+            <h2 class="card-title">Node Status</h2>
+            <div class="toolbar-group">
+                <label class="muted" style="font-size: 12px;">Router</label>
+                <select id="routerFilter" class="select"></select>
+            </div>
+        </div>
+    </div>
+    <div id="nodeStatus">
+        <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<script>
+    let routerData = null;
+
+    function setRouterOptions() {
+        const select = document.getElementById('routerFilter');
+        if (!select || !routerData) return;
+        const options = [
+            { name: 'All Routers', value: 'all' },
+            ...routerData.routers.map(r => ({ name: r.name || r.url || 'router', value: r.name || r.url || 'router' }))
+        ];
+        select.innerHTML = options.map(opt => `<option value="${opt.value}">${opt.name}</option>`).join('');
+    }
+
+    function getSelectedRouter() {
+        const select = document.getElementById('routerFilter');
+        return select ? select.value : 'all';
+    }
+
+    function flattenRepositories(routers) {
+        const repos = [];
+        routers.forEach(router => {
+            if (!router.repositories || !router.repositories.repositories) return;
+            router.repositories.repositories.forEach(repo => {
+                repos.push({ ...repo, _router: router.name || router.url || 'router' });
+            });
+        });
+        return repos;
+    }
+
+    function dedupeNodes(nodes) {
+        const map = new Map();
+        nodes.forEach(node => {
+            const key = `${node.id}|${node.address}`;
+            if (!map.has(key)) {
+                map.set(key, { ...node, _routers: new Set([node._router || 'local']) });
+                return;
+            }
+            const existing = map.get(key);
+            existing.healthy = existing.healthy || node.healthy;
+            existing.file_count = Math.max(existing.file_count || 0, node.file_count || 0);
+            existing.weight = Math.max(existing.weight || 0, node.weight || 0);
+            if (existing.status !== 'ACTIVE' && node.status) {
+                existing.status = node.status;
+            }
+            existing._routers.add(node._router || 'local');
+        });
+        return Array.from(map.values()).map(n => ({
+            ...n,
+            _routers: Array.from(n._routers)
+        }));
+    }
+
+    function dedupeRepositories(repos) {
+        const map = new Map();
+        repos.forEach(repo => {
+            const key = repo.storage_id || `${repo.repo_id}|${repo.branch}`;
+            if (!map.has(key)) {
+                map.set(key, { ...repo, _routers: new Set([repo._router]) });
+                return;
+            }
+            const existing = map.get(key);
+            existing.files_count = Math.max(existing.files_count || 0, repo.files_count || 0);
+            existing.rebalance_progress = Math.max(existing.rebalance_progress || 0, repo.rebalance_progress || 0);
+            existing._routers.add(repo._router);
+        });
+        return Array.from(map.values()).map(r => ({
+            ...r,
+            _routers: Array.from(r._routers)
+        }));
+    }
+
+    function renderRouterCards(routers) {
+        const container = document.getElementById('routerCards');
+        if (!routers || routers.length === 0) {
+            container.innerHTML = '<div class="muted">No routers configured.</div>';
+            return;
+        }
+
+        container.innerHTML = `
+            <div class="grid grid-cols-3">
+                ${routers.map(router => {
+                    const status = router.status;
+                    const repoCount = router.repositories?.repositories?.length || 0;
+                    const nodeCount = status?.nodes?.length || 0;
+                    const healthyCount = status?.nodes?.filter(n => n.healthy).length || 0;
+                    const healthPercent = nodeCount > 0 ? Math.round((healthyCount / nodeCount) * 100) : 0;
+                    const badgeClass = router.error ? 'badge-danger' : healthPercent === 100 ? 'badge-success' : 'badge-warning';
+                    const badgeLabel = router.error ? router.error : `${healthPercent}% healthy`;
+                    return `
+                        <div class="stat-card">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                <div style="font-weight: 600;">${router.name || router.url || 'router'}</div>
+                                <span class="badge ${badgeClass}">${badgeLabel}</span>
+                            </div>
+                            <div class="muted" style="font-size: 12px; margin-bottom: 8px;">${router.local ? 'Local router' : router.url}</div>
+                            <div style="display: flex; gap: 12px; font-size: 13px;">
+                                <span class="pill">Nodes: ${nodeCount}</span>
+                                <span class="pill">Repos: ${repoCount}</span>
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
+    }
+
+    async function loadDashboard() {
+        try {
+            const routersResp = await fetch('/api/routers');
+            routerData = await routersResp.json();
+            const routers = routerData.routers || [];
+
+            setRouterOptions();
+            renderRouterCards(routers);
+            document.getElementById('routerRefresh').textContent = 'Updated just now';
+            setTimeout(() => {
+                document.getElementById('routerRefresh').textContent = `Last updated ${new Date(routerData.generated_at * 1000).toLocaleTimeString()}`;
+            }, 300);
+
+            const selected = getSelectedRouter();
+            const scopedRouters = selected === 'all'
+                ? routers
+                : routers.filter(r => (r.name || r.url || 'router') === selected);
+
+            const allStatuses = scopedRouters.flatMap(r => (r.status?.nodes || []).map(n => ({
+                ...n,
+                _router: r.name || r.url || 'router'
+            })));
+            const allRepositories = flattenRepositories(scopedRouters);
+
+            const uniqueNodes = dedupeNodes(allStatuses);
+            const uniqueRepos = dedupeRepositories(allRepositories);
+
+            const totalRouters = scopedRouters.length;
+            const totalNodes = uniqueNodes.length;
+            const healthyCount = uniqueNodes.filter(n => n.healthy).length;
+            const totalRepos = uniqueRepos.length;
+            
+            // Update stats
+            document.getElementById('totalRouters').textContent = totalRouters;
+            document.getElementById('totalNodes').textContent = totalNodes;
+            document.getElementById('healthyNodes').textContent = healthyCount;
+            document.getElementById('totalRepos').textContent = totalRepos;
+            
+            // Calculate total files
+            const totalFiles = uniqueRepos.reduce((sum, repo) => sum + (repo.files_count || 0), 0) || 0;
+            document.getElementById('totalFiles').textContent = totalFiles.toLocaleString();
+            
+            // Load connected clients count
+            await loadClientStats();
+            
+            // Load search stats
+            await loadSearchStats();
+            
+            // Load fetcher stats
+            await loadFetcherStats();
+            
+            // Render cluster health
+            const healthPercent = totalNodes > 0 ? (healthyCount / totalNodes * 100) : 0;
+            document.getElementById('clusterHealth').innerHTML = `
+                <div style="padding: 20px;">
+                    <div style="font-size: 48px; text-align: center; margin-bottom: 16px;">
+                        ${healthPercent === 100 ? '✅' : healthPercent > 50 ? '⚠️' : '❌'}
+                    </div>
+                    <div style="text-align: center; font-size: 24px; font-weight: 600; margin-bottom: 8px;">
+                        ${healthPercent.toFixed(0)}% Healthy
+                    </div>
+                    <div class="progress">
+                        <div class="progress-bar" style="width: ${healthPercent}%"></div>
+                    </div>
+                    <div style="margin-top: 16px; text-align: center; color: var(--text-secondary); font-size: 14px;">
+                        ${healthyCount} of ${totalNodes} nodes operational
+                    </div>
+                    <div style="margin-top: 12px; text-align: center;">
+                        <a href="/cluster" style="color: var(--primary); font-size: 12px; text-decoration: none;">
+                            View Details →
+                        </a>
+                    </div>
+                </div>
+            `;
+            
+            // Render recent activity
+            const recentRepos = uniqueRepos.slice(-5).reverse() || [];
+            document.getElementById('recentActivity').innerHTML = recentRepos.length > 0 ? `
+                <div style="padding: 0 20px;">
+                    ${recentRepos.map(repo => {
+                        const date = new Date(repo.ingested_at * 1000);
+                        return `
+                            <div style="padding: 12px 0; border-bottom: 1px solid var(--border);">
+                                <div style="font-weight: 600; margin-bottom: 4px;">${repo.repo_id}</div>
+                                <div style="font-size: 12px; color: var(--text-secondary);">
+                                    ${repo.files_count} files • ${date.toLocaleString()} • ${repo._router}
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            ` : '<div style="text-align: center; padding: 20px; color: var(--text-secondary);">No recent activity</div>';
+            
+            // Render node status table
+            const nodes = uniqueNodes;
+            document.getElementById('nodeStatus').innerHTML = `
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Node</th>
+                            <th>Router</th>
+                            <th>Address</th>
+                            <th>Status</th>
+                            <th>Weight</th>
+                            <th>Files</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${nodes.map(node => {
+                            let statusBadge = '';
+                            if (node.status === 'STAGING') {
+                                statusBadge = '<span class="badge badge-warning">Staging</span>';
+                            } else if (node.status === 'SYNCING') {
+                                statusBadge = `<span class="badge badge-info">Syncing ${(node.sync_progress * 100).toFixed(0)}%</span>`;
+                            } else if (node.healthy) {
+                                statusBadge = '<span class="badge badge-success">Healthy</span>';
+                            } else {
+                                statusBadge = '<span class="badge badge-danger">Unhealthy</span>';
+                            }
+                            
+                            return `
+                                <tr>
+                                    <td><strong>${node.id}</strong></td>
+                                    <td>${(node._routers || [node._router || 'local']).join(', ')}</td>
+                                    <td>${node.address}</td>
+                                    <td>${statusBadge}</td>
+                                    <td>${node.weight}</td>
+                                    <td>${(node.file_count || 0).toLocaleString()}</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+        } catch (err) {
+            console.error('Failed to load dashboard:', err);
+        }
+    }
+
+    function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    async function loadFetcherStats() {
+        try {
+            const resp = await fetch('/api/fetchers');
+            if (!resp.ok) {
+                throw new Error('Fetcher cluster unavailable');
+            }
+            const data = await resp.json();
+            
+            if (data.error) {
+                throw new Error(data.error);
+            }
+            
+            const healthyPct = data.total_fetchers > 0 
+                ? (data.healthy_fetchers / data.total_fetchers * 100).toFixed(0) 
+                : 0;
+            const hitRate = (data.aggregated_hit_rate * 100).toFixed(1);
+            const statusEmoji = data.healthy_fetchers === data.total_fetchers ? '✅' : 
+                               data.healthy_fetchers > 0 ? '⚠️' : '❌';
+            const statusText = data.healthy_fetchers === data.total_fetchers ? 'Healthy' : 
+                              data.healthy_fetchers > 0 ? 'Degraded' : 'Down';
+            
+            // Update stat cards
+            document.getElementById('totalFetchers').textContent = `${data.healthy_fetchers}/${data.total_fetchers}`;
+            document.getElementById('fetcherCacheHit').textContent = `${hitRate}%`;
+            document.getElementById('dataFetched').textContent = formatBytes(data.total_bytes_fetched || 0);
+            
+            document.getElementById('fetcherClusterStatus').innerHTML = `
+                <div style="padding: 20px;">
+                    <div style="font-size: 48px; text-align: center; margin-bottom: 16px;">
+                        ${statusEmoji}
+                    </div>
+                    <div style="text-align: center; font-size: 24px; font-weight: 600; margin-bottom: 8px;">
+                        ${statusText}
+                    </div>
+                    <div style="margin-top: 16px; text-align: center;">
+                        <div style="display: flex; justify-content: center; gap: 16px; font-size: 13px;">
+                            <span class="pill">🔄 ${data.healthy_fetchers}/${data.total_fetchers} fetchers</span>
+                            <span class="pill">💾 ${hitRate}% cache hit</span>
+                        </div>
+                    </div>
+                    <div style="margin-top: 12px; text-align: center;">
+                        <div style="display: flex; justify-content: center; gap: 16px; font-size: 13px;">
+                            <span class="pill">📥 ${formatBytes(data.total_bytes_fetched)}</span>
+                            <span class="pill">📤 ${formatBytes(data.total_bytes_served)}</span>
+                        </div>
+                    </div>
+                    <div style="margin-top: 12px; text-align: center;">
+                        <a href="/fetchers" style="color: var(--primary); font-size: 12px; text-decoration: none;">
+                            View Details →
+                        </a>
+                    </div>
+                </div>
+            `;
+        } catch (err) {
+            console.error('Failed to load fetcher stats:', err);
+            // Update stat cards to show unavailable
+            document.getElementById('totalFetchers').textContent = '-';
+            document.getElementById('fetcherCacheHit').textContent = '-';
+            document.getElementById('dataFetched').textContent = '-';
+            
+            document.getElementById('fetcherClusterStatus').innerHTML = `
+                <div style="padding: 20px; text-align: center;">
+                    <div style="font-size: 48px; margin-bottom: 16px;">⚠️</div>
+                    <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">Fetchers Not Configured</div>
+                    <div style="color: var(--text-secondary); font-size: 13px;">
+                        Fetcher cluster is not connected.<br>
+                        Configure --fetcher-addrs to enable.
+                    </div>
+                    <div style="margin-top: 12px;">
+                        <a href="/fetchers" style="color: var(--primary); font-size: 12px; text-decoration: none;">
+                            View Details →
+                        </a>
+                    </div>
+                </div>
+            `;
+        }
+    }
+
+    async function loadSearchStats() {
+        try {
+            const resp = await fetch('/api/search/stats');
+            if (!resp.ok) {
+                throw new Error('Search service unavailable');
+            }
+            const stats = await resp.json();
+            
+            // Update search stats cards
+            document.getElementById('searchIndexes').textContent = stats.total_indexes || 0;
+            document.getElementById('totalSearches').textContent = (stats.searches_total || 0).toLocaleString();
+            document.getElementById('avgSearchTime').textContent = stats.avg_search_duration_ms ? `${stats.avg_search_duration_ms}ms` : '-';
+            
+            // Render search engine status panel
+            const queueLength = stats.queue_length || 0;
+            const activeJobs = stats.active_jobs || 0;
+            const jobsFailed = stats.jobs_failed || 0;
+            const jobsRejected = stats.jobs_rejected || 0;
+            const hasFailures = jobsFailed > 0 || jobsRejected > 0;
+            // Check for uptime to determine if service is healthy (uptime is always present when service responds)
+            const isHealthy = stats.uptime !== undefined && stats.uptime !== '';
+            const statusEmoji = !isHealthy ? '❌' : hasFailures ? '⚠️' : (queueLength > 0 ? '⏳' : '✅');
+            const statusText = !isHealthy ? 'Unavailable' : hasFailures ? 'Has Failures' : (queueLength > 0 ? 'Indexing' : 'Ready');
+            
+            document.getElementById('searchEngineStatus').innerHTML = `
+                <div style="padding: 20px;">
+                    <div style="font-size: 48px; text-align: center; margin-bottom: 16px;">
+                        ${statusEmoji}
+                    </div>
+                    <div style="text-align: center; font-size: 24px; font-weight: 600; margin-bottom: 8px;">
+                        ${statusText}
+                    </div>
+                    <div style="margin-top: 16px; text-align: center;">
+                        <div style="display: flex; justify-content: center; gap: 16px; font-size: 13px;">
+                            <span class="pill">📚 ${stats.total_indexes || 0} repos indexed</span>
+                            <span class="pill">📄 ${(stats.total_files_indexed || 0).toLocaleString()} files</span>
+                        </div>
+                    </div>
+                    ${hasFailures ? `
+                        <div style="margin-top: 12px; text-align: center;">
+                            <div style="display: flex; justify-content: center; gap: 16px; font-size: 13px;">
+                                ${jobsFailed > 0 ? `<span class="pill" style="background: var(--danger-bg); color: var(--danger);">❌ ${jobsFailed} failed</span>` : ''}
+                                ${jobsRejected > 0 ? `<span class="pill" style="background: var(--warning-bg); color: var(--warning);">⚠️ ${jobsRejected} rejected</span>` : ''}
+                            </div>
+                            <div style="margin-top: 8px;">
+                                <a href="/indexer" style="color: var(--primary); font-size: 12px;">View details →</a>
+                            </div>
+                        </div>
+                    ` : ''}
+                    <div style="margin-top: 12px; text-align: center;">
+                        <div style="display: flex; justify-content: center; gap: 16px; font-size: 13px;">
+                            <span class="pill">⏳ Queue: ${queueLength}</span>
+                            <span class="pill">🔄 Active: ${activeJobs}</span>
+                        </div>
+                    </div>
+                    ${stats.uptime ? `
+                        <div style="margin-top: 12px; text-align: center; color: var(--text-secondary); font-size: 12px;">
+                            Uptime: ${stats.uptime}
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+        } catch (err) {
+            console.error('Failed to load search stats:', err);
+            document.getElementById('searchIndexes').textContent = '-';
+            document.getElementById('totalSearches').textContent = '-';
+            document.getElementById('avgSearchTime').textContent = '-';
+            document.getElementById('searchEngineStatus').innerHTML = `
+                <div style="padding: 20px; text-align: center;">
+                    <div style="font-size: 48px; margin-bottom: 16px;">⚠️</div>
+                    <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">Search Unavailable</div>
+                    <div style="color: var(--text-secondary); font-size: 13px;">
+                        Search service is not connected.<br>
+                        Configure --search-addr to enable.
+                    </div>
+                </div>
+            `;
+        }
+    }
+
+    async function loadClientStats() {
+        try {
+            const resp = await fetch('/api/clients');
+            if (!resp.ok) {
+                throw new Error('Failed to fetch clients');
+            }
+            const data = await resp.json();
+            const clients = data.clients || [];
+            const connected = clients.filter(c => c.state === 1).length;
+            document.getElementById('connectedClients').textContent = connected;
+        } catch (err) {
+            console.error('Failed to load client stats:', err);
+            document.getElementById('connectedClients').textContent = '0';
+        }
+    }
+
+    document.addEventListener('change', (event) => {
+        if (event.target && event.target.id === 'routerFilter') {
+            loadDashboard();
+        }
+    });
+
+    loadDashboard();
+    setInterval(loadDashboard, 15000);
+</script>
+{{end}}
