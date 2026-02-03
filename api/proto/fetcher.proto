@@ -1,0 +1,249 @@
+syntax = "proto3";
+package monofs;
+option go_package = "github.com/radryc/monofs/api/proto";
+
+import "api/proto/monofs.proto";
+
+// BlobFetcher service - stateless proxies for external data sources.
+// Runs in DMZ with external network access. Storage nodes call this
+// to fetch blobs without needing direct external connectivity.
+service BlobFetcher {
+    // Synchronous fetch - blocks until blob is returned or error.
+    // Used for cache misses that need immediate data.
+    rpc FetchBlob(FetchBlobRequest) returns (stream DataChunk);
+    
+    // Batch fetch - parallel retrieval of multiple blobs.
+    // Used for bulk prefetch operations.
+    rpc FetchBlobBatch(FetchBlobBatchRequest) returns (stream FetchBlobBatchResponse);
+    
+    // Async prefetch - best-effort background fetch.
+    // Returns immediately, blobs fetched in background.
+    // Caller should poll or re-request via FetchBlob.
+    rpc PrefetchBlobs(PrefetchRequest) returns (PrefetchResponse);
+    
+    // Check if blobs are ready (cached on fetcher).
+    rpc CheckCache(CheckCacheRequest) returns (CheckCacheResponse);
+    
+    // Service health and statistics.
+    rpc GetStats(FetcherStatsRequest) returns (FetcherStatsResponse);
+}
+
+// SourceType identifies the data source backend.
+enum SourceType {
+    SOURCE_TYPE_UNKNOWN = 0;
+    SOURCE_TYPE_GIT = 1;          // Git repository (GitHub, GitLab, etc.)
+    SOURCE_TYPE_GOMOD = 2;        // Go module proxy (proxy.golang.org)
+    SOURCE_TYPE_S3 = 3;           // S3-compatible object storage
+    SOURCE_TYPE_HTTP = 4;         // Generic HTTP/HTTPS URL
+    SOURCE_TYPE_OCI = 5;          // OCI registry (container images)
+}
+
+message FetchBlobRequest {
+    // Content identifier (interpretation depends on source_type):
+    // - GIT: blob SHA hash
+    // - GOMOD: module@version/path
+    // - S3: bucket/key
+    // - HTTP: full URL
+    string content_id = 1;
+    
+    // Source type determines which backend handles the request.
+    SourceType source_type = 2;
+    
+    // Source-specific configuration:
+    // GIT: repo_url, branch, display_path
+    // GOMOD: module_path, version
+    // S3: endpoint, bucket, region
+    // HTTP: (none, content_id is the URL)
+    map<string, string> source_config = 3;
+    
+    // Request metadata for tracing/metrics.
+    string request_id = 10;
+    string storage_node_id = 11;
+    string storage_id = 12;       // Repository storage ID (for affinity routing)
+    
+    // Priority: 0 = highest (sync read), 10 = lowest (speculative prefetch)
+    int32 priority = 13;
+}
+
+// DataChunk streams blob content back to caller.
+// Reusing existing DataChunk from monofs.proto.
+// message DataChunk {
+//     bytes data = 1;
+//     bool is_last = 2;
+// }
+
+message FetchBlobBatchRequest {
+    repeated FetchBlobRequest blobs = 1;
+    
+    // Max concurrent fetches (0 = use server default).
+    int32 concurrency = 2;
+    
+    // Stop on first error vs. continue and report all errors.
+    bool fail_fast = 3;
+}
+
+message FetchBlobBatchResponse {
+    // Content ID from the request.
+    string content_id = 1;
+    
+    // Blob data (for small blobs) or empty if streaming separately.
+    bytes data = 2;
+    
+    // Size in bytes.
+    int64 size = 3;
+    
+    // True if this blob was served from fetcher's local cache.
+    bool from_cache = 4;
+    
+    // Fetch latency in milliseconds (0 if from cache).
+    int64 fetch_latency_ms = 5;
+    
+    // Error message (empty on success).
+    string error = 6;
+    
+    // Indicates this is the last response in the batch.
+    bool batch_complete = 10;
+}
+
+message PrefetchRequest {
+    // Blobs to prefetch (same format as FetchBlobRequest).
+    repeated FetchBlobRequest blobs = 1;
+    
+    // Callback URL for completion notification (optional).
+    // If set, fetcher will POST to this URL when prefetch completes.
+    string callback_url = 2;
+    
+    // TTL for prefetched blobs in fetcher cache (seconds).
+    // 0 = use server default.
+    int32 cache_ttl_seconds = 3;
+}
+
+message PrefetchResponse {
+    // Job ID for tracking (can be used with CheckCache).
+    string job_id = 1;
+    
+    // Number of blobs accepted for prefetch.
+    int32 accepted = 2;
+    
+    // Number of blobs already cached (will skip fetch).
+    int32 already_cached = 3;
+    
+    // Number of blobs rejected (invalid request, etc.).
+    int32 rejected = 4;
+}
+
+message CheckCacheRequest {
+    // Content IDs to check.
+    repeated string content_ids = 1;
+    
+    // Source type (needed to identify cache keys).
+    SourceType source_type = 2;
+}
+
+message CheckCacheResponse {
+    // Map of content_id -> cached (true/false).
+    map<string, bool> cached = 1;
+    
+    // Map of content_id -> size in bytes (only for cached items).
+    map<string, int64> sizes = 2;
+}
+
+message FetcherStatsRequest {
+    // Include detailed per-source stats.
+    bool include_source_stats = 1;
+    
+    // Include cache contents summary.
+    bool include_cache_stats = 2;
+}
+
+message FetcherStatsResponse {
+    // Fetcher instance ID.
+    string fetcher_id = 1;
+    
+    // Uptime in seconds.
+    int64 uptime_seconds = 2;
+    
+    // Total requests served.
+    int64 total_requests = 3;
+    
+    // Cache statistics.
+    int64 cache_hits = 4;
+    int64 cache_misses = 5;
+    double cache_hit_rate = 6;
+    int64 cache_size_bytes = 7;
+    int64 cache_entries = 8;
+    
+    // Active operations.
+    int64 active_fetches = 9;
+    int64 queued_prefetches = 10;
+    
+    // Per-source statistics.
+    map<string, SourceStats> source_stats = 11;
+    
+    // Bytes transferred.
+    int64 bytes_fetched = 12;
+    int64 bytes_served = 13;
+}
+
+message SourceStats {
+    int64 requests = 1;
+    int64 errors = 2;
+    int64 bytes_fetched = 3;
+    double avg_latency_ms = 4;
+    int64 cached_items = 5;
+}
+
+// ============================================================
+// Prediction-related messages (for storage node -> router comm)
+// ============================================================
+
+// Access event reported by storage nodes for prediction training.
+message AccessEvent {
+    string client_id = 1;         // FUSE client identifier
+    string storage_id = 2;        // Repository storage ID
+    string file_path = 3;         // Path within repository
+    int64 timestamp = 4;          // Unix timestamp (nanoseconds)
+    AccessType access_type = 5;   // Type of access
+    string session_id = 6;        // Groups related accesses
+    string node_id = 7;           // Storage node that served the request
+}
+
+enum AccessType {
+    ACCESS_TYPE_UNKNOWN = 0;
+    ACCESS_TYPE_READ = 1;         // File content read
+    ACCESS_TYPE_READDIR = 2;      // Directory listing
+    ACCESS_TYPE_LOOKUP = 3;       // File/dir existence check
+    ACCESS_TYPE_GETATTR = 4;      // Metadata retrieval
+}
+
+// Storage nodes report access events to router for global prediction.
+message ReportAccessRequest {
+    repeated AccessEvent events = 1;
+}
+
+message ReportAccessResponse {
+    int32 accepted = 1;
+}
+
+// Request predictions for a file (what should be prefetched next).
+message GetPredictionsRequest {
+    string storage_id = 1;
+    string file_path = 2;
+    string client_id = 3;
+    int32 max_results = 4;
+    float min_probability = 5;
+}
+
+message GetPredictionsResponse {
+    repeated PredictedFile predictions = 1;
+}
+
+message PredictedFile {
+    string storage_id = 1;
+    string file_path = 2;
+    float probability = 3;
+    string source = 4;            // "markov", "cluster", "structural", "temporal"
+    string content_id = 5;        // Blob hash for fetching
+    SourceType source_type = 6;   // How to fetch
+    map<string, string> source_config = 7;
+}

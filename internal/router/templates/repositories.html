@@ -1,0 +1,444 @@
+{{define "content"}}
+<div class="header">
+    <h1>Repositories</h1>
+    <p>Browse ingested repositories across all routers</p>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <div class="toolbar">
+            <div>
+                <h2 class="card-title">Ingested Repositories</h2>
+                <div class="muted" style="font-size: 12px; margin-top: 6px;">Filter by router or view everything</div>
+            </div>
+            <div class="toolbar-group">
+                <label class="muted" style="font-size: 12px;">Router</label>
+                <select id="routerFilter" class="select"></select>
+                <div style="color: var(--text-secondary); font-size: 14px;">
+                    Cluster Topology: <strong id="clusterTopology">-</strong>
+                </div>
+                <div id="loadingIndicator" style="display: none; color: var(--text-secondary); font-size: 12px;">
+                    <span class="loader" style="width: 12px; height: 12px; border-width: 2px;"></span>
+                    Refreshing...
+                </div>
+                <div id="errorIndicator" style="display: none; color: var(--danger); font-size: 12px;">
+                    ⚠️ <span id="errorText"></span>
+                </div>
+            </div>
+        </div>
+        <div style="margin-top: 12px; display: flex; align-items: center; gap: 8px;">
+            <label class="muted" style="font-size: 12px;">Search</label>
+            <input 
+                type="text" 
+                id="repoSearch" 
+                placeholder="Filter by repository ID, URL, or branch..." 
+                style="flex: 1; padding: 6px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-secondary); color: var(--text-primary); font-size: 13px;"
+            />
+            <span id="searchResults" class="muted" style="font-size: 12px; white-space: nowrap;"></span>
+        </div>
+    </div>
+    <div id="repositoriesTable">
+        <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+            <div class="loader"></div> 
+            <div style="margin-top: 12px;">Loading repositories...</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let repoData = null;
+    let routerData = null;
+    let lastSuccessfulFetch = null;
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
+    let currentSearchTerm = '';
+    
+    function filterRepositories(repos, searchTerm) {
+        if (!searchTerm || searchTerm.trim() === '') {
+            return repos;
+        }
+        
+        const term = searchTerm.toLowerCase().trim();
+        return repos.filter(repo => {
+            return (
+                (repo.repo_id && repo.repo_id.toLowerCase().includes(term)) ||
+                (repo.repo_url && repo.repo_url.toLowerCase().includes(term)) ||
+                (repo.branch && repo.branch.toLowerCase().includes(term)) ||
+                (repo.storage_id && repo.storage_id.toLowerCase().includes(term))
+            );
+        });
+    }
+    
+    function updateSearchResults(filteredCount, totalCount) {
+        const resultsSpan = document.getElementById('searchResults');
+        if (currentSearchTerm && currentSearchTerm.trim() !== '') {
+            resultsSpan.textContent = `Showing ${filteredCount} of ${totalCount}`;
+            resultsSpan.style.display = 'inline';
+        } else {
+            resultsSpan.textContent = '';
+            resultsSpan.style.display = 'none';
+        }
+    }
+    
+    async function triggerRebalance(storageId) {
+        if (!confirm('Are you sure you want to trigger rebalancing for this repository?')) {
+            return;
+        }
+        
+        try {
+            const formData = new URLSearchParams();
+            formData.append('storage_id', storageId);
+            
+            const response = await fetch('/api/rebalance', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: formData
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                alert('✅ Rebalancing started! The page will refresh automatically.');
+                loadRepositories(false);
+            } else {
+                alert('❌ Failed to start rebalancing: ' + result.message);
+            }
+        } catch (err) {
+            alert('❌ Error triggering rebalance: ' + err.message);
+        }
+    }
+    
+    function showLoading() {
+        document.getElementById('loadingIndicator').style.display = 'flex';
+        document.getElementById('errorIndicator').style.display = 'none';
+    }
+    
+    function hideLoading() {
+        document.getElementById('loadingIndicator').style.display = 'none';
+    }
+    
+    function showError(message) {
+        document.getElementById('errorIndicator').style.display = 'block';
+        document.getElementById('errorText').textContent = message;
+        setTimeout(() => {
+            document.getElementById('errorIndicator').style.display = 'none';
+        }, 5000);
+    }
+
+    function setRouterOptions() {
+        const select = document.getElementById('routerFilter');
+        if (!select || !routerData) return;
+        const options = [
+            { name: 'All Routers', value: 'all' },
+            ...routerData.routers.map(r => ({ name: r.name || r.url || 'router', value: r.name || r.url || 'router' }))
+        ];
+        select.innerHTML = options.map(opt => `<option value="${opt.value}">${opt.name}</option>`).join('');
+    }
+
+    function getSelectedRouter() {
+        const select = document.getElementById('routerFilter');
+        return select ? select.value : 'all';
+    }
+
+    function flattenRepositories(routers) {
+        const repos = [];
+        routers.forEach(router => {
+            if (!router.repositories || !router.repositories.repositories) return;
+            router.repositories.repositories.forEach(repo => {
+                repos.push({ ...repo, _router: router.name || router.url || 'router' });
+            });
+        });
+        return repos;
+    }
+
+    function aggregateRepositories(repos, routers) {
+        const map = new Map();
+        repos.forEach(repo => {
+            const key = repo.storage_id || `${repo.repo_id}|${repo.branch}`;
+            if (!map.has(key)) {
+                map.set(key, { ...repo, _routers: new Set([repo._router]) });
+                return;
+            }
+            const existing = map.get(key);
+            existing.files_count = Math.max(existing.files_count || 0, repo.files_count || 0);
+            existing.rebalance_progress = Math.max(existing.rebalance_progress || 0, repo.rebalance_progress || 0);
+            existing._routers.add(repo._router);
+        });
+
+        const routerNames = routers.map(r => r.name || r.url || 'router');
+        return Array.from(map.values()).map(repo => {
+            const seenOn = Array.from(repo._routers);
+            const missingOn = routerNames.filter(name => !repo._routers.has(name));
+            return {
+                ...repo,
+                _routers: seenOn,
+                _missing: missingOn
+            };
+        });
+    }
+
+    function renderRepositories(data) {
+        // Update cluster topology version
+        if (data.current_topology_version) {
+            document.getElementById('clusterTopology').textContent = data.current_topology_version;
+        }
+        
+        if (!data.repositories || data.repositories.length === 0) {
+            document.getElementById('repositoriesTable').innerHTML = `
+                <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                    <div style="font-size: 48px; margin-bottom: 16px;">📦</div>
+                    <div style="font-size: 18px; margin-bottom: 8px;">No repositories ingested</div>
+                    <div style="font-size: 14px; margin-bottom: 16px;">Start by ingesting your first repository</div>
+                    <a href="/ingest" class="btn btn-primary">Ingest Repository</a>
+                </div>
+            `;
+            updateSearchResults(0, 0);
+            return;
+        }
+        
+        // Apply search filter
+        const filteredRepos = filterRepositories(data.repositories, currentSearchTerm);
+        updateSearchResults(filteredRepos.length, data.repositories.length);
+        
+        if (filteredRepos.length === 0 && currentSearchTerm) {
+            document.getElementById('repositoriesTable').innerHTML = `
+                <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                    <div style="font-size: 48px; margin-bottom: 16px;">🔍</div>
+                    <div style="font-size: 18px; margin-bottom: 8px;">No matches found</div>
+                    <div style="font-size: 14px; margin-bottom: 16px;">Try a different search term</div>
+                    <button onclick="document.getElementById('repoSearch').value=''; currentSearchTerm=''; renderRepositories(repoData);" class="btn btn-secondary">Clear Search</button>
+                </div>
+            `;
+            return;
+        }
+        
+        document.getElementById('repositoriesTable').innerHTML = `
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Repository ID</th>
+                        <th>Router</th>
+                        <th>Source</th>
+                        <th>Ref</th>
+                        <th>Files</th>
+                        <th>Topology</th>
+                        <th>Status</th>
+                        <th>Ingested At</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${filteredRepos.map(repo => {
+                        const date = new Date(repo.ingested_at * 1000);
+                        
+                        // Check if this is an in-progress ingestion
+                        const inProgress = repo.in_progress || false;
+                        
+                        // Build topology info
+                        let topologyInfo = '';
+                        if (repo.topology_nodes && repo.topology_nodes.length > 0) {
+                            const nodeList = repo.topology_nodes.map(n => n.id).join(', ');
+                            topologyInfo = `
+                                <div style="font-size: 12px; margin-bottom: 4px;">
+                                    <strong>V${repo.topology_version}</strong>
+                                </div>
+                                <div style="font-size: 11px; color: var(--text-secondary);" title="${nodeList}">
+                                    ${repo.topology_nodes.length} nodes
+                                </div>
+                            `;
+                        } else {
+                            topologyInfo = `<div style="font-size: 12px;">V${repo.topology_version}</div>`;
+                        }
+                        
+                        // Build status badge with animation for active states
+                        let statusBadge = '';
+                        if (inProgress) {
+                            // Show ingestion progress
+                            const stage = repo.stage || 'CLONING';
+                            const progress = repo.rebalance_progress ? Math.round(repo.rebalance_progress * 100) : 0;
+                            const stageEmoji = {
+                                'CLONING': '⬇',
+                                'REGISTERING': '📝',
+                                'INGESTING': '📦',
+                                'COMPLETED': '✓',
+                                'FAILED': '✗'
+                            }[stage] || '⟳';
+                            
+                            if (stage === 'FAILED') {
+                                statusBadge = `
+                                    <span class="badge badge-danger" style="display: inline-flex; align-items: center; gap: 4px;">
+                                        ${stageEmoji} FAILED
+                                    </span>`;
+                                if (repo.message) {
+                                    statusBadge += `<div style="font-size: 11px; margin-top: 4px; color: var(--danger);">${repo.message}</div>`;
+                                }
+                            } else {
+                                statusBadge = `
+                                    <span class="badge badge-warning" style="display: inline-flex; align-items: center; gap: 4px;">
+                                        <span style="animation: spin 1s linear infinite; display: inline-block;">${stageEmoji}</span>
+                                        ${stage} ${progress > 0 ? progress + '%' : ''}
+                                    </span>`;
+                                if (repo.message) {
+                                    statusBadge += `<div style="font-size: 11px; margin-top: 4px; color: var(--text-secondary);">${repo.message}</div>`;
+                                }
+                            }
+                        } else if (repo.rebalance_state === 'Stable') {
+                            statusBadge = '<span class="badge badge-success">✓ Stable</span>';
+                        } else if (repo.rebalance_state === 'Rebalancing') {
+                            const progress = Math.round((repo.rebalance_progress || 0) * 100);
+                            statusBadge = `
+                                <span class="badge badge-warning" style="display: inline-flex; align-items: center; gap: 4px;">
+                                    <span style="animation: spin 1s linear infinite; display: inline-block;">⟳</span>
+                                    ${progress}%
+                                </span>`;
+                            if (repo.target_topology) {
+                                statusBadge += `<div style="font-size: 11px; margin-top: 4px; color: var(--text-secondary);">→ V${repo.target_topology}</div>`;
+                            }
+                        } else if (repo.rebalance_state === 'DualActive') {
+                            const progress = Math.round((repo.rebalance_progress || 0) * 100);
+                            statusBadge = `
+                                <span class="badge badge-info" style="display: inline-flex; align-items: center; gap: 4px;">
+                                    <span style="animation: pulse 2s ease-in-out infinite;">↔</span>
+                                    ${progress}%
+                                </span>`;
+                        } else {
+                            statusBadge = '<span class="badge badge-secondary">Unknown</span>';
+                        }
+                        
+                        // Build files count display
+                        const filesDisplay = inProgress && repo.total_files > 0 
+                            ? `${repo.files_count.toLocaleString()} / ${repo.total_files.toLocaleString()}`
+                            : (repo.files_count || 0).toLocaleString();
+                        
+                        return `
+                            <tr>
+                                <td><strong>${repo.repo_id}</strong></td>
+                                <td><span class="pill">${(repo._routers || [repo._router || 'local']).join(', ')}</span></td>
+                                <td>
+                                    <a href="${repo.repo_url}" target="_blank" style="color: var(--primary); text-decoration: none;">
+                                        ${repo.repo_url}
+                                    </a>
+                                </td>
+                                <td><span class="badge badge-info">${repo.branch}</span></td>
+                                <td style="text-align: right;">${filesDisplay}</td>
+                                <td>${topologyInfo}</td>
+                                <td>${statusBadge}</td>
+                                <td style="white-space: nowrap; font-size: 12px;">${inProgress ? 'In Progress...' : date.toLocaleString()}</td>
+                                <td style="white-space: nowrap;">
+                                    ${inProgress || repo.rebalance_state === 'Rebalancing' || repo.rebalance_state === 'DualActive'
+                                        ? '<span class="badge badge-secondary" style="opacity: 0.5;">⏳ In Progress</span>'
+                                        : `<button class="btn btn-sm" onclick="triggerRebalance('${repo.storage_id}')" style="padding: 4px 8px; font-size: 11px;">🔄 Rebalance</button>`
+                                    }
+                                </td>
+                            </tr>
+                        `;
+                    }).join('')}
+                </tbody>
+            </table>
+            <style>
+                @keyframes spin {
+                    from { transform: rotate(0deg); }
+                    to { transform: rotate(360deg); }
+                }
+                @keyframes pulse {
+                    0%, 100% { opacity: 1; }
+                    50% { opacity: 0.5; }
+                }
+            </style>
+        `;
+    }
+    
+    async function loadRepositories(isAutoRefresh = false) {
+        if (isAutoRefresh) {
+            showLoading();
+        }
+        
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout (increased for Docker/slow networks)
+            
+            const response = await fetch('/api/routers', { signal: controller.signal });
+            clearTimeout(timeoutId);
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            
+            routerData = await response.json();
+            setRouterOptions();
+
+            const selected = getSelectedRouter();
+            const routers = routerData.routers || [];
+            const scopedRouters = selected === 'all'
+                ? routers
+                : routers.filter(r => (r.name || r.url || 'router') === selected);
+
+            const allRepos = flattenRepositories(scopedRouters);
+            const aggregatedRepos = aggregateRepositories(allRepos, scopedRouters);
+            repoData = {
+                repositories: aggregatedRepos,
+                current_topology_version: scopedRouters[0]?.repositories?.current_topology_version || '-'
+            };
+            lastSuccessfulFetch = Date.now();
+            retryCount = 0;
+            
+            renderRepositories(repoData);
+            hideLoading();
+        } catch (err) {
+            console.error('Failed to load repositories:', err);
+            hideLoading();
+            
+            // If we have cached data, keep showing it
+            if (repoData) {
+                const age = Math.round((Date.now() - lastSuccessfulFetch) / 1000);
+                showError(`Failed to refresh (${age}s old data)`);
+            } else {
+                // No cached data, show error state
+                retryCount++;
+                if (retryCount <= MAX_RETRIES) {
+                    document.getElementById('repositoriesTable').innerHTML = `
+                        <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                            <div style="font-size: 48px; margin-bottom: 16px;">⚠️</div>
+                            <div style="font-size: 18px; margin-bottom: 8px;">Failed to load repositories</div>
+                            <div style="font-size: 14px; margin-bottom: 16px;">Retrying... (${retryCount}/${MAX_RETRIES})</div>
+                            <div class="loader"></div>
+                        </div>
+                    `;
+                    setTimeout(() => loadRepositories(false), 2000 * retryCount); // Exponential backoff
+                } else {
+                    showError('Failed to load after multiple attempts');
+                    document.getElementById('repositoriesTable').innerHTML = `
+                        <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                            <div style="font-size: 48px; margin-bottom: 16px;">❌</div>
+                            <div style="font-size: 18px; margin-bottom: 8px;">Unable to load repositories</div>
+                            <div style="font-size: 14px; margin-bottom: 16px;">The router may be temporarily unavailable</div>
+                            <button onclick="retryCount=0; loadRepositories(false)" class="btn btn-primary">Retry</button>
+                        </div>
+                    `;
+                }
+            }
+        }
+    }
+
+    document.addEventListener('change', (event) => {
+        if (event.target && event.target.id === 'routerFilter') {
+            loadRepositories(false);
+        }
+    });
+    
+    document.addEventListener('input', (event) => {
+        if (event.target && event.target.id === 'repoSearch') {
+            currentSearchTerm = event.target.value;
+            if (repoData) {
+                renderRepositories(repoData);
+            }
+        }
+    });
+    
+    // Initial load
+    loadRepositories(false);
+    
+    // Auto-refresh every 5 seconds (faster updates during rebalancing)
+    setInterval(() => loadRepositories(true), 15000);
+</script>
+{{end}}

@@ -1,0 +1,481 @@
+services:
+  # Fetcher 1 - External blob fetcher (Git, Go modules, etc.)
+  # Runs in DMZ with external network access
+  fetcher1:
+    build:
+      context: .
+      target: fetcher
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    command:
+      - "--port=9200"
+      - "--cache-dir=/data/cache"
+      - "--max-cache-gb=20"
+      - "--cache-age-hours=2"
+      - "--prefetch-workers=4"
+      - "--log-level=info"
+    volumes:
+      - fetcher1-cache:/data/cache
+    networks:
+      - monofs-net
+      - monofs-external  # External network access
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9200"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+        reservations:
+          memory: 512M
+
+  # Fetcher 2 - Second fetcher instance for redundancy and load balancing
+  fetcher2:
+    build:
+      context: .
+      target: fetcher
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    command:
+      - "--port=9200"
+      - "--cache-dir=/data/cache"
+      - "--max-cache-gb=20"
+      - "--cache-age-hours=2"
+      - "--prefetch-workers=4"
+      - "--log-level=info"
+    volumes:
+      - fetcher2-cache:/data/cache
+    networks:
+      - monofs-net
+      - monofs-external  # External network access
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9200"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+        reservations:
+          memory: 512M
+
+  # Search service - Zoekt-based code search
+  search:
+    build:
+      context: .
+      target: search
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    command:
+      - "--port=9100"
+      - "--index-dir=/data/indexes"
+      - "--cache-dir=/data/cache"
+      - "--workers=2"
+      - "--queue-size=20"
+      - "--router-addr=router1:9090"
+    volumes:
+      - search-data:/data
+    networks:
+      - monofs-net
+      # No longer needs monofs-external - fetches files from storage nodes via router
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9100"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    # Note: No depends_on for router to avoid dependency cycle
+    # Search will retry connecting to router on startup
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4'
+        reservations:
+          memory: 2G
+
+  # HAProxy - Load balancer for routers
+  haproxy:
+    image: haproxy:2.9-alpine
+    ports:
+      - "9090:9090"
+      - "8080:8080"
+      - "8404:8404"  # HAProxy stats
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - monofs-net
+    depends_on:
+      - router1
+      - router2
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Router 1 - Primary cluster coordinator
+  router1:
+    build:
+      context: .
+      target: router
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    command:
+      - "--port=9090"
+      - "--http-port=8080"
+      - "--router-name=router1"
+      - "--cluster-id=monofs-cluster"
+      - "--peer-routers=${ROUTER1_PEERS:-router2=http://router2:8080}"
+      - "--nodes=node1=node1:9000,node2=node2:9000,node3=node3:9000,node4=node4:9000,node5=node5:9000"
+      - "--weights=node1=100,node2=100,node3=100,node4=100,node5=100"
+      - "--external-addrs=node1=localhost:9001,node2=localhost:9002,node3=localhost:9003,node4=localhost:9004,node5=localhost:9005"
+      - "--search-addr=search:9100"
+      - "--fetcher-addrs=fetcher1:9200,fetcher2:9200"
+      - "--debug"
+    networks:
+      - monofs-net
+    depends_on:
+      - node1
+      - node2
+      - node3
+      - node4
+      - node5
+      - search
+      - fetcher1
+      - fetcher2
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Router 2 - Secondary cluster coordinator (backup failover)
+  router2:
+    build:
+      context: .
+      target: router
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    command:
+      - "--port=9090"
+      - "--http-port=8080"
+      - "--router-name=router2"
+      - "--cluster-id=monofs-cluster"
+      - "--peer-routers=${ROUTER2_PEERS:-router1=http://router1:8080}"
+      - "--nodes=node1=node1:9000,node2=node2:9000,node3=node3:9000,node4=node4:9000,node5=node5:9000"
+      - "--weights=node1=100,node2=100,node3=100,node4=100,node5=100"
+      - "--external-addrs=node1=localhost:9001,node2=localhost:9002,node3=localhost:9003,node4=localhost:9004,node5=localhost:9005"
+      - "--search-addr=search:9100"
+      - "--fetcher-addrs=fetcher1:9200,fetcher2:9200"
+      - "--debug"
+    networks:
+      - monofs-net
+    depends_on:
+      - node1
+      - node2
+      - node3
+      - node4
+      - node5
+      - search
+      - fetcher1
+      - fetcher2
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend node 1
+  node1:
+    build:
+      context: .
+      target: server
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "9001:9000"
+    command:
+      - "--addr=:9000"
+      - "--node-id=node1"
+      - "--db-path=/data/db"
+      - "--git-cache=/data/git"
+      - "--fetcher=fetcher1:9200"
+      - "--fetcher=fetcher2:9200"
+      - "--enable-prediction"
+      - "--debug"
+    volumes:
+      - node1-data:/data
+    networks:
+      - monofs-net
+    depends_on:
+      - fetcher1
+      - fetcher2
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend node 2
+  node2:
+    build:
+      context: .
+      target: server
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "9002:9000"
+    command:
+      - "--addr=:9000"
+      - "--node-id=node2"
+      - "--db-path=/data/db"
+      - "--git-cache=/data/git"
+      - "--fetcher=fetcher1:9200"
+      - "--fetcher=fetcher2:9200"
+      - "--enable-prediction"
+      - "--debug"
+    volumes:
+      - node2-data:/data
+    networks:
+      - monofs-net
+    depends_on:
+      - fetcher1
+      - fetcher2
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend node 3
+  node3:
+    build:
+      context: .
+      target: server
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "9003:9000"
+    command:
+      - "--addr=:9000"
+      - "--node-id=node3"
+      - "--db-path=/data/db"
+      - "--git-cache=/data/git"
+      - "--fetcher=fetcher1:9200"
+      - "--fetcher=fetcher2:9200"
+      - "--enable-prediction"
+      - "--debug"
+    volumes:
+      - node3-data:/data
+    networks:
+      - monofs-net
+    depends_on:
+      - fetcher1
+      - fetcher2
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend node 4
+  node4:
+    build:
+      context: .
+      target: server
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "9004:9000"
+    command:
+      - "--addr=:9000"
+      - "--node-id=node4"
+      - "--db-path=/data/db"
+      - "--git-cache=/data/git"
+      - "--fetcher=fetcher1:9200"
+      - "--fetcher=fetcher2:9200"
+      - "--enable-prediction"
+      - "--debug"
+    volumes:
+      - node4-data:/data
+    networks:
+      - monofs-net
+    depends_on:
+      - fetcher1
+      - fetcher2
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend node 5
+  node5:
+    build:
+      context: .
+      target: server
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "9005:9000"
+    command:
+      - "--addr=:9000"
+      - "--node-id=node5"
+      - "--db-path=/data/db"
+      - "--git-cache=/data/git"
+      - "--fetcher=fetcher1:9200"
+      - "--fetcher=fetcher2:9200"
+      - "--enable-prediction"
+      - "--debug"
+    volumes:
+      - node5-data:/data
+    networks:
+      - monofs-net
+    depends_on:
+      - fetcher1
+      - fetcher2
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Interactive client 1 with SSH and auto-mount
+  client:
+    build:
+      context: .
+      target: client
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "2222:22"
+    environment:
+      - ROUTER_ADDR=haproxy:9090
+      - ENABLE_LOADTEST=true
+    volumes:
+      - client-logs:/var/log
+      - client-cache:/var/cache/monofs
+      - client-overlay:/var/lib/monofs/overlay
+    networks:
+      - monofs-net
+    depends_on:
+      - haproxy
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+
+  # Interactive client 2 with SSH and auto-mount
+  client2:
+    build:
+      context: .
+      target: client
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "2223:22"
+    environment:
+      - ROUTER_ADDR=haproxy:9090
+    volumes:
+      - client2-logs:/var/log
+      - client2-cache:/var/cache/monofs
+      - client2-overlay:/var/lib/monofs/overlay
+    networks:
+      - monofs-net
+    depends_on:
+      - haproxy
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+
+  # Interactive client 3 with SSH and auto-mount
+  client3:
+    build:
+      context: .
+      target: client
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "2224:22"
+    environment:
+      - ROUTER_ADDR=haproxy:9090
+    volumes:
+      - client3-logs:/var/log
+      - client3-cache:/var/cache/monofs
+      - client3-overlay:/var/lib/monofs/overlay
+    networks:
+      - monofs-net
+    depends_on:
+      - haproxy
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+
+volumes:
+  fetcher1-cache:
+  fetcher2-cache:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:
+  search-data:
+  client-logs:
+  client-cache:
+  client-overlay:
+  client2-logs:
+  client2-cache:
+  client2-overlay:
+  client3-logs:
+  client3-cache:
+  client3-overlay:
+
+networks:
+  monofs-net:
+    driver: bridge
+  monofs-external:
+    driver: bridge
+    # In production, this network would have external connectivity
+    # while monofs-net remains internal-only

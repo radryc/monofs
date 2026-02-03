@@ -1,0 +1,164 @@
+{{define "content"}}
+<div class="header">
+    <h1>MetaStores</h1>
+    <p>Detailed view of all store nodes in the cluster</p>
+</div>
+
+<div class="grid grid-cols-3" id="nodeGrid">
+    <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+        <div class="loader"></div> Loading nodes...
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Node Details</h2>
+    </div>
+    <div id="nodeTable">
+        <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<script>
+    async function loadClusterNodes() {
+        try {
+            const response = await fetch('/api/status');
+            const data = await response.json();
+            
+            // Render node cards
+            document.getElementById('nodeGrid').innerHTML = data.nodes.map(node => {
+                let statusColor = 'var(--danger)';
+                let statusText = 'Unhealthy';
+                let statusIcon = '❌';
+                
+                if (node.status === 'STAGING') {
+                    statusColor = 'var(--warning)';
+                    statusText = 'Staging';
+                    statusIcon = '⏳';
+                } else if (node.status === 'SYNCING') {
+                    statusColor = 'var(--info)';
+                    statusText = `Syncing ${(node.sync_progress * 100).toFixed(0)}%`;
+                    statusIcon = '🔄';
+                } else if (node.healthy) {
+                    statusColor = 'var(--success)';
+                    statusText = 'Healthy';
+                    statusIcon = '✅';
+                }
+                
+                return `
+                    <div class="stat-card" style="border-left: 4px solid ${statusColor};">
+                        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 16px;">
+                            <div>
+                                <div style="font-size: 18px; font-weight: 700; margin-bottom: 4px;">${node.id}</div>
+                                <div style="font-size: 12px; color: var(--text-secondary);">${node.address}</div>
+                            </div>
+                            <div style="font-size: 32px;">${statusIcon}</div>
+                        </div>
+                        
+                        <div style="margin-bottom: 12px;">
+                            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">STATUS</div>
+                            <div style="font-weight: 600; color: ${statusColor};">${statusText}</div>
+                        </div>
+                        
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+                            <div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">FILES</div>
+                                <div style="font-size: 20px; font-weight: 600;">${(node.file_count || 0).toLocaleString()}</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">WEIGHT</div>
+                                <div style="font-size: 20px; font-weight: 600;">${node.weight}</div>
+                            </div>
+                        </div>
+                        
+                        ${node.disk_free > 0 ? `
+                            <div style="margin-top: 12px;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">DISK USAGE</div>
+                                <div class="progress" style="height: 8px;">
+                                    <div class="progress-bar ${node.disk_used / (node.disk_used + node.disk_free) > 0.9 ? 'bg-danger' : node.disk_used / (node.disk_used + node.disk_free) > 0.75 ? 'bg-warning' : ''}" 
+                                         style="width: ${(node.disk_used / (node.disk_used + node.disk_free) * 100).toFixed(1)}%"></div>
+                                </div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+                                    ${(node.disk_used / 1073741824).toFixed(1)}GB used / ${(node.disk_free / 1073741824).toFixed(1)}GB free
+                                </div>
+                            </div>
+                        ` : ''}
+                        
+                        ${node.backing_up && node.backing_up.length > 0 ? `
+                            <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);">
+                                <div style="font-size: 11px; color: var(--warning); font-weight: 600; margin-bottom: 4px;">🛡️ BACKING UP</div>
+                                <div style="font-size: 12px;">${node.backing_up.join(', ')}</div>
+                            </div>
+                        ` : ''}
+                        
+                        ${node.status === 'SYNCING' ? `
+                            <div style="margin-top: 12px;">
+                                <div class="progress">
+                                    <div class="progress-bar" style="width: ${(node.sync_progress * 100).toFixed(0)}%"></div>
+                                </div>
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+            
+            // Render detailed table
+            document.getElementById('nodeTable').innerHTML = `
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Node ID</th>
+                            <th>Address</th>
+                            <th>Status</th>
+                            <th>Weight</th>
+                            <th>Files</th>
+                            <th>Disk Used</th>
+                            <th>Replicating</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${data.nodes.map(node => {
+                            let statusBadge = '';
+                            if (node.status === 'STAGING') {
+                                statusBadge = '<span class="badge badge-warning">⏳ Staging</span>';
+                            } else if (node.status === 'SYNCING') {
+                                statusBadge = `<span class="badge badge-info">🔄 Syncing ${(node.sync_progress * 100).toFixed(0)}%</span>`;
+                            } else if (node.healthy) {
+                                statusBadge = '<span class="badge badge-success">✅ Healthy</span>';
+                            } else {
+                                statusBadge = '<span class="badge badge-danger">❌ Unhealthy</span>';
+                            }
+                            
+                            const diskDisplay = node.disk_free > 0 
+                                ? `${(node.disk_used / 1073741824).toFixed(1)}GB used / ${(node.disk_free / 1073741824).toFixed(1)}GB free`
+                                : 'N/A';
+                            const backingUp = node.backing_up && node.backing_up.length > 0 ? node.backing_up.join(', ') : '-';
+                            
+                            return `
+                                <tr>
+                                    <td><strong>${node.id}</strong></td>
+                                    <td>${node.address}</td>
+                                    <td>${statusBadge}</td>
+                                    <td>${node.weight}</td>
+                                    <td>${(node.file_count || 0).toLocaleString()}</td>
+                                    <td>${diskDisplay}</td>
+                                    <td style="color: ${node.backing_up && node.backing_up.length > 0 ? 'var(--warning)' : 'var(--text-secondary)'};">
+                                        ${backingUp}
+                                    </td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+        } catch (err) {
+            console.error('Failed to load cluster nodes:', err);
+        }
+    }
+    
+    loadClusterNodes();
+    setInterval(loadClusterNodes, 5000);
+</script>
+{{end}}

@@ -1,0 +1,200 @@
+{{define "content"}}
+<div class="header">
+    <h1>Connected Clients</h1>
+    <p>FUSE clients currently mounted to the cluster</p>
+</div>
+
+<div class="grid grid-cols-4" id="clientStats">
+    <div class="stat-card">
+        <div class="stat-icon">💻</div>
+        <div class="stat-info">
+            <div class="stat-value" id="totalClients">-</div>
+            <div class="stat-label">Total Clients</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">✅</div>
+        <div class="stat-info">
+            <div class="stat-value" id="connectedClients">-</div>
+            <div class="stat-label">Connected</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">⚠️</div>
+        <div class="stat-info">
+            <div class="stat-value" id="staleClients">-</div>
+            <div class="stat-label">Stale</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">📊</div>
+        <div class="stat-info">
+            <div class="stat-value" id="totalOps">-</div>
+            <div class="stat-label">Total Operations</div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 class="card-title">Client List</h2>
+        <button class="btn btn-primary" onclick="refreshClients()">
+            🔄 Refresh
+        </button>
+    </div>
+    <div id="clientTable">
+        <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading clients...
+        </div>
+    </div>
+</div>
+
+<script>
+    function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    function formatNumber(num) {
+        if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+        if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+        return num.toString();
+    }
+
+    function formatDuration(seconds) {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (hours > 0) return `${hours}h ${minutes}m`;
+        if (minutes > 0) return `${minutes}m`;
+        return `${seconds}s`;
+    }
+
+    function getStateInfo(state) {
+        switch(state) {
+            case 1: // CLIENT_CONNECTED
+                return { color: 'var(--success)', text: 'Connected', icon: '✅' };
+            case 2: // CLIENT_STALE
+                return { color: 'var(--warning)', text: 'Stale', icon: '⚠️' };
+            case 3: // CLIENT_DISCONNECTED
+                return { color: 'var(--danger)', text: 'Disconnected', icon: '❌' };
+            default:
+                return { color: 'var(--text-secondary)', text: 'Unknown', icon: '❓' };
+        }
+    }
+
+    async function loadClients() {
+        try {
+            const response = await fetch('/api/clients');
+            const data = await response.json();
+            
+            const clients = data.clients || [];
+            
+            // Calculate stats
+            let connected = 0, stale = 0, totalOps = 0, totalBytes = 0;
+            clients.forEach(c => {
+                if (c.state === 1) connected++;
+                else if (c.state === 2) stale++;
+                totalOps += c.operations_count || 0;
+                totalBytes += c.bytes_read || 0;
+            });
+            
+            // Update stat cards
+            document.getElementById('totalClients').textContent = clients.length;
+            document.getElementById('connectedClients').textContent = connected;
+            document.getElementById('staleClients').textContent = stale;
+            document.getElementById('totalOps').textContent = formatNumber(totalOps);
+            
+            if (clients.length === 0) {
+                document.getElementById('clientTable').innerHTML = `
+                    <div style="text-align: center; padding: 60px; color: var(--text-secondary);">
+                        <div style="font-size: 48px; margin-bottom: 16px;">💻</div>
+                        <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">No Clients Connected</div>
+                        <div>Mount a FUSE client to see it appear here</div>
+                    </div>
+                `;
+                return;
+            }
+            
+            // Sort by operations count (biggest users first)
+            clients.sort((a, b) => (b.operations_count || 0) - (a.operations_count || 0));
+            
+            document.getElementById('clientTable').innerHTML = `
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Client ID</th>
+                            <th>Hostname</th>
+                            <th>Mount Point</th>
+                            <th>Status</th>
+                            <th>Connected</th>
+                            <th>Last Heartbeat</th>
+                            <th>Operations</th>
+                            <th>Data Read</th>
+                            <th>Mode</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${clients.map(client => {
+                            const state = getStateInfo(client.state);
+                            const connectedAt = new Date(client.connected_at * 1000);
+                            const lastHB = new Date(client.last_heartbeat * 1000);
+                            const now = new Date();
+                            const uptime = Math.floor((now - connectedAt) / 1000);
+                            const hbAgo = Math.floor((now - lastHB) / 1000);
+                            
+                            return `
+                                <tr>
+                                    <td>
+                                        <code style="font-size: 11px; background: rgba(109, 94, 252, 0.2); padding: 2px 6px; border-radius: 4px;">
+                                            ${client.client_id.substring(0, 12)}...
+                                        </code>
+                                    </td>
+                                    <td style="font-weight: 600;">${client.hostname || 'Unknown'}</td>
+                                    <td><code>${client.mount_point || '-'}</code></td>
+                                    <td>
+                                        <span style="display: inline-flex; align-items: center; gap: 4px; color: ${state.color};">
+                                            ${state.icon} ${state.text}
+                                        </span>
+                                    </td>
+                                    <td>${formatDuration(uptime)}</td>
+                                    <td>${hbAgo}s ago</td>
+                                    <td style="font-weight: 600;">${formatNumber(client.operations_count || 0)}</td>
+                                    <td>${formatBytes(client.bytes_read || 0)}</td>
+                                    <td>
+                                        <span class="badge ${client.writable ? 'badge-warning' : 'badge-info'}">
+                                            ${client.writable ? '✏️ Writable' : '👁️ Read-only'}
+                                        </span>
+                                    </td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+        } catch (error) {
+            console.error('Failed to load clients:', error);
+            document.getElementById('clientTable').innerHTML = `
+                <div style="text-align: center; padding: 40px; color: var(--danger);">
+                    Failed to load clients: ${error.message}
+                </div>
+            `;
+        }
+    }
+
+    function refreshClients() {
+        document.getElementById('clientTable').innerHTML = `
+            <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                <div class="loader"></div> Refreshing...
+            </div>
+        `;
+        loadClients();
+    }
+
+    // Initial load and auto-refresh
+    loadClients();
+    setInterval(loadClients, 10000); // Refresh every 10 seconds
+</script>
+{{end}}
