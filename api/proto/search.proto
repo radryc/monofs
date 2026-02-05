@@ -1,0 +1,179 @@
+syntax = "proto3";
+
+package monofs;
+
+option go_package = "github.com/radryc/monofs/api/proto";
+
+// MonoFSSearch provides code search functionality across indexed repositories
+service MonoFSSearch {
+    // IndexRepository triggers indexing of a repository (async with status tracking)
+    rpc IndexRepository(IndexRequest) returns (IndexResponse);
+    
+    // Search performs code search across indexed repositories
+    rpc Search(SearchRequest) returns (SearchResponse);
+    
+    // GetIndexStatus returns the indexing status for a repository
+    rpc GetIndexStatus(IndexStatusRequest) returns (IndexStatusResponse);
+    
+    // ListIndexes returns all indexed repositories with their status
+    rpc ListIndexes(ListIndexesRequest) returns (ListIndexesResponse);
+    
+    // RebuildIndex triggers a re-index of a repository
+    rpc RebuildIndex(RebuildIndexRequest) returns (RebuildIndexResponse);
+    
+    // RebuildAllIndexes triggers re-indexing of all repositories
+    rpc RebuildAllIndexes(RebuildAllIndexesRequest) returns (RebuildAllIndexesResponse);
+    
+    // DeleteIndex removes the index for a repository
+    rpc DeleteIndex(DeleteIndexRequest) returns (DeleteIndexResponse);
+    
+    // GetStats returns search service statistics
+    rpc GetStats(StatsRequest) returns (StatsResponse);
+}
+
+// IndexRequest triggers indexing for a repository
+message IndexRequest {
+    string storage_id = 1;      // Internal storage ID (SHA-256 hash)
+    string display_path = 2;    // Human-readable path (e.g., github_com/owner/repo)
+    string source = 3;          // Source identifier (Git URL, Go module path, etc.)
+    string ref = 4;             // Reference (branch for Git, version for Go, etc.)
+}
+
+// IndexResponse confirms indexing was queued
+message IndexResponse {
+    bool queued = 1;            // True if successfully queued
+    string message = 2;         // Status message
+    string job_id = 3;          // Job ID for tracking
+}
+
+// SearchRequest performs a code search
+message SearchRequest {
+    string query = 1;           // Search query (supports regex if enabled)
+    string storage_id = 2;      // Optional: limit to specific repository
+    int32 max_results = 3;      // Maximum results (default: 100)
+    bool case_sensitive = 4;    // Case-sensitive search
+    bool regex = 5;             // Treat query as regex
+    repeated string file_patterns = 6;  // Optional: file glob patterns (e.g., "*.go")
+}
+
+// SearchResponse contains search results
+message SearchResponse {
+    repeated SearchResult results = 1;
+    int64 total_matches = 2;    // Total number of matches found
+    int64 files_searched = 3;   // Number of files searched
+    int64 duration_ms = 4;      // Search duration in milliseconds
+    bool truncated = 5;         // True if results were truncated
+}
+
+// SearchResult represents a single search match
+message SearchResult {
+    string storage_id = 1;      // Repository storage ID
+    string display_path = 2;    // Repository display path
+    string file_path = 3;       // File path within repository
+    int32 line_number = 4;      // Line number (1-based)
+    string line_content = 5;    // Content of the matched line
+    repeated MatchRange matches = 6;  // Match positions within line
+    string before_context = 7;  // Line before match (optional)
+    string after_context = 8;   // Line after match (optional)
+}
+
+// MatchRange indicates a match position within a line
+message MatchRange {
+    int32 start = 1;            // Start byte offset
+    int32 end = 2;              // End byte offset
+}
+
+// IndexStatusRequest queries status of a repository index
+message IndexStatusRequest {
+    string storage_id = 1;
+}
+
+// IndexStatusResponse contains index status
+message IndexStatusResponse {
+    string storage_id = 1;
+    string display_path = 2;
+    IndexStatus status = 3;     // Current indexing status
+    int64 files_count = 4;      // Number of files indexed
+    int64 index_size_bytes = 5; // Index size on disk
+    string last_indexed = 6;    // ISO timestamp of last successful index
+    string error_message = 7;   // Error message if status is ERROR
+    float progress = 8;         // Indexing progress (0.0 - 1.0) if INDEXING
+    string queued_at = 9;       // When job was queued
+    string started_at = 10;     // When indexing started
+}
+
+// IndexStatus represents the state of an index
+enum IndexStatus {
+    INDEX_STATUS_UNKNOWN = 0;
+    INDEX_STATUS_QUEUED = 1;    // Waiting in queue
+    INDEX_STATUS_INDEXING = 2;  // Currently indexing
+    INDEX_STATUS_READY = 3;     // Index is ready for search
+    INDEX_STATUS_ERROR = 4;     // Indexing failed
+    INDEX_STATUS_NOT_FOUND = 5; // No index exists
+}
+
+// ListIndexesRequest queries all indexes
+message ListIndexesRequest {
+    // Empty - returns all indexes
+}
+
+// ListIndexesResponse contains all index statuses
+message ListIndexesResponse {
+    repeated IndexStatusResponse indexes = 1;
+}
+
+// RebuildIndexRequest triggers re-indexing of a repository
+message RebuildIndexRequest {
+    string storage_id = 1;
+    bool force = 2;             // Rebuild even if already up-to-date
+}
+
+// RebuildIndexResponse confirms rebuild was queued
+message RebuildIndexResponse {
+    bool queued = 1;
+    string message = 2;
+    string job_id = 3;
+}
+
+// RebuildAllIndexesRequest triggers re-indexing of all repositories
+message RebuildAllIndexesRequest {
+    bool force = 1;             // Rebuild all, even if up-to-date
+}
+
+// RebuildAllIndexesResponse confirms rebuilds were queued
+message RebuildAllIndexesResponse {
+    int32 queued_count = 1;     // Number of repositories queued for rebuild
+    string message = 2;
+}
+
+// DeleteIndexRequest removes an index
+message DeleteIndexRequest {
+    string storage_id = 1;
+}
+
+// DeleteIndexResponse confirms deletion
+message DeleteIndexResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// StatsRequest queries service statistics
+message StatsRequest {
+    // Empty
+}
+
+// StatsResponse contains service statistics
+message StatsResponse {
+    int64 total_indexes = 1;        // Total number of indexed repositories
+    int64 total_files_indexed = 2;  // Total files across all indexes
+    int64 total_index_size_bytes = 3;  // Total index storage used
+    int32 queue_length = 4;         // Jobs waiting in queue
+    int32 active_jobs = 5;          // Jobs currently being indexed
+    int64 searches_total = 6;       // Total searches performed
+    int64 avg_search_duration_ms = 7;  // Average search duration
+    string uptime = 8;              // Service uptime
+    int64 jobs_queued = 9;          // Total jobs ever queued
+    int64 jobs_completed = 10;      // Total jobs completed successfully
+    int64 jobs_failed = 11;         // Total jobs that failed
+    int64 jobs_rejected = 12;       // Total jobs rejected (queue full)
+}
