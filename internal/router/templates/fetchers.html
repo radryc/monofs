@@ -1,0 +1,295 @@
+{{define "content"}}
+<div class="header">
+    <h1>Fetcher Cluster</h1>
+    <p>Blob fetcher services for external data access (DMZ layer)</p>
+</div>
+
+<!-- Cluster Overview Cards -->
+<div class="grid grid-cols-4" id="overviewCards">
+    <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+        <div class="loader"></div> Loading fetcher cluster...
+    </div>
+</div>
+
+<!-- Fetcher Instances Grid -->
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Fetcher Instances</h2>
+        <button class="btn btn-primary" onclick="refreshFetchers()">🔄 Refresh</button>
+    </div>
+    <div class="grid grid-cols-3" id="fetcherGrid">
+        <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<!-- Detailed Stats Table -->
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Statistics</h2>
+        <label style="display: flex; align-items: center; gap: 8px; font-size: 14px;">
+            <input type="checkbox" id="showSourceStats" onchange="refreshFetchers()">
+            Show per-source stats
+        </label>
+    </div>
+    <div id="statsTable">
+        <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<script>
+    function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    function formatNumber(num) {
+        return num.toLocaleString();
+    }
+
+    function formatPercent(rate) {
+        return (rate * 100).toFixed(1) + '%';
+    }
+
+    async function loadFetcherStats() {
+        try {
+            const detailed = document.getElementById('showSourceStats')?.checked || false;
+            const response = await fetch(`/api/fetchers${detailed ? '?detailed=true' : ''}`);
+            const data = await response.json();
+            
+            if (data.error) {
+                showError(data.error);
+                return;
+            }
+            
+            renderOverview(data);
+            renderFetcherGrid(data);
+            renderStatsTable(data);
+        } catch (err) {
+            showError('Failed to load fetcher stats: ' + err.message);
+        }
+    }
+
+    function showError(message) {
+        document.getElementById('overviewCards').innerHTML = `
+            <div class="stat-card" style="grid-column: span 4; text-align: center; padding: 40px;">
+                <div style="font-size: 48px; margin-bottom: 16px;">⚠️</div>
+                <div style="font-size: 18px; color: var(--warning); margin-bottom: 8px;">Fetcher Cluster Not Available</div>
+                <div style="color: var(--text-secondary);">${message}</div>
+            </div>
+        `;
+        document.getElementById('fetcherGrid').innerHTML = '';
+        document.getElementById('statsTable').innerHTML = '';
+    }
+
+    function renderOverview(data) {
+        const healthyPct = data.total_fetchers > 0 
+            ? (data.healthy_fetchers / data.total_fetchers * 100).toFixed(0) 
+            : 0;
+        
+        document.getElementById('overviewCards').innerHTML = `
+            <div class="stat-card">
+                <div class="stat-title">Fetchers</div>
+                <div class="stat-value">${data.healthy_fetchers}/${data.total_fetchers}</div>
+                <div class="stat-subtitle" style="color: ${healthyPct >= 100 ? 'var(--success)' : healthyPct >= 50 ? 'var(--warning)' : 'var(--danger)'}">
+                    ${healthyPct}% healthy
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-title">Cache Hit Rate</div>
+                <div class="stat-value">${formatPercent(data.aggregated_hit_rate)}</div>
+                <div class="stat-subtitle">${formatNumber(data.total_cache_hits)} hits / ${formatNumber(data.total_cache_misses)} misses</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-title">Cache Size</div>
+                <div class="stat-value">${formatBytes(data.total_cache_size_bytes)}</div>
+                <div class="stat-subtitle">${formatNumber(data.total_cache_entries)} entries</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-title">Data Transferred</div>
+                <div class="stat-value">${formatBytes(data.total_bytes_served)}</div>
+                <div class="stat-subtitle">${formatBytes(data.total_bytes_fetched)} fetched from sources</div>
+            </div>
+        `;
+    }
+
+    function renderFetcherGrid(data) {
+        if (!data.fetchers || data.fetchers.length === 0) {
+            document.getElementById('fetcherGrid').innerHTML = `
+                <div style="grid-column: span 3; text-align: center; padding: 40px; color: var(--text-secondary);">
+                    No fetchers registered
+                </div>
+            `;
+            return;
+        }
+
+        document.getElementById('fetcherGrid').innerHTML = data.fetchers.map(f => {
+            const statusColor = f.healthy ? 'var(--success)' : 'var(--danger)';
+            const statusIcon = f.healthy ? '✅' : '❌';
+            const cachePercent = f.cache_hits + f.cache_misses > 0 
+                ? (f.cache_hits / (f.cache_hits + f.cache_misses) * 100).toFixed(1) 
+                : 0;
+            
+            return `
+                <div class="stat-card" style="border-left: 4px solid ${statusColor};">
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 16px;">
+                        <div>
+                            <div style="font-size: 14px; font-weight: 700; margin-bottom: 4px;">${f.fetcher_id || 'Unknown'}</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">${f.address}</div>
+                        </div>
+                        <div style="font-size: 24px;">${statusIcon}</div>
+                    </div>
+                    
+                    ${f.healthy ? `
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 12px;">
+                            <div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">REQUESTS</div>
+                                <div style="font-size: 18px; font-weight: 600;">${formatNumber(f.total_requests)}</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">CACHE HIT</div>
+                                <div style="font-size: 18px; font-weight: 600;">${cachePercent}%</div>
+                            </div>
+                        </div>
+                        
+                        <div style="margin-bottom: 12px;">
+                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">CACHE USAGE</div>
+                            <div class="progress" style="height: 8px;">
+                                <div class="progress-bar" style="width: ${Math.min(100, f.cache_entries / 10)}%"></div>
+                            </div>
+                            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+                                ${formatNumber(f.cache_entries)} entries (${formatBytes(f.cache_size_bytes)})
+                            </div>
+                        </div>
+                        
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; font-size: 11px;">
+                            <div>
+                                <span style="color: var(--text-secondary);">Active:</span> 
+                                <span style="font-weight: 600;">${f.active_fetches}</span>
+                            </div>
+                            <div>
+                                <span style="color: var(--text-secondary);">Queued:</span> 
+                                <span style="font-weight: 600;">${f.queued_prefetches}</span>
+                            </div>
+                        </div>
+                    ` : `
+                        <div style="color: var(--danger); font-size: 12px; margin-top: 8px;">
+                            ${f.last_error || 'Connection failed'}
+                        </div>
+                    `}
+                </div>
+            `;
+        }).join('');
+    }
+
+    function renderStatsTable(data) {
+        if (!data.fetchers || data.fetchers.length === 0) {
+            document.getElementById('statsTable').innerHTML = '';
+            return;
+        }
+
+        let html = `
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Fetcher</th>
+                        <th>Status</th>
+                        <th>Uptime</th>
+                        <th>Requests</th>
+                        <th>Cache Hits</th>
+                        <th>Cache Misses</th>
+                        <th>Hit Rate</th>
+                        <th>Bytes Fetched</th>
+                        <th>Bytes Served</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        data.fetchers.forEach(f => {
+            const uptimeHours = Math.floor(f.uptime_seconds / 3600);
+            const uptimeMins = Math.floor((f.uptime_seconds % 3600) / 60);
+            
+            html += `
+                <tr>
+                    <td>
+                        <div style="font-weight: 600;">${f.fetcher_id || 'Unknown'}</div>
+                        <div style="font-size: 11px; color: var(--text-secondary);">${f.address}</div>
+                    </td>
+                    <td>
+                        <span class="badge ${f.healthy ? 'badge-success' : 'badge-danger'}">
+                            ${f.healthy ? 'Healthy' : 'Unhealthy'}
+                        </span>
+                    </td>
+                    <td>${uptimeHours}h ${uptimeMins}m</td>
+                    <td>${formatNumber(f.total_requests)}</td>
+                    <td>${formatNumber(f.cache_hits)}</td>
+                    <td>${formatNumber(f.cache_misses)}</td>
+                    <td>${formatPercent(f.cache_hit_rate)}</td>
+                    <td>${formatBytes(f.bytes_fetched)}</td>
+                    <td>${formatBytes(f.bytes_served)}</td>
+                </tr>
+            `;
+
+            // Add source stats if available
+            if (f.source_stats && Object.keys(f.source_stats).length > 0) {
+                html += `
+                    <tr style="background: rgba(109, 94, 252, 0.1);">
+                        <td colspan="9">
+                            <div style="padding: 8px;">
+                                <div style="font-weight: 600; margin-bottom: 8px; color: var(--primary);">Per-Source Statistics</div>
+                                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px;">
+                                    ${Object.entries(f.source_stats).map(([source, stats]) => `
+                                        <div style="background: var(--bg-card); padding: 8px; border-radius: 4px;">
+                                            <div style="font-weight: 600; font-size: 12px; margin-bottom: 4px;">${source}</div>
+                                            <div style="font-size: 11px; color: var(--text-secondary);">
+                                                Requests: ${formatNumber(stats.requests)} |
+                                                Errors: ${stats.errors} |
+                                                Avg: ${stats.avg_latency_ms.toFixed(1)}ms
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }
+        });
+
+        html += `
+                </tbody>
+            </table>
+            
+            <div style="margin-top: 16px; padding: 12px; background: rgba(109, 94, 252, 0.1); border-radius: 8px;">
+                <div style="font-size: 12px; color: var(--text-secondary);">
+                    <strong>Client Routing Stats:</strong>
+                    Total: ${formatNumber(data.client_total_requests)} |
+                    Affinity Hits: ${formatNumber(data.client_affinity_hits)} |
+                    Affinity Misses: ${formatNumber(data.client_affinity_misses)}
+                    ${data.client_total_requests > 0 ? 
+                        `(${((data.client_affinity_hits / data.client_total_requests) * 100).toFixed(1)}% affinity hit rate)` : ''}
+                </div>
+            </div>
+        `;
+
+        document.getElementById('statsTable').innerHTML = html;
+    }
+
+    function refreshFetchers() {
+        loadFetcherStats();
+    }
+
+    // Initial load
+    loadFetcherStats();
+    
+    // Auto-refresh every 10 seconds
+    setInterval(loadFetcherStats, 10000);
+</script>
+{{end}}
