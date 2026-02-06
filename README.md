@@ -115,37 +115,34 @@ cat /tmp/monofs/github.com/golang/example/README.md
 ## Architecture Overview
 
 ```mermaid
-flowchart TB
-    subgraph Cluster["MonoFS Cluster"]
-        Client["FUSE Client<br/>/mnt/monofs"]
-        HAProxy["HAProxy<br/>Load Balancer"]
-        
-        subgraph Routers["Router Layer"]
-            R1["Router 1<br/>(Primary)"]
-            R2["Router 2<br/>(Backup)"]
-        end
-        
-        subgraph Nodes["Backend Nodes"]
-            N1["N1"]
-            N2["N2"]
-            N3["N3"]
-            N4["N4"]
-            N5["N5"]
-        end
-        
-        Fetchers["Fetcher Pool"]
-        Search["Search Service"]
-        
-        Client --> HAProxy
-        HAProxy --> R1
-        HAProxy --> R2
-        R1 <--> R2
-        R1 --> Nodes
-        Nodes --> Fetchers
+flowchart LR
+    Client["FUSE Client<br/>/mnt/monofs"]
+    HAProxy["HAProxy<br/>Load Balancer"]
+    
+    subgraph Routers["Router Layer"]
+        R1["Router 1<br/>(Primary)"]
+        R2["Router 2<br/>(Backup)"]
     end
     
+    subgraph Nodes["Backend Nodes"]
+        direction TB
+        row1["N1 | N2 | N3"]
+        row2["N4 | N5"]
+    end
+    
+    Fetchers["Fetcher Pool"]
+    Search["Search Service"]
     Git["Git Remotes"]
+    
+    Client --> HAProxy
+    HAProxy --> R1
+    HAProxy --> R2
+    R1 <--> R2
+    R1 --> Nodes
+    R2 -.-> Nodes
+    Nodes --> Fetchers
     Fetchers --> Git
+    Search --> Nodes
 ```
 
 **How it works:**
