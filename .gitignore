@@ -50,8 +50,8 @@ __debug_bin
 # Cache directories
 /tmp/gitfs-cache*
 *.cache
-cache/
-.cache/
+/cache/
+/.cache/
 
 # FUSE mount points
 /mnt/gitfs*
