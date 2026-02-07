@@ -63,7 +63,7 @@ func (r *Router) generateLayouts(
 
 	// Ingest each virtual repo.
 	for virtualDisplayPath, virtualFiles := range grouped {
-		if err := r.ingestVirtualRepo(ctx, info, virtualDisplayPath, virtualFiles, fileIndex); err != nil {
+		if err := r.ingestVirtualRepo(ctx, info.StorageID, info, virtualDisplayPath, virtualFiles, fileIndex); err != nil {
 			r.logger.Warn("virtual repo ingestion failed (non-fatal)",
 				"virtual_path", virtualDisplayPath,
 				"error", err)
@@ -82,14 +82,19 @@ func (r *Router) generateLayouts(
 // This reuses the EXISTING IngestFileBatch and BuildDirectoryIndexes RPCs.
 // The virtual files have the same BlobHash as the originals, so the fetcher
 // serves identical content without duplication.
+//
+// CRITICAL: Uses the ORIGINAL storage_id (hard link concept) so both paths
+// resolve to the same storage, making files accessible via either path.
 func (r *Router) ingestVirtualRepo(
 	ctx context.Context,
+	originalStorageID string,
 	originalInfo buildlayout.RepoInfo,
 	virtualDisplayPath string,
 	virtualFiles []buildlayout.VirtualEntry,
 	fileIndex map[string]*buildlayout.FileInfo,
 ) error {
-	virtualStorageID := generateStorageID(virtualDisplayPath)
+	// Use the ORIGINAL storage_id (hard link) - both display paths point to same storage
+	virtualStorageID := originalStorageID
 
 	r.logger.Info("ingesting virtual repo",
 		"virtual_path", virtualDisplayPath,

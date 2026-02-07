@@ -498,30 +498,36 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 
 	// Store repository info in database
 	err := s.db.Update(func(tx *nutsdb.Tx) error {
-		// Check if already registered
-		if s.repoExistsByStorageIDTx(tx, req.StorageId) {
-			s.logger.Debug("repository already registered", "storage_id", req.StorageId)
-			return nil
+		// Check if storage ID already exists (repo metadata)
+		repoExists := s.repoExistsByStorageIDTx(tx, req.StorageId)
+		
+		if !repoExists {
+			// Store repo metadata only if new storage ID
+			info := &repoInfo{
+				StorageID:   req.StorageId,
+				DisplayPath: req.DisplayPath,
+				RepoURL:     req.Source,
+				Branch:      "", // Branch will be set during file ingestion
+			}
+			repoKey := []byte(req.StorageId)
+			repoValue, err := json.Marshal(info)
+			if err != nil {
+				return fmt.Errorf("marshal repo info: %w", err)
+			}
+
+			if err := tx.Put(bucketRepos, repoKey, repoValue, 0); err != nil {
+				return fmt.Errorf("store repo info: %w", err)
+			}
+		} else {
+			s.logger.Debug("repository storage already exists, adding display path mapping",
+				"storage_id", req.StorageId,
+				"display_path", req.DisplayPath)
 		}
 
-		// Store repo metadata
-		info := &repoInfo{
-			StorageID:   req.StorageId,
-			DisplayPath: req.DisplayPath,
-			RepoURL:     req.Source,
-			Branch:      "", // Branch will be set during file ingestion
-		}
-		repoKey := []byte(req.StorageId)
-		repoValue, err := json.Marshal(info)
-		if err != nil {
-			return fmt.Errorf("marshal repo info: %w", err)
-		}
-
-		if err := tx.Put(bucketRepos, repoKey, repoValue, 0); err != nil {
-			return fmt.Errorf("store repo info: %w", err)
-		}
-
-		// Store display path → storage_id mapping for reverse lookup
+		// ALWAYS store display path → storage_id mapping, even if storage ID exists.
+		// This supports hard links: multiple display paths can point to the same storage.
+		// Example: both "github.com/google/uuid@v1.6.0" and "go-modules/pkg/mod/github.com/google/uuid@v1.6.0"
+		// can map to the same storageID for virtual build tool layouts.
 		lookupKey := []byte(req.DisplayPath)
 		if err := tx.Put(bucketRepoLookup, lookupKey, []byte(req.StorageId), 0); err != nil {
 			return fmt.Errorf("store path lookup: %w", err)
@@ -529,7 +535,8 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 
 		s.logger.Info("repository registered successfully",
 			"storage_id", req.StorageId,
-			"display_path", req.DisplayPath)
+			"display_path", req.DisplayPath,
+			"is_new_storage", !repoExists)
 
 		return nil
 	})
