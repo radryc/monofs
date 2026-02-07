@@ -62,7 +62,6 @@ type repoInfo struct {
 
 type storedMetadata struct {
 	Path        string `json:"path"`         // Full path: "github.com/owner/repo/path/to/file"
-	RepoID      string `json:"repo_id"`      // DEPRECATED: kept for backwards compat
 	StorageID   string `json:"storage_id"`   // SHA-256 hash of display path
 	DisplayPath string `json:"display_path"` // User-visible repo path
 	FilePath    string `json:"file_path"`    // Path within repo: "path/to/file"

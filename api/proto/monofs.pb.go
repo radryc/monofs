@@ -1765,8 +1765,7 @@ func (x *IngestProgress) GetTotalBytes() int64 {
 type FileMetadata struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Path        string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	RepoId      string                 `protobuf:"bytes,2,opt,name=repo_id,json=repoId,proto3" json:"repo_id,omitempty"` // DEPRECATED: kept for backwards compatibility
-	Ref         string                 `protobuf:"bytes,3,opt,name=ref,proto3" json:"ref,omitempty"`                     // Reference: branch for Git, version for Go, prefix for S3
+	Ref         string                 `protobuf:"bytes,3,opt,name=ref,proto3" json:"ref,omitempty"` // Reference: branch for Git, version for Go, prefix for S3
 	Size        uint64                 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
 	Mtime       int64                  `protobuf:"varint,5,opt,name=mtime,proto3" json:"mtime,omitempty"`
 	Mode        uint32                 `protobuf:"varint,6,opt,name=mode,proto3" json:"mode,omitempty"`
@@ -1815,13 +1814,6 @@ func (*FileMetadata) Descriptor() ([]byte, []int) {
 func (x *FileMetadata) GetPath() string {
 	if x != nil {
 		return x.Path
-	}
-	return ""
-}
-
-func (x *FileMetadata) GetRepoId() string {
-	if x != nil {
-		return x.RepoId
 	}
 	return ""
 }
@@ -5175,10 +5167,9 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\tINGESTING\x10\x02\x12\r\n" +
 	"\tCOMPLETED\x10\x03\x12\n" +
 	"\n" +
-	"\x06FAILED\x10\x04\"\x86\x04\n" +
+	"\x06FAILED\x10\x04\"\xf3\x03\n" +
 	"\fFileMetadata\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\x12\x17\n" +
-	"\arepo_id\x18\x02 \x01(\tR\x06repoId\x12\x10\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x10\n" +
 	"\x03ref\x18\x03 \x01(\tR\x03ref\x12\x12\n" +
 	"\x04size\x18\x04 \x01(\x04R\x04size\x12\x14\n" +
 	"\x05mtime\x18\x05 \x01(\x03R\x05mtime\x12\x12\n" +
@@ -5196,7 +5187,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x10backend_metadata\x18\r \x03(\v2).monofs.FileMetadata.BackendMetadataEntryR\x0fbackendMetadata\x1aB\n" +
 	"\x14BackendMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"E\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x02\x10\x03\"E\n" +
 	"\x11IngestFileRequest\x120\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x14.monofs.FileMetadataR\bmetadata\".\n" +
 	"\x12IngestFileResponse\x12\x18\n" +

@@ -36,7 +36,7 @@ func (g *GitIngestionBackend) Initialize(ctx context.Context, sourceURL string, 
 	}
 
 	// Generate repo ID from URL
-	g.repoID = config["repo_id"]
+	g.repoID = config["display_path"]
 	if g.repoID == "" {
 		g.repoID = normalizeRepoID(sourceURL)
 	}

@@ -282,7 +282,7 @@ message IngestProgress {
 
 message FileMetadata {
     string path = 1;
-    string repo_id = 2;        // DEPRECATED: kept for backwards compatibility
+    reserved 2;                // Was: repo_id (removed)
     string ref = 3;            // Reference: branch for Git, version for Go, prefix for S3
     uint64 size = 4;
     int64 mtime = 5;

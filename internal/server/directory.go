@@ -227,50 +227,33 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 	path := req.Path
 	s.logger.Debug("readdir started", "path", path)
 
-	// Handle root directory - list all top-level directories (e.g., "github.com")
+	// Handle root directory - list all top-level directories (e.g., "github.com", "go-modules")
 	if path == "" {
 		topLevelDirs := make(map[string]bool)
 		repoCount := 0
 
 		s.db.View(func(tx *nutsdb.Tx) error {
-			// Use GetKeys first to get only keys (lighter), then batch Get values
-			keys, err := tx.GetKeys(bucketRepos)
+			// Use bucketRepoLookup (display_path → storage_id), not bucketRepos
+			// This is critical for showing virtual repos like go-modules/
+			keys, err := tx.GetKeys(bucketRepoLookup)
 			if err != nil {
 				return nil // Empty is okay
 			}
 
 			repoCount = len(keys)
 
-			// Process in batches of 100
-			const batchSize = 100
-			for batchStart := 0; batchStart < len(keys); batchStart += batchSize {
-				batchEnd := batchStart + batchSize
-				if batchEnd > len(keys) {
-					batchEnd = len(keys)
-				}
-
-				for i := batchStart; i < batchEnd; i++ {
-					value, err := tx.Get(bucketRepos, keys[i])
-					if err != nil {
-						continue
-					}
-
-					var info repoInfo
-					if err := json.Unmarshal(value, &info); err != nil {
-						continue
-					}
-
-					displayPath := info.DisplayPath
-					if idx := strings.Index(displayPath, "/"); idx > 0 {
-						topLevelDirs[displayPath[:idx]] = true
-					} else {
-						// Repo without slash, show as-is
-						stream.Send(&pb.DirEntry{
-							Name: displayPath,
-							Mode: 0755 | uint32(syscall.S_IFDIR),
-							Ino:  hashPath(displayPath),
-						})
-					}
+			// Process display paths directly from keys (no need to unmarshal)
+			for _, key := range keys {
+				displayPath := string(key)
+				if idx := strings.Index(displayPath, "/"); idx > 0 {
+					topLevelDirs[displayPath[:idx]] = true
+				} else {
+					// Repo without slash, show as-is
+					stream.Send(&pb.DirEntry{
+						Name: displayPath,
+						Mode: 0755 | uint32(syscall.S_IFDIR),
+						Ino:  hashPath(displayPath),
+					})
 				}
 			}
 			return nil
@@ -312,39 +295,21 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 		intermediateDirs := make(map[string]bool)
 
 		s.db.View(func(tx *nutsdb.Tx) error {
-			// Use GetKeys first, then batch Get values
-			keys, err := tx.GetKeys(bucketRepos)
+			// Use bucketRepoLookup (display_path → storage_id)
+			keys, err := tx.GetKeys(bucketRepoLookup)
 			if err != nil {
 				return nil
 			}
 
-			// Process in batches of 100
-			const batchSize = 100
-			for batchStart := 0; batchStart < len(keys); batchStart += batchSize {
-				batchEnd := batchStart + batchSize
-				if batchEnd > len(keys) {
-					batchEnd = len(keys)
-				}
-
-				for i := batchStart; i < batchEnd; i++ {
-					value, err := tx.Get(bucketRepos, keys[i])
-					if err != nil {
-						continue
-					}
-
-					var info repoInfo
-					if err := json.Unmarshal(value, &info); err != nil {
-						continue
-					}
-
-					displayPath := info.DisplayPath
-					if strings.HasPrefix(displayPath, pathPrefix) {
-						remainder := strings.TrimPrefix(displayPath, pathPrefix)
-						if idx := strings.Index(remainder, "/"); idx > 0 {
-							intermediateDirs[remainder[:idx]] = true
-						} else {
-							intermediateDirs[remainder] = true
-						}
+			// Process display paths directly from keys
+			for _, key := range keys {
+				displayPath := string(key)
+				if strings.HasPrefix(displayPath, pathPrefix) {
+					remainder := strings.TrimPrefix(displayPath, pathPrefix)
+					if idx := strings.Index(remainder, "/"); idx > 0 {
+						intermediateDirs[remainder[:idx]] = true
+					} else {
+						intermediateDirs[remainder] = true
 					}
 				}
 			}

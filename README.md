@@ -61,7 +61,9 @@ Navigate with `cd`. Read files instantly. Edit and commit changes back. Search a
 | **Write Support** | Edit files and commit changes back |
 | **Web Dashboard** | Monitor cluster health and manage repositories |
 | **Go Module Support** | Mount Go modules alongside Git repos |
+| **Build Tool Integration** | Virtual layouts for Go modules, npm, Maven, etc. |
 | **Streaming I/O** | Large files streamed in chunks - no size limit |
+| **Bulk Dependency Ingestion** | Ingest all deps from go.mod with one command |
 
 ---
 
@@ -185,16 +187,42 @@ flowchart LR
 
 ### Ingest a Repository
 
-```
+```bash
+# Git repository
 ./bin/monofs-admin ingest \
   --router=localhost:9090 \
   --source=https://github.com/owner/repo.git \
   --ref=main
+
+# Go module
+./bin/monofs-admin ingest \
+  --router=localhost:9090 \
+  --source=github.com/google/uuid@v1.6.0 \
+  --ingestion-type=go \
+  --fetch-type=gomod
+```
+
+### Bulk Ingest Dependencies
+
+```bash
+# Ingest all dependencies from go.mod
+./bin/monofs-admin ingest-deps \
+  --file=go.mod \
+  --type=go \
+  --concurrency=10
+```
+
+### Use with Go Build
+
+```bash
+export GOMODCACHE=/tmp/monofs/go-modules/pkg/mod
+cd your-project
+go build ./...
 ```
 
 ### Delete a Repository
 
-```
+```bash
 ./bin/monofs-admin delete --router=localhost:9090 --storage-id=<id>
 ```
 
@@ -367,6 +395,7 @@ make test-e2e
 | [Quick Start](docs/QUICKSTART.md) | Get running in 5 minutes |
 | [Architecture](docs/ARCHITECTURE.md) | System design and data flows |
 | [Deployment](docs/DEPLOYMENT.md) | Production deployment guide |
+| [Build Integration](docs/BUILD_INTEGRATION.md) | Using MonoFS with build tools (Go, npm, Maven, etc.) |
 
 ---
 

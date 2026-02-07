@@ -11,9 +11,12 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/buildlayout"
+	golangmapper "github.com/radryc/monofs/internal/buildlayout/golang"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -22,6 +25,7 @@ import (
 func main() {
 	// Subcommands
 	ingestCmd := flag.NewFlagSet("ingest", flag.ExitOnError)
+	ingestDepsCmd := flag.NewFlagSet("ingest-deps", flag.ExitOnError)
 	statusCmd := flag.NewFlagSet("status", flag.ExitOnError)
 	deleteCmd := flag.NewFlagSet("delete", flag.ExitOnError)
 	failoverCmd := flag.NewFlagSet("failover", flag.ExitOnError)
@@ -44,6 +48,13 @@ func main() {
 	ingestionType := ingestCmd.String("ingestion-type", "git", "Ingestion backend type (git, go, s3, file)")
 	fetchType := ingestCmd.String("fetch-type", "git", "Fetch backend type (git, gomod, s3, local)")
 	replicateData := ingestCmd.Bool("replicate-data", false, "Replicate blob data to fetch backend during ingestion")
+
+	// Ingest-deps flags
+	ingestDepsRouter := ingestDepsCmd.String("router", "localhost:9090", "MonoFS router address")
+	ingestDepsFile := ingestDepsCmd.String("file", "", "Path to dependency manifest (e.g., go.mod, package.json) (required)")
+	ingestDepsType := ingestDepsCmd.String("type", "go", "Dependency type: go, npm, maven, cargo")
+	ingestDepsConcurrency := ingestDepsCmd.Int("concurrency", 5, "Max concurrent ingestions")
+	ingestDepsSkipExisting := ingestDepsCmd.Bool("skip-existing", true, "Skip dependencies that are already ingested")
 
 	// Delete flags
 	deleteRouter := deleteCmd.String("router", "localhost:9090", "MonoFS router address")
@@ -115,6 +126,19 @@ func main() {
 
 		if err := ingestRepository(*routerAddr, *source, *ref, *sourceID, *ingestionType, *fetchType, *replicateData); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: ingestion failed: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "ingest-deps":
+		ingestDepsCmd.Parse(os.Args[2:])
+		if *ingestDepsFile == "" {
+			fmt.Fprintln(os.Stderr, "Error: --file is required")
+			ingestDepsCmd.Usage()
+			os.Exit(1)
+		}
+
+		if err := ingestDeps(*ingestDepsRouter, *ingestDepsFile, *ingestDepsType, *ingestDepsConcurrency, *ingestDepsSkipExisting); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: dependency ingestion failed: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -271,7 +295,8 @@ Usage:
   monofs-admin <command> [options]
 
 Commands:
-  ingest           Ingest a Git repository into the cluster
+  ingest           Ingest a Git repository or Go module into the cluster
+  ingest-deps      Bulk ingest all dependencies from a manifest (go.mod, package.json, etc.)
   delete           Delete a repository from all nodes (cleanup)
   status           Show cluster status and health
   repos            Show repositories in the cluster
@@ -289,6 +314,12 @@ Commands:
 Examples:
   # Ingest repository (auto-detect branch from URL)
   monofs-admin ingest --url=https://github.com/radryc/prompusher/tree/main
+  
+  # Ingest Go module
+  monofs-admin ingest --source=github.com/google/uuid@v1.6.0 --ingestion-type=go --fetch-type=gomod
+
+  # Bulk ingest all dependencies from go.mod
+  monofs-admin ingest-deps --file=go.mod --type=go --concurrency=10
 
   # Delete repository to free memory
   monofs-admin delete --storage-id=<storage-id>
@@ -450,6 +481,175 @@ func validateIngestionParams(source, ref, ingestionType string) error {
 	}
 
 	return nil
+}
+
+// ingestDeps reads a dependency manifest and ingests all dependencies.
+func ingestDeps(routerAddr, filePath, depType string, concurrency int, skipExisting bool) error {
+	// 1. Read the dependency file
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read dependency file: %w", err)
+	}
+
+	// 2. Select mapper by type
+	mapper := selectMapper(depType)
+	if mapper == nil {
+		return fmt.Errorf("unknown dependency type: %q (supported: go)", depType)
+	}
+
+	// 3. Parse dependencies
+	deps, err := mapper.ParseDependencyFile(content)
+	if err != nil {
+		return fmt.Errorf("parse dependencies: %w", err)
+	}
+
+	if len(deps) == 0 {
+		fmt.Println("No dependencies found.")
+		return nil
+	}
+
+	fmt.Printf("Found %d dependencies in %s\n", len(deps), filePath)
+
+	// 4. Get existing repos if skip-existing is enabled
+	existingRepos := make(map[string]bool)
+	if skipExisting {
+		repos, err := fetchExistingRepos(routerAddr)
+		if err != nil {
+			fmt.Printf("Warning: could not fetch existing repos: %v\n", err)
+		} else {
+			for _, repo := range repos {
+				existingRepos[repo] = true
+			}
+			fmt.Printf("Found %d existing repositories\n", len(existingRepos))
+		}
+	}
+
+	// 5. Filter dependencies
+	var depsToIngest []buildlayout.Dependency
+	for _, dep := range deps {
+		if skipExisting && existingRepos[dep.Source] {
+			fmt.Printf("Skipping %s (already ingested)\n", dep.Source)
+			continue
+		}
+		depsToIngest = append(depsToIngest, dep)
+	}
+
+	if len(depsToIngest) == 0 {
+		fmt.Println("All dependencies already ingested.")
+		return nil
+	}
+
+	fmt.Printf("Ingesting %d dependencies with concurrency %d...\n", len(depsToIngest), concurrency)
+
+	// 6. Ingest dependencies with concurrency control
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, concurrency)
+	errChan := make(chan error, len(depsToIngest))
+	successCount := 0
+	var mu sync.Mutex
+
+	for _, dep := range depsToIngest {
+		wg.Add(1)
+		go func(d buildlayout.Dependency) {
+			defer wg.Done()
+			sem <- struct{}{}        // Acquire semaphore
+			defer func() { <-sem }() // Release semaphore
+
+			fmt.Printf("Ingesting %s...\n", d.Source)
+
+			// Determine ingestion and fetch types based on dependency type
+			ingestionType := depType
+			fetchType := mapDepTypeToFetchType(depType)
+
+			err := ingestRepository(routerAddr, d.Source, "", "", ingestionType, fetchType, false)
+			if err != nil {
+				errChan <- fmt.Errorf("%s: %w", d.Source, err)
+				fmt.Printf("Failed: %s: %v\n", d.Source, err)
+			} else {
+				mu.Lock()
+				successCount++
+				mu.Unlock()
+				fmt.Printf("Success: %s\n", d.Source)
+			}
+		}(dep)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	// Collect errors
+	var errors []error
+	for err := range errChan {
+		errors = append(errors, err)
+	}
+
+	fmt.Printf("\nIngestion complete: %d succeeded, %d failed\n", successCount, len(errors))
+
+	if len(errors) > 0 {
+		fmt.Println("\nFailed dependencies:")
+		for _, err := range errors {
+			fmt.Printf("  - %v\n", err)
+		}
+		return fmt.Errorf("%d dependencies failed to ingest", len(errors))
+	}
+
+	return nil
+}
+
+// selectMapper returns the appropriate layout mapper for the given type.
+func selectMapper(depType string) buildlayout.LayoutMapper {
+	switch strings.ToLower(depType) {
+	case "go":
+		return golangmapper.NewGoMapper()
+	default:
+		return nil
+	}
+}
+
+// mapDepTypeToFetchType converts dependency type to fetch type.
+func mapDepTypeToFetchType(depType string) string {
+	switch strings.ToLower(depType) {
+	case "go":
+		return "gomod"
+	default:
+		return "git"
+	}
+}
+
+// fetchExistingRepos fetches the list of existing repository display paths from the router.
+func fetchExistingRepos(routerAddr string) ([]string, error) {
+	// Extract HTTP address from gRPC address (convert port 9090 -> 8080)
+	httpAddr := strings.Replace(routerAddr, ":9090", ":8080", 1)
+	if !strings.Contains(httpAddr, ":") {
+		httpAddr = httpAddr + ":8080"
+	}
+
+	resp, err := http.Get(fmt.Sprintf("http://%s/api/repos", httpAddr))
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var data struct {
+		Repositories []struct {
+			DisplayPath string `json:"display_path"`
+		} `json:"repositories"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, fmt.Errorf("decode JSON: %w", err)
+	}
+
+	var repos []string
+	for _, repo := range data.Repositories {
+		repos = append(repos, repo.DisplayPath)
+	}
+
+	return repos, nil
 }
 
 // ingestRepository ingests a source via the router.
@@ -1283,7 +1483,7 @@ func showRepositories(routerAddr string) error {
 		return nil
 	}
 
-	// Sort repositories by repo_id
+	// Sort repositories by repo ID
 	repos := data.Repositories
 	sort.Slice(repos, func(i, j int) bool {
 		return repos[i].RepoID < repos[j].RepoID

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/buildlayout"
 	"github.com/radryc/monofs/internal/fetcher"
 	"github.com/radryc/monofs/internal/sharding"
 	"google.golang.org/grpc"
@@ -57,8 +58,9 @@ type Router struct {
 
 	mu                   sync.RWMutex
 	nodes                map[string]*nodeState
-	ingestedRepos        map[string]*ingestedRepo        // repoID -> repo info
-	inProgressIngestions map[string]*inProgressIngestion // storageID -> ingestion progress
+	ingestedRepos        map[string]*ingestedRepo          // repoID -> repo info
+	inProgressIngestions map[string]*inProgressIngestion   // storageID -> ingestion progress
+	layoutRegistry       *buildlayout.LayoutMapperRegistry // Build layout mappers (Go modules, etc.)
 	version              atomic.Int64
 	config               RouterConfig
 	stopHealth           chan struct{}
@@ -395,6 +397,16 @@ func (r *Router) SetFetcherClient(addrs []string) error {
 	r.fetcherClient = client
 	r.logger.Info("fetcher cluster client configured", "addrs", addrs)
 	return nil
+}
+
+// SetLayoutRegistry configures the layout mapper registry for build tool integration.
+func (r *Router) SetLayoutRegistry(registry *buildlayout.LayoutMapperRegistry) {
+	r.layoutRegistry = registry
+}
+
+// GetLayoutRegistry returns the current layout mapper registry.
+func (r *Router) GetLayoutRegistry() *buildlayout.LayoutMapperRegistry {
+	return r.layoutRegistry
 }
 
 // GetFetcherClusterStats returns statistics from all fetchers in the cluster.

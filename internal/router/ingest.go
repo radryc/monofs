@@ -13,6 +13,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/buildlayout"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage"
 	"google.golang.org/grpc"
@@ -229,7 +230,7 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 		config = make(map[string]string)
 	}
 	config["branch"] = ref
-	config["repo_id"] = displayPath
+	config["display_path"] = displayPath
 
 	// Validate source
 	sendProgress(pb.IngestProgress_CLONING, "Validating source...", 0, 0, "")
@@ -422,6 +423,9 @@ initComplete:
 	primaryBatches := make(map[string][]*pb.FileMetadata)            // primaryNodeID -> files
 	replicaBatches := make(map[string]map[string][]*pb.FileMetadata) // replicaNodeID -> primaryNodeID -> files
 
+	// Collect files for layout generation (Phase 2)
+	var collectedFiles []buildlayout.FileInfo
+
 	// Walk files using backend and group by target nodes
 	var totalFiles int64
 	err = backend.WalkFiles(stream.Context(), func(meta storage.FileMetadata) error {
@@ -467,7 +471,6 @@ initComplete:
 
 		fileMeta := &pb.FileMetadata{
 			Path:            meta.Path,
-			RepoId:          displayPath,
 			Ref:             ref,
 			Size:            meta.Size,
 			Mtime:           meta.ModTime,
@@ -505,6 +508,17 @@ initComplete:
 				fmt.Sprintf("Scanning files... %d found", count),
 				0, count, meta.Path)
 		}
+
+		// Collect file info for layout generation (Phase 2)
+		collectedFiles = append(collectedFiles, buildlayout.FileInfo{
+			Path:            meta.Path,
+			BlobHash:        meta.ContentHash,
+			Size:            meta.Size,
+			Mode:            meta.Mode,
+			Mtime:           meta.ModTime,
+			Source:          sourceURL,
+			BackendMetadata: meta.Metadata,
+		})
 
 		return nil
 	})
@@ -866,6 +880,31 @@ initComplete:
 					"message", resp.Message)
 			}
 		}()
+	}
+
+	// Generate build layouts (virtual paths for build tools)
+	if r.layoutRegistry != nil && r.layoutRegistry.HasMappers() {
+		layoutInfo := buildlayout.RepoInfo{
+			DisplayPath:   displayPath,
+			StorageID:     storageID,
+			Source:        sourceURL,
+			Ref:           ref,
+			IngestionType: string(ingestionType),
+			FetchType:     string(fetchType),
+			Config:        req.IngestionConfig,
+		}
+
+		// sendProgress wrapper for layout generation
+		layoutProgress := func(stage pb.IngestProgress_Stage, msg string) {
+			if stream != nil {
+				stream.Send(&pb.IngestProgress{
+					Stage:   stage,
+					Message: msg,
+				})
+			}
+		}
+
+		r.generateLayouts(stream.Context(), layoutInfo, collectedFiles, layoutProgress)
 	}
 
 	sendProgress(pb.IngestProgress_COMPLETED, fmt.Sprintf("Repository ingested successfully: %d files", filesIngested), filesIngested, filesIngested, "")

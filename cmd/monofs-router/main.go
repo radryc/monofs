@@ -15,6 +15,8 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/buildlayout"
+	golangmapper "github.com/radryc/monofs/internal/buildlayout/golang"
 	"github.com/radryc/monofs/internal/router"
 	"github.com/radryc/monofs/internal/storage"
 	gitstorage "github.com/radryc/monofs/internal/storage/git"
@@ -131,6 +133,12 @@ func main() {
 			logger.Warn("failed to configure fetcher cluster", "error", err)
 		}
 	}
+
+	// Configure build layout mappers
+	layoutRegistry := buildlayout.NewRegistry()
+	layoutRegistry.Register(golangmapper.NewGoMapper())
+	r.SetLayoutRegistry(layoutRegistry)
+	logger.Info("registered build layout mappers", "count", 1)
 
 	// Parse initial nodes
 	if *nodes != "" {
