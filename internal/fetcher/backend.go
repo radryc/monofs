@@ -54,6 +54,9 @@ const (
 	SourceTypeS3                 // S3-compatible storage
 	SourceTypeHTTP               // Generic HTTP
 	SourceTypeOCI                // OCI registry
+	SourceTypeNpm                // npm registry
+	SourceTypeMaven              // Maven Central
+	SourceTypeCargo              // crates.io
 )
 
 func (s SourceType) String() string {
@@ -68,6 +71,12 @@ func (s SourceType) String() string {
 		return "http"
 	case SourceTypeOCI:
 		return "oci"
+	case SourceTypeNpm:
+		return "npm"
+	case SourceTypeMaven:
+		return "maven"
+	case SourceTypeCargo:
+		return "cargo"
 	default:
 		return "unknown"
 	}
@@ -86,6 +95,12 @@ func ParseSourceType(s string) SourceType {
 		return SourceTypeHTTP
 	case "oci":
 		return SourceTypeOCI
+	case "npm":
+		return SourceTypeNpm
+	case "maven":
+		return SourceTypeMaven
+	case "cargo":
+		return SourceTypeCargo
 	default:
 		return SourceTypeUnknown
 	}

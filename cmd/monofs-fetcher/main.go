@@ -111,6 +111,48 @@ func main() {
 	registry.Register(gomodBackend)
 	logger.Info("gomod backend initialized", "cached_modules", len(gomodBackend.CachedSources()))
 
+	// Initialize npm backend
+	npmBackend := fetcher.NewNpmBackend()
+	if err := npmBackend.Initialize(ctx, fetcher.BackendConfig{
+		CacheDir:        *cacheDir + "/npm",
+		MaxCacheSize:    int64(*maxCacheGB) * 1024 * 1024 * 1024 / 6, // Share cache space
+		MaxCacheAgeSecs: int64(*cacheAgeHours) * 3600,
+		Concurrency:     10,
+	}); err != nil {
+		logger.Error("failed to initialize npm backend", "error", err)
+		os.Exit(1)
+	}
+	registry.Register(npmBackend)
+	logger.Info("npm backend initialized", "cached_packages", len(npmBackend.CachedSources()))
+
+	// Initialize Maven backend
+	mavenBackend := fetcher.NewMavenBackend()
+	if err := mavenBackend.Initialize(ctx, fetcher.BackendConfig{
+		CacheDir:        *cacheDir + "/maven",
+		MaxCacheSize:    int64(*maxCacheGB) * 1024 * 1024 * 1024 / 6,
+		MaxCacheAgeSecs: int64(*cacheAgeHours) * 3600,
+		Concurrency:     10,
+	}); err != nil {
+		logger.Error("failed to initialize maven backend", "error", err)
+		os.Exit(1)
+	}
+	registry.Register(mavenBackend)
+	logger.Info("maven backend initialized", "cached_artifacts", len(mavenBackend.CachedSources()))
+
+	// Initialize Cargo backend
+	cargoBackend := fetcher.NewCargoBackend()
+	if err := cargoBackend.Initialize(ctx, fetcher.BackendConfig{
+		CacheDir:        *cacheDir + "/cargo",
+		MaxCacheSize:    int64(*maxCacheGB) * 1024 * 1024 * 1024 / 6,
+		MaxCacheAgeSecs: int64(*cacheAgeHours) * 3600,
+		Concurrency:     10,
+	}); err != nil {
+		logger.Error("failed to initialize cargo backend", "error", err)
+		os.Exit(1)
+	}
+	registry.Register(cargoBackend)
+	logger.Info("cargo backend initialized", "cached_crates", len(cargoBackend.CachedSources()))
+
 	// Create fetcher service
 	serviceConfig := fetcher.DefaultServiceConfig()
 	serviceConfig.PrefetchWorkers = *prefetchWorkers

@@ -181,8 +181,31 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 		progress.mu.RUnlock()
 	}
 
+	// Collect in-progress source URLs for cross-check dedup.
+	// The storageID of an in-progress npm/cargo/maven ingestion may differ
+	// from the storageID reported by nodes (initial vs canonical), so we
+	// also match by source URL to prevent duplicates in the UI.
+	inProgressURLs := make(map[string]bool, len(inProgressSnapshot))
+	for _, progress := range inProgressSnapshot {
+		progress.mu.RLock()
+		if progress.repoURL != "" {
+			inProgressURLs[progress.repoURL] = true
+		}
+		progress.mu.RUnlock()
+	}
+
 	// Add completed ingestions from nodes (source of truth)
-	for _, repoInfo := range repoMap {
+	// Skip any that are already shown as in-progress to avoid duplicates
+	for storageID, repoInfo := range repoMap {
+		if _, isInProgress := inProgressSnapshot[storageID]; isInProgress {
+			continue
+		}
+		// Also check by source URL for npm/cargo/maven where storageID changes mid-ingestion
+		if repoURL, ok := repoInfo["repo_url"].(string); ok && repoURL != "" {
+			if inProgressURLs[repoURL] {
+				continue
+			}
+		}
 		repos = append(repos, repoInfo)
 	}
 

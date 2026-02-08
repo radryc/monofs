@@ -28,17 +28,16 @@ func generateStorageID(displayPath string) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// normalizeRepoID converts a repository URL to a normalized path format
+// normalizeGitURL converts a Git repository URL to a normalized path format.
 // Examples:
 //   - https://github.com/owner/repo -> github.com/owner/repo
-//   - github.com/google/uuid@v1.3.0 -> github.com/google/uuid@v1.3.0
-func normalizeRepoID(repoURL string) string {
-	// For Go modules with @version, keep as-is
-	if strings.Contains(repoURL, "@") {
-		return repoURL
-	}
-
-	// Try to parse as URL
+//   - git@github.com:owner/repo.git -> github.com/owner/repo
+//
+// normalizeGitURL converts a Git repository URL to a normalized path format.
+// Examples:
+//   - https://github.com/owner/repo -> github.com/owner/repo
+//   - git@github.com:owner/repo.git -> github.com/owner/repo
+func normalizeGitURL(repoURL string) string {
 	u, err := url.Parse(repoURL)
 	if err != nil {
 		// If parsing fails, return as-is (might be a Go module path)
@@ -68,183 +67,120 @@ func normalizeRepoID(repoURL string) string {
 	return strings.TrimSuffix(repoURL, ".git")
 }
 
-// IngestRepository implements the IngestRepository RPC with streaming progress.
-func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_IngestRepositoryServer) error {
+// ingestionContext holds all state for an ingestion operation
+type ingestionContext struct {
+	req              *pb.IngestRequest
+	stream           pb.MonoFSRouter_IngestRepositoryServer
+	displayPath      string
+	storageID        string
+	initialStorageID string // storageID at registration time (before canonical path update)
+	sourceURL        string
+	ref              string
+	ingestionType    storage.IngestionType
+	fetchType        storage.FetchType
+	backend          storage.IngestionBackend
+	nodes            []sharding.Node
+	nodeClients      map[string]nodeClient
+	sharder          *sharding.HRW
+	filesIngested    *int64
+	totalFiles       *int64
+	collectedFiles   []buildlayout.FileInfo
+	canonicalPath    string
+	canonicalPathMux sync.Mutex
+}
+
+type nodeClient struct {
+	nodeID string
+	client pb.MonoFSClient
+}
+
+// validateAndSetup validates the request and sets up the ingestion context
+func (r *Router) validateAndSetup(ctx *ingestionContext) error {
 	// Validate source
-	if req.Source == "" {
+	if ctx.req.Source == "" {
 		return fmt.Errorf("source must be specified")
 	}
 
-	// Step 1: Determine display path (what users see in filesystem)
-	// If req.SourceId is set: use custom path (e.g., "my/custom/path" or "myrepo")
-	// If req.SourceId is empty: auto-generate from source (e.g., "github_com/owner/repo")
-	displayPath := req.SourceId
-	if displayPath == "" {
-		displayPath = normalizeRepoID(req.Source)
+	// Get ingestion handler for this type
+	registry := NewIngestionRegistry()
+	handler, err := registry.Get(ctx.req.IngestionType)
+	if err != nil {
+		return fmt.Errorf("unsupported ingestion type: %v", ctx.req.IngestionType)
 	}
 
-	// Step 2: Generate internal storage ID (SHA-256 hash)
-	storageID := generateStorageID(displayPath)
+	// Determine display path using handler
+	ctx.displayPath = handler.NormalizeDisplayPath(ctx.req.Source, ctx.req.SourceId)
+	ctx.ref = ctx.req.Ref
+	ctx.sourceURL = ctx.req.Source
 
-	// Determine backend types
-	ingestionType := storage.IngestionType(strings.ToLower(req.IngestionType.String()))
-	if ingestionType == "" || ingestionType == "ingestion_git" {
-		ingestionType = storage.IngestionTypeGit
-	} else if ingestionType == "ingestion_go" {
-		ingestionType = storage.IngestionTypeGo
-	} else if ingestionType == "ingestion_s3" {
-		ingestionType = storage.IngestionTypeS3
+	// Special handling for Go modules
+	if ctx.req.IngestionType == pb.IngestionType_INGESTION_GO {
+		if ctx.ref != "" && !strings.Contains(ctx.req.Source, "@") {
+			ctx.sourceURL = ctx.req.Source + "@" + ctx.ref
+			ctx.displayPath = handler.NormalizeDisplayPath(ctx.sourceURL, ctx.req.SourceId)
+		}
 	}
 
-	fetchType := storage.FetchType(strings.ToLower(req.FetchType.String()))
-	if fetchType == "" || fetchType == "fetch_git" {
-		// Auto-detect: if ingestion type is Go, use GoMod fetch type
-		if ingestionType == storage.IngestionTypeGo {
-			fetchType = storage.FetchTypeGoMod
-		} else {
-			fetchType = storage.FetchTypeGit
-		}
-	} else if fetchType == "fetch_gomod" {
-		fetchType = storage.FetchTypeGoMod
+	// Apply default ref if needed
+	if ctx.ref == "" && handler.GetDefaultRef() != "" {
+		ctx.ref = handler.GetDefaultRef()
 	}
 
-	// Handle ref with type-specific defaults and validation
-	ref := req.Ref
-	sourceURL := req.Source
-
-	switch req.IngestionType {
-	case pb.IngestionType_INGESTION_GIT:
-		// Git: ref is optional, defaults to "main"
-		if ref == "" {
-			ref = "main"
-		}
-	case pb.IngestionType_INGESTION_GO:
-		// Go modules: combine source@ref or expect source to contain version
-		if ref != "" && !strings.Contains(req.Source, "@") {
-			sourceURL = req.Source + "@" + ref
-			// Update displayPath to include version for Go modules
-			// This ensures the filesystem path matches what users expect (module@version/file)
-			if displayPath == normalizeRepoID(req.Source) {
-				displayPath = normalizeRepoID(sourceURL)
-				// Regenerate storage ID with updated displayPath
-				storageID = generateStorageID(displayPath)
-			}
-		}
-		if !strings.Contains(sourceURL, "@") {
-			return fmt.Errorf("Go module source must include version (e.g., module@v1.0.0)")
-		}
-	case pb.IngestionType_INGESTION_S3:
-		// S3: ref is optional and used as prefix
+	// Validate source format
+	if err := handler.ValidateSource(ctx.sourceURL, ctx.ref); err != nil {
+		return err
 	}
 
-	r.logger.Info("ingesting source",
-		"source", req.Source,
-		"ref", ref,
-		"source_url", sourceURL,
-		"display_path", displayPath,
-		"ingestion_type", ingestionType,
-		"fetch_type", fetchType)
+	// Add directory prefix for package managers
+	ctx.displayPath = handler.AddDirectoryPrefix(ctx.displayPath, ctx.req.Source)
 
-	// Register in-progress ingestion
-	r.mu.Lock()
-	r.inProgressIngestions[storageID] = &inProgressIngestion{
-		storageID: storageID,
-		repoID:    displayPath,
-		repoURL:   sourceURL,
-		branch:    ref,
-		startedAt: time.Now(),
-		stage:     pb.IngestProgress_CLONING,
-		message:   "Starting ingestion...",
-	}
-	r.mu.Unlock()
-
-	// Ensure cleanup on exit (with delay for failed ingestions so UI can see the error)
-	defer func() {
-		// Check if this was a failure by looking at the final stage
-		r.mu.Lock()
-		progress, exists := r.inProgressIngestions[storageID]
-		if exists && progress.stage == pb.IngestProgress_FAILED {
-			// Keep failed ingestions visible for 30 seconds before cleanup
-			r.mu.Unlock()
-			time.AfterFunc(30*time.Second, func() {
-				r.mu.Lock()
-				delete(r.inProgressIngestions, storageID)
-				r.mu.Unlock()
-				r.logger.Info("cleaned up failed ingestion", "storage_id", storageID)
-			})
-		} else {
-			// Successful or cancelled - remove immediately
-			delete(r.inProgressIngestions, storageID)
-			r.mu.Unlock()
-		}
-	}()
-
-	// Helper to send progress updates and update in-memory state
-	sendProgress := func(stage pb.IngestProgress_Stage, message string, filesProcessed, totalFiles int64, currentFile string) {
-		// Update in-memory state (non-blocking - use TryLock to avoid blocking ingestion)
-		if r.mu.TryLock() {
-			if progress, ok := r.inProgressIngestions[storageID]; ok {
-				progress.mu.Lock()
-				progress.stage = stage
-				progress.message = message
-				progress.filesProcessed = filesProcessed
-				progress.totalFiles = totalFiles
-				progress.mu.Unlock()
-			}
-			r.mu.Unlock()
-		}
-		// If lock not acquired, skip UI update - ingestion performance is more important
-
-		// Send to stream
-		stream.Send(&pb.IngestProgress{
-			Stage:          stage,
-			Message:        message,
-			FilesProcessed: filesProcessed,
-			TotalFiles:     totalFiles,
-			CurrentFile:    currentFile,
-			Success:        stage == pb.IngestProgress_COMPLETED,
-		})
+	// Generate internal storage ID.
+	// When displayPath is empty (npm/cargo/maven before canonical path discovery),
+	// use sourceURL for a stable unique ID instead of hashing empty string.
+	if ctx.displayPath != "" {
+		ctx.storageID = generateStorageID(ctx.displayPath)
+	} else {
+		ctx.storageID = generateStorageID(ctx.sourceURL)
 	}
 
+	// Get storage types from handler
+	ctx.ingestionType = handler.GetStorageType()
+	ctx.fetchType = handler.GetFetchType()
+
+	return nil
+}
+
+// initializeBackend creates and initializes the ingestion backend with progress updates
+func (r *Router) initializeBackend(ctx *ingestionContext, sendProgress func(pb.IngestProgress_Stage, string, int64, int64, string)) error {
 	sendProgress(pb.IngestProgress_CLONING, "Initializing backend...", 0, 0, "")
 
-	r.logger.Info("ingesting repository",
-		"url", sourceURL,
-		"branch", ref,
-		"display_path", displayPath,
-		"storage_id", storageID,
-		"ingestion_type", ingestionType,
-		"fetch_type", fetchType)
-
 	// Create ingestion backend
-	backend, err := storage.DefaultRegistry.CreateIngestionBackend(ingestionType)
+	backend, err := storage.DefaultRegistry.CreateIngestionBackend(ctx.ingestionType)
 	if err != nil {
-		sendProgress(pb.IngestProgress_FAILED, fmt.Sprintf("unsupported ingestion type: %v", err), 0, 0, "")
 		return fmt.Errorf("unsupported ingestion type: %w", err)
 	}
-	defer backend.Cleanup()
+	ctx.backend = backend
 
 	// Prepare backend config
-	config := req.IngestionConfig
+	config := ctx.req.IngestionConfig
 	if config == nil {
 		config = make(map[string]string)
 	}
-	config["branch"] = ref
-	config["display_path"] = displayPath
+	config["branch"] = ctx.ref
+	config["display_path"] = ctx.displayPath
 
 	// Validate source
 	sendProgress(pb.IngestProgress_CLONING, "Validating source...", 0, 0, "")
-	if err := backend.Validate(stream.Context(), sourceURL, config); err != nil {
-		sendProgress(pb.IngestProgress_FAILED, fmt.Sprintf("validation failed: %v", err), 0, 0, "")
+	if err := backend.Validate(ctx.stream.Context(), ctx.sourceURL, config); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Initialize backend with progress keepalives (prevents stream timeout during long operations)
+	// Initialize backend with progress keepalives
 	initDone := make(chan struct{})
 	initErr := make(chan error, 1)
 
 	go func() {
-		err := backend.Initialize(stream.Context(), sourceURL, config)
+		err := backend.Initialize(ctx.stream.Context(), ctx.sourceURL, config)
 		if err != nil {
 			initErr <- err
 		} else {
@@ -252,7 +188,7 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 		}
 	}()
 
-	// Send keepalive progress updates every 10 seconds during initialization
+	// Send keepalive progress updates
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	initStartTime := time.Now()
@@ -260,55 +196,23 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 	for {
 		select {
 		case <-initDone:
-			// Initialization completed successfully
 			elapsed := time.Since(initStartTime).Round(time.Second)
 			sendProgress(pb.IngestProgress_CLONING, fmt.Sprintf("Backend ready in %v", elapsed), 0, 0, "")
-			goto initComplete
+			return nil
 		case err := <-initErr:
-			sendProgress(pb.IngestProgress_FAILED, fmt.Sprintf("failed to initialize backend: %v", err), 0, 0, "")
 			return fmt.Errorf("failed to initialize backend: %w", err)
 		case <-ticker.C:
 			elapsed := time.Since(initStartTime).Round(time.Second)
 			sendProgress(pb.IngestProgress_CLONING, fmt.Sprintf("Initializing backend... (%v elapsed)", elapsed), 0, 0, "")
-		case <-stream.Context().Done():
-			return fmt.Errorf("initialization cancelled: %w", stream.Context().Err())
+		case <-ctx.stream.Context().Done():
+			return fmt.Errorf("initialization cancelled: %w", ctx.stream.Context().Err())
 		}
 	}
+}
 
-initComplete:
-	sendProgress(pb.IngestProgress_REGISTERING, "Registering repository on nodes...", 0, 0, "")
-
-	// Get cluster nodes for sharding
-	r.mu.RLock()
-	nodes := make([]sharding.Node, 0, len(r.nodes))
-	for _, state := range r.nodes {
-		if state.info.Healthy {
-			nodes = append(nodes, sharding.Node{
-				ID:      state.info.NodeId,
-				Address: state.info.Address,
-				Weight:  state.info.Weight,
-				Healthy: true, // Mark as healthy since we filtered above
-			})
-		}
-	}
-	r.mu.RUnlock()
-
-	if len(nodes) == 0 {
-		sendProgress(pb.IngestProgress_FAILED, "no healthy nodes available", 0, 0, "")
-		return fmt.Errorf("no healthy nodes available")
-	}
-
-	// Create sharding calculator
-	sharder := sharding.NewHRW(nodes)
-
-	// STEP 1: Register repository metadata on ALL nodes
-	// This ensures every node knows about the repo and can resolve paths
-	r.logger.Info("registering repository on all nodes",
-		"display_path", displayPath,
-		"storage_id", storageID,
-		"node_count", len(nodes))
-
-	for _, node := range nodes {
+// registerOnAllNodes registers repository metadata on all cluster nodes
+func (r *Router) registerOnAllNodes(ctx *ingestionContext) error {
+	for _, node := range ctx.nodes {
 		r.mu.Lock()
 		state, ok := r.nodes[node.ID]
 		if !ok {
@@ -338,13 +242,13 @@ initComplete:
 		// Register repository on this node
 		regCtx, regCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_, err := client.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
-			StorageId:       storageID,
-			DisplayPath:     displayPath,
-			Source:          sourceURL,
-			IngestionType:   req.IngestionType,
-			FetchType:       req.FetchType,
-			IngestionConfig: req.IngestionConfig,
-			FetchConfig:     req.FetchConfig,
+			StorageId:       ctx.storageID,
+			DisplayPath:     ctx.displayPath,
+			Source:          ctx.sourceURL,
+			IngestionType:   ctx.req.IngestionType,
+			FetchType:       ctx.req.FetchType,
+			IngestionConfig: ctx.req.IngestionConfig,
+			FetchConfig:     ctx.req.FetchConfig,
 		})
 		regCancel()
 
@@ -352,50 +256,46 @@ initComplete:
 			r.logger.Error("failed to register repository on node",
 				"node_id", node.ID,
 				"error", err)
-			// Don't fail ingestion if registration fails on one node
-			// Files can still be ingested to other nodes
 		} else {
 			r.logger.Info("registered repository on node",
 				"node_id", node.ID,
-				"display_path", displayPath)
+				"display_path", ctx.displayPath)
 		}
 	}
+	return nil
+}
 
-	// STEP 2: Distribute files to nodes using HRW sharding with replication
-	sendProgress(pb.IngestProgress_INGESTING, "Ingesting files...", 0, 0, "")
-
-	var filesIngested int64
-	const batchSize = 1000          // Files per batch (optimal for transaction size)
-	const maxConcurrentBatches = 10 // Parallel batch operations
-
-	// Get replication factor from router config
-	replicationFactor := r.config.ReplicationFactor
-	if replicationFactor < 1 {
-		replicationFactor = 1 // At least primary
+// setupNodesAndSharding gets healthy nodes and creates sharding calculator
+func (r *Router) setupNodesAndSharding(ctx *ingestionContext) error {
+	r.mu.RLock()
+	ctx.nodes = make([]sharding.Node, 0, len(r.nodes))
+	for _, state := range r.nodes {
+		if state.info.Healthy {
+			ctx.nodes = append(ctx.nodes, sharding.Node{
+				ID:      state.info.NodeId,
+				Address: state.info.Address,
+				Weight:  state.info.Weight,
+				Healthy: true,
+			})
+		}
 	}
-	if replicationFactor > len(nodes) {
-		replicationFactor = len(nodes) // Can't have more replicas than nodes
+	r.mu.RUnlock()
+
+	if len(ctx.nodes) == 0 {
+		return fmt.Errorf("no healthy nodes available")
 	}
 
-	r.logger.Info("ingestion replication config",
-		"replication_factor", replicationFactor,
-		"healthy_nodes", len(nodes))
+	ctx.sharder = sharding.NewHRW(ctx.nodes)
 
-	// Pre-create gRPC connections for all healthy nodes (connection pooling)
-	type nodeClient struct {
-		nodeID string
-		client pb.MonoFSClient
-	}
-	nodeClients := make(map[string]nodeClient)
-
+	// Pre-create gRPC connections
+	ctx.nodeClients = make(map[string]nodeClient)
 	r.mu.Lock()
-	for _, node := range nodes {
+	for _, node := range ctx.nodes {
 		state, ok := r.nodes[node.ID]
 		if !ok || !state.info.Healthy || state.status != NodeActive {
 			continue
 		}
 
-		// Ensure connection exists
 		if state.client == nil {
 			conn, err := grpc.NewClient(state.info.Address,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -408,62 +308,99 @@ initComplete:
 			state.client = pb.NewMonoFSClient(conn)
 		}
 
-		nodeClients[node.ID] = nodeClient{
+		ctx.nodeClients[node.ID] = nodeClient{
 			nodeID: node.ID,
 			client: state.client,
 		}
 	}
 	r.mu.Unlock()
 
-	if len(nodeClients) == 0 {
-		sendProgress(pb.IngestProgress_FAILED, "no healthy nodes with connections available", 0, 0, "")
-		return fmt.Errorf("no healthy nodes available")
+	if len(ctx.nodeClients) == 0 {
+		return fmt.Errorf("no healthy nodes with connections available")
 	}
-	// Batch files by target node (primary) and replicas
-	primaryBatches := make(map[string][]*pb.FileMetadata)            // primaryNodeID -> files
-	replicaBatches := make(map[string]map[string][]*pb.FileMetadata) // replicaNodeID -> primaryNodeID -> files
 
-	// Collect files for layout generation (Phase 2)
-	var collectedFiles []buildlayout.FileInfo
+	return nil
+}
 
-	// Walk files using backend and group by target nodes
-	var totalFiles int64
-	err = backend.WalkFiles(stream.Context(), func(meta storage.FileMetadata) error {
-		atomic.AddInt64(&totalFiles, 1)
+// distributeFiles walks files and distributes them to nodes using sharding
+func (r *Router) distributeFiles(ctx *ingestionContext, sendProgress func(pb.IngestProgress_Stage, string, int64, int64, string)) (map[string][]*pb.FileMetadata, map[string]map[string][]*pb.FileMetadata, error) {
+	replicationFactor := r.config.ReplicationFactor
+	if replicationFactor < 1 {
+		replicationFactor = 1
+	}
+	if replicationFactor > len(ctx.nodes) {
+		replicationFactor = len(ctx.nodes)
+	}
 
-		// Determine target nodes using HRW sharding with replication
-		// GetNodes returns top N nodes sorted by HRW score
-		shardKey := storageID + ":" + meta.Path
-		targetNodes := sharder.GetNodes(shardKey, replicationFactor)
+	primaryBatches := make(map[string][]*pb.FileMetadata)
+	replicaBatches := make(map[string]map[string][]*pb.FileMetadata)
+
+	// Get handler for canonical path extraction
+	registry := NewIngestionRegistry()
+	handler, err := registry.Get(ctx.req.IngestionType)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get ingestion handler: %w", err)
+	}
+
+	err = ctx.backend.WalkFiles(ctx.stream.Context(), func(meta storage.FileMetadata) error {
+		atomic.AddInt64(ctx.totalFiles, 1)
+
+		// Extract canonical path from metadata on FIRST file
+		ctx.canonicalPathMux.Lock()
+		if ctx.canonicalPath == "" && meta.Metadata != nil {
+			if canonicalPath := handler.ExtractCanonicalPath(meta.Metadata); canonicalPath != "" {
+				ctx.canonicalPath = canonicalPath
+
+				// Update display path and storage ID immediately
+				oldDisplayPath := ctx.displayPath
+				oldStorageID := ctx.storageID
+
+				ctx.displayPath = canonicalPath
+				ctx.storageID = generateStorageID(canonicalPath)
+
+				r.logger.Info("discovered canonical path from metadata",
+					"original_path", oldDisplayPath,
+					"canonical_path", ctx.canonicalPath,
+					"old_storage_id", oldStorageID,
+					"new_storage_id", ctx.storageID)
+
+				// Move in-progress tracking from old storageID to new storageID
+				r.mu.Lock()
+				if progress, ok := r.inProgressIngestions[oldStorageID]; ok {
+					progress.mu.Lock()
+					progress.storageID = ctx.storageID
+					progress.repoID = ctx.canonicalPath
+					progress.mu.Unlock()
+					r.inProgressIngestions[ctx.storageID] = progress
+					delete(r.inProgressIngestions, oldStorageID)
+				}
+				r.mu.Unlock()
+
+				// Re-register all nodes with new canonical path
+				r.updateCanonicalPath(ctx)
+			}
+		}
+		currentDisplayPath := ctx.displayPath
+		currentStorageID := ctx.storageID
+		ctx.canonicalPathMux.Unlock()
+
+		// Determine target nodes using HRW sharding
+		shardKey := currentStorageID + ":" + meta.Path
+		targetNodes := ctx.sharder.GetNodes(shardKey, replicationFactor)
 		if len(targetNodes) == 0 {
 			r.logger.Warn("no node available for path", "path", meta.Path)
 			return nil
 		}
 
-		// First node is primary, rest are replicas
 		primaryNode := targetNodes[0]
 
-		// Debug logging for first 5 files
-		if atomic.LoadInt64(&totalFiles) <= 5 {
-			replicaIDs := make([]string, 0, len(targetNodes)-1)
-			for i := 1; i < len(targetNodes); i++ {
-				replicaIDs = append(replicaIDs, targetNodes[i].ID)
-			}
-			r.logger.Info("file sharding with replication",
-				"file_num", totalFiles,
-				"path", meta.Path,
-				"shard_key", shardKey,
-				"primary_node", primaryNode.ID,
-				"replica_nodes", replicaIDs)
-		}
-
-		// Check if we have a connection to primary node
-		if _, ok := nodeClients[primaryNode.ID]; !ok {
+		// Check connection to primary node
+		if _, ok := ctx.nodeClients[primaryNode.ID]; !ok {
 			r.logger.Warn("skipping file - no connection to primary node", "node_id", primaryNode.ID, "path", meta.Path)
 			return nil
 		}
 
-		// Merge backend metadata with standard metadata
+		// Merge backend metadata
 		backendMeta := meta.Metadata
 		if backendMeta == nil {
 			backendMeta = make(map[string]string)
@@ -471,27 +408,27 @@ initComplete:
 
 		fileMeta := &pb.FileMetadata{
 			Path:            meta.Path,
-			Ref:             ref,
+			Ref:             ctx.ref,
 			Size:            meta.Size,
 			Mtime:           meta.ModTime,
 			Mode:            meta.Mode,
 			BlobHash:        meta.ContentHash,
-			Source:          sourceURL,
-			StorageId:       storageID,
-			DisplayPath:     displayPath,
-			SourceType:      req.IngestionType,
-			FetchType:       req.FetchType,
+			Source:          ctx.sourceURL,
+			StorageId:       currentStorageID,
+			DisplayPath:     currentDisplayPath,
+			SourceType:      ctx.req.IngestionType,
+			FetchType:       ctx.req.FetchType,
 			BackendMetadata: backendMeta,
 		}
 
 		// Add to primary batch
 		primaryBatches[primaryNode.ID] = append(primaryBatches[primaryNode.ID], fileMeta)
 
-		// Add to replica batches (for nodes 1..N-1)
+		// Add to replica batches
 		for i := 1; i < len(targetNodes); i++ {
 			replicaNode := targetNodes[i]
-			if _, ok := nodeClients[replicaNode.ID]; !ok {
-				continue // Skip if no connection to replica
+			if _, ok := ctx.nodeClients[replicaNode.ID]; !ok {
+				continue
 			}
 
 			if replicaBatches[replicaNode.ID] == nil {
@@ -501,22 +438,22 @@ initComplete:
 				replicaBatches[replicaNode.ID][primaryNode.ID], fileMeta)
 		}
 
-		// Send progress every 1000 files
-		if atomic.LoadInt64(&totalFiles)%1000 == 0 {
-			count := atomic.LoadInt64(&totalFiles)
+		// Send progress periodically
+		if atomic.LoadInt64(ctx.totalFiles)%1000 == 0 {
+			count := atomic.LoadInt64(ctx.totalFiles)
 			sendProgress(pb.IngestProgress_INGESTING,
 				fmt.Sprintf("Scanning files... %d found", count),
 				0, count, meta.Path)
 		}
 
-		// Collect file info for layout generation (Phase 2)
-		collectedFiles = append(collectedFiles, buildlayout.FileInfo{
+		// Collect file info for layout generation
+		ctx.collectedFiles = append(ctx.collectedFiles, buildlayout.FileInfo{
 			Path:            meta.Path,
 			BlobHash:        meta.ContentHash,
 			Size:            meta.Size,
 			Mode:            meta.Mode,
 			Mtime:           meta.ModTime,
-			Source:          sourceURL,
+			Source:          ctx.sourceURL,
 			BackendMetadata: meta.Metadata,
 		})
 
@@ -524,47 +461,60 @@ initComplete:
 	})
 
 	if err != nil {
-		sendProgress(pb.IngestProgress_FAILED, fmt.Sprintf("failed to walk files: %v", err), 0, 0, "")
-		return fmt.Errorf("failed to walk files: %w", err)
+		return nil, nil, fmt.Errorf("failed to walk files: %w", err)
 	}
 
-	// Log distribution for debugging
-	totalReplicaFiles := 0
-	for nodeID, files := range primaryBatches {
-		r.logger.Info("primary batch prepared",
-			"node_id", nodeID,
-			"file_count", len(files),
-			"sample_paths", func() []string {
-				if len(files) > 3 {
-					return []string{files[0].Path, files[1].Path, files[2].Path}
-				}
-				return []string{}
-			}())
-	}
-	for replicaNodeID, primaryMap := range replicaBatches {
-		for primaryNodeID, files := range primaryMap {
-			totalReplicaFiles += len(files)
-			r.logger.Debug("replica batch prepared",
-				"replica_node", replicaNodeID,
-				"primary_node", primaryNodeID,
-				"file_count", len(files))
+	// No need to call updateCanonicalPath here - already done during first file
+	return primaryBatches, replicaBatches, nil
+}
+
+// updateCanonicalPath updates repository registration with canonical path
+func (r *Router) updateCanonicalPath(ctx *ingestionContext) {
+	r.logger.Info("updating repository registrations with canonical path",
+		"original_path", ctx.displayPath,
+		"canonical_path", ctx.canonicalPath)
+
+	for _, node := range ctx.nodes {
+		r.mu.Lock()
+		state, ok := r.nodes[node.ID]
+		if !ok || state.client == nil {
+			r.mu.Unlock()
+			continue
+		}
+		client := state.client
+		r.mu.Unlock()
+
+		regCtx, regCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err := client.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
+			StorageId:       ctx.storageID,
+			DisplayPath:     ctx.canonicalPath,
+			Source:          ctx.sourceURL,
+			IngestionType:   ctx.req.IngestionType,
+			FetchType:       ctx.req.FetchType,
+			IngestionConfig: ctx.req.IngestionConfig,
+			FetchConfig:     ctx.req.FetchConfig,
+		})
+		regCancel()
+
+		if err != nil {
+			r.logger.Warn("failed to update repository registration with canonical path",
+				"node_id", node.ID,
+				"error", err)
 		}
 	}
+}
 
-	r.logger.Info("files grouped for ingestion",
-		"total_files", totalFiles,
-		"primary_nodes", len(primaryBatches),
-		"replica_nodes", len(replicaBatches),
-		"total_replica_files", totalReplicaFiles,
-		"replication_factor", replicationFactor)
+// ingestPrimaryBatches sends primary file batches to nodes
+func (r *Router) ingestPrimaryBatches(ctx *ingestionContext, primaryBatches map[string][]*pb.FileMetadata, sendProgress func(pb.IngestProgress_Stage, string, int64, int64, string)) error {
+	const batchSize = 1000
+	const maxConcurrentBatches = 10
 
-	// ===== PHASE 1: Send PRIMARY batches =====
 	type batchJob struct {
 		nodeID string
 		batch  []*pb.FileMetadata
 	}
 
-	// Pre-calculate total batches needed for proper channel sizing
+	// Calculate total batches
 	totalPrimaryBatches := 0
 	for _, files := range primaryBatches {
 		totalPrimaryBatches += (len(files) + batchSize - 1) / batchSize
@@ -574,33 +524,26 @@ initComplete:
 	resultChan := make(chan error, totalPrimaryBatches)
 	doneChan := make(chan struct{})
 
-	// Start batch worker goroutines
+	// Start workers
 	var wg sync.WaitGroup
 	for i := 0; i < maxConcurrentBatches; i++ {
 		wg.Add(1)
-		go func(workerID int) {
+		go func() {
 			defer wg.Done()
 			for job := range batchChan {
-				client, ok := nodeClients[job.nodeID]
+				client, ok := ctx.nodeClients[job.nodeID]
 				if !ok {
-					r.logger.Error("node client not found", "node_id", job.nodeID)
 					resultChan <- fmt.Errorf("node %s not found", job.nodeID)
 					continue
 				}
 
-				// Send batch with timeout
 				batchCtx, batchCancel := context.WithTimeout(context.Background(), 60*time.Second)
-
-				r.logger.Debug("sending primary batch to node",
-					"node_id", job.nodeID,
-					"batch_size", len(job.batch))
-
 				resp, err := client.client.IngestFileBatch(batchCtx, &pb.IngestFileBatchRequest{
 					Files:       job.batch,
-					StorageId:   storageID,
-					DisplayPath: displayPath,
-					Source:      sourceURL,
-					Ref:         ref,
+					StorageId:   ctx.storageID,
+					DisplayPath: ctx.displayPath,
+					Source:      ctx.sourceURL,
+					Ref:         ctx.ref,
 				})
 				batchCancel()
 
@@ -621,14 +564,13 @@ initComplete:
 						"error", resp.ErrorMessage)
 				}
 
-				// Update counter
-				atomic.AddInt64(&filesIngested, resp.FilesIngested)
+				atomic.AddInt64(ctx.filesIngested, resp.FilesIngested)
 				resultChan <- nil
 			}
-		}(i)
+		}()
 	}
 
-	// Progress reporter goroutine
+	// Progress reporter
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -637,36 +579,30 @@ initComplete:
 			case <-doneChan:
 				return
 			case <-ticker.C:
-				count := atomic.LoadInt64(&filesIngested)
+				count := atomic.LoadInt64(ctx.filesIngested)
+				total := atomic.LoadInt64(ctx.totalFiles)
 				sendProgress(pb.IngestProgress_INGESTING,
-					fmt.Sprintf("Ingesting files... %d/%d", count, totalFiles),
-					count, totalFiles, "")
+					fmt.Sprintf("Ingesting files... %d/%d", count, total),
+					count, total, "")
 			}
 		}
 	}()
 
-	// Feed primary batches to workers
+	// Queue batches
 	batchesQueued := 0
 	for nodeID, files := range primaryBatches {
-		// Split into smaller batches for this node
 		for i := 0; i < len(files); i += batchSize {
 			end := i + batchSize
 			if end > len(files) {
 				end = len(files)
 			}
-
-			batchChan <- batchJob{
-				nodeID: nodeID,
-				batch:  files[i:end],
-			}
+			batchChan <- batchJob{nodeID: nodeID, batch: files[i:end]}
 			batchesQueued++
 		}
 	}
 	close(batchChan)
 
-	r.logger.Info("primary batches queued", "count", batchesQueued)
-
-	// Wait for all primary batches to complete
+	// Wait for completion
 	wg.Wait()
 	close(doneChan)
 
@@ -684,87 +620,85 @@ initComplete:
 	}
 
 	if firstError != nil && errorCount == batchesQueued {
-		sendProgress(pb.IngestProgress_FAILED, fmt.Sprintf("all batches failed: %v", firstError), filesIngested, totalFiles, "")
-		return fmt.Errorf("ingestion failed: %w", firstError)
+		return fmt.Errorf("all batches failed: %w", firstError)
 	}
 
 	if errorCount > 0 {
 		r.logger.Warn("some primary batches failed",
 			"failed_batches", errorCount,
-			"total_batches", batchesQueued,
-			"files_ingested", filesIngested)
+			"total_batches", batchesQueued)
 	}
 
-	r.logger.Info("primary batch ingestion complete",
-		"files", filesIngested,
-		"batches", batchesQueued,
-		"failed_batches", errorCount)
+	return nil
+}
 
-	// ===== PHASE 2: Send REPLICA batches (async, best-effort) =====
-	// Replica ingestion is done asynchronously - it's okay if some fail
-	// because failover will still work (just slower initial sync)
-	if replicationFactor > 1 && len(replicaBatches) > 0 {
-		sendProgress(pb.IngestProgress_INGESTING, "Replicating to backup nodes...", filesIngested, totalFiles, "")
+// ingestReplicaBatches sends replica file batches to nodes (async, best-effort)
+func (r *Router) ingestReplicaBatches(ctx *ingestionContext, replicaBatches map[string]map[string][]*pb.FileMetadata) {
+	replicationFactor := r.config.ReplicationFactor
+	if replicationFactor <= 1 || len(replicaBatches) == 0 {
+		return
+	}
 
-		var replicasIngested int64
-		var replicaErrors int64
-		var replicaWg sync.WaitGroup
+	const batchSize = 1000
+	var replicasIngested, replicaErrors int64
+	var replicaWg sync.WaitGroup
 
-		for replicaNodeID, primaryMap := range replicaBatches {
-			client, ok := nodeClients[replicaNodeID]
-			if !ok {
-				continue
-			}
-
-			for primaryNodeID, files := range primaryMap {
-				// Split into batches
-				for i := 0; i < len(files); i += batchSize {
-					end := i + batchSize
-					if end > len(files) {
-						end = len(files)
-					}
-					batch := files[i:end]
-
-					replicaWg.Add(1)
-					go func(nodeID, primaryID string, fileBatch []*pb.FileMetadata, c nodeClient) {
-						defer replicaWg.Done()
-
-						ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-						defer cancel()
-
-						resp, err := c.client.IngestReplicaBatch(ctx, &pb.IngestReplicaBatchRequest{
-							Files:         fileBatch,
-							StorageId:     storageID,
-							DisplayPath:   displayPath,
-							PrimaryNodeId: primaryID,
-							Source:        sourceURL,
-							Ref:           ref,
-						})
-
-						if err != nil {
-							r.logger.Warn("replica batch failed",
-								"replica_node", nodeID,
-								"primary_node", primaryID,
-								"error", err)
-							atomic.AddInt64(&replicaErrors, 1)
-							return
-						}
-
-						atomic.AddInt64(&replicasIngested, resp.FilesReplicated)
-					}(replicaNodeID, primaryNodeID, batch, client)
-				}
-			}
+	for replicaNodeID, primaryMap := range replicaBatches {
+		client, ok := ctx.nodeClients[replicaNodeID]
+		if !ok {
+			continue
 		}
 
-		replicaWg.Wait()
+		for primaryNodeID, files := range primaryMap {
+			for i := 0; i < len(files); i += batchSize {
+				end := i + batchSize
+				if end > len(files) {
+					end = len(files)
+				}
+				batch := files[i:end]
 
-		r.logger.Info("replica ingestion complete",
-			"files_replicated", replicasIngested,
-			"errors", replicaErrors)
+				replicaWg.Add(1)
+				go func(nodeID, primaryID string, fileBatch []*pb.FileMetadata, c nodeClient) {
+					defer replicaWg.Done()
+
+					replCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+					defer cancel()
+
+					resp, err := c.client.IngestReplicaBatch(replCtx, &pb.IngestReplicaBatchRequest{
+						Files:         fileBatch,
+						StorageId:     ctx.storageID,
+						DisplayPath:   ctx.displayPath,
+						PrimaryNodeId: primaryID,
+						Source:        ctx.sourceURL,
+						Ref:           ctx.ref,
+					})
+
+					if err != nil {
+						r.logger.Warn("replica batch failed",
+							"replica_node", nodeID,
+							"primary_node", primaryID,
+							"error", err)
+						atomic.AddInt64(&replicaErrors, 1)
+						return
+					}
+
+					atomic.AddInt64(&replicasIngested, resp.FilesReplicated)
+				}(replicaNodeID, primaryNodeID, batch, client)
+			}
+		}
 	}
 
-	// Build directory indexes on ALL nodes in batch (deferred for performance)
-	sendProgress(pb.IngestProgress_INGESTING, "Building directory indexes...", filesIngested, filesIngested, "")
+	replicaWg.Wait()
+	r.logger.Info("replica ingestion complete",
+		"files_replicated", replicasIngested,
+		"errors", replicaErrors)
+}
+
+// performPostIngestionTasks handles indexing, layouts, and marking repo as onboarded
+func (r *Router) performPostIngestionTasks(ctx *ingestionContext, sendProgress func(pb.IngestProgress_Stage, string, int64, int64, string)) {
+	// Build directory indexes
+	sendProgress(pb.IngestProgress_INGESTING, "Building directory indexes...",
+		atomic.LoadInt64(ctx.filesIngested), atomic.LoadInt64(ctx.filesIngested), "")
 
 	r.mu.RLock()
 	indexingNodes := make([]*nodeState, 0, len(r.nodes))
@@ -778,24 +712,21 @@ initComplete:
 	for _, state := range indexingNodes {
 		indexCtx, indexCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		resp, err := state.client.BuildDirectoryIndexes(indexCtx, &pb.BuildDirectoryIndexesRequest{
-			StorageId: storageID,
+			StorageId: ctx.storageID,
 		})
 		indexCancel()
 
 		if err != nil {
 			r.logger.Error("failed to build directory indexes on node",
-				"node_id", state.info.NodeId,
-				"storage_id", storageID,
-				"error", err)
+				"node_id", state.info.NodeId, "error", err)
 		} else {
 			r.logger.Info("directory indexes built on node",
 				"node_id", state.info.NodeId,
-				"storage_id", storageID,
 				"directories_indexed", resp.DirectoriesIndexed)
 		}
 	}
 
-	// Mark repository as onboarded on ALL nodes
+	// Mark repository as onboarded
 	r.mu.RLock()
 	activeNodes := make([]*nodeState, 0, len(r.nodes))
 	for _, state := range r.nodes {
@@ -808,105 +739,260 @@ initComplete:
 	for _, state := range activeNodes {
 		markCtx, markCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, err := state.client.MarkRepositoryOnboarded(markCtx, &pb.MarkRepositoryOnboardedRequest{
-			StorageId: storageID,
+			StorageId: ctx.storageID,
 		})
 		markCancel()
 
 		if err != nil {
 			r.logger.Warn("failed to mark repository onboarded on node",
-				"node_id", state.info.NodeId,
-				"storage_id", storageID,
-				"error", err)
-		} else {
-			r.logger.Info("marked repository as onboarded on node",
-				"node_id", state.info.NodeId,
-				"storage_id", storageID)
+				"node_id", state.info.NodeId, "error", err)
 		}
 	}
 
-	// Track ingested repository and detect re-ingestion
+	// Track ingested repository
 	r.mu.Lock()
-	existingRepo, isReingestion := r.ingestedRepos[storageID]
-	r.ingestedRepos[storageID] = &ingestedRepo{
-		repoID:            displayPath, // Store display path for UI
-		repoURL:           sourceURL,
-		branch:            ref,
-		filesCount:        filesIngested,
+	_, isReingestion := r.ingestedRepos[ctx.storageID]
+	r.ingestedRepos[ctx.storageID] = &ingestedRepo{
+		repoID:            ctx.displayPath,
+		repoURL:           ctx.sourceURL,
+		branch:            ctx.ref,
+		filesCount:        atomic.LoadInt64(ctx.filesIngested),
 		ingestedAt:        time.Now(),
-		topologyVersion:   r.version.Load(), // Current topology version
+		topologyVersion:   r.version.Load(),
 		targetTopology:    0,
 		rebalanceState:    RebalanceStateStable,
 		rebalanceProgress: 1.0,
 	}
 	r.mu.Unlock()
 
-	// If this is a re-ingestion of an existing repository, trigger rebalancing
+	// Trigger rebalancing if re-ingestion
 	if isReingestion {
 		r.logger.Info("detected repository re-ingestion, triggering cluster rebalancing",
-			"storage_id", storageID,
-			"display_path", displayPath,
-			"previous_ingestion", existingRepo.ingestedAt,
-			"previous_files", existingRepo.filesCount,
-			"new_files", filesIngested)
-
-		// Trigger rebalancing on all active nodes asynchronously
-		// This will redistribute files according to current cluster topology
-		go r.rebalanceRepository(storageID)
+			"storage_id", ctx.storageID)
+		go r.rebalanceRepository(ctx.storageID)
 	}
 
-	// Trigger search indexing asynchronously (if search service configured)
+	// Trigger search indexing
 	if r.searchClient != nil {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			searchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 			defer cancel()
 
-			resp, err := r.searchClient.IndexRepository(ctx, &pb.IndexRequest{
-				StorageId:   storageID,
-				DisplayPath: displayPath,
-				Source:      sourceURL,
-				Ref:         ref,
+			resp, err := r.searchClient.IndexRepository(searchCtx, &pb.IndexRequest{
+				StorageId:   ctx.storageID,
+				DisplayPath: ctx.displayPath,
+				Source:      ctx.sourceURL,
+				Ref:         ctx.ref,
 			})
 			if err != nil {
-				r.logger.Warn("failed to trigger search indexing",
-					"storage_id", storageID,
-					"error", err)
+				r.logger.Warn("failed to trigger search indexing", "error", err)
 			} else if resp.Queued {
-				r.logger.Info("search indexing queued",
-					"storage_id", storageID,
-					"job_id", resp.JobId)
-			} else {
-				r.logger.Warn("search indexing not queued",
-					"storage_id", storageID,
-					"message", resp.Message)
+				r.logger.Info("search indexing queued", "job_id", resp.JobId)
 			}
 		}()
 	}
 
-	// Generate build layouts (virtual paths for build tools)
+	// Generate build layouts
 	if r.layoutRegistry != nil && r.layoutRegistry.HasMappers() {
 		layoutInfo := buildlayout.RepoInfo{
-			DisplayPath:   displayPath,
-			StorageID:     storageID,
-			Source:        sourceURL,
-			Ref:           ref,
-			IngestionType: string(ingestionType),
-			FetchType:     string(fetchType),
-			Config:        req.IngestionConfig,
+			DisplayPath:   ctx.displayPath,
+			StorageID:     ctx.storageID,
+			Source:        ctx.sourceURL,
+			Ref:           ctx.ref,
+			IngestionType: string(ctx.ingestionType),
+			FetchType:     string(ctx.fetchType),
+			Config:        ctx.req.IngestionConfig,
 		}
 
-		// sendProgress wrapper for layout generation
 		layoutProgress := func(stage pb.IngestProgress_Stage, msg string) {
-			if stream != nil {
-				stream.Send(&pb.IngestProgress{
+			if ctx.stream != nil {
+				ctx.stream.Send(&pb.IngestProgress{
 					Stage:   stage,
 					Message: msg,
 				})
 			}
 		}
 
-		r.generateLayouts(stream.Context(), layoutInfo, collectedFiles, layoutProgress)
+		r.generateLayouts(ctx.stream.Context(), layoutInfo, ctx.collectedFiles, layoutProgress)
+	}
+}
+
+// IngestRepository implements the IngestRepository RPC with streaming progress.
+func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_IngestRepositoryServer) error {
+	// Initialize ingestion context
+	var filesIngested, totalFiles int64
+	ctx := &ingestionContext{
+		req:           req,
+		stream:        stream,
+		filesIngested: &filesIngested,
+		totalFiles:    &totalFiles,
 	}
 
-	sendProgress(pb.IngestProgress_COMPLETED, fmt.Sprintf("Repository ingested successfully: %d files", filesIngested), filesIngested, filesIngested, "")
+	// Step 1: Validate and setup
+	if err := r.validateAndSetup(ctx); err != nil {
+		return err
+	}
+
+	r.logger.Info("ingesting source",
+		"source", req.Source,
+		"ref", ctx.ref,
+		"source_url", ctx.sourceURL,
+		"display_path", ctx.displayPath,
+		"ingestion_type", ctx.ingestionType,
+		"fetch_type", ctx.fetchType)
+
+	// Check for already in-progress or already completed ingestion.
+	// We check by storageID first, then also scan by source URL because
+	// for npm/cargo/maven packages the initial storageID (hash of source
+	// string like "prettier@3.1.1") differs from the canonical storageID
+	// (hash of discovered path like "github.com/prettier/prettier").
+	r.mu.Lock()
+	if existing, ok := r.inProgressIngestions[ctx.storageID]; ok {
+		r.mu.Unlock()
+		return fmt.Errorf("ingestion already in progress for %s (started %s)",
+			existing.repoID, existing.startedAt.Format(time.RFC3339))
+	}
+	for _, existing := range r.inProgressIngestions {
+		if existing.repoURL == ctx.sourceURL {
+			r.mu.Unlock()
+			return fmt.Errorf("ingestion already in progress for %s (started %s)",
+				existing.repoID, existing.startedAt.Format(time.RFC3339))
+		}
+	}
+	if existing, ok := r.ingestedRepos[ctx.storageID]; ok {
+		r.mu.Unlock()
+		return fmt.Errorf("source already ingested as %s (ingested %s)",
+			existing.repoID, existing.ingestedAt.Format(time.RFC3339))
+	}
+	for _, existing := range r.ingestedRepos {
+		if existing.repoURL == ctx.sourceURL {
+			r.mu.Unlock()
+			return fmt.Errorf("source already ingested as %s (ingested %s)",
+				existing.repoID, existing.ingestedAt.Format(time.RFC3339))
+		}
+	}
+
+	// Register in-progress ingestion
+	ctx.initialStorageID = ctx.storageID
+	r.inProgressIngestions[ctx.storageID] = &inProgressIngestion{
+		storageID: ctx.storageID,
+		repoID:    ctx.displayPath,
+		repoURL:   ctx.sourceURL,
+		branch:    ctx.ref,
+		startedAt: time.Now(),
+		stage:     pb.IngestProgress_CLONING,
+		message:   "Starting ingestion...",
+	}
+	r.mu.Unlock()
+
+	// Ensure cleanup on exit
+	defer func() {
+		r.mu.Lock()
+		// Always clean up the initial storageID entry (before canonical path changed it)
+		if ctx.initialStorageID != ctx.storageID {
+			delete(r.inProgressIngestions, ctx.initialStorageID)
+		}
+		progress, exists := r.inProgressIngestions[ctx.storageID]
+		if exists && progress.stage == pb.IngestProgress_FAILED {
+			r.mu.Unlock()
+			time.AfterFunc(30*time.Second, func() {
+				r.mu.Lock()
+				delete(r.inProgressIngestions, ctx.storageID)
+				r.mu.Unlock()
+			})
+		} else {
+			delete(r.inProgressIngestions, ctx.storageID)
+			r.mu.Unlock()
+		}
+		if ctx.backend != nil {
+			ctx.backend.Cleanup()
+		}
+	}()
+
+	// Helper to send progress updates
+	sendProgress := func(stage pb.IngestProgress_Stage, message string, filesProcessed, totalFiles int64, currentFile string) {
+		if r.mu.TryLock() {
+			if progress, ok := r.inProgressIngestions[ctx.storageID]; ok {
+				progress.mu.Lock()
+				progress.stage = stage
+				progress.message = message
+				progress.filesProcessed = filesProcessed
+				progress.totalFiles = totalFiles
+				progress.mu.Unlock()
+			}
+			r.mu.Unlock()
+		}
+		stream.Send(&pb.IngestProgress{
+			Stage:          stage,
+			Message:        message,
+			FilesProcessed: filesProcessed,
+			TotalFiles:     totalFiles,
+			CurrentFile:    currentFile,
+			Success:        stage == pb.IngestProgress_COMPLETED,
+		})
+	}
+
+	// Step 2: Initialize backend
+	if err := r.initializeBackend(ctx, sendProgress); err != nil {
+		sendProgress(pb.IngestProgress_FAILED, err.Error(), 0, 0, "")
+		return err
+	}
+
+	// Step 3: Setup nodes and sharding
+	sendProgress(pb.IngestProgress_REGISTERING, "Preparing cluster nodes...", 0, 0, "")
+	if err := r.setupNodesAndSharding(ctx); err != nil {
+		sendProgress(pb.IngestProgress_FAILED, err.Error(), 0, 0, "")
+		return err
+	}
+
+	// Step 4: Register on all nodes (skip if display path not yet known —
+	// npm/cargo/maven discover canonical path during file scanning and
+	// register via updateCanonicalPath at that point)
+	if ctx.displayPath != "" {
+		sendProgress(pb.IngestProgress_REGISTERING, "Registering repository on nodes...", 0, 0, "")
+		r.logger.Info("registering repository on all nodes",
+			"display_path", ctx.displayPath,
+			"storage_id", ctx.storageID,
+			"node_count", len(ctx.nodes))
+
+		if err := r.registerOnAllNodes(ctx); err != nil {
+			sendProgress(pb.IngestProgress_FAILED, err.Error(), 0, 0, "")
+			return err
+		}
+	} else {
+		sendProgress(pb.IngestProgress_REGISTERING, "Preparing ingestion (display path pending)...", 0, 0, "")
+		r.logger.Info("skipping initial registration — display path will be discovered from package metadata",
+			"source", ctx.sourceURL)
+	}
+
+	// Step 5: Distribute files to nodes
+	sendProgress(pb.IngestProgress_INGESTING, "Scanning files...", 0, 0, "")
+	primaryBatches, replicaBatches, err := r.distributeFiles(ctx, sendProgress)
+	if err != nil {
+		sendProgress(pb.IngestProgress_FAILED, err.Error(), 0, 0, "")
+		return err
+	}
+
+	// Step 6: Ingest primary batches
+	sendProgress(pb.IngestProgress_INGESTING, "Ingesting files to primary nodes...", 0, atomic.LoadInt64(ctx.totalFiles), "")
+	if err := r.ingestPrimaryBatches(ctx, primaryBatches, sendProgress); err != nil {
+		sendProgress(pb.IngestProgress_FAILED, err.Error(), atomic.LoadInt64(ctx.filesIngested), atomic.LoadInt64(ctx.totalFiles), "")
+		return err
+	}
+
+	// Step 7: Ingest replica batches (best-effort)
+	if r.config.ReplicationFactor > 1 {
+		sendProgress(pb.IngestProgress_INGESTING, "Replicating to backup nodes...",
+			atomic.LoadInt64(ctx.filesIngested), atomic.LoadInt64(ctx.totalFiles), "")
+		r.ingestReplicaBatches(ctx, replicaBatches)
+	}
+
+	// Step 8: Post-ingestion tasks
+	r.performPostIngestionTasks(ctx, sendProgress)
+
+	filesIngestedFinal := atomic.LoadInt64(ctx.filesIngested)
+	sendProgress(pb.IngestProgress_COMPLETED,
+		fmt.Sprintf("Repository ingested successfully: %d files", filesIngestedFinal),
+		filesIngestedFinal, filesIngestedFinal, "")
 	return nil
 }

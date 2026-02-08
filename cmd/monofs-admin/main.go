@@ -16,7 +16,11 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/buildlayout"
+	bazelmapper "github.com/radryc/monofs/internal/buildlayout/bazel"
+	cargomapper "github.com/radryc/monofs/internal/buildlayout/cargo"
 	golangmapper "github.com/radryc/monofs/internal/buildlayout/golang"
+	mavenmapper "github.com/radryc/monofs/internal/buildlayout/maven"
+	npmmapper "github.com/radryc/monofs/internal/buildlayout/npm"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -601,6 +605,14 @@ func selectMapper(depType string) buildlayout.LayoutMapper {
 	switch strings.ToLower(depType) {
 	case "go":
 		return golangmapper.NewGoMapper()
+	case "npm":
+		return npmmapper.NewNpmMapper()
+	case "maven":
+		return mavenmapper.NewMavenMapper()
+	case "cargo":
+		return cargomapper.NewCargoMapper()
+	case "bazel":
+		return bazelmapper.NewBazelMapper()
 	default:
 		return nil
 	}
@@ -611,12 +623,21 @@ func mapDepTypeToFetchType(depType string) string {
 	switch strings.ToLower(depType) {
 	case "go":
 		return "gomod"
+	case "npm":
+		return "npm"
+	case "maven":
+		return "maven"
+	case "cargo":
+		return "cargo"
 	default:
 		return "git"
 	}
 }
 
-// fetchExistingRepos fetches the list of existing repository display paths from the router.
+// fetchExistingRepos fetches the list of existing repository identifiers from the router.
+// Returns both display_path and repo_url (source) values so skip-existing works for
+// package managers where display_path differs from source (e.g. npm: source="prettier@3.1.1"
+// but display_path="github.com/prettier/prettier").
 func fetchExistingRepos(routerAddr string) ([]string, error) {
 	// Extract HTTP address from gRPC address (convert port 9090 -> 8080)
 	httpAddr := strings.Replace(routerAddr, ":9090", ":8080", 1)
@@ -637,6 +658,7 @@ func fetchExistingRepos(routerAddr string) ([]string, error) {
 	var data struct {
 		Repositories []struct {
 			DisplayPath string `json:"display_path"`
+			RepoURL     string `json:"repo_url"`
 		} `json:"repositories"`
 	}
 
@@ -647,6 +669,10 @@ func fetchExistingRepos(routerAddr string) ([]string, error) {
 	var repos []string
 	for _, repo := range data.Repositories {
 		repos = append(repos, repo.DisplayPath)
+		// Also include source URL so skip-existing matches npm/cargo/maven sources
+		if repo.RepoURL != "" && repo.RepoURL != repo.DisplayPath {
+			repos = append(repos, repo.RepoURL)
+		}
 	}
 
 	return repos, nil
@@ -775,6 +801,12 @@ func parseIngestionType(s string) pb.IngestionType {
 		return pb.IngestionType_INGESTION_S3
 	case "file":
 		return pb.IngestionType_INGESTION_FILE
+	case "npm":
+		return pb.IngestionType_INGESTION_NPM
+	case "maven":
+		return pb.IngestionType_INGESTION_MAVEN
+	case "cargo":
+		return pb.IngestionType_INGESTION_CARGO
 	default:
 		return pb.IngestionType_INGESTION_GIT
 	}
@@ -785,10 +817,18 @@ func parseFetchType(s string) pb.FetchType {
 	switch strings.ToLower(s) {
 	case "git":
 		return pb.FetchType_FETCH_GIT
+	case "gomod":
+		return pb.FetchType_FETCH_GOMOD
 	case "s3":
 		return pb.FetchType_FETCH_S3
 	case "local":
 		return pb.FetchType_FETCH_LOCAL
+	case "npm":
+		return pb.FetchType_FETCH_NPM
+	case "maven":
+		return pb.FetchType_FETCH_MAVEN
+	case "cargo":
+		return pb.FetchType_FETCH_CARGO
 	default:
 		return pb.FetchType_FETCH_GIT
 	}

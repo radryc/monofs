@@ -61,17 +61,19 @@ type repoInfo struct {
 }
 
 type storedMetadata struct {
-	Path        string `json:"path"`         // Full path: "github.com/owner/repo/path/to/file"
-	StorageID   string `json:"storage_id"`   // SHA-256 hash of display path
-	DisplayPath string `json:"display_path"` // User-visible repo path
-	FilePath    string `json:"file_path"`    // Path within repo: "path/to/file"
-	Size        uint64 `json:"size"`
-	Mode        uint32 `json:"mode"`
-	Mtime       int64  `json:"mtime"`
-	BlobHash    string `json:"blob_hash"`
-	Branch      string `json:"branch"`
-	RepoURL     string `json:"repo_url"`
-	IsDir       bool   `json:"is_dir"`
+	Path            string            `json:"path"`         // Full path: "github.com/owner/repo/path/to/file"
+	StorageID       string            `json:"storage_id"`   // SHA-256 hash of display path
+	DisplayPath     string            `json:"display_path"` // User-visible repo path
+	FilePath        string            `json:"file_path"`    // Path within repo: "path/to/file"
+	Size            uint64            `json:"size"`
+	Mode            uint32            `json:"mode"`
+	Mtime           int64             `json:"mtime"`
+	BlobHash        string            `json:"blob_hash"`
+	Branch          string            `json:"branch"`
+	RepoURL         string            `json:"repo_url"`
+	IsDir           bool              `json:"is_dir"`
+	FetchType       string            `json:"fetch_type"`                 // Storage fetch type (git, npm, gomod, etc.)
+	BackendMetadata map[string]string `json:"backend_metadata,omitempty"` // Backend-specific metadata (package_name, version, etc.)
 }
 
 // dirIndexEntry represents a file entry in the directory index.
@@ -500,7 +502,7 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 	err := s.db.Update(func(tx *nutsdb.Tx) error {
 		// Check if storage ID already exists (repo metadata)
 		repoExists := s.repoExistsByStorageIDTx(tx, req.StorageId)
-		
+
 		if !repoExists {
 			// Store repo metadata only if new storage ID
 			info := &repoInfo{
@@ -618,17 +620,18 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 		"file_path", meta.Path)
 
 	stored := storedMetadata{
-		Path:        fullPath,
-		StorageID:   storageID,
-		DisplayPath: displayPath,
-		FilePath:    meta.Path,
-		Size:        meta.Size,
-		Mode:        meta.Mode,
-		Mtime:       meta.Mtime,
-		BlobHash:    meta.BlobHash,
-		Branch:      meta.Ref,
-		RepoURL:     meta.Source,
-		IsDir:       false,
+		Path:            fullPath,
+		StorageID:       storageID,
+		DisplayPath:     displayPath,
+		FilePath:        meta.Path,
+		Size:            meta.Size,
+		Mode:            meta.Mode,
+		Mtime:           meta.Mtime,
+		BlobHash:        meta.BlobHash,
+		Branch:          meta.Ref,
+		RepoURL:         meta.Source,
+		IsDir:           false,
+		BackendMetadata: meta.BackendMetadata,
 	}
 
 	value, err := json.Marshal(stored)
@@ -792,17 +795,19 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 		fullPath := makeFullPath(displayPath, meta.Path)
 
 		stored := storedMetadata{
-			Path:        fullPath,
-			StorageID:   storageID,
-			DisplayPath: displayPath,
-			FilePath:    meta.Path,
-			Size:        meta.Size,
-			Mode:        meta.Mode,
-			Mtime:       meta.Mtime,
-			BlobHash:    meta.BlobHash,
-			Branch:      branch,
-			RepoURL:     repoURL,
-			IsDir:       false,
+			Path:            fullPath,
+			StorageID:       storageID,
+			DisplayPath:     displayPath,
+			FilePath:        meta.Path,
+			Size:            meta.Size,
+			Mode:            meta.Mode,
+			Mtime:           meta.Mtime,
+			BlobHash:        meta.BlobHash,
+			Branch:          branch,
+			RepoURL:         repoURL,
+			IsDir:           false,
+			FetchType:       meta.FetchType.String(), // Store fetch type for lazy fetching
+			BackendMetadata: meta.BackendMetadata,
 		}
 
 		value, err := json.Marshal(stored)
@@ -991,17 +996,19 @@ func (s *Server) IngestReplicaBatch(ctx context.Context, req *pb.IngestReplicaBa
 		fullPath := makeFullPath(displayPath, meta.Path)
 
 		stored := storedMetadata{
-			Path:        fullPath,
-			StorageID:   storageID,
-			DisplayPath: displayPath,
-			FilePath:    meta.Path,
-			Size:        meta.Size,
-			Mode:        meta.Mode,
-			Mtime:       meta.Mtime,
-			BlobHash:    meta.BlobHash,
-			Branch:      branch,
-			RepoURL:     repoURL,
-			IsDir:       false,
+			Path:            fullPath,
+			StorageID:       storageID,
+			DisplayPath:     displayPath,
+			FilePath:        meta.Path,
+			Size:            meta.Size,
+			Mode:            meta.Mode,
+			Mtime:           meta.Mtime,
+			BlobHash:        meta.BlobHash,
+			Branch:          branch,
+			RepoURL:         repoURL,
+			IsDir:           false,
+			FetchType:       meta.FetchType.String(), // Store fetch type for replica
+			BackendMetadata: meta.BackendMetadata,
 		}
 
 		metadataVal, err := json.Marshal(stored)

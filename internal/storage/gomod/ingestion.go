@@ -98,7 +98,9 @@ func (g *GoModIngestionBackend) Initialize(ctx context.Context, sourceURL string
 func (g *GoModIngestionBackend) downloadModule(ctx context.Context) error {
 	// Build Go proxy URL for module zip
 	// Format: https://proxy.golang.org/module/@v/version.zip
-	proxyURL := fmt.Sprintf("%s/%s/@v/%s.zip", g.proxy, g.modulePath, g.version)
+	// Module paths with capital letters must be case-encoded (!proton!mail)
+	escapedPath := escapeModulePath(g.modulePath)
+	proxyURL := fmt.Sprintf("%s/%s/@v/%s.zip", g.proxy, escapedPath, g.version)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", proxyURL, nil)
 	if err != nil {
@@ -157,7 +159,9 @@ func (g *GoModIngestionBackend) Validate(ctx context.Context, sourceURL string, 
 
 	// Check if module version exists
 	// Format: https://proxy.golang.org/module/@v/version.info
-	infoURL := fmt.Sprintf("%s/%s/@v/%s.info", proxy, modulePath, version)
+	// Module paths with capital letters must be case-encoded (!proton!mail)
+	escapedPath := escapeModulePath(modulePath)
+	infoURL := fmt.Sprintf("%s/%s/@v/%s.info", proxy, escapedPath, version)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, "GET", infoURL, nil)
@@ -249,6 +253,21 @@ func (g *GoModIngestionBackend) WalkFiles(ctx context.Context, fn func(storage.F
 	}
 
 	return nil
+}
+
+// escapeModulePath escapes a module path for use in Go proxy URLs.
+// Capital letters are encoded as !lowercase (e.g., ProtonMail -> !proton!mail)
+func escapeModulePath(path string) string {
+	var result strings.Builder
+	for _, r := range path {
+		if r >= 'A' && r <= 'Z' {
+			result.WriteRune('!')
+			result.WriteRune(r + ('a' - 'A'))
+		} else {
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
 }
 
 func (g *GoModIngestionBackend) GetMetadata(ctx context.Context, filePath string) (*storage.FileMetadata, error) {

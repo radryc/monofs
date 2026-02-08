@@ -130,8 +130,8 @@ monofs-admin ingest \
   [--ref=<version>]
 ```
 
-**Ingestion types**: `git`, `go`, `s3`, `file`  
-**Fetch types**: `git`, `gomod`, `s3`, `local`
+**Ingestion types**: `git`, `go`, `npm`, `cargo`, `maven`, `s3`  
+**Fetch types**: `git`, `gomod`, `npm`, `cargo`, `maven`, `s3`, `local`
 
 ### `monofs-admin ingest-deps`
 
@@ -145,7 +145,7 @@ monofs-admin ingest-deps \
   [--skip-existing=true]
 ```
 
-**Supported types**: `go` (more coming soon: `npm`, `maven`, `cargo`)
+**Supported types**: `go`, `npm`, `maven`, `cargo`
 
 Options:
 - `--file`: Path to manifest file (e.g., `go.mod`, `package.json`)
@@ -186,10 +186,10 @@ ls /mnt/monofs/go-modules/pkg/mod/github.com/google/uuid@v1.6.0/
 
 ## Roadmap
 
-- [ ] npm/yarn support (`node_modules/` layout)
-- [ ] Maven support (`.m2/repository/` layout)
-- [ ] Cargo support (`.cargo/registry/` layout)
-- [ ] Bazel support (external workspace layout)
+- [x] npm/yarn support (`node_modules/` layout)
+- [x] Maven support (`.m2/repository/` layout)
+- [x] Cargo support (`.cargo/registry/` layout)
+- [x] Bazel support (external workspace layout)
 - [ ] Python pip support (site-packages layout)
 - [ ] Version conflict resolution strategies
 - [ ] Nested dependency resolution
@@ -197,10 +197,9 @@ ls /mnt/monofs/go-modules/pkg/mod/github.com/google/uuid@v1.6.0/
 
 ## Limitations
 
-1. Currently only supports Go modules
-2. No version conflict resolution (uses first ingested version)
-3. No support for replace/exclude directives in go.mod
-4. Virtual layouts are generated at ingestion time only
+1. No version conflict resolution (uses first ingested version)
+2. No support for replace/exclude directives in go.mod
+3. Virtual layouts are generated at ingestion time only
 
 ## Contributing
 
@@ -215,11 +214,11 @@ To add support for a new build system:
 
 ## References
 
-- [BUILD_INTEGRATION_TODO.md](BUILD_INTEGRATION_TODO.md) - Complete implementation guide
 - [Go module cache layout](https://go.dev/ref/mod#module-cache) - Official Go documentation
 - [npm cache layout](https://docs.npmjs.com/cli/v9/configuring-npm/folders) - npm documentation
+- [Maven repository layout](https://maven.apache.org/repository/layout.html) - Maven documentation
+- [Cargo registry layout](https://doc.rust-lang.org/cargo/reference/registries.html) - Cargo documentation
 
 ---
 
-**Status**: Phase 1-3 Complete ✅  
-**Next**: Add npm, Maven, and Cargo support
+**Status**: Multi-backend ingestion complete ✅ (Go, npm, Maven, Cargo, Bazel)

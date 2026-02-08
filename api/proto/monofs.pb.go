@@ -25,10 +25,13 @@ const (
 type IngestionType int32
 
 const (
-	IngestionType_INGESTION_GIT  IngestionType = 0 // Git repository
-	IngestionType_INGESTION_GO   IngestionType = 1 // Go module cache
-	IngestionType_INGESTION_S3   IngestionType = 2 // S3 bucket
-	IngestionType_INGESTION_FILE IngestionType = 3 // Local filesystem
+	IngestionType_INGESTION_GIT   IngestionType = 0 // Git repository
+	IngestionType_INGESTION_GO    IngestionType = 1 // Go module cache
+	IngestionType_INGESTION_S3    IngestionType = 2 // S3 bucket
+	IngestionType_INGESTION_FILE  IngestionType = 3 // Local filesystem
+	IngestionType_INGESTION_NPM   IngestionType = 4 // npm package
+	IngestionType_INGESTION_MAVEN IngestionType = 5 // Maven artifact
+	IngestionType_INGESTION_CARGO IngestionType = 6 // Cargo crate
 )
 
 // Enum value maps for IngestionType.
@@ -38,12 +41,18 @@ var (
 		1: "INGESTION_GO",
 		2: "INGESTION_S3",
 		3: "INGESTION_FILE",
+		4: "INGESTION_NPM",
+		5: "INGESTION_MAVEN",
+		6: "INGESTION_CARGO",
 	}
 	IngestionType_value = map[string]int32{
-		"INGESTION_GIT":  0,
-		"INGESTION_GO":   1,
-		"INGESTION_S3":   2,
-		"INGESTION_FILE": 3,
+		"INGESTION_GIT":   0,
+		"INGESTION_GO":    1,
+		"INGESTION_S3":    2,
+		"INGESTION_FILE":  3,
+		"INGESTION_NPM":   4,
+		"INGESTION_MAVEN": 5,
+		"INGESTION_CARGO": 6,
 	}
 )
 
@@ -81,6 +90,9 @@ const (
 	FetchType_FETCH_S3    FetchType = 1 // Fetch from S3
 	FetchType_FETCH_LOCAL FetchType = 2 // Fetch from local cache
 	FetchType_FETCH_GOMOD FetchType = 3 // Fetch from Go module cache
+	FetchType_FETCH_NPM   FetchType = 4 // Fetch from npm registry
+	FetchType_FETCH_MAVEN FetchType = 5 // Fetch from Maven Central
+	FetchType_FETCH_CARGO FetchType = 6 // Fetch from crates.io
 )
 
 // Enum value maps for FetchType.
@@ -90,12 +102,18 @@ var (
 		1: "FETCH_S3",
 		2: "FETCH_LOCAL",
 		3: "FETCH_GOMOD",
+		4: "FETCH_NPM",
+		5: "FETCH_MAVEN",
+		6: "FETCH_CARGO",
 	}
 	FetchType_value = map[string]int32{
 		"FETCH_GIT":   0,
 		"FETCH_S3":    1,
 		"FETCH_LOCAL": 2,
 		"FETCH_GOMOD": 3,
+		"FETCH_NPM":   4,
+		"FETCH_MAVEN": 5,
+		"FETCH_CARGO": 6,
 	}
 )
 
@@ -5421,17 +5439,23 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\n" +
 	"storage_id\x18\x01 \x01(\tR\tstorageId\x12\x1b\n" +
 	"\tfile_path\x18\x02 \x01(\tR\bfilePath\x12!\n" +
-	"\fdisplay_path\x18\x03 \x01(\tR\vdisplayPath*Z\n" +
+	"\fdisplay_path\x18\x03 \x01(\tR\vdisplayPath*\x97\x01\n" +
 	"\rIngestionType\x12\x11\n" +
 	"\rINGESTION_GIT\x10\x00\x12\x10\n" +
 	"\fINGESTION_GO\x10\x01\x12\x10\n" +
 	"\fINGESTION_S3\x10\x02\x12\x12\n" +
-	"\x0eINGESTION_FILE\x10\x03*J\n" +
+	"\x0eINGESTION_FILE\x10\x03\x12\x11\n" +
+	"\rINGESTION_NPM\x10\x04\x12\x13\n" +
+	"\x0fINGESTION_MAVEN\x10\x05\x12\x13\n" +
+	"\x0fINGESTION_CARGO\x10\x06*{\n" +
 	"\tFetchType\x12\r\n" +
 	"\tFETCH_GIT\x10\x00\x12\f\n" +
 	"\bFETCH_S3\x10\x01\x12\x0f\n" +
 	"\vFETCH_LOCAL\x10\x02\x12\x0f\n" +
-	"\vFETCH_GOMOD\x10\x03*b\n" +
+	"\vFETCH_GOMOD\x10\x03\x12\r\n" +
+	"\tFETCH_NPM\x10\x04\x12\x0f\n" +
+	"\vFETCH_MAVEN\x10\x05\x12\x0f\n" +
+	"\vFETCH_CARGO\x10\x06*b\n" +
 	"\vClientState\x12\x12\n" +
 	"\x0eCLIENT_UNKNOWN\x10\x00\x12\x14\n" +
 	"\x10CLIENT_CONNECTED\x10\x01\x12\x10\n" +

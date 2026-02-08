@@ -16,11 +16,18 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/buildlayout"
+	bazelmapper "github.com/radryc/monofs/internal/buildlayout/bazel"
+	cargomapper "github.com/radryc/monofs/internal/buildlayout/cargo"
 	golangmapper "github.com/radryc/monofs/internal/buildlayout/golang"
+	mavenmapper "github.com/radryc/monofs/internal/buildlayout/maven"
+	npmmapper "github.com/radryc/monofs/internal/buildlayout/npm"
 	"github.com/radryc/monofs/internal/router"
 	"github.com/radryc/monofs/internal/storage"
+	cargostorage "github.com/radryc/monofs/internal/storage/cargo"
 	gitstorage "github.com/radryc/monofs/internal/storage/git"
 	gomodstorage "github.com/radryc/monofs/internal/storage/gomod"
+	mavenstorage "github.com/radryc/monofs/internal/storage/maven"
+	npmstorage "github.com/radryc/monofs/internal/storage/npm"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 )
@@ -51,6 +58,24 @@ func init() {
 	storage.DefaultRegistry.RegisterFetchBackend(
 		storage.FetchTypeGoMod,
 		gomodstorage.NewGoModFetchBackend,
+	)
+
+	// Register npm backends
+	storage.DefaultRegistry.RegisterIngestionBackend(
+		storage.IngestionTypeNpm,
+		npmstorage.NewNpmIngestionBackend,
+	)
+
+	// Register Maven backends
+	storage.DefaultRegistry.RegisterIngestionBackend(
+		storage.IngestionTypeMaven,
+		mavenstorage.NewMavenIngestionBackend,
+	)
+
+	// Register Cargo backends
+	storage.DefaultRegistry.RegisterIngestionBackend(
+		storage.IngestionTypeCargo,
+		cargostorage.NewCargoIngestionBackend,
 	)
 
 	// Future backends will be registered here:
@@ -137,8 +162,12 @@ func main() {
 	// Configure build layout mappers
 	layoutRegistry := buildlayout.NewRegistry()
 	layoutRegistry.Register(golangmapper.NewGoMapper())
+	layoutRegistry.Register(bazelmapper.NewBazelMapper())
+	layoutRegistry.Register(npmmapper.NewNpmMapper())
+	layoutRegistry.Register(mavenmapper.NewMavenMapper())
+	layoutRegistry.Register(cargomapper.NewCargoMapper())
 	r.SetLayoutRegistry(layoutRegistry)
-	logger.Info("registered build layout mappers", "count", 1)
+	logger.Info("registered build layout mappers", "count", 5)
 
 	// Parse initial nodes
 	if *nodes != "" {

@@ -555,6 +555,12 @@ func sourceTypeToProto(st SourceType) pb.SourceType {
 		return pb.SourceType_SOURCE_TYPE_HTTP
 	case SourceTypeOCI:
 		return pb.SourceType_SOURCE_TYPE_OCI
+	case SourceTypeNpm:
+		return pb.SourceType_SOURCE_TYPE_NPM
+	case SourceTypeMaven:
+		return pb.SourceType_SOURCE_TYPE_MAVEN
+	case SourceTypeCargo:
+		return pb.SourceType_SOURCE_TYPE_CARGO
 	default:
 		return pb.SourceType_SOURCE_TYPE_UNKNOWN
 	}

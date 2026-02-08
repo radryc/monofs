@@ -60,8 +60,8 @@ func TestGenerateStorageID(t *testing.T) {
 	}
 }
 
-// TestNormalizeRepoID verifies URL-to-path normalization.
-func TestNormalizeRepoID(t *testing.T) {
+// TestNormalizeGitURL verifies Git URL-to-path normalization.
+func TestNormalizeGitURL(t *testing.T) {
 	tests := []struct {
 		name     string
 		repoURL  string
@@ -116,7 +116,7 @@ func TestNormalizeRepoID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := normalizeRepoID(tt.repoURL)
+			result := normalizeGitURL(tt.repoURL)
 			if result != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, result)
 			}

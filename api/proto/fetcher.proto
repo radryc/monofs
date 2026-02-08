@@ -36,6 +36,9 @@ enum SourceType {
     SOURCE_TYPE_S3 = 3;           // S3-compatible object storage
     SOURCE_TYPE_HTTP = 4;         // Generic HTTP/HTTPS URL
     SOURCE_TYPE_OCI = 5;          // OCI registry (container images)
+    SOURCE_TYPE_NPM = 6;          // npm registry (npmjs.org)
+    SOURCE_TYPE_MAVEN = 7;        // Maven Central (repo1.maven.org)
+    SOURCE_TYPE_CARGO = 8;        // crates.io registry
 }
 
 message FetchBlobRequest {

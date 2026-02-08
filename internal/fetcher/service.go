@@ -452,6 +452,12 @@ func protoToSourceType(pt pb.SourceType) SourceType {
 		return SourceTypeHTTP
 	case pb.SourceType_SOURCE_TYPE_OCI:
 		return SourceTypeOCI
+	case pb.SourceType_SOURCE_TYPE_NPM:
+		return SourceTypeNpm
+	case pb.SourceType_SOURCE_TYPE_MAVEN:
+		return SourceTypeMaven
+	case pb.SourceType_SOURCE_TYPE_CARGO:
+		return SourceTypeCargo
 	default:
 		return SourceTypeUnknown
 	}
@@ -468,6 +474,12 @@ func getSourceKey(req *pb.FetchBlobRequest) string {
 		return req.SourceConfig["repo_url"]
 	case pb.SourceType_SOURCE_TYPE_GOMOD:
 		return req.SourceConfig["module_path"]
+	case pb.SourceType_SOURCE_TYPE_NPM:
+		return req.SourceConfig["package_name"]
+	case pb.SourceType_SOURCE_TYPE_MAVEN:
+		return req.SourceConfig["coordinates"]
+	case pb.SourceType_SOURCE_TYPE_CARGO:
+		return req.SourceConfig["crate_name"]
 	default:
 		return req.ContentId
 	}

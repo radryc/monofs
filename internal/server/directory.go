@@ -35,6 +35,9 @@ func (s *Server) updateDirectoryIndexHierarchy(tx *nutsdb.Tx, storageID, filePat
 	// Build list of all directories in the path
 	parts := strings.Split(filePath, "/")
 
+	// Check if the file itself is a directory (from mode bits)
+	isFileDir := (mode & uint32(syscall.S_IFDIR)) != 0
+
 	// Update each parent directory to include its child (either directory or file)
 	for i := 0; i < len(parts); i++ {
 		var dirPath string
@@ -45,12 +48,14 @@ func (s *Server) updateDirectoryIndexHierarchy(tx *nutsdb.Tx, storageID, filePat
 			// Root directory - add first component
 			dirPath = ""
 			entryName = parts[0]
-			isDir = (i < len(parts)-1) // It's a directory if not the last component
+			// If this is the last component, use the actual mode; otherwise it's a parent dir
+			isDir = (i < len(parts)-1) || isFileDir
 		} else {
 			// Nested directory
 			dirPath = strings.Join(parts[:i], "/")
 			entryName = parts[i]
-			isDir = (i < len(parts)-1)
+			// If this is the last component, use the actual mode; otherwise it's a parent dir
+			isDir = (i < len(parts)-1) || isFileDir
 		}
 
 		// Get or create directory index
@@ -474,6 +479,9 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 	for _, meta := range fileMetadata {
 		hashKey := makeStorageKey(storageID, meta.FilePath)
 
+		// Check if this entry itself is a directory (from mode bits)
+		isFileDir := (meta.Mode & uint32(syscall.S_IFDIR)) != 0
+
 		// Get all parent directories
 		parts := strings.Split(meta.FilePath, "/")
 
@@ -485,11 +493,13 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 			if i == 0 {
 				dirPath = ""
 				entryName = parts[0]
-				isDir = (i < len(parts)-1)
+				// If this is the last component, use the actual mode; otherwise it's a parent dir
+				isDir = (i < len(parts)-1) || isFileDir
 			} else {
 				dirPath = strings.Join(parts[:i], "/")
 				entryName = parts[i]
-				isDir = (i < len(parts)-1)
+				// If this is the last component, use the actual mode; otherwise it's a parent dir
+				isDir = (i < len(parts)-1) || isFileDir
 			}
 
 			// Check if entry already exists in this directory
@@ -497,8 +507,29 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 			found := false
 			for j, entry := range entries {
 				if entry.Name == entryName {
+					// CRITICAL: Never convert a file to a directory!
+					// If entry exists as a file, keep it as a file regardless of what we're adding now
+					if !entry.IsDir {
+						// Entry is already a file - update it only if we're also adding a file
+						if !isDir {
+							entries[j] = dirIndexEntry{
+								Name:    entryName,
+								Mode:    meta.Mode,
+								Size:    meta.Size,
+								Mtime:   meta.Mtime,
+								HashKey: string(hashKey),
+								IsDir:   false,
+							}
+						}
+						// If entry is a file but we're trying to add it as a directory, skip (file wins)
+						found = true
+						break
+					}
+
+					// Entry exists as a directory
 					if !isDir {
-						// Update existing file entry
+						// We're trying to add a file that conflicts with an existing directory
+						// File wins - replace directory with file
 						entries[j] = dirIndexEntry{
 							Name:    entryName,
 							Mode:    meta.Mode,
@@ -508,7 +539,7 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 							IsDir:   false,
 						}
 					} else {
-						// Update directory Mtime if current file is newer
+						// Both are directories - update Mtime if current file is newer
 						if meta.Mtime > entry.Mtime {
 							entries[j].Mtime = meta.Mtime
 						}

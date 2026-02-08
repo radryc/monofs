@@ -60,6 +60,9 @@
                 >
                     <option value="git" selected>Git Repository</option>
                     <option value="go">Go Modules</option>
+                    <option value="npm">npm Packages</option>
+                    <option value="maven">Maven Artifacts</option>
+                    <option value="cargo">Cargo Crates</option>
                     <option value="s3" disabled>S3 Bucket (Coming Soon)</option>
                     <option value="file" disabled>Local Filesystem (Coming Soon)</option>
                 </select>
@@ -138,6 +141,9 @@
                         >
                             <option value="git" selected>Git (Lazy Fetch)</option>
                             <option value="gomod">Go Module Cache</option>
+                            <option value="npm">npm Registry</option>
+                            <option value="maven">Maven Repository</option>
+                            <option value="cargo">Cargo Registry</option>
                             <option value="s3" disabled>S3 Storage (Coming Soon)</option>
                             <option value="local" disabled>Local Cache (Coming Soon)</option>
                         </select>
@@ -298,6 +304,106 @@ const typeConfig = {
         validateRef: (val) => null,
         submitText: 'Ingest Bucket',
         defaultFetchType: 's3'
+    },
+    npm: {
+        pageTitle: 'Ingest npm Package',
+        pageSubtitle: 'Add an npm package to the cluster',
+        sourceLabel: 'Package Name',
+        sourcePlaceholder: 'express@4.18.2',
+        sourceHelp: 'npm package name with version (package@version)',
+        refLabel: 'Version',
+        refPlaceholder: '1.0.0',
+        refHelp: 'Package version (required if not included in package name)',
+        refVisible: true,
+        refDynamic: true,
+        examples: [
+            'express@4.18.2',
+            '@types/node@20.10.0',
+            'react@18.2.0'
+        ],
+        helpDescription: 'Enter an npm package name with version. The system will download from npm registry, index all files, and distribute them across cluster nodes.',
+        processSteps: [
+            'Package is downloaded from npm registry',
+            'Files are extracted and indexed',
+            'Content is distributed using HRW sharding'
+        ],
+        validateSource: (val) => {
+            if (!val) return 'Package name is required';
+            if (val.includes('@') && !val.startsWith('@')) {
+                const parts = val.split('@');
+                if (parts.length !== 2) return 'Invalid format, use package@version';
+            }
+            return null;
+        },
+        validateRef: (val) => null,
+        submitText: 'Ingest Package',
+        defaultFetchType: 'npm'
+    },
+    maven: {
+        pageTitle: 'Ingest Maven Artifact',
+        pageSubtitle: 'Add a Maven artifact to the cluster',
+        sourceLabel: 'Maven Coordinates',
+        sourcePlaceholder: 'org.springframework.boot:spring-boot-starter-web:3.1.0',
+        sourceHelp: 'Maven coordinates (groupId:artifactId:version)',
+        refLabel: 'Version',
+        refPlaceholder: '1.0.0',
+        refHelp: 'Artifact version (required if not included in coordinates)',
+        refVisible: true,
+        refDynamic: true,
+        examples: [
+            'org.springframework.boot:spring-boot-starter-web:3.1.0',
+            'com.google.guava:guava:32.1.2-jre',
+            'junit:junit:4.13.2'
+        ],
+        helpDescription: 'Enter Maven coordinates with version. The system will download from Maven Central, index all files, and distribute them across cluster nodes.',
+        processSteps: [
+            'Artifact is downloaded from Maven Central',
+            'Files are extracted and indexed',
+            'Content is distributed using HRW sharding'
+        ],
+        validateSource: (val) => {
+            if (!val) return 'Maven coordinates are required';
+            const parts = val.split(':');
+            if (parts.length < 2) return 'Invalid format, use groupId:artifactId:version';
+            return null;
+        },
+        validateRef: (val) => null,
+        submitText: 'Ingest Artifact',
+        defaultFetchType: 'maven'
+    },
+    cargo: {
+        pageTitle: 'Ingest Cargo Crate',
+        pageSubtitle: 'Add a Cargo crate to the cluster',
+        sourceLabel: 'Crate Name',
+        sourcePlaceholder: 'serde@1.0.193',
+        sourceHelp: 'Cargo crate name with version (crate@version)',
+        refLabel: 'Version',
+        refPlaceholder: '1.0.0',
+        refHelp: 'Crate version (required if not included in crate name)',
+        refVisible: true,
+        refDynamic: true,
+        examples: [
+            'serde@1.0.193',
+            'tokio@1.35.0',
+            'clap@4.4.11'
+        ],
+        helpDescription: 'Enter a Cargo crate name with version. The system will download from crates.io, index all files, and distribute them across cluster nodes.',
+        processSteps: [
+            'Crate is downloaded from crates.io',
+            'Files are extracted and indexed',
+            'Content is distributed using HRW sharding'
+        ],
+        validateSource: (val) => {
+            if (!val) return 'Crate name is required';
+            if (val.includes('@')) {
+                const parts = val.split('@');
+                if (parts.length !== 2) return 'Invalid format, use crate@version';
+            }
+            return null;
+        },
+        validateRef: (val) => null,
+        submitText: 'Ingest Crate',
+        defaultFetchType: 'cargo'
     }
 };
 

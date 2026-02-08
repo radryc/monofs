@@ -69,8 +69,9 @@ func (g *GoMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.FileI
 	// Apply Go module cache case encoding to module path.
 	encodedModule := EncodePath(modulePath)
 
-	// Virtual display path: go-modules/pkg/mod/<encoded_module>@<version>
-	virtualDisplayPath := GoModCachePrefix + "/" + encodedModule + "@" + version
+	// Return just module@version without prefix
+	// The prefix (go-modules/pkg/mod/) is added during ingestion by the handler
+	virtualDisplayPath := encodedModule + "@" + version
 
 	entries := make([]buildlayout.VirtualEntry, 0, len(files))
 	for _, f := range files {

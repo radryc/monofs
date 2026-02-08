@@ -64,7 +64,8 @@ func TestGoMapper_MapPaths_Standard(t *testing.T) {
 		t.Fatalf("expected 3 entries, got %d", len(entries))
 	}
 
-	expectedDisplayPath := "go-modules/pkg/mod/github.com/google/uuid@v1.6.0"
+	// The mapper returns just module@version, prefix is added by ingestion handler
+	expectedDisplayPath := "github.com/google/uuid@v1.6.0"
 	for i, e := range entries {
 		if e.VirtualDisplayPath != expectedDisplayPath {
 			t.Errorf("entry %d: VirtualDisplayPath = %q, want %q", i, e.VirtualDisplayPath, expectedDisplayPath)
@@ -96,7 +97,8 @@ func TestGoMapper_MapPaths_UppercaseModule(t *testing.T) {
 	}
 
 	// Azure → !azure in Go module cache
-	expected := "go-modules/pkg/mod/github.com/!azure/azure-sdk-for-go@v1.0.0"
+	// The mapper returns just module@version, prefix is added by ingestion handler
+	expected := "github.com/!azure/azure-sdk-for-go@v1.0.0"
 	if entries[0].VirtualDisplayPath != expected {
 		t.Errorf("expected %q, got %q", expected, entries[0].VirtualDisplayPath)
 	}
@@ -119,7 +121,8 @@ func TestGoMapper_MapPaths_VersionInRef(t *testing.T) {
 		t.Fatalf("MapPaths failed: %v", err)
 	}
 
-	expected := "go-modules/pkg/mod/github.com/google/uuid@v1.6.0"
+	// The mapper returns just module@version, prefix is added by ingestion handler
+	expected := "github.com/google/uuid@v1.6.0"
 	if entries[0].VirtualDisplayPath != expected {
 		t.Errorf("expected %q, got %q", expected, entries[0].VirtualDisplayPath)
 	}

@@ -10,10 +10,13 @@ import (
 type IngestionType string
 
 const (
-	IngestionTypeGit  IngestionType = "git"
-	IngestionTypeGo   IngestionType = "go"   // Future: Go module cache
-	IngestionTypeS3   IngestionType = "s3"   // Future: S3 bucket
-	IngestionTypeFile IngestionType = "file" // Future: Local filesystem
+	IngestionTypeGit   IngestionType = "git"
+	IngestionTypeGo    IngestionType = "go"    // Go module cache
+	IngestionTypeS3    IngestionType = "s3"    // Future: S3 bucket
+	IngestionTypeFile  IngestionType = "file"  // Future: Local filesystem
+	IngestionTypeNpm   IngestionType = "npm"   // npm packages
+	IngestionTypeMaven IngestionType = "maven" // Maven artifacts
+	IngestionTypeCargo IngestionType = "cargo" // Cargo crates
 )
 
 // FetchType identifies the backend for blob storage
@@ -24,6 +27,9 @@ const (
 	FetchTypeGoMod FetchType = "gomod" // Fetch from Go module cache
 	FetchTypeS3    FetchType = "s3"    // Fetch from S3 bucket
 	FetchTypeLocal FetchType = "local" // Fetch from local cache
+	FetchTypeNpm   FetchType = "npm"   // Fetch from npm registry
+	FetchTypeMaven FetchType = "maven" // Fetch from Maven Central
+	FetchTypeCargo FetchType = "cargo" // Fetch from crates.io
 )
 
 // FileMetadata represents file metadata from any source

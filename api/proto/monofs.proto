@@ -237,6 +237,9 @@ enum IngestionType {
     INGESTION_GO = 1;    // Go module cache
     INGESTION_S3 = 2;    // S3 bucket
     INGESTION_FILE = 3;  // Local filesystem
+    INGESTION_NPM = 4;   // npm package
+    INGESTION_MAVEN = 5; // Maven artifact
+    INGESTION_CARGO = 6; // Cargo crate
 }
 
 enum FetchType {
@@ -244,6 +247,9 @@ enum FetchType {
     FETCH_S3 = 1;     // Fetch from S3
     FETCH_LOCAL = 2;  // Fetch from local cache
     FETCH_GOMOD = 3;  // Fetch from Go module cache
+    FETCH_NPM = 4;    // Fetch from npm registry
+    FETCH_MAVEN = 5;  // Fetch from Maven Central
+    FETCH_CARGO = 6;  // Fetch from crates.io
 }
 
 // Repository ingestion messages

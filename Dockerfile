@@ -126,7 +126,14 @@ RUN apk add --no-cache \
     openssh-server \
     bash \
     sudo \
-    shadow
+    shadow \
+    curl \
+    jq \
+    coreutils \
+    grep \
+    findutils \
+    diffutils \
+    procps
 
 # Create monofs user
 RUN adduser -D -s /bin/bash monofs && \

@@ -68,9 +68,15 @@ flowchart TB
     
     Git["Git Remotes"]
     GoMod["Go Module Proxy"]
+    NPMReg["npm Registry"]
+    MavenCentral["Maven Central"]
+    CratesIO["crates.io"]
     
     Fetchers --> Git
     Fetchers --> GoMod
+    Fetchers --> NPMReg
+    Fetchers --> MavenCentral
+    Fetchers --> CratesIO
 ```
 
 ### Component Responsibilities
@@ -80,7 +86,7 @@ flowchart TB
 | **FUSE Client** | Mounts the filesystem, handles read/write operations, caches metadata locally |
 | **Router** | Coordinates the cluster, determines which node owns which files, monitors health |
 | **Backend Node** | Stores file metadata in NutsDB, serves file lookups, replicates data for failover |
-| **Fetcher** | Retrieves actual file content from Git remotes or Go module proxies |
+| **Fetcher** | Retrieves actual file content from Git remotes, Go module proxies, npm registry, Maven Central, or crates.io |
 | **Search Service** | Indexes repositories for full-text code search using Zoekt |
 | **HAProxy** | Load balances requests, handles router failover |
 
@@ -269,6 +275,9 @@ flowchart TB
         subgraph Registry["Backend Registry"]
             Git["Git Backend"]
             GoMod["GoMod Backend"]
+            NPM["npm Backend"]
+            Maven["Maven Backend"]
+            Cargo["Cargo Backend"]
             S3["S3 Backend<br/>(future)"]
         end
         

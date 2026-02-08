@@ -4,9 +4,9 @@
 
 # MonoFS
 
-**A distributed filesystem that turns Git repositories and Go modules into a unified, mountable filesystem.**
+**A distributed filesystem that turns Git repositories and package registries into a unified, mountable filesystem.**
 
-Mount hundreds of Git repositories and Go modules as a single filesystem. Browse with `ls`, search with `grep`, edit with your favorite editor. MonoFS handles the distribution, caching, and failover automatically.
+Mount hundreds of Git repositories, Go modules, npm packages, Maven artifacts, and Cargo crates as a single filesystem. Browse with `ls`, search with `grep`, edit with your favorite editor. MonoFS handles the distribution, caching, and failover automatically.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/go-1.21+-00ADD8.svg)](https://go.dev)
@@ -60,7 +60,7 @@ Navigate with `cd`. Read files instantly. Edit and commit changes back. Search a
 | **Full-Text Search** | Search code across all repositories instantly |
 | **Write Support** | Edit files and commit changes back |
 | **Web Dashboard** | Monitor cluster health and manage repositories |
-| **Go Module Support** | Mount Go modules alongside Git repos |
+| **Multi-Ecosystem Support** | Mount Go modules, npm packages, Maven artifacts, and Cargo crates |
 | **Build Tool Integration** | Virtual layouts for Go modules, npm, Maven, etc. |
 | **Streaming I/O** | Large files streamed in chunks - no size limit |
 | **Bulk Dependency Ingestion** | Ingest all deps from go.mod with one command |
@@ -164,7 +164,7 @@ flowchart LR
 | `monofs-client` | FUSE client - mounts the filesystem |
 | `monofs-router` | Cluster coordinator - manages nodes and sharding |
 | `monofs-server` | Backend node - stores file metadata |
-| `monofs-fetcher` | Blob fetcher - retrieves files from Git/GoMod |
+| `monofs-fetcher` | Blob fetcher - retrieves files from Git/GoMod/npm/Maven/Cargo |
 | `monofs-search` | Search service - Zoekt-powered code search |
 | `monofs-admin` | Admin CLI - cluster management |
 | `monofs-session` | Session CLI - write session management |
@@ -396,6 +396,7 @@ make test-e2e
 | [Architecture](docs/ARCHITECTURE.md) | System design and data flows |
 | [Deployment](docs/DEPLOYMENT.md) | Production deployment guide |
 | [Build Integration](docs/BUILD_INTEGRATION.md) | Using MonoFS with build tools (Go, npm, Maven, etc.) |
+| [Adding Ingestion Types](docs/ADDING_INGESTION_TYPES.md) | Guide for adding new package manager support |
 
 ---
 

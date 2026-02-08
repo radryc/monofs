@@ -17,6 +17,14 @@ coverage.out
 bin/
 dist/
 build/
+monofs-admin
+monofs-client
+monofs-fetcher
+monofs-loadtest
+monofs-router
+monofs-search
+monofs-server
+monofs-session
 
 # Bazel artifacts
 bazel-*

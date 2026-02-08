@@ -26,9 +26,9 @@ echo "================================================"
 echo ""
 echo "Router: $ROUTER"
 echo "Admin:  $ADMIN_BIN"
-echo "Delay between repos: ${DELAY_BETWEEN_REPOS:-3}s"
+echo "Delay between repos: ${INGEST_DELAY:-1}s"
 echo "Batch size: ${BATCH_SIZE:-20} repos"
-echo "Batch delay: ${BATCH_DELAY:-60}s"
+echo "Batch delay: ${BATCH_DELAY:-10}s"
 echo ""
 
 # Array of interesting repositories to ingest
@@ -151,7 +151,64 @@ GO_MODULES=(
     "github.com/xujiajun/utils@v0.0.0-20220904132955-5f7c5b914235"
 )
 
-# Combine and shuffle both types
+# npm packages (JavaScript/TypeScript ecosystem)
+NPM_PACKAGES=(
+    "lodash@4.17.21"
+    "express@4.18.2"
+    "react@18.2.0"
+    "axios@1.6.0"
+    "@types/node@20.10.0"
+    "typescript@5.3.3"
+    "webpack@5.89.0"
+    "jest@29.7.0"
+    "eslint@8.56.0"
+    "prettier@3.1.1"
+    "chalk@5.3.0"
+    "commander@11.1.0"
+    "dotenv@16.3.1"
+    "uuid@9.0.1"
+    "moment@2.29.4"
+)
+
+# Maven artifacts (Java ecosystem)
+MAVEN_PACKAGES=(
+    "junit:junit:4.13.2"
+    "com.google.guava:guava:32.1.3-jre"
+    "org.springframework.boot:spring-boot-starter-web:3.2.0"
+    "org.slf4j:slf4j-api:2.0.9"
+    "com.fasterxml.jackson.core:jackson-databind:2.16.0"
+    "org.apache.commons:commons-lang3:3.14.0"
+    "org.mockito:mockito-core:5.7.0"
+    "org.projectlombok:lombok:1.18.30"
+    "org.hibernate:hibernate-core:6.4.0.Final"
+    "com.google.code.gson:gson:2.10.1"
+    "org.apache.httpcomponents:httpclient:4.5.14"
+    "commons-io:commons-io:2.15.1"
+    "org.postgresql:postgresql:42.7.1"
+    "redis.clients:jedis:5.1.0"
+    "org.apache.kafka:kafka-clients:3.6.1"
+)
+
+# Cargo crates (Rust ecosystem)
+CARGO_PACKAGES=(
+    "tokio@1.35.1"
+    "serde@1.0.193"
+    "serde_json@1.0.108"
+    "reqwest@0.11.23"
+    "clap@4.4.11"
+    "anyhow@1.0.75"
+    "thiserror@1.0.51"
+    "log@0.4.20"
+    "env_logger@0.11.0"
+    "rand@0.8.5"
+    "regex@1.10.2"
+    "chrono@0.4.31"
+    "uuid@1.6.1"
+    "actix-web@4.4.0"
+    "diesel@2.1.4"
+)
+
+# Combine and shuffle all types
 ALL_SOURCES=()
 for repo in "${REPOS[@]}"; do
     ALL_SOURCES+=("git|$repo")
@@ -159,19 +216,31 @@ done
 for mod in "${GO_MODULES[@]}"; do
     ALL_SOURCES+=("gomod|$mod")
 done
+for npm in "${NPM_PACKAGES[@]}"; do
+    ALL_SOURCES+=("npm|$npm")
+done
+for maven in "${MAVEN_PACKAGES[@]}"; do
+    ALL_SOURCES+=("maven|$maven")
+done
+for cargo in "${CARGO_PACKAGES[@]}"; do
+    ALL_SOURCES+=("cargo|$cargo")
+done
 
 SELECTED_SOURCES=($(printf '%s\n' "${ALL_SOURCES[@]}" | shuf))
 
-echo "Selected sources to ingest (repositories + Go modules):"
+echo "Selected sources to ingest (all supported types):"
 echo "  Git repositories: ${#REPOS[@]}"
-echo "  Go modules: ${#GO_MODULES[@]}"
-echo "  Total: ${#SELECTED_SOURCES[@]}"
+echo "  Go modules:       ${#GO_MODULES[@]}"
+echo "  npm packages:     ${#NPM_PACKAGES[@]}"
+echo "  Maven artifacts:  ${#MAVEN_PACKAGES[@]}"
+echo "  Cargo crates:     ${#CARGO_PACKAGES[@]}"
+echo "  Total:            ${#SELECTED_SOURCES[@]}"
 echo ""
 
 # Configuration for rate limiting
-DELAY_BETWEEN_REPOS="${INGEST_DELAY:-3}"  # seconds between each ingestion
+DELAY_BETWEEN_REPOS="${INGEST_DELAY:-1}"  # seconds between each ingestion
 BATCH_SIZE="${BATCH_SIZE:-20}"            # number of repos per batch
-BATCH_DELAY="${BATCH_DELAY:-60}"          # seconds between batches
+BATCH_DELAY="${BATCH_DELAY:-10}"          # seconds between batches
 
 # Ingest each source
 SUCCESS=0
@@ -190,6 +259,15 @@ for source_entry in "${SELECTED_SOURCES[@]}"; do
     if [ "$type" = "gomod" ]; then
         # Go module ingestion
         cmd="$ADMIN_BIN ingest --router=\"$ROUTER\" --source=\"$source\" --ingestion-type=go --fetch-type=gomod"
+    elif [ "$type" = "npm" ]; then
+        # npm package ingestion
+        cmd="$ADMIN_BIN ingest --router=\"$ROUTER\" --source=\"$source\" --ingestion-type=npm --fetch-type=npm"
+    elif [ "$type" = "maven" ]; then
+        # Maven artifact ingestion
+        cmd="$ADMIN_BIN ingest --router=\"$ROUTER\" --source=\"$source\" --ingestion-type=maven --fetch-type=maven"
+    elif [ "$type" = "cargo" ]; then
+        # Cargo crate ingestion
+        cmd="$ADMIN_BIN ingest --router=\"$ROUTER\" --source=\"$source\" --ingestion-type=cargo --fetch-type=cargo"
     else
         # Git repository ingestion
         cmd="$ADMIN_BIN ingest --router=\"$ROUTER\" --source=\"$source\""

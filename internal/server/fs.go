@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"syscall"
 	"time"
 
@@ -343,7 +344,8 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	}
 
 	// Find file metadata using path index
-	var blobHash, repoURL, branch, displayPath string
+	var blobHash, repoURL, branch, displayPath, fetchType string
+	var backendMetadata map[string]string
 	key, cached := s.getHashFromPath(storageID, filePath)
 
 	s.logger.Debug("read file",
@@ -368,6 +370,8 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		branch = stored.Branch
 		repoURL = stored.RepoURL
 		displayPath = stored.DisplayPath
+		fetchType = stored.FetchType
+		backendMetadata = stored.BackendMetadata
 		return nil
 	})
 
@@ -382,6 +386,8 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 			branch = failoverMeta.Branch
 			repoURL = failoverMeta.RepoURL
 			displayPath = failoverMeta.DisplayPath
+			fetchType = failoverMeta.FetchType
+			backendMetadata = failoverMeta.BackendMetadata
 			err = nil // Clear error since we found it in failover cache
 		}
 	}
@@ -413,7 +419,7 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		return status.Errorf(codes.FailedPrecondition, "storage node not configured: fetcher client required")
 	}
 
-	content, wasPrefetched, err = s.readViaFetcher(ctx, storageID, blobHash, repoURL, filePath, branch)
+	content, wasPrefetched, err = s.readViaFetcher(ctx, storageID, blobHash, repoURL, filePath, branch, fetchType, backendMetadata)
 	if err != nil {
 		s.logger.Error("read: fetcher request failed", "path", path, "blob_hash", blobHash, "error", err)
 		return status.Errorf(codes.Unavailable, "failed to read blob via fetcher: %v", err)
@@ -431,7 +437,7 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 
 	// Record access for predictor (asynchronously to not block response)
 	if s.predictor != nil {
-		go s.recordAccessForPredictor(ctx, storageID, filePath, blobHash, repoURL, branch)
+		go s.recordAccessForPredictor(ctx, storageID, filePath, blobHash, repoURL, branch, fetchType)
 	}
 
 	// Handle offset and size
@@ -544,7 +550,7 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 
 // readViaFetcher attempts to read blob content via the fetcher service.
 // Returns the content, whether it was a prefetch hit, and any error.
-func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoURL, filePath, branch string) ([]byte, bool, error) {
+func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoURL, filePath, branch, fetchType string, backendMetadata map[string]string) ([]byte, bool, error) {
 	// Check if blob is in prefetch cache
 	inCache, err := s.fetcherClient.CheckCacheSimple(ctx, repoURL, blobHash)
 	if err != nil {
@@ -553,14 +559,41 @@ func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoUR
 
 	wasPrefetched := inCache
 
-	// Determine source type from URL
-	sourceType := fetcher.SourceTypeGit
-	if fetcher.IsGoModPath(repoURL) {
-		sourceType = fetcher.SourceTypeGoMod
+	// Use stored fetch type, fallback to detection if not available
+	sourceType := protoFetchTypeToSourceType(fetchType)
+	if sourceType == fetcher.SourceTypeUnknown {
+		sourceType = detectSourceType(repoURL)
 	}
 
-	// Fetch via fetcher service
-	content, err := s.fetcherClient.FetchBlobSimple(ctx, repoURL, blobHash, filePath, branch, sourceType)
+	// Build source config from stored backend metadata
+	// For git/gomod this is typically empty; for npm/cargo/maven it contains
+	// package_name, version, crate_name, group_id, etc.
+	sourceConfig := make(map[string]string)
+	for k, v := range backendMetadata {
+		sourceConfig[k] = v
+	}
+	// Always set common fields
+	sourceConfig["repo_url"] = repoURL
+	sourceConfig["branch"] = branch
+	sourceConfig["display_path"] = filePath
+	sourceConfig["file_path"] = filePath
+
+	// For Go modules, parse module_path and version from sourceURL
+	if sourceType == fetcher.SourceTypeGoMod {
+		if idx := strings.LastIndex(repoURL, "@"); idx != -1 {
+			sourceConfig["module_path"] = repoURL[:idx]
+			sourceConfig["version"] = repoURL[idx+1:]
+		}
+	}
+
+	req := &fetcher.FetchRequest{
+		ContentID:    blobHash,
+		SourceKey:    repoURL,
+		SourceConfig: sourceConfig,
+		Priority:     5,
+	}
+
+	content, err := s.fetcherClient.FetchBlob(ctx, req, sourceType)
 	if err != nil {
 		return nil, false, fmt.Errorf("fetch blob failed: %w", err)
 	}
@@ -568,18 +601,65 @@ func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoUR
 	return content, wasPrefetched, nil
 }
 
+// protoFetchTypeToSourceType converts proto FetchType string to fetcher SourceType.
+func protoFetchTypeToSourceType(fetchType string) fetcher.SourceType {
+	switch fetchType {
+	case "FETCH_GIT":
+		return fetcher.SourceTypeGit
+	case "FETCH_GO_MOD":
+		return fetcher.SourceTypeGoMod
+	case "FETCH_NPM":
+		return fetcher.SourceTypeNpm
+	case "FETCH_MAVEN":
+		return fetcher.SourceTypeMaven
+	case "FETCH_CARGO":
+		return fetcher.SourceTypeCargo
+	case "FETCH_S3":
+		return fetcher.SourceTypeS3
+	default:
+		return fetcher.SourceTypeUnknown
+	}
+}
+
+// detectSourceType determines the fetcher source type from a repository URL/path.
+func detectSourceType(repoURL string) fetcher.SourceType {
+	// Check for package registries first (most specific)
+	if strings.HasPrefix(repoURL, "registry.npmjs.org/") || strings.Contains(repoURL, "registry.npmjs.org") {
+		return fetcher.SourceTypeNpm
+	}
+	if strings.HasPrefix(repoURL, "repo.maven.apache.org/") || strings.Contains(repoURL, "repo.maven.apache.org") {
+		return fetcher.SourceTypeMaven
+	}
+	if strings.HasPrefix(repoURL, "crates.io/") || strings.Contains(repoURL, "crates.io") {
+		return fetcher.SourceTypeCargo
+	}
+
+	// Check for Go modules
+	if fetcher.IsGoModPath(repoURL) {
+		return fetcher.SourceTypeGoMod
+	}
+
+	// Default to Git for GitHub/GitLab URLs
+	return fetcher.SourceTypeGit
+}
+
 // recordAccessForPredictor records file access for the predictor.
 // The predictor handles prediction and prefetch triggering internally.
-func (s *Server) recordAccessForPredictor(ctx context.Context, storageID, filePath, blobHash, repoURL, branch string) {
+func (s *Server) recordAccessForPredictor(ctx context.Context, storageID, filePath, blobHash, repoURL, branch, fetchType string) {
 	// Create blob metadata for predictor
+	sourceType := protoFetchTypeToSourceType(fetchType)
+	if sourceType == fetcher.SourceTypeUnknown {
+		sourceType = detectSourceType(repoURL)
+	}
+	if fetcher.IsGoModPath(repoURL) {
+		sourceType = fetcher.SourceTypeGoMod
+	}
+
 	meta := &BlobMeta{
 		BlobHash:   blobHash,
 		RepoURL:    repoURL,
 		Branch:     branch,
-		SourceType: fetcher.SourceTypeGit,
-	}
-	if fetcher.IsGoModPath(repoURL) {
-		meta.SourceType = fetcher.SourceTypeGoMod
+		SourceType: sourceType,
 	}
 
 	// Extract client ID from gRPC metadata if available

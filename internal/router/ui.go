@@ -245,6 +245,12 @@ func parseIngestionTypeString(s string) pb.IngestionType {
 		return pb.IngestionType_INGESTION_S3
 	case "file":
 		return pb.IngestionType_INGESTION_FILE
+	case "npm":
+		return pb.IngestionType_INGESTION_NPM
+	case "maven":
+		return pb.IngestionType_INGESTION_MAVEN
+	case "cargo":
+		return pb.IngestionType_INGESTION_CARGO
 	default:
 		return pb.IngestionType_INGESTION_GIT
 	}
@@ -261,6 +267,12 @@ func parseFetchTypeString(s string) pb.FetchType {
 		return pb.FetchType_FETCH_S3
 	case "local":
 		return pb.FetchType_FETCH_LOCAL
+	case "npm":
+		return pb.FetchType_FETCH_NPM
+	case "maven":
+		return pb.FetchType_FETCH_MAVEN
+	case "cargo":
+		return pb.FetchType_FETCH_CARGO
 	default:
 		return pb.FetchType_FETCH_GIT
 	}

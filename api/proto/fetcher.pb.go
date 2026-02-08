@@ -31,6 +31,9 @@ const (
 	SourceType_SOURCE_TYPE_S3      SourceType = 3 // S3-compatible object storage
 	SourceType_SOURCE_TYPE_HTTP    SourceType = 4 // Generic HTTP/HTTPS URL
 	SourceType_SOURCE_TYPE_OCI     SourceType = 5 // OCI registry (container images)
+	SourceType_SOURCE_TYPE_NPM     SourceType = 6 // npm registry (npmjs.org)
+	SourceType_SOURCE_TYPE_MAVEN   SourceType = 7 // Maven Central (repo1.maven.org)
+	SourceType_SOURCE_TYPE_CARGO   SourceType = 8 // crates.io registry
 )
 
 // Enum value maps for SourceType.
@@ -42,6 +45,9 @@ var (
 		3: "SOURCE_TYPE_S3",
 		4: "SOURCE_TYPE_HTTP",
 		5: "SOURCE_TYPE_OCI",
+		6: "SOURCE_TYPE_NPM",
+		7: "SOURCE_TYPE_MAVEN",
+		8: "SOURCE_TYPE_CARGO",
 	}
 	SourceType_value = map[string]int32{
 		"SOURCE_TYPE_UNKNOWN": 0,
@@ -50,6 +56,9 @@ var (
 		"SOURCE_TYPE_S3":      3,
 		"SOURCE_TYPE_HTTP":    4,
 		"SOURCE_TYPE_OCI":     5,
+		"SOURCE_TYPE_NPM":     6,
+		"SOURCE_TYPE_MAVEN":   7,
+		"SOURCE_TYPE_CARGO":   8,
 	}
 )
 
@@ -1445,7 +1454,7 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\rsource_config\x18\a \x03(\v2'.monofs.PredictedFile.SourceConfigEntryR\fsourceConfig\x1a?\n" +
 	"\x11SourceConfigEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x90\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xd3\x01\n" +
 	"\n" +
 	"SourceType\x12\x17\n" +
 	"\x13SOURCE_TYPE_UNKNOWN\x10\x00\x12\x13\n" +
@@ -1453,7 +1462,10 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\x11SOURCE_TYPE_GOMOD\x10\x02\x12\x12\n" +
 	"\x0eSOURCE_TYPE_S3\x10\x03\x12\x14\n" +
 	"\x10SOURCE_TYPE_HTTP\x10\x04\x12\x13\n" +
-	"\x0fSOURCE_TYPE_OCI\x10\x05*\x85\x01\n" +
+	"\x0fSOURCE_TYPE_OCI\x10\x05\x12\x13\n" +
+	"\x0fSOURCE_TYPE_NPM\x10\x06\x12\x15\n" +
+	"\x11SOURCE_TYPE_MAVEN\x10\a\x12\x15\n" +
+	"\x11SOURCE_TYPE_CARGO\x10\b*\x85\x01\n" +
 	"\n" +
 	"AccessType\x12\x17\n" +
 	"\x13ACCESS_TYPE_UNKNOWN\x10\x00\x12\x14\n" +
