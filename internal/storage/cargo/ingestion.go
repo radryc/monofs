@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -208,19 +209,38 @@ func (c *CargoIngestionBackend) Validate(ctx context.Context, sourceURL string, 
 	return nil
 }
 
+// skipCargoDirs are directories that should not be walked during cargo ingestion.
+var skipCargoDirs = map[string]bool{
+	"target": true, ".git": true, ".hg": true, ".svn": true, "node_modules": true,
+}
+
 func (c *CargoIngestionBackend) WalkFiles(ctx context.Context, fn func(storage.FileMetadata) error) error {
-	return filepath.Walk(c.extractDir, func(path string, info os.FileInfo, err error) error {
+	// Use WalkDir instead of Walk to avoid following symlinks
+	return filepath.WalkDir(c.extractDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if info.IsDir() {
+		// Skip symlinks entirely to prevent cycles
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+
+		if d.IsDir() {
+			if skipCargoDirs[d.Name()] {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
 		relPath, err := filepath.Rel(c.extractDir, path)
 		if err != nil {
 			return err
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return nil // skip files we can't stat
 		}
 
 		contentHash, err := computeFileHash(path)

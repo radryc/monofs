@@ -78,8 +78,8 @@ CMD ["--port=9090"]
 # Search image
 FROM alpine:3.19 AS search
 
-# Install git for cloning repos and go for downloading Go modules
-RUN apk add --no-cache ca-certificates git go
+# Install git for cloning repos (Go modules are handled by fetcher service)
+RUN apk add --no-cache ca-certificates git
 
 # Create non-root user
 RUN addgroup -S monofs && adduser -S monofs -G monofs

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -226,19 +227,39 @@ func (n *NpmIngestionBackend) Validate(ctx context.Context, sourceURL string, co
 	return nil
 }
 
+// skipNpmDirs are directories that should not be walked during npm ingestion.
+var skipNpmDirs = map[string]bool{
+	"node_modules": true, ".git": true, ".hg": true, ".svn": true,
+}
+
 func (n *NpmIngestionBackend) WalkFiles(ctx context.Context, fn func(storage.FileMetadata) error) error {
-	return filepath.Walk(n.extractDir, func(path string, info os.FileInfo, err error) error {
+	// Use WalkDir instead of Walk to avoid following symlinks
+	return filepath.WalkDir(n.extractDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if info.IsDir() {
+		// Skip symlinks entirely to prevent cycles
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+
+		if d.IsDir() {
+			// Skip well-known non-source directories
+			if skipNpmDirs[d.Name()] {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
 		relPath, err := filepath.Rel(n.extractDir, path)
 		if err != nil {
 			return err
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return nil // skip files we can't stat
 		}
 
 		contentHash, err := computeFileHash(path)

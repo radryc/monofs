@@ -258,13 +258,70 @@ func (i *Indexer) indexFromMonoFS(ctx context.Context, req IndexRequest, start t
 	}, nil
 }
 
-// walkMonoFSTree recursively walks the repository tree using MonoFS client
+// Recursion safety limits for walkMonoFSTree
+const (
+	maxWalkDepth    = 50     // Maximum directory recursion depth
+	maxPathLength   = 4096   // Maximum path length in bytes
+	maxFilesPerRepo = 500000 // Maximum files to index per repository
+)
+
+// skipDirNames are directories that should never be recursed into during indexing.
+var skipDirNames = map[string]bool{
+	".git": true, ".hg": true, ".svn": true,
+	"node_modules": true, "vendor": true,
+	"__pycache__": true, ".tox": true, ".venv": true,
+	".mypy_cache": true, ".pytest_cache": true,
+	".next": true, ".nuxt": true, "dist": true,
+	"bower_components": true,
+}
+
+// walkMonoFSTree recursively walks the repository tree using MonoFS client.
+// It includes guards against infinite recursion caused by symlink cycles.
 func (i *Indexer) walkMonoFSTree(ctx context.Context, repoPath, subPath, branch string, builder *index.Builder, filesIndexed *int64) error {
+	visited := make(map[string]bool)
+	return i.walkMonoFSTreeInner(ctx, repoPath, subPath, branch, builder, filesIndexed, 0, visited)
+}
+
+func (i *Indexer) walkMonoFSTreeInner(ctx context.Context, repoPath, subPath, branch string, builder *index.Builder, filesIndexed *int64, depth int, visited map[string]bool) error {
+	// Guard: context cancelled
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Guard: maximum recursion depth
+	if depth > maxWalkDepth {
+		i.logger.Warn("walk depth limit reached, skipping subtree",
+			"path", subPath, "depth", depth)
+		return nil
+	}
+
+	// Guard: maximum files already indexed
+	if *filesIndexed >= maxFilesPerRepo {
+		i.logger.Warn("file count limit reached, stopping walk",
+			"repo", repoPath, "files", *filesIndexed)
+		return nil
+	}
+
 	// Construct the full path in MonoFS
 	fullPath := repoPath
 	if subPath != "" {
 		fullPath = filepath.Join(repoPath, subPath)
 	}
+
+	// Guard: path length
+	if len(fullPath) > maxPathLength {
+		i.logger.Warn("path too long, skipping subtree",
+			"path_length", len(fullPath), "max", maxPathLength)
+		return nil
+	}
+
+	// Guard: cycle detection — skip if we've already visited this path
+	if visited[fullPath] {
+		i.logger.Warn("cycle detected, skipping already-visited path",
+			"path", fullPath)
+		return nil
+	}
+	visited[fullPath] = true
 
 	// Read directory entries
 	entries, err := i.monofsClient.ReadDir(ctx, fullPath)
@@ -278,17 +335,24 @@ func (i *Indexer) walkMonoFSTree(ctx context.Context, repoPath, subPath, branch 
 			entryPath = filepath.Join(subPath, entry.Name)
 		}
 
+		// Guard: skip symlinks entirely — they are the main cause of cycles.
+		// Symlink mode bits: 0120000 (S_IFLNK)
+		isSymlink := (entry.Mode & 0170000) == 0120000
+		if isSymlink {
+			continue
+		}
+
 		// Check if it's a directory (mode has directory bit set)
 		isDir := (entry.Mode & 0040000) != 0
 
 		if isDir {
-			// Skip .git directory
-			if entry.Name == ".git" {
+			// Skip well-known non-source directories
+			if skipDirNames[entry.Name] {
 				continue
 			}
 
 			// Recurse into subdirectory
-			if err := i.walkMonoFSTree(ctx, repoPath, entryPath, branch, builder, filesIndexed); err != nil {
+			if err := i.walkMonoFSTreeInner(ctx, repoPath, entryPath, branch, builder, filesIndexed, depth+1, visited); err != nil {
 				i.logger.Warn("failed to walk subdirectory",
 					"path", entryPath,
 					"error", err)
@@ -476,11 +540,16 @@ func (i *Indexer) indexFromExternal(ctx context.Context, req IndexRequest, start
 			return err
 		}
 
-		// Skip .git directory
+		// Skip well-known non-source directories
 		if d.IsDir() {
-			if d.Name() == ".git" {
+			if skipDirNames[d.Name()] {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+
+		// Skip symlinks to prevent cycles
+		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 

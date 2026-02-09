@@ -66,7 +66,7 @@ all: clean proto build test-unit ## Clean, generate proto, build, and run unit t
 
 ##@ Build
 
-build: build-server build-client build-router build-admin build-session build-search build-fetcher build-loadtest ## Build all binaries
+build: build-server build-client build-router build-admin build-session build-search build-fetcher build-loadtest build-build ## Build all binaries
 
 build-server: $(BIN_DIR) ## Build the server binary
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(SERVER_BINARY) ./$(CMD_DIR)/$(SERVER_BINARY)
@@ -99,6 +99,10 @@ build-fetcher: $(BIN_DIR) ## Build the fetcher service binary
 build-loadtest: $(BIN_DIR) ## Build the load test binary
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/monofs-loadtest ./$(CMD_DIR)/monofs-loadtest
 	@echo "Built $(BIN_DIR)/monofs-loadtest"
+
+build-build: $(BIN_DIR) ## Build the build wrapper CLI binary
+	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/monofs-build ./$(CMD_DIR)/monofs-build
+	@echo "Built $(BIN_DIR)/monofs-build"
 
 $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)

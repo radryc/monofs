@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -191,18 +192,32 @@ func (m *MavenIngestionBackend) Validate(ctx context.Context, sourceURL string, 
 }
 
 func (m *MavenIngestionBackend) WalkFiles(ctx context.Context, fn func(storage.FileMetadata) error) error {
-	return filepath.Walk(m.extractDir, func(path string, info os.FileInfo, err error) error {
+	// Use WalkDir instead of Walk to avoid following symlinks
+	return filepath.WalkDir(m.extractDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if info.IsDir() {
+		// Skip symlinks entirely to prevent cycles
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+
+		if d.IsDir() {
+			if d.Name() == ".git" || d.Name() == ".svn" || d.Name() == ".hg" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
 		relPath, err := filepath.Rel(m.extractDir, path)
 		if err != nil {
 			return err
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return nil // skip files we can't stat
 		}
 
 		contentHash, err := computeFileHash(path)
