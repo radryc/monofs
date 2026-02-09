@@ -62,7 +62,9 @@ func main() {
 
 	// Delete flags
 	deleteRouter := deleteCmd.String("router", "localhost:9090", "MonoFS router address")
-	deleteStorageID := deleteCmd.String("storage-id", "", "Storage ID to delete (required)")
+	deleteStorageID := deleteCmd.String("storage-id", "", "Storage ID to delete")
+	deleteName := deleteCmd.String("name", "", "Repository name/path to delete (e.g., github.com/user/repo)")
+	deleteForce := deleteCmd.Bool("force", false, "Skip confirmation prompt")
 
 	// Status flags
 	statusRouter := statusCmd.String("router", "localhost:9090", "MonoFS router address")
@@ -148,13 +150,13 @@ func main() {
 
 	case "delete":
 		deleteCmd.Parse(os.Args[2:])
-		if *deleteStorageID == "" {
-			fmt.Fprintln(os.Stderr, "Error: --storage-id is required")
+		if *deleteStorageID == "" && *deleteName == "" {
+			fmt.Fprintln(os.Stderr, "Error: --storage-id or --name is required")
 			deleteCmd.Usage()
 			os.Exit(1)
 		}
 
-		if err := deleteRepository(*deleteRouter, *deleteStorageID); err != nil {
+		if err := deleteRepository(*deleteRouter, *deleteStorageID, *deleteName, *deleteForce); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: deletion failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -301,7 +303,7 @@ Usage:
 Commands:
   ingest           Ingest a Git repository or Go module into the cluster
   ingest-deps      Bulk ingest all dependencies from a manifest (go.mod, package.json, etc.)
-  delete           Delete a repository from all nodes (cleanup)
+  delete           Delete a repository from all nodes, search index, and memory
   status           Show cluster status and health
   repos            Show repositories in the cluster
   rebalance        Trigger rebalancing for a specific repository
@@ -325,8 +327,14 @@ Examples:
   # Bulk ingest all dependencies from go.mod
   monofs-admin ingest-deps --file=go.mod --type=go --concurrency=10
 
-  # Delete repository to free memory
+  # Delete repository by storage ID
   monofs-admin delete --storage-id=<storage-id>
+
+  # Delete repository by name (partial match supported)
+  monofs-admin delete --name=github.com/user/repo
+
+  # Delete without confirmation prompt
+  monofs-admin delete --name=myrepo --force
 
   # Ingest with custom repo ID
   monofs-admin ingest --url=https://github.com/owner/repo/tree/develop --repo-id=myrepo
@@ -825,10 +833,9 @@ func parseFetchType(s string) pb.SourceType {
 	}
 }
 
-// deleteRepository deletes a repository from all nodes (cleanup to free memory).
-func deleteRepository(routerAddr, storageID string) error {
-	fmt.Printf("Deleting repository %s from router %s\n", storageID, routerAddr)
-
+// deleteRepository deletes a repository from all nodes, search index, and router memory.
+// Supports deletion by storage ID or by repository name (display path).
+func deleteRepository(routerAddr, storageID, name string, force bool) error {
 	conn, err := grpc.NewClient(routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -843,6 +850,38 @@ func deleteRepository(routerAddr, storageID string) error {
 	defer conn.Close()
 
 	client := pb.NewMonoFSRouterClient(conn)
+
+	// If name is provided, resolve it to a storage ID via repos listing
+	if storageID == "" && name != "" {
+		resolved, err := resolveStorageID(routerAddr, name)
+		if err != nil {
+			return err
+		}
+		storageID = resolved
+	}
+
+	fmt.Printf("\n🗑️  Deleting repository\n")
+	fmt.Printf("   Storage ID: %s\n", storageID)
+	fmt.Printf("   Router:     %s\n", routerAddr)
+	fmt.Printf("\n")
+	fmt.Printf("   This will remove ALL data:\n")
+	fmt.Printf("   • Repository metadata from all nodes\n")
+	fmt.Printf("   • All owned and replica files\n")
+	fmt.Printf("   • Directory indexes\n")
+	fmt.Printf("   • Search index\n")
+	fmt.Printf("   • Router memory references\n")
+	fmt.Printf("\n")
+
+	if !force {
+		fmt.Printf("   Are you sure? [y/N]: ")
+		var answer string
+		fmt.Scanln(&answer)
+		if answer != "y" && answer != "Y" && answer != "yes" {
+			fmt.Println("   Aborted.")
+			return nil
+		}
+		fmt.Println()
+	}
 
 	// Delete with extended timeout (5 minutes max)
 	deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -860,11 +899,89 @@ func deleteRepository(routerAddr, storageID string) error {
 	}
 
 	fmt.Printf("✅ Repository deleted successfully\n")
-	fmt.Printf("   Storage ID: %s\n", storageID)
+	fmt.Printf("   Storage ID:    %s\n", storageID)
 	fmt.Printf("   Files deleted: %d\n", resp.FilesDeleted)
-	fmt.Printf("   Message: %s\n", resp.Message)
+	fmt.Printf("   Message:       %s\n", resp.Message)
 
 	return nil
+}
+
+// resolveStorageID resolves a repository name (display path) to its storage ID.
+// Uses the HTTP API to find matching repos, supporting partial matches.
+func resolveStorageID(routerAddr, name string) (string, error) {
+	// The router addr is a gRPC addr (e.g., localhost:9090).
+	// The HTTP API is typically on port 8080. Try to derive it.
+	httpAddr := routerAddr
+	if strings.HasSuffix(httpAddr, ":9090") {
+		httpAddr = strings.TrimSuffix(httpAddr, ":9090") + ":8080"
+	}
+
+	apiURL := fmt.Sprintf("http://%s/api/repositories", httpAddr)
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.Get(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch repositories for name lookup: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("API error during name lookup: %s", resp.Status)
+	}
+
+	var data struct {
+		Repositories []struct {
+			StorageID string `json:"storage_id"`
+			RepoID    string `json:"repo_id"`
+			RepoURL   string `json:"repo_url"`
+		} `json:"repositories"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", fmt.Errorf("failed to decode repositories: %w", err)
+	}
+
+	// Find matching repos (exact or partial match on repo_id)
+	var matches []struct {
+		StorageID string
+		RepoID    string
+	}
+
+	nameLower := strings.ToLower(name)
+	for _, repo := range data.Repositories {
+		repoIDLower := strings.ToLower(repo.RepoID)
+		if repoIDLower == nameLower || strings.Contains(repoIDLower, nameLower) {
+			matches = append(matches, struct {
+				StorageID string
+				RepoID    string
+			}{repo.StorageID, repo.RepoID})
+		}
+	}
+
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no repository found matching '%s'", name)
+	}
+
+	if len(matches) == 1 {
+		fmt.Printf("   Resolved '%s' → %s (storage: %s)\n", name, matches[0].RepoID, matches[0].StorageID)
+		return matches[0].StorageID, nil
+	}
+
+	// Multiple matches - let user choose
+	fmt.Printf("   Multiple repositories match '%s':\n\n", name)
+	for i, m := range matches {
+		fmt.Printf("   [%d] %s (storage: %s)\n", i+1, m.RepoID, m.StorageID)
+	}
+	fmt.Printf("\n   Enter number (1-%d) or 0 to cancel: ", len(matches))
+
+	var choice int
+	fmt.Scanln(&choice)
+	if choice < 1 || choice > len(matches) {
+		return "", fmt.Errorf("cancelled")
+	}
+
+	selected := matches[choice-1]
+	fmt.Printf("   Selected: %s\n\n", selected.RepoID)
+	return selected.StorageID, nil
 }
 
 // showClusterStatus displays cluster health and node information.

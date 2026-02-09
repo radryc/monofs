@@ -741,6 +741,7 @@ const (
 	MonoFS_GetOnboardingStatus_FullMethodName     = "/monofs.MonoFS/GetOnboardingStatus"
 	MonoFS_MarkRepositoryOnboarded_FullMethodName = "/monofs.MonoFS/MarkRepositoryOnboarded"
 	MonoFS_DeleteFile_FullMethodName              = "/monofs.MonoFS/DeleteFile"
+	MonoFS_DeleteRepository_FullMethodName        = "/monofs.MonoFS/DeleteRepository"
 	MonoFS_BuildDirectoryIndexes_FullMethodName   = "/monofs.MonoFS/BuildDirectoryIndexes"
 )
 
@@ -783,6 +784,8 @@ type MonoFSClient interface {
 	MarkRepositoryOnboarded(ctx context.Context, in *MarkRepositoryOnboardedRequest, opts ...grpc.CallOption) (*MarkRepositoryOnboardedResponse, error)
 	// Cleanup operations (called by router after rebalancing)
 	DeleteFile(ctx context.Context, in *DeleteFileRequest, opts ...grpc.CallOption) (*DeleteFileResponse, error)
+	// Delete entire repository from this node (all buckets)
+	DeleteRepository(ctx context.Context, in *DeleteRepositoryOnNodeRequest, opts ...grpc.CallOption) (*DeleteRepositoryOnNodeResponse, error)
 	// Build directory indexes in batch after ingestion (deferred for performance)
 	BuildDirectoryIndexes(ctx context.Context, in *BuildDirectoryIndexesRequest, opts ...grpc.CallOption) (*BuildDirectoryIndexesResponse, error)
 }
@@ -1016,6 +1019,16 @@ func (c *monoFSClient) DeleteFile(ctx context.Context, in *DeleteFileRequest, op
 	return out, nil
 }
 
+func (c *monoFSClient) DeleteRepository(ctx context.Context, in *DeleteRepositoryOnNodeRequest, opts ...grpc.CallOption) (*DeleteRepositoryOnNodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteRepositoryOnNodeResponse)
+	err := c.cc.Invoke(ctx, MonoFS_DeleteRepository_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *monoFSClient) BuildDirectoryIndexes(ctx context.Context, in *BuildDirectoryIndexesRequest, opts ...grpc.CallOption) (*BuildDirectoryIndexesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BuildDirectoryIndexesResponse)
@@ -1065,6 +1078,8 @@ type MonoFSServer interface {
 	MarkRepositoryOnboarded(context.Context, *MarkRepositoryOnboardedRequest) (*MarkRepositoryOnboardedResponse, error)
 	// Cleanup operations (called by router after rebalancing)
 	DeleteFile(context.Context, *DeleteFileRequest) (*DeleteFileResponse, error)
+	// Delete entire repository from this node (all buckets)
+	DeleteRepository(context.Context, *DeleteRepositoryOnNodeRequest) (*DeleteRepositoryOnNodeResponse, error)
 	// Build directory indexes in batch after ingestion (deferred for performance)
 	BuildDirectoryIndexes(context.Context, *BuildDirectoryIndexesRequest) (*BuildDirectoryIndexesResponse, error)
 	mustEmbedUnimplementedMonoFSServer()
@@ -1136,6 +1151,9 @@ func (UnimplementedMonoFSServer) MarkRepositoryOnboarded(context.Context, *MarkR
 }
 func (UnimplementedMonoFSServer) DeleteFile(context.Context, *DeleteFileRequest) (*DeleteFileResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteFile not implemented")
+}
+func (UnimplementedMonoFSServer) DeleteRepository(context.Context, *DeleteRepositoryOnNodeRequest) (*DeleteRepositoryOnNodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteRepository not implemented")
 }
 func (UnimplementedMonoFSServer) BuildDirectoryIndexes(context.Context, *BuildDirectoryIndexesRequest) (*BuildDirectoryIndexesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BuildDirectoryIndexes not implemented")
@@ -1496,6 +1514,24 @@ func _MonoFS_DeleteFile_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFS_DeleteRepository_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteRepositoryOnNodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSServer).DeleteRepository(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFS_DeleteRepository_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSServer).DeleteRepository(ctx, req.(*DeleteRepositoryOnNodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _MonoFS_BuildDirectoryIndexes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(BuildDirectoryIndexesRequest)
 	if err := dec(in); err != nil {
@@ -1588,6 +1624,10 @@ var MonoFS_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteFile",
 			Handler:    _MonoFS_DeleteFile_Handler,
+		},
+		{
+			MethodName: "DeleteRepository",
+			Handler:    _MonoFS_DeleteRepository_Handler,
 		},
 		{
 			MethodName: "BuildDirectoryIndexes",

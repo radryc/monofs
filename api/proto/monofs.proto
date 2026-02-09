@@ -93,6 +93,9 @@ service MonoFS {
     // Cleanup operations (called by router after rebalancing)
     rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
     
+    // Delete entire repository from this node (all buckets)
+    rpc DeleteRepository(DeleteRepositoryOnNodeRequest) returns (DeleteRepositoryOnNodeResponse);
+    
     // Build directory indexes in batch after ingestion (deferred for performance)
     rpc BuildDirectoryIndexes(BuildDirectoryIndexesRequest) returns (BuildDirectoryIndexesResponse);
 }
@@ -492,6 +495,18 @@ message BuildDirectoryIndexesResponse {
     bool success = 1;
     int64 directories_indexed = 2;
     string message = 3;
+}
+
+// Node-level repository deletion (removes all data for a repository from one node)
+message DeleteRepositoryOnNodeRequest {
+    string storage_id = 1;
+}
+
+message DeleteRepositoryOnNodeResponse {
+    bool success = 1;
+    string message = 2;
+    int64 files_deleted = 3;
+    int64 dirs_deleted = 4;
 }
 
 // Client registration messages

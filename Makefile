@@ -293,11 +293,13 @@ deploy-stop: ## Stop dev deployment
 	@if pgrep -x monofs-client > /dev/null; then echo "  - Stopping monofs-client"; pkill -9 -x monofs-client; fi
 	@echo "✅ Stopped all services"
 
-deploy-clean: ## Stop deployment and remove all data
+deploy-clean: ## Stop deployment and remove all data (includes Docker prune)
 	@echo "Cleaning deployment..."
 	@$(DOCKER_COMPOSE) down -v || true
 	@rm -rf /tmp/monofs-dev || true
-	@echo "✅ Cleaned deployment data"
+	@docker system prune -f || true
+	@docker builder prune -f || true
+	@echo "✅ Cleaned deployment data and pruned Docker resources"
 
 deploy-restart: deploy-stop deploy ## Restart deployment
 

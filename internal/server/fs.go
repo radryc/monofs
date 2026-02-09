@@ -548,6 +548,146 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 	}, nil
 }
 
+// DeleteRepository removes ALL data for a repository from this node.
+// Cleans up: repos, repolookup, metadata, pathindex, ownedfiles, replicafiles, dirindex, onboarding_status.
+func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryOnNodeRequest) (*pb.DeleteRepositoryOnNodeResponse, error) {
+	storageID := req.StorageId
+	s.logger.Info("deleting repository from node", "storage_id", storageID)
+
+	var filesDeleted int64
+	var dirsDeleted int64
+
+	err := s.db.Update(func(tx *nutsdb.Tx) error {
+		// 1. Get repo info (for display path lookup cleanup)
+		repoKey := []byte(storageID)
+		var displayPath string
+		repoData, repoErr := tx.Get(bucketRepos, repoKey)
+		if repoErr == nil {
+			var info repoInfo
+			if json.Unmarshal(repoData, &info) == nil {
+				displayPath = info.DisplayPath
+			}
+		}
+
+		// 2. Delete repo info
+		if err := tx.Delete(bucketRepos, repoKey); err != nil && err != nutsdb.ErrKeyNotFound {
+			s.logger.Warn("failed to delete repo info", "storage_id", storageID, "error", err)
+		}
+
+		// 3. Delete display path → storageID lookup
+		if displayPath != "" {
+			if err := tx.Delete(bucketRepoLookup, []byte(displayPath)); err != nil && err != nutsdb.ErrKeyNotFound {
+				s.logger.Warn("failed to delete repo lookup", "display_path", displayPath, "error", err)
+			}
+		}
+
+		// 4. Delete onboarding status
+		if err := tx.Delete(bucketOnboardingStatus, repoKey); err != nil && err != nutsdb.ErrKeyNotFound {
+			s.logger.Warn("failed to delete onboarding status", "storage_id", storageID, "error", err)
+		}
+
+		// 5. Delete all owned files (metadata, pathindex, ownedfiles)
+		prefix := []byte(storageID + ":")
+		ownedKeys, _, err := tx.PrefixScanEntries(bucketOwnedFiles, prefix, "", 0, -1, true, false)
+		if err == nil {
+			for _, key := range ownedKeys {
+				keyStr := string(key)
+				prefixStr := storageID + ":"
+				if !strings.HasPrefix(keyStr, prefixStr) {
+					continue
+				}
+				filePath := strings.TrimPrefix(keyStr, prefixStr)
+				metaKey := makeStorageKey(storageID, filePath)
+
+				// Delete metadata
+				if err := tx.Delete(bucketMetadata, metaKey); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Debug("failed to delete metadata", "key", string(metaKey), "error", err)
+				}
+
+				// Delete path index
+				if err := tx.Delete(bucketPathIndex, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Debug("failed to delete path index", "key", keyStr, "error", err)
+				}
+
+				// Delete ownership
+				if err := tx.Delete(bucketOwnedFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Debug("failed to delete ownership", "key", keyStr, "error", err)
+				}
+
+				filesDeleted++
+			}
+		}
+
+		// 6. Delete all replica files
+		replicaKeys, _, err := tx.PrefixScanEntries(bucketReplicaFiles, prefix, "", 0, -1, true, false)
+		if err == nil {
+			for _, key := range replicaKeys {
+				keyStr := string(key)
+				prefixStr := storageID + ":"
+				if !strings.HasPrefix(keyStr, prefixStr) {
+					continue
+				}
+				filePath := strings.TrimPrefix(keyStr, prefixStr)
+				metaKey := makeStorageKey(storageID, filePath)
+
+				// Delete replica metadata
+				if err := tx.Delete(bucketMetadata, metaKey); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Debug("failed to delete replica metadata", "key", string(metaKey), "error", err)
+				}
+
+				// Delete replica tracking
+				if err := tx.Delete(bucketReplicaFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Debug("failed to delete replica tracking", "key", keyStr, "error", err)
+				}
+
+				filesDeleted++
+			}
+		}
+
+		// 7. Delete all directory indexes for this repo
+		dirKeys, _, err := tx.PrefixScanEntries(bucketDirIndex, prefix, "", 0, -1, true, false)
+		if err == nil {
+			for _, key := range dirKeys {
+				if err := tx.Delete(bucketDirIndex, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Debug("failed to delete dir index", "key", string(key), "error", err)
+				}
+				dirsDeleted++
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		s.logger.Error("failed to delete repository", "storage_id", storageID, "error", err)
+		return &pb.DeleteRepositoryOnNodeResponse{
+			Success: false,
+			Message: fmt.Sprintf("deletion failed: %v", err),
+		}, err
+	}
+
+	// Update file count
+	s.totalFiles.Add(-filesDeleted)
+
+	// Invalidate intermediate directory cache
+	s.intermediateDirCache.Range(func(key, value any) bool {
+		s.intermediateDirCache.Delete(key)
+		return true
+	})
+
+	s.logger.Info("repository deleted from node",
+		"storage_id", storageID,
+		"files_deleted", filesDeleted,
+		"dirs_deleted", dirsDeleted)
+
+	return &pb.DeleteRepositoryOnNodeResponse{
+		Success:      true,
+		Message:      "repository deleted",
+		FilesDeleted: filesDeleted,
+		DirsDeleted:  dirsDeleted,
+	}, nil
+}
+
 // readViaFetcher attempts to read blob content via the fetcher service.
 // Returns the content, whether it was a prefetch hit, and any error.
 func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoURL, filePath, branch, fetchType string, backendMetadata map[string]string) ([]byte, bool, error) {
