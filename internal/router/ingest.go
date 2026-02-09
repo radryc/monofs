@@ -175,6 +175,7 @@ func (r *Router) initializeBackend(ctx *ingestionContext, sendProgress func(pb.I
 	config := ctx.req.IngestionConfig
 	if config == nil {
 		config = make(map[string]string)
+		ctx.req.IngestionConfig = config // Ensure it's saved back to the context
 	}
 	config["branch"] = ctx.ref
 	config["display_path"] = ctx.displayPath
@@ -208,6 +209,13 @@ func (r *Router) initializeBackend(ctx *ingestionContext, sendProgress func(pb.I
 		case <-initDone:
 			elapsed := time.Since(initStartTime).Round(time.Second)
 			sendProgress(pb.IngestProgress_CLONING, fmt.Sprintf("Backend ready in %v", elapsed), 0, 0, "")
+
+			// Debug: log commit info after initialization
+			r.logger.Info("backend initialized",
+				"commit_hash", ctx.req.IngestionConfig["commit_hash"],
+				"commit_time", ctx.req.IngestionConfig["commit_time"],
+				"commit_message", ctx.req.IngestionConfig["commit_message"])
+
 			return nil
 		case err := <-initErr:
 			return fmt.Errorf("failed to initialize backend: %w", err)
@@ -277,6 +285,8 @@ func (r *Router) registerOnAllNodes(ctx *ingestionContext) error {
 			} else {
 				r.logger.Info("registered repository on node",
 					"node_id", nodeID,
+					"storage_id", ctx.storageID,
+					"commit_hash", ctx.req.IngestionConfig["commit_hash"],
 					"display_path", ctx.displayPath)
 			}
 		}()
@@ -365,9 +375,23 @@ func (r *Router) distributeFiles(ctx *ingestionContext, sendProgress func(pb.Ing
 	err = ctx.backend.WalkFiles(ctx.stream.Context(), func(meta storage.FileMetadata) error {
 		atomic.AddInt64(ctx.totalFiles, 1)
 
-		// Extract canonical path from metadata on FIRST file
+		// Extract canonical path and commit metadata from FIRST file
 		ctx.canonicalPathMux.Lock()
 		if ctx.canonicalPath == "" && meta.Metadata != nil {
+			// Extract commit information from first file metadata
+			if commitHash, ok := meta.Metadata["commit_hash"]; ok && commitHash != "" {
+				if ctx.req.IngestionConfig == nil {
+					ctx.req.IngestionConfig = make(map[string]string)
+				}
+				ctx.req.IngestionConfig["commit_hash"] = commitHash
+				if commitTime, ok := meta.Metadata["commit_time"]; ok {
+					ctx.req.IngestionConfig["commit_time"] = commitTime
+				}
+				if commitMessage, ok := meta.Metadata["commit_message"]; ok {
+					ctx.req.IngestionConfig["commit_message"] = commitMessage
+				}
+			}
+
 			if canonicalPath := handler.ExtractCanonicalPath(meta.Metadata); canonicalPath != "" {
 				ctx.canonicalPath = canonicalPath
 

@@ -121,6 +121,14 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 					continue
 				}
 
+				// Debug: log commit data from server response
+				if repoInfo.CommitHash != "" {
+					r.logger.Info("received commit info from server",
+						"storage_id", storageID,
+						"commit_hash", repoInfo.CommitHash,
+						"commit_time", repoInfo.CommitTime)
+				}
+
 				// Get file count and ingested time from router's tracking
 				var filesCount int64
 				var ingestedAt time.Time
@@ -144,6 +152,9 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 					"repo_id":            repoInfo.DisplayPath,
 					"repo_url":           repoInfo.Source,
 					"branch":             repoInfo.Ref,
+					"commit_hash":        repoInfo.CommitHash,
+					"commit_time":        repoInfo.CommitTime,
+					"commit_message":     repoInfo.CommitMessage,
 					"files_count":        filesCount,
 					"ingested_at":        ingestedAt.Unix(),
 					"topology_version":   currentVersion,

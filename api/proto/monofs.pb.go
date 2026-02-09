@@ -2920,6 +2920,9 @@ type GetRepositoryInfoResponse struct {
 	DisplayPath   string                 `protobuf:"bytes,2,opt,name=display_path,json=displayPath,proto3" json:"display_path,omitempty"`
 	Source        string                 `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
 	Ref           string                 `protobuf:"bytes,4,opt,name=ref,proto3" json:"ref,omitempty"`
+	CommitHash    string                 `protobuf:"bytes,5,opt,name=commit_hash,json=commitHash,proto3" json:"commit_hash,omitempty"`
+	CommitTime    int64                  `protobuf:"varint,6,opt,name=commit_time,json=commitTime,proto3" json:"commit_time,omitempty"`
+	CommitMessage string                 `protobuf:"bytes,7,opt,name=commit_message,json=commitMessage,proto3" json:"commit_message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2978,6 +2981,27 @@ func (x *GetRepositoryInfoResponse) GetSource() string {
 func (x *GetRepositoryInfoResponse) GetRef() string {
 	if x != nil {
 		return x.Ref
+	}
+	return ""
+}
+
+func (x *GetRepositoryInfoResponse) GetCommitHash() string {
+	if x != nil {
+		return x.CommitHash
+	}
+	return ""
+}
+
+func (x *GetRepositoryInfoResponse) GetCommitTime() int64 {
+	if x != nil {
+		return x.CommitTime
+	}
+	return 0
+}
+
+func (x *GetRepositoryInfoResponse) GetCommitMessage() string {
+	if x != nil {
+		return x.CommitMessage
 	}
 	return ""
 }
@@ -5325,13 +5349,18 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x0erepository_ids\x18\x01 \x03(\tR\rrepositoryIds\"9\n" +
 	"\x18GetRepositoryInfoRequest\x12\x1d\n" +
 	"\n" +
-	"storage_id\x18\x01 \x01(\tR\tstorageId\"\x87\x01\n" +
+	"storage_id\x18\x01 \x01(\tR\tstorageId\"\xf0\x01\n" +
 	"\x19GetRepositoryInfoResponse\x12\x1d\n" +
 	"\n" +
 	"storage_id\x18\x01 \x01(\tR\tstorageId\x12!\n" +
 	"\fdisplay_path\x18\x02 \x01(\tR\vdisplayPath\x12\x16\n" +
 	"\x06source\x18\x03 \x01(\tR\x06source\x12\x10\n" +
-	"\x03ref\x18\x04 \x01(\tR\x03ref\"2\n" +
+	"\x03ref\x18\x04 \x01(\tR\x03ref\x12\x1f\n" +
+	"\vcommit_hash\x18\x05 \x01(\tR\n" +
+	"commitHash\x12\x1f\n" +
+	"\vcommit_time\x18\x06 \x01(\x03R\n" +
+	"commitTime\x12%\n" +
+	"\x0ecommit_message\x18\a \x01(\tR\rcommitMessage\"2\n" +
 	"\x17OnboardingStatusRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\"\xb3\x01\n" +
 	"\x18OnboardingStatusResponse\x12V\n" +

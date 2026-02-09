@@ -416,6 +416,9 @@ message GetRepositoryInfoResponse {
     string display_path = 2;
     string source = 3;
     string ref = 4;
+    string commit_hash = 5;
+    int64 commit_time = 6;
+    string commit_message = 7;
 }
 
 // Onboarding status messages

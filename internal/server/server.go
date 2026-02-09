@@ -54,8 +54,8 @@ type Server struct {
 }
 
 type repoInfo struct {
-	StorageID     string `json:"storage_id"`     // SHA-256 hash (primary key)
-	DisplayPath   string `json:"display_path"`   // User-visible path
+	StorageID     string `json:"storage_id"`   // SHA-256 hash (primary key)
+	DisplayPath   string `json:"display_path"` // User-visible path
 	RepoURL       string `json:"repo_url"`
 	Branch        string `json:"branch"`
 	CommitHash    string `json:"commit_hash"`    // Git commit hash
@@ -684,10 +684,15 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 			RepoURL:     meta.Source,
 		}
 
-		// If repo exists but branch is empty and we have a branch, update it
+		// If repo exists, preserve commit fields and handle branch
 		if !isNewRepo && existsErr == nil {
 			var existing repoInfo
 			if json.Unmarshal(existingRepoData, &existing) == nil {
+				// Always preserve commit fields from registration
+				info.CommitHash = existing.CommitHash
+				info.CommitTime = existing.CommitTime
+				info.CommitMessage = existing.CommitMessage
+
 				if existing.Branch == "" && meta.Ref != "" {
 					// Update with new branch
 					s.logger.Info("updating repo branch",
@@ -852,10 +857,15 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 			RepoURL:     repoURL,
 		}
 
-		// If repo exists but branch is empty and we have a branch, update it
+		// If repo exists, preserve commit fields and handle branch
 		if !isNewRepo && existsErr == nil {
 			var existing repoInfo
 			if json.Unmarshal(existingRepoData, &existing) == nil {
+				// Always preserve commit fields from registration
+				info.CommitHash = existing.CommitHash
+				info.CommitTime = existing.CommitTime
+				info.CommitMessage = existing.CommitMessage
+
 				if existing.Branch == "" && branch != "" {
 					s.logger.Info("updating repo branch in batch",
 						"storage_id", storageID,
@@ -1050,6 +1060,7 @@ func (s *Server) IngestReplicaBatch(ctx context.Context, req *pb.IngestReplicaBa
 				DisplayPath: displayPath,
 				Branch:      branch,
 				RepoURL:     repoURL,
+				// Note: commit fields will be empty for replicas created without prior registration
 			}
 			repoValue, _ := json.Marshal(info)
 			if err := tx.Put(bucketRepos, repoKey, repoValue, 0); err != nil {
@@ -1199,10 +1210,13 @@ func (s *Server) GetRepositoryInfo(ctx context.Context, req *pb.GetRepositoryInf
 	}
 
 	return &pb.GetRepositoryInfoResponse{
-		StorageId:   repoInfoData.StorageID,
-		DisplayPath: repoInfoData.DisplayPath,
-		Source:      repoInfoData.RepoURL,
-		Ref:         repoInfoData.Branch,
+		StorageId:     repoInfoData.StorageID,
+		DisplayPath:   repoInfoData.DisplayPath,
+		Source:        repoInfoData.RepoURL,
+		Ref:           repoInfoData.Branch,
+		CommitHash:    repoInfoData.CommitHash,
+		CommitTime:    repoInfoData.CommitTime,
+		CommitMessage: repoInfoData.CommitMessage,
 	}, nil
 }
 
