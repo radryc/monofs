@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,15 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+// parseCommitTime converts a commit time string to int64, returning 0 on error
+func parseCommitTime(timeStr string) int64 {
+	if timeStr == "" {
+		return 0
+	}
+	val, _ := strconv.ParseInt(timeStr, 10, 64)
+	return val
+}
 
 // generateStorageID creates a SHA-256 hash of the display path.
 // This provides a consistent, fixed-length internal identifier regardless of
@@ -254,6 +264,9 @@ func (r *Router) registerOnAllNodes(ctx *ingestionContext) error {
 				FetchType:       ctx.req.FetchType,
 				IngestionConfig: ctx.req.IngestionConfig,
 				FetchConfig:     ctx.req.FetchConfig,
+				CommitHash:      ctx.req.IngestionConfig["commit_hash"],
+				CommitTime:      parseCommitTime(ctx.req.IngestionConfig["commit_time"]),
+				CommitMessage:   ctx.req.IngestionConfig["commit_message"],
 			})
 			regCancel()
 

@@ -357,6 +357,11 @@ message RegisterRepositoryRequest {
     SourceType fetch_type = 5;
     map<string, string> ingestion_config = 6;
     map<string, string> fetch_config = 7;
+    
+    // Commit information (for Git repositories)
+    string commit_hash = 8;    // Git commit hash
+    int64 commit_time = 9;     // Commit timestamp (Unix)
+    string commit_message = 10; // Commit message
 }
 
 message RegisterRepositoryResponse {

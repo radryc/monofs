@@ -54,10 +54,13 @@ type Server struct {
 }
 
 type repoInfo struct {
-	StorageID   string `json:"storage_id"`   // SHA-256 hash (primary key)
-	DisplayPath string `json:"display_path"` // User-visible path
-	RepoURL     string `json:"repo_url"`
-	Branch      string `json:"branch"`
+	StorageID     string `json:"storage_id"`     // SHA-256 hash (primary key)
+	DisplayPath   string `json:"display_path"`   // User-visible path
+	RepoURL       string `json:"repo_url"`
+	Branch        string `json:"branch"`
+	CommitHash    string `json:"commit_hash"`    // Git commit hash
+	CommitTime    int64  `json:"commit_time"`    // Commit timestamp (Unix)
+	CommitMessage string `json:"commit_message"` // Commit message
 }
 
 type storedMetadata struct {
@@ -506,10 +509,13 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 		if !repoExists {
 			// Store repo metadata only if new storage ID
 			info := &repoInfo{
-				StorageID:   req.StorageId,
-				DisplayPath: req.DisplayPath,
-				RepoURL:     req.Source,
-				Branch:      "", // Branch will be set during file ingestion
+				StorageID:     req.StorageId,
+				DisplayPath:   req.DisplayPath,
+				RepoURL:       req.Source,
+				Branch:        "", // Branch will be set during file ingestion
+				CommitHash:    req.CommitHash,
+				CommitTime:    req.CommitTime,
+				CommitMessage: req.CommitMessage,
 			}
 			repoKey := []byte(req.StorageId)
 			repoValue, err := json.Marshal(info)

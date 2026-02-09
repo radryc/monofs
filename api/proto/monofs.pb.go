@@ -2309,8 +2309,12 @@ type RegisterRepositoryRequest struct {
 	FetchType       SourceType        `protobuf:"varint,5,opt,name=fetch_type,json=fetchType,proto3,enum=monofs.SourceType" json:"fetch_type,omitempty"`
 	IngestionConfig map[string]string `protobuf:"bytes,6,rep,name=ingestion_config,json=ingestionConfig,proto3" json:"ingestion_config,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	FetchConfig     map[string]string `protobuf:"bytes,7,rep,name=fetch_config,json=fetchConfig,proto3" json:"fetch_config,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Commit information (for Git repositories)
+	CommitHash    string `protobuf:"bytes,8,opt,name=commit_hash,json=commitHash,proto3" json:"commit_hash,omitempty"`           // Git commit hash
+	CommitTime    int64  `protobuf:"varint,9,opt,name=commit_time,json=commitTime,proto3" json:"commit_time,omitempty"`          // Commit timestamp (Unix)
+	CommitMessage string `protobuf:"bytes,10,opt,name=commit_message,json=commitMessage,proto3" json:"commit_message,omitempty"` // Commit message
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RegisterRepositoryRequest) Reset() {
@@ -2390,6 +2394,27 @@ func (x *RegisterRepositoryRequest) GetFetchConfig() map[string]string {
 		return x.FetchConfig
 	}
 	return nil
+}
+
+func (x *RegisterRepositoryRequest) GetCommitHash() string {
+	if x != nil {
+		return x.CommitHash
+	}
+	return ""
+}
+
+func (x *RegisterRepositoryRequest) GetCommitTime() int64 {
+	if x != nil {
+		return x.CommitTime
+	}
+	return 0
+}
+
+func (x *RegisterRepositoryRequest) GetCommitMessage() string {
+	if x != nil {
+		return x.CommitMessage
+	}
+	return ""
 }
 
 type RegisterRepositoryResponse struct {
@@ -5249,7 +5274,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12)\n" +
 	"\x10files_replicated\x18\x02 \x01(\x03R\x0ffilesReplicated\x12!\n" +
 	"\ffiles_failed\x18\x03 \x01(\x03R\vfilesFailed\x12#\n" +
-	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xa4\x04\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\x8d\x05\n" +
 	"\x19RegisterRepositoryRequest\x12\x1d\n" +
 	"\n" +
 	"storage_id\x18\x01 \x01(\tR\tstorageId\x12!\n" +
@@ -5259,7 +5284,13 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\n" +
 	"fetch_type\x18\x05 \x01(\x0e2\x12.monofs.SourceTypeR\tfetchType\x12a\n" +
 	"\x10ingestion_config\x18\x06 \x03(\v26.monofs.RegisterRepositoryRequest.IngestionConfigEntryR\x0fingestionConfig\x12U\n" +
-	"\ffetch_config\x18\a \x03(\v22.monofs.RegisterRepositoryRequest.FetchConfigEntryR\vfetchConfig\x1aB\n" +
+	"\ffetch_config\x18\a \x03(\v22.monofs.RegisterRepositoryRequest.FetchConfigEntryR\vfetchConfig\x12\x1f\n" +
+	"\vcommit_hash\x18\b \x01(\tR\n" +
+	"commitHash\x12\x1f\n" +
+	"\vcommit_time\x18\t \x01(\x03R\n" +
+	"commitTime\x12%\n" +
+	"\x0ecommit_message\x18\n" +
+	" \x01(\tR\rcommitMessage\x1aB\n" +
 	"\x14IngestionConfigEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a>\n" +

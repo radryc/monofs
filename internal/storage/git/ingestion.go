@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	gitpkg "github.com/radryc/monofs/internal/git"
 	"github.com/radryc/monofs/internal/storage"
 )
@@ -56,6 +57,17 @@ func (g *GitIngestionBackend) Initialize(ctx context.Context, sourceURL string, 
 	}
 	g.repo = repo
 
+	// Extract commit information from the current branch
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(g.branch), true)
+	if err == nil {
+		commit, err := repo.CommitObject(ref.Hash())
+		if err == nil {
+			config["commit_hash"] = commit.Hash.String()
+			config["commit_time"] = fmt.Sprintf("%d", commit.Committer.When.Unix())
+			config["commit_message"] = commit.Message
+		}
+	}
+
 	return nil
 }
 
@@ -84,6 +96,19 @@ func (g *GitIngestionBackend) WalkFiles(ctx context.Context, fn func(storage.Fil
 		return fmt.Errorf("backend not initialized")
 	}
 
+	// Get commit information
+	var commitHash, commitMessage string
+	var commitTime int64
+	ref, err := g.repo.Reference(plumbing.NewBranchReferenceName(g.branch), true)
+	if err == nil {
+		commit, err := g.repo.CommitObject(ref.Hash())
+		if err == nil {
+			commitHash = commit.Hash.String()
+			commitTime = commit.Committer.When.Unix()
+			commitMessage = commit.Message
+		}
+	}
+
 	// Walk tree using the repo manager
 	return g.repoMgr.WalkTree(g.repo, g.branch, func(gitMeta gitpkg.FileMetadata) error {
 		meta := storage.FileMetadata{
@@ -93,8 +118,11 @@ func (g *GitIngestionBackend) WalkFiles(ctx context.Context, fn func(storage.Fil
 			ModTime:     gitMeta.Mtime,
 			ContentHash: gitMeta.BlobHash,
 			Metadata: map[string]string{
-				"branch":   g.branch,
-				"repo_url": g.sourceURL,
+				"branch":         g.branch,
+				"repo_url":       g.sourceURL,
+				"commit_hash":    commitHash,
+				"commit_time":    fmt.Sprintf("%d", commitTime),
+				"commit_message": commitMessage,
 			},
 		}
 		return fn(meta)
