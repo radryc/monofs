@@ -40,8 +40,8 @@ func (h *GitIngestionHandler) GetStorageType() storage.IngestionType {
 	return storage.IngestionTypeGit
 }
 
-func (h *GitIngestionHandler) GetFetchType() storage.FetchType {
-	return storage.FetchTypeGit
+func (h *GitIngestionHandler) GetFetchType() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_GIT
 }
 func (h *GitIngestionHandler) ExtractCanonicalPath(metadata map[string]string) string {
 	return "" // Git repos are already at their canonical path

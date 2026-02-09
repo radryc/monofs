@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
 )
 
@@ -511,7 +512,7 @@ type BlobMeta struct {
 	BlobHash   string
 	RepoURL    string
 	Branch     string
-	SourceType fetcher.SourceType
+	SourceType pb.SourceType
 	ModulePath string // For Go modules
 	Version    string // For Go modules
 }
@@ -534,7 +535,7 @@ func (p *Predictor) triggerPrefetch(ctx context.Context, predictions []Predicted
 			},
 		}
 
-		if currentMeta.SourceType == fetcher.SourceTypeGoMod {
+		if currentMeta.SourceType == pb.SourceType_SOURCE_TYPE_GOMOD {
 			req.SourceConfig["module_path"] = currentMeta.ModulePath
 			req.SourceConfig["version"] = currentMeta.Version
 		}

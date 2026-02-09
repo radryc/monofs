@@ -106,3 +106,6 @@ benchmark-results/
 *.prof
 cpu.prof
 mem.prof
+
+# Documentation TODO
+docs/TODO

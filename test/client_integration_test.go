@@ -84,7 +84,7 @@ func newClientTestCluster(t *testing.T, numNodes int, basePort int) *clientTestC
 		go grpcServer.Serve(lis)
 
 		// Create client connection to node
-		conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", port),
+		conn, err := grpc.NewClient(fmt.Sprintf("localhost:%d", port),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 		)
 		if err != nil {

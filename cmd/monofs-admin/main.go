@@ -467,15 +467,15 @@ func validateIngestionParams(source, ref, ingestionType string) error {
 				return fmt.Errorf("invalid Go module format, expected module@version")
 			}
 			if !strings.HasPrefix(parts[1], "v") {
-				return fmt.Errorf("Go module version must start with 'v' (e.g., v1.0.0)")
+				return fmt.Errorf("go module version must start with 'v' (e.g., v1.0.0)")
 			}
 		} else if ref == "" {
-			return fmt.Errorf("Go module requires version either in source (module@version) or via --ref flag")
+			return fmt.Errorf("go module requires version either in source (module@version) or via --ref flag")
 		} else if !strings.HasPrefix(ref, "v") {
-			return fmt.Errorf("Go module version must start with 'v' (e.g., v1.0.0)")
+			return fmt.Errorf("go module version must start with 'v' (e.g., v1.0.0)")
 		}
 		if !strings.Contains(source, "/") {
-			return fmt.Errorf("Go module path must contain at least one slash")
+			return fmt.Errorf("go module path must contain at least one slash")
 		}
 
 	case "s3":
@@ -705,7 +705,7 @@ func ingestRepository(routerAddr, rawSource, ref, customSourceID, ingestionType,
 		case "go":
 			// For Go, version should be in source
 			if !strings.Contains(source, "@") {
-				return fmt.Errorf("Go module requires version")
+				return fmt.Errorf("go module requires version")
 			}
 		}
 	}
@@ -716,13 +716,8 @@ func ingestRepository(routerAddr, rawSource, ref, customSourceID, ingestionType,
 	}
 	fmt.Println()
 
-	// Connect to router
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, routerAddr,
+	conn, err := grpc.NewClient(routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                1 * time.Minute,
 			Timeout:             20 * time.Second,
@@ -812,25 +807,21 @@ func parseIngestionType(s string) pb.IngestionType {
 	}
 }
 
-// parseFetchType converts string to FetchType enum
-func parseFetchType(s string) pb.FetchType {
+// parseFetchType converts string to SourceType enum
+func parseFetchType(s string) pb.SourceType {
 	switch strings.ToLower(s) {
 	case "git":
-		return pb.FetchType_FETCH_GIT
+		return pb.SourceType_SOURCE_TYPE_GIT
 	case "gomod":
-		return pb.FetchType_FETCH_GOMOD
-	case "s3":
-		return pb.FetchType_FETCH_S3
-	case "local":
-		return pb.FetchType_FETCH_LOCAL
+		return pb.SourceType_SOURCE_TYPE_GOMOD
 	case "npm":
-		return pb.FetchType_FETCH_NPM
+		return pb.SourceType_SOURCE_TYPE_NPM
 	case "maven":
-		return pb.FetchType_FETCH_MAVEN
+		return pb.SourceType_SOURCE_TYPE_MAVEN
 	case "cargo":
-		return pb.FetchType_FETCH_CARGO
+		return pb.SourceType_SOURCE_TYPE_CARGO
 	default:
-		return pb.FetchType_FETCH_GIT
+		return pb.SourceType_SOURCE_TYPE_GIT
 	}
 }
 
@@ -838,13 +829,8 @@ func parseFetchType(s string) pb.FetchType {
 func deleteRepository(routerAddr, storageID string) error {
 	fmt.Printf("Deleting repository %s from router %s\n", storageID, routerAddr)
 
-	// Connect to router
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, routerAddr,
+	conn, err := grpc.NewClient(routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                1 * time.Minute,
 			Timeout:             20 * time.Second,
@@ -886,9 +872,8 @@ func showClusterStatus(routerAddr string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, routerAddr,
+	conn, err := grpc.NewClient(routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return fmt.Errorf("connect to router: %w", err)
@@ -1223,9 +1208,8 @@ func showFailoverStatus(routerAddr string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, routerAddr,
+	conn, err := grpc.NewClient(routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return fmt.Errorf("connect to router: %w", err)
@@ -1373,7 +1357,7 @@ func rebuildDirectoryIndex(routerAddr, storageID string, useExternal, debug bool
 		fmt.Printf("Connecting to router at %s...\n", routerAddr)
 	}
 
-	conn, err := grpc.Dial(routerAddr, grpc.WithInsecure())
+	conn, err := grpc.NewClient(routerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("failed to connect to router: %w", err)
 	}
@@ -1425,7 +1409,7 @@ func rebuildDirectoryIndex(routerAddr, storageID string, useExternal, debug bool
 			fmt.Printf("Connecting to node %s at %s...\n", node.NodeId, nodeAddr)
 		}
 
-		nodeConn, err := grpc.Dial(nodeAddr, grpc.WithInsecure())
+		nodeConn, err := grpc.NewClient(nodeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			fmt.Printf("❌ Failed to connect to node %s: %v\n", node.NodeId, err)
 			failedNodes++
@@ -1614,9 +1598,8 @@ func showStatistics(routerAddr, statsType, format string) error {
 	defer cancel()
 
 	// Create gRPC connection
-	conn, err := grpc.DialContext(ctx, routerAddr,
+	conn, err := grpc.NewClient(routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
 			Timeout:             3 * time.Second,
@@ -1773,9 +1756,8 @@ func triggerFailover(routerAddr, nodeID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, routerAddr,
+	conn, err := grpc.NewClient(routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
 			Timeout:             3 * time.Second,
@@ -1828,9 +1810,8 @@ func clearFailover(routerAddr, nodeID string) error {
 	defer cancel()
 
 	// First, get cluster info to find the node's address
-	conn, err := grpc.DialContext(ctx, routerAddr,
+	conn, err := grpc.NewClient(routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
 			Timeout:             3 * time.Second,
@@ -1875,9 +1856,8 @@ func clearFailover(routerAddr, nodeID string) error {
 	fmt.Printf("\n")
 
 	// Connect to the node directly to clear its failover cache
-	nodeConn, err := grpc.DialContext(ctx, nodeAddr,
+	nodeConn, err := grpc.NewClient(nodeAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node: %w", err)
@@ -1909,9 +1889,8 @@ func showNodeFiles(routerAddr, nodeID, storageID, format string) error {
 	defer cancel()
 
 	// First, get cluster info to find the node's address
-	conn, err := grpc.DialContext(ctx, routerAddr,
+	conn, err := grpc.NewClient(routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
 			Timeout:             3 * time.Second,
@@ -1954,9 +1933,8 @@ func showNodeFiles(routerAddr, nodeID, storageID, format string) error {
 	}
 
 	// Connect to the node directly
-	nodeConn, err := grpc.DialContext(ctx, nodeAddr,
+	nodeConn, err := grpc.NewClient(nodeAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node: %w", err)
@@ -2046,9 +2024,8 @@ func showAllNodesFiles(ctx context.Context, routerAddr string, clusterInfo *pb.C
 
 	for _, node := range clusterInfo.Nodes {
 		go func(n *pb.NodeInfo) {
-			nodeConn, err := grpc.DialContext(ctx, n.Address,
+			nodeConn, err := grpc.NewClient(n.Address,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpc.WithBlock(),
 			)
 			if err != nil {
 				results <- nodeFiles{nodeID: n.NodeId, err: err}

@@ -256,25 +256,21 @@ func parseIngestionTypeString(s string) pb.IngestionType {
 	}
 }
 
-// parseFetchTypeString converts string to FetchType enum
-func parseFetchTypeString(s string) pb.FetchType {
+// parseFetchTypeString converts string to SourceType enum
+func parseFetchTypeString(s string) pb.SourceType {
 	switch s {
 	case "git":
-		return pb.FetchType_FETCH_GIT
+		return pb.SourceType_SOURCE_TYPE_GIT
 	case "gomod":
-		return pb.FetchType_FETCH_GOMOD
-	case "s3":
-		return pb.FetchType_FETCH_S3
-	case "local":
-		return pb.FetchType_FETCH_LOCAL
+		return pb.SourceType_SOURCE_TYPE_GOMOD
 	case "npm":
-		return pb.FetchType_FETCH_NPM
+		return pb.SourceType_SOURCE_TYPE_NPM
 	case "maven":
-		return pb.FetchType_FETCH_MAVEN
+		return pb.SourceType_SOURCE_TYPE_MAVEN
 	case "cargo":
-		return pb.FetchType_FETCH_CARGO
+		return pb.SourceType_SOURCE_TYPE_CARGO
 	default:
-		return pb.FetchType_FETCH_GIT
+		return pb.SourceType_SOURCE_TYPE_GIT
 	}
 }
 

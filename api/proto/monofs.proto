@@ -242,14 +242,15 @@ enum IngestionType {
     INGESTION_CARGO = 6; // Cargo crate
 }
 
-enum FetchType {
-    FETCH_GIT = 0;    // Fetch from Git repository
-    FETCH_S3 = 1;     // Fetch from S3
-    FETCH_LOCAL = 2;  // Fetch from local cache
-    FETCH_GOMOD = 3;  // Fetch from Go module cache
-    FETCH_NPM = 4;    // Fetch from npm registry
-    FETCH_MAVEN = 5;  // Fetch from Maven Central
-    FETCH_CARGO = 6;  // Fetch from crates.io
+// SourceType identifies the data source backend.
+// Canonical type identifier used across the entire system.
+enum SourceType {
+    SOURCE_TYPE_UNKNOWN = 0;
+    SOURCE_TYPE_GIT = 1;          // Git repository (GitHub, GitLab, etc.)
+    SOURCE_TYPE_GOMOD = 2;        // Go module proxy (proxy.golang.org)
+    SOURCE_TYPE_NPM = 6;          // npm registry (npmjs.org)
+    SOURCE_TYPE_MAVEN = 7;        // Maven Central (repo1.maven.org)
+    SOURCE_TYPE_CARGO = 8;        // crates.io registry
 }
 
 // Repository ingestion messages
@@ -260,7 +261,7 @@ message IngestRequest {
     
     // Backend configuration
     IngestionType ingestion_type = 4;  // Type of source (git, go, s3, etc.)
-    FetchType fetch_type = 5;          // Type of blob storage (git, s3, local)
+    SourceType fetch_type = 5;         // Where to fetch blob content
     map<string, string> ingestion_config = 6;  // Backend-specific config
     map<string, string> fetch_config = 7;      // Fetch backend config
     bool replicate_data = 8;           // If true, copy blobs to fetch backend during ingestion
@@ -300,7 +301,7 @@ message FileMetadata {
     
     // Backend information
     IngestionType source_type = 11;  // Where metadata came from
-    FetchType fetch_type = 12;       // Where to fetch blob content
+    SourceType fetch_type = 12;      // Where to fetch blob content
     map<string, string> backend_metadata = 13;  // Backend-specific metadata
 }
 
@@ -353,7 +354,7 @@ message RegisterRepositoryRequest {
     
     // Backend configuration
     IngestionType ingestion_type = 4;
-    FetchType fetch_type = 5;
+    SourceType fetch_type = 5;
     map<string, string> ingestion_config = 6;
     map<string, string> fetch_config = 7;
 }
@@ -521,6 +522,7 @@ message ClientHeartbeatRequest {
     string client_id = 1;
     int64 operations_count = 2;     // Total FUSE operations since mount
     int64 bytes_read = 3;           // Total bytes read
+    int64 errors_count = 4;         // Total I/O errors since mount
 }
 
 message ClientHeartbeatResponse {
@@ -546,6 +548,7 @@ message ClientInfo {
     int64 last_heartbeat = 8;       // Unix timestamp
     int64 operations_count = 9;     // Total FUSE operations
     int64 bytes_read = 10;          // Total bytes read
+    int64 errors_count = 11;        // Total I/O errors
 }
 
 // Graceful failover messages

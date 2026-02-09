@@ -1,0 +1,7 @@
+1) UI fixes ( repoository don;t need all information whyt should be opened after clicking on url)
+2) delete - fix
+3) support for update 
+4) allow dissallow LICENCE per URL ( !not "foo/*" licences.yaml
+5) configs 
+6) setup build helper
+7) introduce failure zones

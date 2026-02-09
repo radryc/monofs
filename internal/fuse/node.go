@@ -149,6 +149,22 @@ func toErrno(err error) syscall.Errno {
 	return syscall.EIO
 }
 
+// recordAndConvertError records an I/O error metric on the client and converts to errno.
+// Context cancellations (FUSE kernel aborting the request) are NOT counted as errors.
+func (n *MonoNode) recordAndConvertError(err error) syscall.Errno {
+	if err == nil {
+		return 0
+	}
+	// Context cancelled = kernel/process abandoned the request, not a real error
+	if err == context.Canceled || err == context.DeadlineExceeded {
+		return syscall.EINTR
+	}
+	if n.client != nil {
+		n.client.RecordError()
+	}
+	return syscall.EIO
+}
+
 // getRootNode safely returns the root MonoNode, or self if not embedded in FUSE tree.
 // This handles the case of unit tests where nodes aren't mounted.
 func (n *MonoNode) getRootNode() *MonoNode {
@@ -183,15 +199,15 @@ func (n *MonoNode) updateBackendError(err error) {
 }
 
 // getBackendError returns the current backend error state
-func (n *MonoNode) getBackendError() (error, time.Time) {
+func (n *MonoNode) getBackendError() (time.Time, error) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return n.backendError, n.lastErrorCheck
+	return n.lastErrorCheck, n.backendError
 }
 
 // hasBackendError checks if there's an active backend error
 func (n *MonoNode) hasBackendError() bool {
-	err, _ := n.getBackendError()
+	_, err := n.getBackendError()
 	return err != nil
 }
 
@@ -215,7 +231,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 
 			// Also check backend error
 			if errorMsg == "" && n.hasBackendError() {
-				err, errTime := n.getBackendError()
+				errTime, err := n.getBackendError()
 				errorMsg = fmt.Sprintf("MonoFS Backend Connection Error\n\nTime: %s\nError: %s\n\nThe backend servers are unavailable. This file will disappear when the connection is restored.\n",
 					errTime.Format(time.RFC3339), err.Error())
 			}
@@ -384,7 +400,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	if err != nil {
 		n.logger.Debug("lookup failed", "path", childPath, "error", err)
 		n.updateBackendError(err)
-		return nil, toErrno(err)
+		return nil, n.recordAndConvertError(err)
 	}
 
 	// Clear backend error on success
@@ -437,7 +453,7 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 
 	// Special handling for FS_ERROR.txt
 	if n.path == "FS_ERROR.txt" && n.hasBackendError() {
-		err, errTime := n.getBackendError()
+		errTime, err := n.getBackendError()
 		errorMsg := fmt.Sprintf("MonoFS Backend Connection Error\n\nTime: %s\nError: %s\n\nThe backend servers are unavailable. This file will disappear when the connection is restored.\n",
 			errTime.Format(time.RFC3339), err.Error())
 		out.Mode = 0444 | uint32(syscall.S_IFREG)
@@ -566,7 +582,7 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 	if err != nil {
 		n.logger.Debug("getattr failed", "path", n.path, "error", err)
 		n.updateBackendError(err)
-		return toErrno(err)
+		return n.recordAndConvertError(err)
 	}
 
 	// Clear backend error on success
@@ -725,7 +741,7 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			}
 			return fs.NewListDirStream(errorEntry), 0
 		}
-		return nil, toErrno(err)
+		return nil, n.recordAndConvertError(err)
 	}
 	// Clear backend error on success
 	n.updateBackendError(nil)
@@ -906,7 +922,7 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	if err != nil {
 		n.logger.Debug("open failed after retries", "path", n.path, "error", err)
 		n.updateBackendError(err)
-		return nil, 0, toErrno(err)
+		return nil, 0, n.recordAndConvertError(err)
 	}
 
 	// Clear backend error on success
@@ -964,6 +980,12 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 		if content == nil {
 			n.logger.Debug("read: reload failed after retries", "path", n.path, "error", err)
 			n.updateBackendError(err)
+			// Only count real errors, not context cancellations
+			if err != context.Canceled && err != context.DeadlineExceeded {
+				if n.client != nil {
+					n.client.RecordError()
+				}
+			}
 			return nil, syscall.EIO
 		}
 

@@ -147,45 +147,9 @@ func TestClient_FetchBlob(t *testing.T) {
 		},
 	}
 
-	data, err := client.FetchBlob(context.Background(), req, SourceTypeGit)
+	data, err := client.FetchBlob(context.Background(), req, pb.SourceType_SOURCE_TYPE_GIT)
 	if err != nil {
 		t.Fatalf("FetchBlob failed: %v", err)
-	}
-
-	if len(data) == 0 {
-		t.Error("expected non-empty data")
-	}
-
-	if server.fetchCalls != 1 {
-		t.Errorf("expected 1 fetch call, got %d", server.fetchCalls)
-	}
-}
-
-func TestClient_FetchBlobSimple(t *testing.T) {
-	addr, server, cleanup := startMockServer(t)
-	defer cleanup()
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
-
-	config := DefaultClientConfig()
-	config.FetcherAddresses = []string{addr}
-
-	client, err := NewClient(config, logger)
-	if err != nil {
-		t.Fatalf("NewClient failed: %v", err)
-	}
-	defer client.Close()
-
-	data, err := client.FetchBlobSimple(
-		context.Background(),
-		"https://github.com/test/repo",
-		"abc123",
-		"main.go",
-		"main",
-		SourceTypeGit,
-	)
-	if err != nil {
-		t.Fatalf("FetchBlobSimple failed: %v", err)
 	}
 
 	if len(data) == 0 {
@@ -256,7 +220,7 @@ func TestClient_PrefetchSimple(t *testing.T) {
 			BlobHash:   "blob1",
 			FilePath:   "main.go",
 			Branch:     "main",
-			SourceType: SourceTypeGit,
+			SourceType: pb.SourceType_SOURCE_TYPE_GIT,
 			Confidence: 0.8,
 		},
 		{
@@ -264,7 +228,7 @@ func TestClient_PrefetchSimple(t *testing.T) {
 			BlobHash:   "blob2",
 			FilePath:   "handler.go",
 			Branch:     "main",
-			SourceType: SourceTypeGit,
+			SourceType: pb.SourceType_SOURCE_TYPE_GIT,
 			Confidence: 0.6,
 		},
 	}
@@ -318,7 +282,7 @@ func TestClient_AffinityRouting(t *testing.T) {
 			},
 		}
 
-		_, err := client.FetchBlob(context.Background(), req, SourceTypeGit)
+		_, err := client.FetchBlob(context.Background(), req, pb.SourceType_SOURCE_TYPE_GIT)
 		if err != nil {
 			t.Fatalf("FetchBlob failed: %v", err)
 		}
@@ -385,7 +349,7 @@ func TestClient_Retries(t *testing.T) {
 	}
 
 	// This should succeed since we have one healthy server
-	_, err = client.FetchBlob(context.Background(), req, SourceTypeGit)
+	_, err = client.FetchBlob(context.Background(), req, pb.SourceType_SOURCE_TYPE_GIT)
 	if err != nil {
 		t.Errorf("FetchBlob should succeed with healthy server: %v", err)
 	}
@@ -468,7 +432,7 @@ func TestClientStats(t *testing.T) {
 			ContentID: "blob-" + string(rune('A'+i)),
 			SourceKey: "https://github.com/test/repo",
 		}
-		client.FetchBlob(context.Background(), req, SourceTypeGit)
+		client.FetchBlob(context.Background(), req, pb.SourceType_SOURCE_TYPE_GIT)
 	}
 
 	// Check updated stats
@@ -502,7 +466,7 @@ func BenchmarkClient_FetchBlob(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := client.FetchBlob(context.Background(), req, SourceTypeGit)
+		_, err := client.FetchBlob(context.Background(), req, pb.SourceType_SOURCE_TYPE_GIT)
 		if err != nil {
 			b.Fatal(err)
 		}

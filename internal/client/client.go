@@ -24,6 +24,7 @@ type MonoFSClient interface {
 	// Metrics tracking
 	RecordOperation()
 	RecordBytesRead(n int64)
+	RecordError()
 }
 
 // MetricsRecorder provides optional methods for recording operation metrics.
@@ -219,5 +220,10 @@ func (c *Client) RecordOperation() {
 
 // RecordBytesRead is a no-op for simple client (metrics only tracked in ShardedClient).
 func (c *Client) RecordBytesRead(n int64) {
+	// No-op for simple client
+}
+
+// RecordError is a no-op for simple client (metrics only tracked in ShardedClient).
+func (c *Client) RecordError() {
 	// No-op for simple client
 }

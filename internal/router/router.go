@@ -120,6 +120,14 @@ type Router struct {
 	// Directory index rebuild tracking (nodeID -> set of storageIDs)
 	pendingIndexRebuilds   map[string]map[string]bool
 	pendingIndexRebuildsMu sync.Mutex
+
+	// Rebalance concurrency limiter (prevents goroutine storms)
+	rebalanceSem chan struct{}
+
+	// Partial repo cleanup: tracks non-onboarded repos and when they were first seen
+	partialRepos       map[string]time.Time // storageID -> first detected as partial
+	partialReposMu     sync.Mutex
+	stopPartialCleanup chan struct{}
 }
 
 // clientState tracks a connected FUSE client with performance metrics.
@@ -128,6 +136,7 @@ type clientState struct {
 	lastHeartbeat   time.Time
 	operationsCount int64 // Total FUSE operations
 	bytesRead       int64 // Total bytes read
+	errorsCount     int64 // Total I/O errors
 	mu              sync.RWMutex
 }
 
@@ -246,6 +255,9 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		stopClients:          make(chan struct{}),
 		uiRequests:           make(chan UIRequest, 100), // Buffered to prevent UI blocking
 		stopUI:               make(chan struct{}),
+		rebalanceSem:         make(chan struct{}, 5), // Limit concurrent rebalance operations
+		partialRepos:         make(map[string]time.Time),
+		stopPartialCleanup:   make(chan struct{}),
 		logger:               logger,
 	}
 	r.version.Store(1)
@@ -292,6 +304,9 @@ func (r *Router) triggerIndexRebuild(nodeID, storageID string) error {
 
 	if state == nil {
 		return fmt.Errorf("node not found: %s", nodeID)
+	}
+	if state.client == nil {
+		return fmt.Errorf("node %s has no active connection", nodeID)
 	}
 
 	r.logger.Info("triggering directory index rebuild",
@@ -835,6 +850,8 @@ func (r *Router) StartHealthCheck() {
 		time.Sleep(r.config.HealthCheckInterval + time.Second)
 		r.discoverClusterRepositories()
 	}()
+	// Start periodic cleanup of stale partial repos
+	go r.partialRepoCleanupLoop()
 }
 
 // discoverClusterRepositories queries all connected nodes to discover existing repositories.
@@ -923,6 +940,66 @@ func (r *Router) discoverClusterRepositories() {
 
 	wg.Wait()
 
+	// Query onboarding status from all nodes to filter out partially ingested repos.
+	// A repo is only considered fully ingested if it's marked onboarded on at least one node.
+	// This prevents partial repos from crashed mid-ingestion being treated as complete.
+	onboardedRepos := make(map[string]bool) // storageID -> true if onboarded on any node
+	var onboardWg sync.WaitGroup
+	var onboardMu sync.Mutex
+
+	for nodeID, client := range nodeClients {
+		onboardWg.Add(1)
+		go func(nid string, c pb.MonoFSClient) {
+			defer onboardWg.Done()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			statusResp, err := c.GetOnboardingStatus(ctx, &pb.OnboardingStatusRequest{
+				NodeId: nid,
+			})
+			if err != nil {
+				r.logger.Warn("failed to get onboarding status from node",
+					"node_id", nid,
+					"error", err)
+				return
+			}
+
+			onboardMu.Lock()
+			for storageID, isOnboarded := range statusResp.Repositories {
+				if isOnboarded {
+					onboardedRepos[storageID] = true
+				}
+			}
+			onboardMu.Unlock()
+		}(nodeID, client)
+	}
+
+	onboardWg.Wait()
+
+	// Filter discovered repos: only keep those that are onboarded on at least one node.
+	// Track partial repos for eventual cleanup if they stay partial for too long.
+	r.partialReposMu.Lock()
+	for storageID := range discoveredRepos {
+		if !onboardedRepos[storageID] {
+			r.logger.Warn("skipping partially ingested repository (not onboarded on any node)",
+				"storage_id", storageID,
+				"display_path", discoveredRepos[storageID].repoID)
+			// Track first-seen time for partial repos (don't overwrite if already tracked)
+			if _, tracked := r.partialRepos[storageID]; !tracked {
+				r.partialRepos[storageID] = time.Now()
+				r.logger.Info("tracking partial repository for cleanup",
+					"storage_id", storageID,
+					"display_path", discoveredRepos[storageID].repoID)
+			}
+			delete(discoveredRepos, storageID)
+		} else {
+			// If a previously-partial repo is now onboarded, stop tracking it
+			delete(r.partialRepos, storageID)
+		}
+	}
+	r.partialReposMu.Unlock()
+
 	// Merge discovered repos into ingestedRepos (don't overwrite existing)
 	r.mu.Lock()
 	newCount := 0
@@ -943,6 +1020,151 @@ func (r *Router) discoverClusterRepositories() {
 // StopHealthCheck stops the background health checking.
 func (r *Router) StopHealthCheck() {
 	close(r.stopHealth)
+	close(r.stopPartialCleanup)
+}
+
+const (
+	// partialRepoMaxAge is the maximum time a repo can remain in a partial (non-onboarded) state
+	// before its metadata is cleaned up from all nodes. This prevents abandoned partial repos
+	// from accumulating after mid-ingestion crashes.
+	partialRepoMaxAge = 1 * time.Hour
+
+	// partialRepoCheckInterval is how often the cleanup loop scans for stale partial repos.
+	partialRepoCheckInterval = 10 * time.Minute
+)
+
+// partialRepoCleanupLoop periodically checks for repositories that have been stuck in a
+// partial (non-onboarded) state for longer than partialRepoMaxAge and removes all their
+// metadata from cluster nodes.
+func (r *Router) partialRepoCleanupLoop() {
+	// Wait for initial discovery to run first
+	time.Sleep(r.config.HealthCheckInterval + 2*time.Second)
+
+	ticker := time.NewTicker(partialRepoCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			r.cleanupStalePartialRepos()
+		case <-r.stopPartialCleanup:
+			return
+		}
+	}
+}
+
+// cleanupStalePartialRepos scans tracked partial repos and removes any that have exceeded
+// the maximum partial age. For each stale repo, it queries onboarding status again (in case
+// it was completed since last check), and if still partial, deletes all metadata from nodes.
+func (r *Router) cleanupStalePartialRepos() {
+	now := time.Now()
+
+	// Snapshot partial repos that have exceeded the max age
+	r.partialReposMu.Lock()
+	var staleRepos []string
+	for storageID, firstSeen := range r.partialRepos {
+		if now.Sub(firstSeen) > partialRepoMaxAge {
+			staleRepos = append(staleRepos, storageID)
+		}
+	}
+	r.partialReposMu.Unlock()
+
+	if len(staleRepos) == 0 {
+		return
+	}
+
+	r.logger.Info("checking stale partial repos for cleanup", "count", len(staleRepos))
+
+	// Get snapshot of healthy node clients
+	r.mu.RLock()
+	nodeClients := make(map[string]pb.MonoFSClient)
+	for nodeID, state := range r.nodes {
+		if state.client != nil && state.info.Healthy {
+			nodeClients[nodeID] = state.client
+		}
+	}
+	r.mu.RUnlock()
+
+	if len(nodeClients) == 0 {
+		r.logger.Warn("no healthy nodes available for partial repo cleanup check")
+		return
+	}
+
+	// Re-check onboarding status before deleting — the repo may have been completed since tracking
+	onboardedRepos := make(map[string]bool)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for nodeID, client := range nodeClients {
+		wg.Add(1)
+		go func(nid string, c pb.MonoFSClient) {
+			defer wg.Done()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			statusResp, err := c.GetOnboardingStatus(ctx, &pb.OnboardingStatusRequest{
+				NodeId: nid,
+			})
+			if err != nil {
+				r.logger.Warn("failed to get onboarding status during partial cleanup",
+					"node_id", nid,
+					"error", err)
+				return
+			}
+
+			mu.Lock()
+			for storageID, isOnboarded := range statusResp.Repositories {
+				if isOnboarded {
+					onboardedRepos[storageID] = true
+				}
+			}
+			mu.Unlock()
+		}(nodeID, client)
+	}
+
+	wg.Wait()
+
+	// Process each stale repo
+	for _, storageID := range staleRepos {
+		if onboardedRepos[storageID] {
+			// Repo has been onboarded since we started tracking it — stop tracking
+			r.partialReposMu.Lock()
+			delete(r.partialRepos, storageID)
+			r.partialReposMu.Unlock()
+			r.logger.Info("partial repo is now onboarded, removing from cleanup tracking",
+				"storage_id", storageID)
+			continue
+		}
+
+		// Also skip if an ingestion is currently in progress for this repo
+		r.mu.RLock()
+		_, inProgress := r.inProgressIngestions[storageID]
+		r.mu.RUnlock()
+		if inProgress {
+			r.logger.Info("partial repo has active ingestion, skipping cleanup",
+				"storage_id", storageID)
+			continue
+		}
+
+		// Repo is still partial after the max age — clean up metadata from all nodes
+		r.partialReposMu.Lock()
+		firstSeen := r.partialRepos[storageID]
+		delete(r.partialRepos, storageID)
+		r.partialReposMu.Unlock()
+
+		r.logger.Warn("cleaning up stale partial repository metadata from all nodes",
+			"storage_id", storageID,
+			"partial_since", firstSeen.Format(time.RFC3339),
+			"age", now.Sub(firstSeen).Round(time.Second).String())
+
+		var filesDeleted int64
+		r.deleteRepositoryFromNodes(storageID, &filesDeleted)
+
+		r.logger.Info("stale partial repository cleanup complete",
+			"storage_id", storageID,
+			"files_deleted", filesDeleted)
+	}
 }
 
 // healthCheckLoop periodically checks node health.
@@ -960,12 +1182,26 @@ func (r *Router) healthCheckLoop() {
 	}
 }
 
-// checkAllNodes checks health of all registered nodes.
-func (r *Router) checkAllNodes() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// healthCheckResult holds the result of an individual node health check RPC.
+type healthCheckResult struct {
+	nodeID   string
+	nodeInfo *pb.NodeInfoResponse
+	err      error
+}
 
+// checkAllNodes checks health of all registered nodes.
+// RPC calls are made outside the mutex to avoid blocking other operations.
+func (r *Router) checkAllNodes() {
 	now := time.Now()
+
+	// PHASE 1: Under lock — mark unhealthy nodes, create connections, snapshot clients for RPCs
+	type nodeCheck struct {
+		nodeID string
+		client pb.MonoFSClient
+	}
+	var toCheck []nodeCheck
+
+	r.mu.Lock()
 
 	// Log overall cluster health state at start of each check
 	healthyCount := 0
@@ -980,7 +1216,7 @@ func (r *Router) checkAllNodes() {
 		// Check if node has timed out based on lastSeen (for passive monitoring)
 		timeSinceLastSeen := now.Sub(state.lastSeen)
 
-		// NEW: Detect node transition to unhealthy (but still try to reconnect)
+		// Detect node transition to unhealthy (but still try to reconnect)
 		if timeSinceLastSeen > r.config.UnhealthyThreshold {
 			if state.info.Healthy {
 				r.logger.Warn("node became unhealthy, assigning failover",
@@ -997,7 +1233,7 @@ func (r *Router) checkAllNodes() {
 					state.client = nil
 				}
 
-				// NEW: Assign failover node (only for NodeActive nodes that held data, and not in drain mode)
+				// Assign failover node (only for NodeActive nodes that held data, and not in drain mode)
 				if state.status == NodeActive && !r.IsDrained() {
 					r.assignFailoverNodeLocked(nodeID)
 				}
@@ -1033,130 +1269,158 @@ func (r *Router) checkAllNodes() {
 			r.logger.Info("established connection to node", "node_id", nodeID, "address", state.info.Address)
 		}
 
-		// Active health check if we have a connection
+		// Snapshot client for RPC outside the lock
 		if state.client != nil {
+			toCheck = append(toCheck, nodeCheck{nodeID: nodeID, client: state.client})
+		}
+	}
+	r.mu.Unlock()
+
+	// PHASE 2: Outside lock — make all health check RPCs concurrently
+	results := make([]healthCheckResult, len(toCheck))
+	var wg sync.WaitGroup
+	for i, nc := range toCheck {
+		wg.Add(1)
+		go func(idx int, nc nodeCheck) {
+			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			nodeInfo, err := state.client.GetNodeInfo(ctx, &pb.NodeInfoRequest{})
+			nodeInfo, err := nc.client.GetNodeInfo(ctx, &pb.NodeInfoRequest{})
 			cancel()
+			results[idx] = healthCheckResult{nodeID: nc.nodeID, nodeInfo: nodeInfo, err: err}
+		}(i, nc)
+	}
+	wg.Wait()
 
-			if err != nil {
-				r.logger.Warn("health check failed", "node_id", nodeID, "error", err, "was_healthy", state.info.Healthy)
-				// Close stale connection
-				if state.conn != nil {
-					state.conn.Close()
-					state.conn = nil
-					state.client = nil
-				}
-				// Only mark unhealthy if we're past threshold
-				if timeSinceLastSeen > r.config.UnhealthyThreshold/2 && state.info.Healthy {
-					r.logger.Warn("node became unhealthy (health check failed), assigning failover",
-						"node_id", nodeID,
-						"last_seen", timeSinceLastSeen,
-						"status", state.status.String())
-					state.info.Healthy = false
-					r.version.Add(1)
-					// Assign failover node (only for NodeActive nodes that held data, and not in drain mode)
-					if state.status == NodeActive && !r.IsDrained() {
-						r.assignFailoverNodeLocked(nodeID)
-					}
-				}
-			} else {
-				state.lastSeen = now
+	// PHASE 3: Under lock — apply results
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-				// Update file count and disk usage from node info
-				state.ownedFilesCount = nodeInfo.TotalFiles
-				state.diskUsedBytes = nodeInfo.DiskUsedBytes
-				state.diskTotalBytes = nodeInfo.DiskTotalBytes
-				state.diskFreeBytes = nodeInfo.DiskFreeBytes
+	for _, result := range results {
+		state, exists := r.nodes[result.nodeID]
+		if !exists {
+			continue
+		}
+		nodeID := result.nodeID
+		nodeInfo := result.nodeInfo
+		err := result.err
+		timeSinceLastSeen := now.Sub(state.lastSeen)
 
-				// NEW: Detect node recovery/health restoration
-				if !state.info.Healthy && state.status == NodeActive {
-					r.logger.Info("node recovered", "node_id", nodeID)
-					state.info.Healthy = true
-					r.version.Add(1)
-
-					// Cancel rebalance timer if still pending (node returned in time)
-					timerWasCancelled := r.cancelFailoverTimer(nodeID)
-
-					// Clear any failover mapping for this node
-					if backupNodeID, hadFailover := r.failoverMap.LoadAndDelete(nodeID); hadFailover {
-						r.logger.Info("cleared failover mapping for recovered node",
-							"node_id", nodeID,
-							"backup_node", backupNodeID,
-							"timer_was_pending", timerWasCancelled)
-
-						// Remove this node from backup node's backingUpNodes list
-						if backupState, exists := r.nodes[backupNodeID.(string)]; exists {
-							for i, id := range backupState.backingUpNodes {
-								if id == nodeID {
-									backupState.backingUpNodes = append(
-										backupState.backingUpNodes[:i],
-										backupState.backingUpNodes[i+1:]...,
-									)
-									r.logger.Debug("removed from backup node's list",
-										"recovered_node", nodeID,
-										"backup_node", backupNodeID)
-									break
-								}
-							}
-						}
-					}
-
-					// Handle recovery based on whether timer had fired
-					if timerWasCancelled {
-						// Node returned before RebalanceDelay elapsed
-						// Only sync repos that were ingested during the outage
-						go r.handleEarlyRecovery(nodeID)
-					} else {
-						// Timer already fired (or was never set), full rebalance was triggered
-						// Just need to sync any remaining repos
-						go r.triggerRebalanceOnRecovery(nodeID)
-					}
-				} else if !state.info.Healthy {
-					// Node was unhealthy, now healthy (but maybe never was ACTIVE before)
-					state.info.Healthy = true
-					r.version.Add(1)
-
-					// Cancel any pending timer and clear failover state
-					r.cancelFailoverTimer(nodeID)
-
-					// Clear any failover mapping
-					if backupNodeID, hadFailover := r.failoverMap.LoadAndDelete(nodeID); hadFailover {
-						r.logger.Info("cleared failover mapping for newly healthy node",
-							"node_id", nodeID,
-							"backup_node", backupNodeID)
-
-						// Remove from backup node's backingUpNodes list
-						if backupState, exists := r.nodes[backupNodeID.(string)]; exists {
-							for i, id := range backupState.backingUpNodes {
-								if id == nodeID {
-									backupState.backingUpNodes = append(
-										backupState.backingUpNodes[:i],
-										backupState.backingUpNodes[i+1:]...,
-									)
-									r.logger.Debug("removed from backup node's list",
-										"recovered_node", nodeID,
-										"backup_node", backupNodeID)
-									break
-								}
-							}
-						}
-					}
-
-					// Handle recovery for newly healthy nodes
-					if state.status == NodeActive {
-						go r.handleEarlyRecovery(nodeID)
-					}
-				}
-
-				// Check onboarding status and trigger recovery if needed
-				if state.status == NodeActive && state.client != nil && !state.onboardRequested {
-					// Only check if not already in progress
-					go r.checkAndRecoverNode(nodeID, state)
+		if err != nil {
+			r.logger.Warn("health check failed", "node_id", nodeID, "error", err, "was_healthy", state.info.Healthy)
+			// Close stale connection
+			if state.conn != nil {
+				state.conn.Close()
+				state.conn = nil
+				state.client = nil
+			}
+			// Only mark unhealthy if we're past threshold
+			if timeSinceLastSeen > r.config.UnhealthyThreshold/2 && state.info.Healthy {
+				r.logger.Warn("node became unhealthy (health check failed), assigning failover",
+					"node_id", nodeID,
+					"last_seen", timeSinceLastSeen,
+					"status", state.status.String())
+				state.info.Healthy = false
+				r.version.Add(1)
+				// Assign failover node (only for NodeActive nodes that held data, and not in drain mode)
+				if state.status == NodeActive && !r.IsDrained() {
+					r.assignFailoverNodeLocked(nodeID)
 				}
 			}
+		} else {
+			state.lastSeen = now
+
+			// Update file count and disk usage from node info
+			state.ownedFilesCount = nodeInfo.TotalFiles
+			state.diskUsedBytes = nodeInfo.DiskUsedBytes
+			state.diskTotalBytes = nodeInfo.DiskTotalBytes
+			state.diskFreeBytes = nodeInfo.DiskFreeBytes
+
+			// Detect node recovery/health restoration
+			if !state.info.Healthy && state.status == NodeActive {
+				r.logger.Info("node recovered", "node_id", nodeID)
+				state.info.Healthy = true
+				r.version.Add(1)
+
+				// Cancel rebalance timer if still pending (node returned in time)
+				timerWasCancelled := r.cancelFailoverTimer(nodeID)
+
+				// Clear any failover mapping for this node
+				if backupNodeID, hadFailover := r.failoverMap.LoadAndDelete(nodeID); hadFailover {
+					r.logger.Info("cleared failover mapping for recovered node",
+						"node_id", nodeID,
+						"backup_node", backupNodeID,
+						"timer_was_pending", timerWasCancelled)
+
+					// Remove this node from backup node's backingUpNodes list
+					if backupState, exists := r.nodes[backupNodeID.(string)]; exists {
+						for i, id := range backupState.backingUpNodes {
+							if id == nodeID {
+								backupState.backingUpNodes = append(
+									backupState.backingUpNodes[:i],
+									backupState.backingUpNodes[i+1:]...,
+								)
+								r.logger.Debug("removed from backup node's list",
+									"recovered_node", nodeID,
+									"backup_node", backupNodeID)
+								break
+							}
+						}
+					}
+				}
+
+				// Handle recovery based on whether timer had fired
+				if timerWasCancelled {
+					// Node returned before RebalanceDelay elapsed
+					// Only sync repos that were ingested during the outage
+					go r.handleEarlyRecovery(nodeID)
+				} else {
+					// Timer already fired (or was never set), full rebalance was triggered
+					// Just need to sync any remaining repos
+					go r.triggerRebalanceOnRecovery(nodeID)
+				}
+			} else if !state.info.Healthy {
+				// Node was unhealthy, now healthy (but maybe never was ACTIVE before)
+				state.info.Healthy = true
+				r.version.Add(1)
+
+				// Cancel any pending timer and clear failover state
+				r.cancelFailoverTimer(nodeID)
+
+				// Clear any failover mapping
+				if backupNodeID, hadFailover := r.failoverMap.LoadAndDelete(nodeID); hadFailover {
+					r.logger.Info("cleared failover mapping for newly healthy node",
+						"node_id", nodeID,
+						"backup_node", backupNodeID)
+
+					// Remove from backup node's backingUpNodes list
+					if backupState, exists := r.nodes[backupNodeID.(string)]; exists {
+						for i, id := range backupState.backingUpNodes {
+							if id == nodeID {
+								backupState.backingUpNodes = append(
+									backupState.backingUpNodes[:i],
+									backupState.backingUpNodes[i+1:]...,
+								)
+								r.logger.Debug("removed from backup node's list",
+									"recovered_node", nodeID,
+									"backup_node", backupNodeID)
+								break
+							}
+						}
+					}
+				}
+
+				// Handle recovery for newly healthy nodes
+				if state.status == NodeActive {
+					go r.handleEarlyRecovery(nodeID)
+				}
+			}
+
+			// Check onboarding status and trigger recovery if needed
+			if state.status == NodeActive && state.client != nil && !state.onboardRequested {
+				// Only check if not already in progress
+				go r.checkAndRecoverNode(nodeID, state)
+			}
 		}
-		_ = nodeID // Silence unused variable warning
 	}
 }
 
@@ -1296,7 +1560,12 @@ func (r *Router) triggerDelayedRebalance(failedNodeID string) {
 		"repo_count", len(allRepos))
 
 	for _, storageID := range allRepos {
-		go r.rebalanceRepository(storageID)
+		storageID := storageID
+		go func() {
+			r.rebalanceSem <- struct{}{}
+			defer func() { <-r.rebalanceSem }()
+			r.rebalanceRepository(storageID)
+		}()
 	}
 }
 
@@ -1550,7 +1819,7 @@ func (r *Router) recoverNode(nodeID string, missingRepos, incompleteRepos []stri
 	// Find source nodes (healthy active nodes with data)
 	sourceNodes := make(map[string]*nodeState)
 	for nid, ns := range r.nodes {
-		if nid != nodeID && ns.info.Healthy && ns.status == NodeActive && ns.ownedFilesCount > 0 {
+		if nid != nodeID && ns.info.Healthy && ns.status == NodeActive && ns.client != nil && ns.ownedFilesCount > 0 {
 			sourceNodes[nid] = ns
 		}
 	}
@@ -1558,6 +1827,10 @@ func (r *Router) recoverNode(nodeID string, missingRepos, incompleteRepos []stri
 
 	if targetState == nil {
 		r.logger.Warn("cannot recover node - target node not found", "node_id", nodeID)
+		return
+	}
+	if targetState.client == nil {
+		r.logger.Warn("cannot recover node - target node has no active connection", "node_id", nodeID)
 		return
 	}
 
@@ -1800,7 +2073,12 @@ func (r *Router) recoverNode(nodeID string, missingRepos, incompleteRepos []stri
 
 	// Trigger rebalancing for each repository
 	for _, storageID := range allRepos {
-		go r.rebalanceRepository(storageID)
+		storageID := storageID
+		go func() {
+			r.rebalanceSem <- struct{}{}
+			defer func() { <-r.rebalanceSem }()
+			r.rebalanceRepository(storageID)
+		}()
 	}
 
 	// Trigger directory index rebuilds for repositories that were recovered
@@ -1856,7 +2134,7 @@ func (r *Router) onboardNewNode(nodeID string) {
 	r.mu.RLock()
 	existingNodes := make(map[string]*nodeState)
 	for nid, ns := range r.nodes {
-		if nid != nodeID && ns.info.Healthy && ns.status == NodeActive {
+		if nid != nodeID && ns.info.Healthy && ns.status == NodeActive && ns.client != nil {
 			existingNodes[nid] = ns
 		}
 	}
@@ -1955,6 +2233,10 @@ func (r *Router) onboardNewNode(nodeID string) {
 		}
 
 		// STEP 2: Register repository on new node before syncing files
+		if newNode.client == nil {
+			r.logger.Warn("new node has no active connection, skipping", "node_id", nodeID)
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_, err := newNode.client.RegisterRepository(ctx, &pb.RegisterRepositoryRequest{
 			StorageId:   repoID,
@@ -1980,7 +2262,7 @@ func (r *Router) onboardNewNode(nodeID string) {
 		r.mu.RLock()
 		existingNodes := make(map[string]*nodeState)
 		for nid, ns := range r.nodes {
-			if nid != nodeID && ns.info.Healthy && ns.status == NodeActive {
+			if nid != nodeID && ns.info.Healthy && ns.status == NodeActive && ns.client != nil {
 				existingNodes[nid] = ns
 			}
 		}
@@ -2101,7 +2383,12 @@ func (r *Router) onboardNewNode(nodeID string) {
 
 	// Trigger rebalancing for each repository
 	for _, storageID := range allRepos {
-		go r.rebalanceRepository(storageID)
+		storageID := storageID
+		go func() {
+			r.rebalanceSem <- struct{}{}
+			defer func() { <-r.rebalanceSem }()
+			r.rebalanceRepository(storageID)
+		}()
 	}
 }
 
@@ -2150,7 +2437,12 @@ func (r *Router) triggerRebalanceOnRecovery(nodeID string) {
 		"topology_version", r.version.Load())
 
 	for _, storageID := range allRepos {
-		go r.rebalanceRepository(storageID)
+		storageID := storageID
+		go func() {
+			r.rebalanceSem <- struct{}{}
+			defer func() { <-r.rebalanceSem }()
+			r.rebalanceRepository(storageID)
+		}()
 	}
 }
 
@@ -2206,7 +2498,7 @@ func (r *Router) rebalanceRepository(storageID string) {
 	activeNodes := make([]sharding.Node, 0, len(r.nodes))
 	nodeStates := make(map[string]*nodeState)
 	for nodeID, state := range r.nodes {
-		if state.info.Healthy && state.status == NodeActive {
+		if state.info.Healthy && state.status == NodeActive && state.client != nil {
 			activeNodes = append(activeNodes, sharding.Node{
 				ID:      state.info.NodeId,
 				Address: state.info.Address,
@@ -2706,9 +2998,11 @@ func (r *Router) ClientHeartbeat(ctx context.Context, req *pb.ClientHeartbeatReq
 	state.lastHeartbeat = now
 	state.operationsCount = req.OperationsCount
 	state.bytesRead = req.BytesRead
+	state.errorsCount = req.ErrorsCount
 	state.info.LastHeartbeat = now.Unix()
 	state.info.OperationsCount = req.OperationsCount
 	state.info.BytesRead = req.BytesRead
+	state.info.ErrorsCount = req.ErrorsCount
 	state.info.State = pb.ClientState_CLIENT_CONNECTED
 	state.mu.Unlock()
 
@@ -2740,6 +3034,7 @@ func (r *Router) ListClients(ctx context.Context, req *pb.ListClientsRequest) (*
 			LastHeartbeat:   state.info.LastHeartbeat,
 			OperationsCount: state.operationsCount,
 			BytesRead:       state.bytesRead,
+			ErrorsCount:     state.errorsCount,
 		}
 
 		// Update state based on heartbeat freshness

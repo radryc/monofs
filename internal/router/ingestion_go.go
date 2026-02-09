@@ -35,7 +35,7 @@ func (h *GoModIngestionHandler) GetDefaultRef() string {
 
 func (h *GoModIngestionHandler) ValidateSource(source string, ref string) error {
 	if !strings.Contains(source, "@") {
-		return fmt.Errorf("Go module source must include version (e.g., module@v1.0.0)")
+		return fmt.Errorf("go module source must include version (e.g., module@v1.0.0)")
 	}
 	return nil
 }
@@ -44,8 +44,8 @@ func (h *GoModIngestionHandler) GetStorageType() storage.IngestionType {
 	return storage.IngestionTypeGo
 }
 
-func (h *GoModIngestionHandler) GetFetchType() storage.FetchType {
-	return storage.FetchTypeGoMod
+func (h *GoModIngestionHandler) GetFetchType() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_GOMOD
 }
 func (h *GoModIngestionHandler) ExtractCanonicalPath(metadata map[string]string) string {
 	return "" // Go modules use module path as canonical path

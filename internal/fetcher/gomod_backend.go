@@ -2,7 +2,6 @@ package fetcher
 
 import (
 	"archive/zip"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -11,12 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	pb "github.com/radryc/monofs/api/proto"
 )
 
 // GoModBackend fetches files from Go module proxies.
 type GoModBackend struct {
+	BaseBackend
 	config BackendConfig
 
 	// HTTP client for module proxy
@@ -27,8 +28,6 @@ type GoModBackend struct {
 
 	mu      sync.RWMutex
 	modules map[string]*cachedModule // module@version -> cached module
-
-	stats atomic.Pointer[BackendStats]
 }
 
 type cachedModule struct {
@@ -49,12 +48,12 @@ func NewGoModBackend() *GoModBackend {
 		},
 		proxyURL: "https://proxy.golang.org",
 	}
-	gb.stats.Store(&BackendStats{})
+	gb.InitStats()
 	return gb
 }
 
-func (gb *GoModBackend) Type() SourceType {
-	return SourceTypeGoMod
+func (gb *GoModBackend) Type() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_GOMOD
 }
 
 func (gb *GoModBackend) Initialize(ctx context.Context, config BackendConfig) error {
@@ -126,26 +125,26 @@ func (gb *GoModBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*Fetc
 	}
 
 	if modulePath == "" || version == "" {
-		gb.recordError()
+		gb.RecordError()
 		return nil, fmt.Errorf("invalid go module request: missing module_path or version")
 	}
 
 	// Get or download module
 	cached, err := gb.getOrDownloadModule(ctx, modulePath, version)
 	if err != nil {
-		gb.recordError()
+		gb.RecordError()
 		return nil, fmt.Errorf("failed to get module: %w", err)
 	}
 
 	// Read file from module
 	content, err := gb.readFileFromModule(cached, filePath)
 	if err != nil {
-		gb.recordError()
+		gb.RecordError()
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
 	latency := time.Since(start).Milliseconds()
-	gb.recordSuccess(int64(len(content)), latency, false)
+	gb.RecordSuccess(int64(len(content)), latency, false, int64(len(gb.modules)))
 
 	return &FetchResult{
 		Content:        content,
@@ -156,12 +155,7 @@ func (gb *GoModBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*Fetc
 }
 
 func (gb *GoModBackend) FetchBlobStream(ctx context.Context, req *FetchRequest) (io.ReadCloser, int64, error) {
-	// For Go modules, we don't stream - files are typically small
-	result, err := gb.FetchBlob(ctx, req)
-	if err != nil {
-		return nil, 0, err
-	}
-	return io.NopCloser(bytes.NewReader(result.Content)), result.Size, nil
+	return DefaultFetchBlobStream(gb, ctx, req)
 }
 
 func (gb *GoModBackend) Warmup(ctx context.Context, sourceKey string, config map[string]string) error {
@@ -214,10 +208,6 @@ func (gb *GoModBackend) Close() error {
 
 	gb.modules = make(map[string]*cachedModule)
 	return nil
-}
-
-func (gb *GoModBackend) Stats() BackendStats {
-	return *gb.stats.Load()
 }
 
 // getOrDownloadModule returns a cached module or downloads it.
@@ -426,45 +416,6 @@ func (gb *GoModBackend) cleanupOldModules(maxAge time.Duration) {
 			if cached.zipPath != "" {
 				os.RemoveAll(filepath.Dir(cached.zipPath))
 			}
-		}
-	}
-}
-
-func (gb *GoModBackend) recordSuccess(bytes int64, latencyMs int64, fromCache bool) {
-	for {
-		old := gb.stats.Load()
-		new := &BackendStats{
-			Requests:     old.Requests + 1,
-			Errors:       old.Errors,
-			BytesFetched: old.BytesFetched + bytes,
-			CachedItems:  int64(len(gb.modules)),
-		}
-		if fromCache {
-			new.CacheHits = old.CacheHits + 1
-		} else {
-			new.CacheMisses = old.CacheMisses + 1
-		}
-		new.AvgLatencyMs = (old.AvgLatencyMs*float64(old.Requests) + float64(latencyMs)) / float64(new.Requests)
-		if gb.stats.CompareAndSwap(old, new) {
-			return
-		}
-	}
-}
-
-func (gb *GoModBackend) recordError() {
-	for {
-		old := gb.stats.Load()
-		new := &BackendStats{
-			Requests:     old.Requests + 1,
-			Errors:       old.Errors + 1,
-			BytesFetched: old.BytesFetched,
-			CacheHits:    old.CacheHits,
-			CacheMisses:  old.CacheMisses + 1,
-			CachedItems:  old.CachedItems,
-			AvgLatencyMs: old.AvgLatencyMs,
-		}
-		if gb.stats.CompareAndSwap(old, new) {
-			return
 		}
 	}
 }

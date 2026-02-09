@@ -219,9 +219,9 @@ done
 for npm in "${NPM_PACKAGES[@]}"; do
     ALL_SOURCES+=("npm|$npm")
 done
-for maven in "${MAVEN_PACKAGES[@]}"; do
-    ALL_SOURCES+=("maven|$maven")
-done
+#for maven in "${MAVEN_PACKAGES[@]}"; do
+#    ALL_SOURCES+=("maven|$maven")
+#done
 for cargo in "${CARGO_PACKAGES[@]}"; do
     ALL_SOURCES+=("cargo|$cargo")
 done

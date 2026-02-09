@@ -1,16 +1,20 @@
 package fetcher
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"strings"
+	"sync/atomic"
+
+	pb "github.com/radryc/monofs/api/proto"
 )
 
 // Backend defines the interface for fetch backends (Git, Go modules, etc.).
 // Each backend handles a specific source type and knows how to retrieve blobs.
 type Backend interface {
 	// Type returns the source type this backend handles.
-	Type() SourceType
+	Type() pb.SourceType
 
 	// Initialize sets up the backend with configuration.
 	// Called once at service startup.
@@ -23,6 +27,7 @@ type Backend interface {
 
 	// FetchBlobStream is like FetchBlob but streams content.
 	// Useful for large blobs to avoid memory pressure.
+	// Default implementation wraps FetchBlob; override for true streaming (e.g. Git).
 	FetchBlobStream(ctx context.Context, req *FetchRequest) (io.ReadCloser, int64, error)
 
 	// Warmup prepares the backend for fetching from a specific source.
@@ -42,68 +47,6 @@ type Backend interface {
 
 	// Stats returns backend-specific statistics.
 	Stats() BackendStats
-}
-
-// SourceType identifies the data source backend.
-type SourceType int
-
-const (
-	SourceTypeUnknown SourceType = iota
-	SourceTypeGit                // Git repository
-	SourceTypeGoMod              // Go module proxy
-	SourceTypeS3                 // S3-compatible storage
-	SourceTypeHTTP               // Generic HTTP
-	SourceTypeOCI                // OCI registry
-	SourceTypeNpm                // npm registry
-	SourceTypeMaven              // Maven Central
-	SourceTypeCargo              // crates.io
-)
-
-func (s SourceType) String() string {
-	switch s {
-	case SourceTypeGit:
-		return "git"
-	case SourceTypeGoMod:
-		return "gomod"
-	case SourceTypeS3:
-		return "s3"
-	case SourceTypeHTTP:
-		return "http"
-	case SourceTypeOCI:
-		return "oci"
-	case SourceTypeNpm:
-		return "npm"
-	case SourceTypeMaven:
-		return "maven"
-	case SourceTypeCargo:
-		return "cargo"
-	default:
-		return "unknown"
-	}
-}
-
-// ParseSourceType converts a string to SourceType.
-func ParseSourceType(s string) SourceType {
-	switch s {
-	case "git":
-		return SourceTypeGit
-	case "gomod":
-		return SourceTypeGoMod
-	case "s3":
-		return SourceTypeS3
-	case "http":
-		return SourceTypeHTTP
-	case "oci":
-		return SourceTypeOCI
-	case "npm":
-		return SourceTypeNpm
-	case "maven":
-		return SourceTypeMaven
-	case "cargo":
-		return SourceTypeCargo
-	default:
-		return SourceTypeUnknown
-	}
 }
 
 // IsGoModPath detects if a URL is a Go module path (vs Git URL).
@@ -208,15 +151,82 @@ type BackendStats struct {
 	AvgLatencyMs float64
 }
 
+// BaseBackend provides shared stats tracking and a default FetchBlobStream
+// implementation. Embed this in concrete backends to eliminate boilerplate.
+type BaseBackend struct {
+	stats atomic.Pointer[BackendStats]
+}
+
+// InitStats initialises the stats pointer. Call from the backend constructor.
+func (b *BaseBackend) InitStats() {
+	b.stats.Store(&BackendStats{})
+}
+
+// Stats returns a snapshot of the current backend statistics.
+func (b *BaseBackend) Stats() BackendStats {
+	return *b.stats.Load()
+}
+
+// RecordSuccess atomically updates stats after a successful fetch.
+func (b *BaseBackend) RecordSuccess(bytesFetched int64, latencyMs int64, fromCache bool, cachedItems int64) {
+	for {
+		old := b.stats.Load()
+		next := &BackendStats{
+			Requests:     old.Requests + 1,
+			Errors:       old.Errors,
+			BytesFetched: old.BytesFetched + bytesFetched,
+			CachedItems:  cachedItems,
+		}
+		if fromCache {
+			next.CacheHits = old.CacheHits + 1
+		} else {
+			next.CacheMisses = old.CacheMisses + 1
+		}
+		next.AvgLatencyMs = (old.AvgLatencyMs*float64(old.Requests) + float64(latencyMs)) / float64(next.Requests)
+		if b.stats.CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
+
+// RecordError atomically updates stats after a failed fetch.
+func (b *BaseBackend) RecordError() {
+	for {
+		old := b.stats.Load()
+		next := &BackendStats{
+			Requests:     old.Requests + 1,
+			Errors:       old.Errors + 1,
+			BytesFetched: old.BytesFetched,
+			CacheHits:    old.CacheHits,
+			CacheMisses:  old.CacheMisses + 1,
+			CachedItems:  old.CachedItems,
+			AvgLatencyMs: old.AvgLatencyMs,
+		}
+		if b.stats.CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
+
+// DefaultFetchBlobStream wraps FetchBlob into a streaming reader.
+// Use this for backends whose underlying data is already fully buffered.
+func DefaultFetchBlobStream(b Backend, ctx context.Context, req *FetchRequest) (io.ReadCloser, int64, error) {
+	result, err := b.FetchBlob(ctx, req)
+	if err != nil {
+		return nil, 0, err
+	}
+	return io.NopCloser(bytes.NewReader(result.Content)), result.Size, nil
+}
+
 // Registry manages available backends.
 type Registry struct {
-	backends map[SourceType]Backend
+	backends map[pb.SourceType]Backend
 }
 
 // NewRegistry creates a new backend registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		backends: make(map[SourceType]Backend),
+		backends: make(map[pb.SourceType]Backend),
 	}
 }
 
@@ -226,7 +236,7 @@ func (r *Registry) Register(backend Backend) {
 }
 
 // Get returns the backend for a source type.
-func (r *Registry) Get(sourceType SourceType) (Backend, bool) {
+func (r *Registry) Get(sourceType pb.SourceType) (Backend, bool) {
 	backend, ok := r.backends[sourceType]
 	return backend, ok
 }

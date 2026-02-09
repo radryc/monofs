@@ -102,11 +102,10 @@ func (s *Service) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_Fetc
 	defer s.activeRequests.Add(-1)
 
 	ctx := stream.Context()
-	sourceType := protoToSourceType(req.SourceType)
 
-	backend, ok := s.registry.Get(sourceType)
+	backend, ok := s.registry.Get(req.SourceType)
 	if !ok {
-		return fmt.Errorf("unsupported source type: %s", sourceType)
+		return fmt.Errorf("unsupported source type: %s", req.SourceType)
 	}
 
 	// Build fetch request
@@ -120,7 +119,7 @@ func (s *Service) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_Fetc
 
 	s.logger.Debug("fetching blob",
 		"content_id", req.ContentId,
-		"source_type", sourceType,
+		"source_type", req.SourceType,
 		"source_key", fetchReq.SourceKey,
 	)
 
@@ -217,13 +216,12 @@ func (s *Service) FetchBlobBatch(req *pb.FetchBlobBatchRequest, stream pb.BlobFe
 
 func (s *Service) fetchSingleBlob(ctx context.Context, req *pb.FetchBlobRequest) *pb.FetchBlobBatchResponse {
 	start := time.Now()
-	sourceType := protoToSourceType(req.SourceType)
 
-	backend, ok := s.registry.Get(sourceType)
+	backend, ok := s.registry.Get(req.SourceType)
 	if !ok {
 		return &pb.FetchBlobBatchResponse{
 			ContentId: req.ContentId,
-			Error:     fmt.Sprintf("unsupported source type: %s", sourceType),
+			Error:     fmt.Sprintf("unsupported source type: %s", req.SourceType),
 		}
 	}
 
@@ -265,8 +263,7 @@ func (s *Service) PrefetchBlobs(ctx context.Context, req *pb.PrefetchRequest) (*
 
 	for _, blobReq := range req.Blobs {
 		// Check if already cached
-		sourceType := protoToSourceType(blobReq.SourceType)
-		backend, ok := s.registry.Get(sourceType)
+		backend, ok := s.registry.Get(blobReq.SourceType)
 		if !ok {
 			rejected++
 			continue
@@ -307,10 +304,9 @@ func (s *Service) PrefetchBlobs(ctx context.Context, req *pb.PrefetchRequest) (*
 
 // CheckCache checks if blobs are in the fetcher's cache.
 func (s *Service) CheckCache(ctx context.Context, req *pb.CheckCacheRequest) (*pb.CheckCacheResponse, error) {
-	sourceType := protoToSourceType(req.SourceType)
-	backend, ok := s.registry.Get(sourceType)
+	backend, ok := s.registry.Get(req.SourceType)
 	if !ok {
-		return nil, fmt.Errorf("unsupported source type: %s", sourceType)
+		return nil, fmt.Errorf("unsupported source type: %s", req.SourceType)
 	}
 
 	cached := make(map[string]bool)
@@ -389,7 +385,7 @@ func (s *Service) processPrefetchJob(job *prefetchJob) {
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
 	defer cancel()
 
-	sourceType := protoToSourceType(job.req.SourceType)
+	sourceType := job.req.SourceType
 	backend, ok := s.registry.Get(sourceType)
 	if !ok {
 		return
@@ -439,29 +435,6 @@ func (s *Service) Close() error {
 }
 
 // Helper functions
-
-func protoToSourceType(pt pb.SourceType) SourceType {
-	switch pt {
-	case pb.SourceType_SOURCE_TYPE_GIT:
-		return SourceTypeGit
-	case pb.SourceType_SOURCE_TYPE_GOMOD:
-		return SourceTypeGoMod
-	case pb.SourceType_SOURCE_TYPE_S3:
-		return SourceTypeS3
-	case pb.SourceType_SOURCE_TYPE_HTTP:
-		return SourceTypeHTTP
-	case pb.SourceType_SOURCE_TYPE_OCI:
-		return SourceTypeOCI
-	case pb.SourceType_SOURCE_TYPE_NPM:
-		return SourceTypeNpm
-	case pb.SourceType_SOURCE_TYPE_MAVEN:
-		return SourceTypeMaven
-	case pb.SourceType_SOURCE_TYPE_CARGO:
-		return SourceTypeCargo
-	default:
-		return SourceTypeUnknown
-	}
-}
 
 func getSourceKey(req *pb.FetchBlobRequest) string {
 	// Use storage_id if provided (for affinity routing)

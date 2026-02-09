@@ -188,8 +188,7 @@ Common socket locations:
   - %s/.monofs/overlay/session.sock (default)
   - /tmp/monofs-overlay/session.sock (Docker common)
 
-Run 'find / -name session.sock 2>/dev/null' to locate existing sockets.
-`, sc.socketPath, homeDir)
+Run 'find / -name session.sock 2>/dev/null' to locate existing sockets`, sc.socketPath, homeDir)
 	}
 
 	// Connect to socket
@@ -356,9 +355,8 @@ func (sc *SessionCommand) searchCode(args []string) error {
 	defer cancel()
 
 	// Connect to search service
-	conn, err := grpc.DialContext(ctx, *searchAddr,
+	conn, err := grpc.NewClient(*searchAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to connect to search service at %s: %w", *searchAddr, err)

@@ -83,64 +83,63 @@ func (IngestionType) EnumDescriptor() ([]byte, []int) {
 	return file_api_proto_monofs_proto_rawDescGZIP(), []int{0}
 }
 
-type FetchType int32
+// SourceType identifies the data source backend.
+// Canonical type identifier used across the entire system.
+type SourceType int32
 
 const (
-	FetchType_FETCH_GIT   FetchType = 0 // Fetch from Git repository
-	FetchType_FETCH_S3    FetchType = 1 // Fetch from S3
-	FetchType_FETCH_LOCAL FetchType = 2 // Fetch from local cache
-	FetchType_FETCH_GOMOD FetchType = 3 // Fetch from Go module cache
-	FetchType_FETCH_NPM   FetchType = 4 // Fetch from npm registry
-	FetchType_FETCH_MAVEN FetchType = 5 // Fetch from Maven Central
-	FetchType_FETCH_CARGO FetchType = 6 // Fetch from crates.io
+	SourceType_SOURCE_TYPE_UNKNOWN SourceType = 0
+	SourceType_SOURCE_TYPE_GIT     SourceType = 1 // Git repository (GitHub, GitLab, etc.)
+	SourceType_SOURCE_TYPE_GOMOD   SourceType = 2 // Go module proxy (proxy.golang.org)
+	SourceType_SOURCE_TYPE_NPM     SourceType = 6 // npm registry (npmjs.org)
+	SourceType_SOURCE_TYPE_MAVEN   SourceType = 7 // Maven Central (repo1.maven.org)
+	SourceType_SOURCE_TYPE_CARGO   SourceType = 8 // crates.io registry
 )
 
-// Enum value maps for FetchType.
+// Enum value maps for SourceType.
 var (
-	FetchType_name = map[int32]string{
-		0: "FETCH_GIT",
-		1: "FETCH_S3",
-		2: "FETCH_LOCAL",
-		3: "FETCH_GOMOD",
-		4: "FETCH_NPM",
-		5: "FETCH_MAVEN",
-		6: "FETCH_CARGO",
+	SourceType_name = map[int32]string{
+		0: "SOURCE_TYPE_UNKNOWN",
+		1: "SOURCE_TYPE_GIT",
+		2: "SOURCE_TYPE_GOMOD",
+		6: "SOURCE_TYPE_NPM",
+		7: "SOURCE_TYPE_MAVEN",
+		8: "SOURCE_TYPE_CARGO",
 	}
-	FetchType_value = map[string]int32{
-		"FETCH_GIT":   0,
-		"FETCH_S3":    1,
-		"FETCH_LOCAL": 2,
-		"FETCH_GOMOD": 3,
-		"FETCH_NPM":   4,
-		"FETCH_MAVEN": 5,
-		"FETCH_CARGO": 6,
+	SourceType_value = map[string]int32{
+		"SOURCE_TYPE_UNKNOWN": 0,
+		"SOURCE_TYPE_GIT":     1,
+		"SOURCE_TYPE_GOMOD":   2,
+		"SOURCE_TYPE_NPM":     6,
+		"SOURCE_TYPE_MAVEN":   7,
+		"SOURCE_TYPE_CARGO":   8,
 	}
 )
 
-func (x FetchType) Enum() *FetchType {
-	p := new(FetchType)
+func (x SourceType) Enum() *SourceType {
+	p := new(SourceType)
 	*p = x
 	return p
 }
 
-func (x FetchType) String() string {
+func (x SourceType) String() string {
 	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
 }
 
-func (FetchType) Descriptor() protoreflect.EnumDescriptor {
+func (SourceType) Descriptor() protoreflect.EnumDescriptor {
 	return file_api_proto_monofs_proto_enumTypes[1].Descriptor()
 }
 
-func (FetchType) Type() protoreflect.EnumType {
+func (SourceType) Type() protoreflect.EnumType {
 	return &file_api_proto_monofs_proto_enumTypes[1]
 }
 
-func (x FetchType) Number() protoreflect.EnumNumber {
+func (x SourceType) Number() protoreflect.EnumNumber {
 	return protoreflect.EnumNumber(x)
 }
 
-// Deprecated: Use FetchType.Descriptor instead.
-func (FetchType) EnumDescriptor() ([]byte, []int) {
+// Deprecated: Use SourceType.Descriptor instead.
+func (SourceType) EnumDescriptor() ([]byte, []int) {
 	return file_api_proto_monofs_proto_rawDescGZIP(), []int{1}
 }
 
@@ -1585,7 +1584,7 @@ type IngestRequest struct {
 	SourceId string                 `protobuf:"bytes,3,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"` // Custom display identifier (optional, auto-generated if empty)
 	// Backend configuration
 	IngestionType   IngestionType     `protobuf:"varint,4,opt,name=ingestion_type,json=ingestionType,proto3,enum=monofs.IngestionType" json:"ingestion_type,omitempty"`                                                      // Type of source (git, go, s3, etc.)
-	FetchType       FetchType         `protobuf:"varint,5,opt,name=fetch_type,json=fetchType,proto3,enum=monofs.FetchType" json:"fetch_type,omitempty"`                                                                      // Type of blob storage (git, s3, local)
+	FetchType       SourceType        `protobuf:"varint,5,opt,name=fetch_type,json=fetchType,proto3,enum=monofs.SourceType" json:"fetch_type,omitempty"`                                                                     // Where to fetch blob content
 	IngestionConfig map[string]string `protobuf:"bytes,6,rep,name=ingestion_config,json=ingestionConfig,proto3" json:"ingestion_config,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Backend-specific config
 	FetchConfig     map[string]string `protobuf:"bytes,7,rep,name=fetch_config,json=fetchConfig,proto3" json:"fetch_config,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`             // Fetch backend config
 	ReplicateData   bool              `protobuf:"varint,8,opt,name=replicate_data,json=replicateData,proto3" json:"replicate_data,omitempty"`                                                                                // If true, copy blobs to fetch backend during ingestion
@@ -1651,11 +1650,11 @@ func (x *IngestRequest) GetIngestionType() IngestionType {
 	return IngestionType_INGESTION_GIT
 }
 
-func (x *IngestRequest) GetFetchType() FetchType {
+func (x *IngestRequest) GetFetchType() SourceType {
 	if x != nil {
 		return x.FetchType
 	}
-	return FetchType_FETCH_GIT
+	return SourceType_SOURCE_TYPE_UNKNOWN
 }
 
 func (x *IngestRequest) GetIngestionConfig() map[string]string {
@@ -1793,7 +1792,7 @@ type FileMetadata struct {
 	DisplayPath string                 `protobuf:"bytes,10,opt,name=display_path,json=displayPath,proto3" json:"display_path,omitempty"` // User-visible repository path (e.g., "github_com/owner/repo" or "myrepo")
 	// Backend information
 	SourceType      IngestionType     `protobuf:"varint,11,opt,name=source_type,json=sourceType,proto3,enum=monofs.IngestionType" json:"source_type,omitempty"`                                                               // Where metadata came from
-	FetchType       FetchType         `protobuf:"varint,12,opt,name=fetch_type,json=fetchType,proto3,enum=monofs.FetchType" json:"fetch_type,omitempty"`                                                                      // Where to fetch blob content
+	FetchType       SourceType        `protobuf:"varint,12,opt,name=fetch_type,json=fetchType,proto3,enum=monofs.SourceType" json:"fetch_type,omitempty"`                                                                     // Where to fetch blob content
 	BackendMetadata map[string]string `protobuf:"bytes,13,rep,name=backend_metadata,json=backendMetadata,proto3" json:"backend_metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Backend-specific metadata
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -1899,11 +1898,11 @@ func (x *FileMetadata) GetSourceType() IngestionType {
 	return IngestionType_INGESTION_GIT
 }
 
-func (x *FileMetadata) GetFetchType() FetchType {
+func (x *FileMetadata) GetFetchType() SourceType {
 	if x != nil {
 		return x.FetchType
 	}
-	return FetchType_FETCH_GIT
+	return SourceType_SOURCE_TYPE_UNKNOWN
 }
 
 func (x *FileMetadata) GetBackendMetadata() map[string]string {
@@ -2307,7 +2306,7 @@ type RegisterRepositoryRequest struct {
 	Source      string                 `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`                              // Source identifier (Git URL, Go module path, S3 bucket, etc.)
 	// Backend configuration
 	IngestionType   IngestionType     `protobuf:"varint,4,opt,name=ingestion_type,json=ingestionType,proto3,enum=monofs.IngestionType" json:"ingestion_type,omitempty"`
-	FetchType       FetchType         `protobuf:"varint,5,opt,name=fetch_type,json=fetchType,proto3,enum=monofs.FetchType" json:"fetch_type,omitempty"`
+	FetchType       SourceType        `protobuf:"varint,5,opt,name=fetch_type,json=fetchType,proto3,enum=monofs.SourceType" json:"fetch_type,omitempty"`
 	IngestionConfig map[string]string `protobuf:"bytes,6,rep,name=ingestion_config,json=ingestionConfig,proto3" json:"ingestion_config,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	FetchConfig     map[string]string `protobuf:"bytes,7,rep,name=fetch_config,json=fetchConfig,proto3" json:"fetch_config,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields   protoimpl.UnknownFields
@@ -2372,11 +2371,11 @@ func (x *RegisterRepositoryRequest) GetIngestionType() IngestionType {
 	return IngestionType_INGESTION_GIT
 }
 
-func (x *RegisterRepositoryRequest) GetFetchType() FetchType {
+func (x *RegisterRepositoryRequest) GetFetchType() SourceType {
 	if x != nil {
 		return x.FetchType
 	}
-	return FetchType_FETCH_GIT
+	return SourceType_SOURCE_TYPE_UNKNOWN
 }
 
 func (x *RegisterRepositoryRequest) GetIngestionConfig() map[string]string {
@@ -3920,6 +3919,7 @@ type ClientHeartbeatRequest struct {
 	ClientId        string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
 	OperationsCount int64                  `protobuf:"varint,2,opt,name=operations_count,json=operationsCount,proto3" json:"operations_count,omitempty"` // Total FUSE operations since mount
 	BytesRead       int64                  `protobuf:"varint,3,opt,name=bytes_read,json=bytesRead,proto3" json:"bytes_read,omitempty"`                   // Total bytes read
+	ErrorsCount     int64                  `protobuf:"varint,4,opt,name=errors_count,json=errorsCount,proto3" json:"errors_count,omitempty"`             // Total I/O errors since mount
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -3971,6 +3971,13 @@ func (x *ClientHeartbeatRequest) GetOperationsCount() int64 {
 func (x *ClientHeartbeatRequest) GetBytesRead() int64 {
 	if x != nil {
 		return x.BytesRead
+	}
+	return 0
+}
+
+func (x *ClientHeartbeatRequest) GetErrorsCount() int64 {
+	if x != nil {
+		return x.ErrorsCount
 	}
 	return 0
 }
@@ -4127,6 +4134,7 @@ type ClientInfo struct {
 	LastHeartbeat   int64                  `protobuf:"varint,8,opt,name=last_heartbeat,json=lastHeartbeat,proto3" json:"last_heartbeat,omitempty"`       // Unix timestamp
 	OperationsCount int64                  `protobuf:"varint,9,opt,name=operations_count,json=operationsCount,proto3" json:"operations_count,omitempty"` // Total FUSE operations
 	BytesRead       int64                  `protobuf:"varint,10,opt,name=bytes_read,json=bytesRead,proto3" json:"bytes_read,omitempty"`                  // Total bytes read
+	ErrorsCount     int64                  `protobuf:"varint,11,opt,name=errors_count,json=errorsCount,proto3" json:"errors_count,omitempty"`            // Total I/O errors
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -4227,6 +4235,13 @@ func (x *ClientInfo) GetOperationsCount() int64 {
 func (x *ClientInfo) GetBytesRead() int64 {
 	if x != nil {
 		return x.BytesRead
+	}
+	return 0
+}
+
+func (x *ClientInfo) GetErrorsCount() int64 {
+	if x != nil {
+		return x.ErrorsCount
 	}
 	return 0
 }
@@ -5151,14 +5166,14 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"session_id\x18\x02 \x01(\tR\tsessionId\x12\x1d\n" +
 	"\n" +
 	"expires_at\x18\x03 \x01(\x03R\texpiresAt\x12#\n" +
-	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\x93\x04\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\x94\x04\n" +
 	"\rIngestRequest\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x10\n" +
 	"\x03ref\x18\x02 \x01(\tR\x03ref\x12\x1b\n" +
 	"\tsource_id\x18\x03 \x01(\tR\bsourceId\x12<\n" +
-	"\x0eingestion_type\x18\x04 \x01(\x0e2\x15.monofs.IngestionTypeR\ringestionType\x120\n" +
+	"\x0eingestion_type\x18\x04 \x01(\x0e2\x15.monofs.IngestionTypeR\ringestionType\x121\n" +
 	"\n" +
-	"fetch_type\x18\x05 \x01(\x0e2\x11.monofs.FetchTypeR\tfetchType\x12U\n" +
+	"fetch_type\x18\x05 \x01(\x0e2\x12.monofs.SourceTypeR\tfetchType\x12U\n" +
 	"\x10ingestion_config\x18\x06 \x03(\v2*.monofs.IngestRequest.IngestionConfigEntryR\x0fingestionConfig\x12I\n" +
 	"\ffetch_config\x18\a \x03(\v2&.monofs.IngestRequest.FetchConfigEntryR\vfetchConfig\x12%\n" +
 	"\x0ereplicate_data\x18\b \x01(\bR\rreplicateData\x1aB\n" +
@@ -5185,7 +5200,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\tINGESTING\x10\x02\x12\r\n" +
 	"\tCOMPLETED\x10\x03\x12\n" +
 	"\n" +
-	"\x06FAILED\x10\x04\"\xf3\x03\n" +
+	"\x06FAILED\x10\x04\"\xf4\x03\n" +
 	"\fFileMetadata\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x10\n" +
 	"\x03ref\x18\x03 \x01(\tR\x03ref\x12\x12\n" +
@@ -5199,9 +5214,9 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\fdisplay_path\x18\n" +
 	" \x01(\tR\vdisplayPath\x126\n" +
 	"\vsource_type\x18\v \x01(\x0e2\x15.monofs.IngestionTypeR\n" +
-	"sourceType\x120\n" +
+	"sourceType\x121\n" +
 	"\n" +
-	"fetch_type\x18\f \x01(\x0e2\x11.monofs.FetchTypeR\tfetchType\x12T\n" +
+	"fetch_type\x18\f \x01(\x0e2\x12.monofs.SourceTypeR\tfetchType\x12T\n" +
 	"\x10backend_metadata\x18\r \x03(\v2).monofs.FileMetadata.BackendMetadataEntryR\x0fbackendMetadata\x1aB\n" +
 	"\x14BackendMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
@@ -5234,15 +5249,15 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12)\n" +
 	"\x10files_replicated\x18\x02 \x01(\x03R\x0ffilesReplicated\x12!\n" +
 	"\ffiles_failed\x18\x03 \x01(\x03R\vfilesFailed\x12#\n" +
-	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xa3\x04\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xa4\x04\n" +
 	"\x19RegisterRepositoryRequest\x12\x1d\n" +
 	"\n" +
 	"storage_id\x18\x01 \x01(\tR\tstorageId\x12!\n" +
 	"\fdisplay_path\x18\x02 \x01(\tR\vdisplayPath\x12\x16\n" +
 	"\x06source\x18\x03 \x01(\tR\x06source\x12<\n" +
-	"\x0eingestion_type\x18\x04 \x01(\x0e2\x15.monofs.IngestionTypeR\ringestionType\x120\n" +
+	"\x0eingestion_type\x18\x04 \x01(\x0e2\x15.monofs.IngestionTypeR\ringestionType\x121\n" +
 	"\n" +
-	"fetch_type\x18\x05 \x01(\x0e2\x11.monofs.FetchTypeR\tfetchType\x12a\n" +
+	"fetch_type\x18\x05 \x01(\x0e2\x12.monofs.SourceTypeR\tfetchType\x12a\n" +
 	"\x10ingestion_config\x18\x06 \x03(\v26.monofs.RegisterRepositoryRequest.IngestionConfigEntryR\x0fingestionConfig\x12U\n" +
 	"\ffetch_config\x18\a \x03(\v22.monofs.RegisterRepositoryRequest.FetchConfigEntryR\vfetchConfig\x1aB\n" +
 	"\x14IngestionConfigEntry\x12\x10\n" +
@@ -5351,19 +5366,20 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"N\n" +
 	"\x18UnregisterClientResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\x7f\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xa2\x01\n" +
 	"\x16ClientHeartbeatRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12)\n" +
 	"\x10operations_count\x18\x02 \x01(\x03R\x0foperationsCount\x12\x1d\n" +
 	"\n" +
-	"bytes_read\x18\x03 \x01(\x03R\tbytesRead\"v\n" +
+	"bytes_read\x18\x03 \x01(\x03R\tbytesRead\x12!\n" +
+	"\ferrors_count\x18\x04 \x01(\x03R\verrorsCount\"v\n" +
 	"\x17ClientHeartbeatResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12'\n" +
 	"\x0fshould_register\x18\x03 \x01(\bR\x0eshouldRegister\"\x14\n" +
 	"\x12ListClientsRequest\"C\n" +
 	"\x13ListClientsResponse\x12,\n" +
-	"\aclients\x18\x01 \x03(\v2\x12.monofs.ClientInfoR\aclients\"\xdb\x02\n" +
+	"\aclients\x18\x01 \x03(\v2\x12.monofs.ClientInfoR\aclients\"\xfe\x02\n" +
 	"\n" +
 	"ClientInfo\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1f\n" +
@@ -5378,7 +5394,8 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x10operations_count\x18\t \x01(\x03R\x0foperationsCount\x12\x1d\n" +
 	"\n" +
 	"bytes_read\x18\n" +
-	" \x01(\x03R\tbytesRead\"U\n" +
+	" \x01(\x03R\tbytesRead\x12!\n" +
+	"\ferrors_count\x18\v \x01(\x03R\verrorsCount\"U\n" +
 	"\x0fFailoverRequest\x12$\n" +
 	"\x0esource_node_id\x18\x01 \x01(\tR\fsourceNodeId\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\"l\n" +
@@ -5447,15 +5464,15 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x0eINGESTION_FILE\x10\x03\x12\x11\n" +
 	"\rINGESTION_NPM\x10\x04\x12\x13\n" +
 	"\x0fINGESTION_MAVEN\x10\x05\x12\x13\n" +
-	"\x0fINGESTION_CARGO\x10\x06*{\n" +
-	"\tFetchType\x12\r\n" +
-	"\tFETCH_GIT\x10\x00\x12\f\n" +
-	"\bFETCH_S3\x10\x01\x12\x0f\n" +
-	"\vFETCH_LOCAL\x10\x02\x12\x0f\n" +
-	"\vFETCH_GOMOD\x10\x03\x12\r\n" +
-	"\tFETCH_NPM\x10\x04\x12\x0f\n" +
-	"\vFETCH_MAVEN\x10\x05\x12\x0f\n" +
-	"\vFETCH_CARGO\x10\x06*b\n" +
+	"\x0fINGESTION_CARGO\x10\x06*\x94\x01\n" +
+	"\n" +
+	"SourceType\x12\x17\n" +
+	"\x13SOURCE_TYPE_UNKNOWN\x10\x00\x12\x13\n" +
+	"\x0fSOURCE_TYPE_GIT\x10\x01\x12\x15\n" +
+	"\x11SOURCE_TYPE_GOMOD\x10\x02\x12\x13\n" +
+	"\x0fSOURCE_TYPE_NPM\x10\x06\x12\x15\n" +
+	"\x11SOURCE_TYPE_MAVEN\x10\a\x12\x15\n" +
+	"\x11SOURCE_TYPE_CARGO\x10\b*b\n" +
 	"\vClientState\x12\x12\n" +
 	"\x0eCLIENT_UNKNOWN\x10\x00\x12\x14\n" +
 	"\x10CLIENT_CONNECTED\x10\x01\x12\x10\n" +
@@ -5519,7 +5536,7 @@ var file_api_proto_monofs_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_api_proto_monofs_proto_msgTypes = make([]protoimpl.MessageInfo, 87)
 var file_api_proto_monofs_proto_goTypes = []any{
 	(IngestionType)(0),                       // 0: monofs.IngestionType
-	(FetchType)(0),                           // 1: monofs.FetchType
+	(SourceType)(0),                          // 1: monofs.SourceType
 	(ClientState)(0),                         // 2: monofs.ClientState
 	(IngestProgress_Stage)(0),                // 3: monofs.IngestProgress.Stage
 	(*ClusterInfoRequest)(nil),               // 4: monofs.ClusterInfoRequest
@@ -5614,18 +5631,18 @@ var file_api_proto_monofs_proto_depIdxs = []int32{
 	6,  // 0: monofs.ClusterInfoResponse.nodes:type_name -> monofs.NodeInfo
 	83, // 1: monofs.NodeInfo.metadata:type_name -> monofs.NodeInfo.MetadataEntry
 	0,  // 2: monofs.IngestRequest.ingestion_type:type_name -> monofs.IngestionType
-	1,  // 3: monofs.IngestRequest.fetch_type:type_name -> monofs.FetchType
+	1,  // 3: monofs.IngestRequest.fetch_type:type_name -> monofs.SourceType
 	84, // 4: monofs.IngestRequest.ingestion_config:type_name -> monofs.IngestRequest.IngestionConfigEntry
 	85, // 5: monofs.IngestRequest.fetch_config:type_name -> monofs.IngestRequest.FetchConfigEntry
 	3,  // 6: monofs.IngestProgress.stage:type_name -> monofs.IngestProgress.Stage
 	0,  // 7: monofs.FileMetadata.source_type:type_name -> monofs.IngestionType
-	1,  // 8: monofs.FileMetadata.fetch_type:type_name -> monofs.FetchType
+	1,  // 8: monofs.FileMetadata.fetch_type:type_name -> monofs.SourceType
 	86, // 9: monofs.FileMetadata.backend_metadata:type_name -> monofs.FileMetadata.BackendMetadataEntry
 	27, // 10: monofs.IngestFileRequest.metadata:type_name -> monofs.FileMetadata
 	27, // 11: monofs.IngestFileBatchRequest.files:type_name -> monofs.FileMetadata
 	27, // 12: monofs.IngestReplicaBatchRequest.files:type_name -> monofs.FileMetadata
 	0,  // 13: monofs.RegisterRepositoryRequest.ingestion_type:type_name -> monofs.IngestionType
-	1,  // 14: monofs.RegisterRepositoryRequest.fetch_type:type_name -> monofs.FetchType
+	1,  // 14: monofs.RegisterRepositoryRequest.fetch_type:type_name -> monofs.SourceType
 	87, // 15: monofs.RegisterRepositoryRequest.ingestion_config:type_name -> monofs.RegisterRepositoryRequest.IngestionConfigEntry
 	88, // 16: monofs.RegisterRepositoryRequest.fetch_config:type_name -> monofs.RegisterRepositoryRequest.FetchConfigEntry
 	82, // 17: monofs.SyncMetadataFromNodeRequest.files:type_name -> monofs.FileInfo

@@ -2,7 +2,6 @@ package fetcher
 
 import (
 	"archive/zip"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -11,12 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	pb "github.com/radryc/monofs/api/proto"
 )
 
 // MavenBackend fetches files from Maven Central repository.
 type MavenBackend struct {
+	BaseBackend
 	config BackendConfig
 
 	// HTTP client for Maven Central
@@ -27,8 +28,6 @@ type MavenBackend struct {
 
 	mu        sync.RWMutex
 	artifacts map[string]*cachedMavenArtifact // groupId:artifactId:version -> cached artifact
-
-	stats atomic.Pointer[BackendStats]
 }
 
 type cachedMavenArtifact struct {
@@ -50,12 +49,12 @@ func NewMavenBackend() *MavenBackend {
 		},
 		repoURL: "https://repo1.maven.org/maven2",
 	}
-	mb.stats.Store(&BackendStats{})
+	mb.InitStats()
 	return mb
 }
 
-func (mb *MavenBackend) Type() SourceType {
-	return SourceTypeMaven
+func (mb *MavenBackend) Type() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_MAVEN
 }
 
 func (mb *MavenBackend) Initialize(ctx context.Context, config BackendConfig) error {
@@ -146,26 +145,26 @@ func (mb *MavenBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*Fetc
 	}
 
 	if groupID == "" || artifactID == "" || version == "" {
-		mb.recordError()
+		mb.RecordError()
 		return nil, fmt.Errorf("invalid maven request: missing groupId, artifactId, or version")
 	}
 
 	// Get or download artifact
 	cached, err := mb.getOrDownloadArtifact(ctx, groupID, artifactID, version)
 	if err != nil {
-		mb.recordError()
+		mb.RecordError()
 		return nil, fmt.Errorf("failed to get artifact: %w", err)
 	}
 
 	// Read file from artifact
 	content, err := mb.readFileFromArtifact(cached, filePath)
 	if err != nil {
-		mb.recordError()
+		mb.RecordError()
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
 	latency := time.Since(start).Milliseconds()
-	mb.recordSuccess(int64(len(content)), latency, false)
+	mb.RecordSuccess(int64(len(content)), latency, false, int64(len(mb.artifacts)))
 
 	return &FetchResult{
 		Content:   content,
@@ -175,11 +174,7 @@ func (mb *MavenBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*Fetc
 }
 
 func (mb *MavenBackend) FetchBlobStream(ctx context.Context, req *FetchRequest) (io.ReadCloser, int64, error) {
-	result, err := mb.FetchBlob(ctx, req)
-	if err != nil {
-		return nil, 0, err
-	}
-	return io.NopCloser(bytes.NewReader(result.Content)), result.Size, nil
+	return DefaultFetchBlobStream(mb, ctx, req)
 }
 
 func (mb *MavenBackend) Warmup(ctx context.Context, sourceKey string, config map[string]string) error {
@@ -235,10 +230,6 @@ func (mb *MavenBackend) Cleanup(ctx context.Context, sourceKey string) error {
 
 func (mb *MavenBackend) Close() error {
 	return nil
-}
-
-func (mb *MavenBackend) Stats() BackendStats {
-	return *mb.stats.Load()
 }
 
 // getOrDownloadArtifact retrieves an artifact from cache or downloads it.
@@ -449,27 +440,4 @@ func sanitizeMavenCoords(groupID, artifactID string) string {
 	s = strings.ReplaceAll(s, ".", "_")
 	s = strings.ReplaceAll(s, "/", "_")
 	return s
-}
-
-// recordSuccess updates backend statistics for successful fetch.
-func (mb *MavenBackend) recordSuccess(bytes, latencyMs int64, cached bool) {
-	stats := mb.stats.Load()
-	newStats := *stats
-	newStats.Requests++
-	newStats.BytesFetched += bytes
-	if cached {
-		newStats.CacheHits++
-	} else {
-		newStats.CacheMisses++
-	}
-	mb.stats.Store(&newStats)
-}
-
-// recordError updates backend statistics for failed fetch.
-func (mb *MavenBackend) recordError() {
-	stats := mb.stats.Load()
-	newStats := *stats
-	newStats.Requests++
-	newStats.Errors++
-	mb.stats.Store(&newStats)
 }

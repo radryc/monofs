@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
@@ -106,7 +107,7 @@ func (r *Router) ingestVirtualRepo(
 	var healthyNodes []sharding.Node
 	var nodeStates []*nodeState
 	for id, ns := range r.nodes {
-		if ns.status == NodeActive {
+		if ns.status == NodeActive && ns.client != nil {
 			healthyNodes = append(healthyNodes, sharding.Node{
 				ID:     id,
 				Weight: ns.info.Weight,
@@ -122,7 +123,7 @@ func (r *Router) ingestVirtualRepo(
 
 	// Step 2: Determine ingestion and fetch types from original info
 	ingestionType := pb.IngestionType_INGESTION_GIT
-	fetchType := pb.FetchType_FETCH_GIT
+	fetchType := pb.SourceType_SOURCE_TYPE_GIT
 
 	switch strings.ToLower(originalInfo.IngestionType) {
 	case "git":
@@ -133,31 +134,38 @@ func (r *Router) ingestVirtualRepo(
 
 	switch strings.ToLower(originalInfo.FetchType) {
 	case "git":
-		fetchType = pb.FetchType_FETCH_GIT
+		fetchType = pb.SourceType_SOURCE_TYPE_GIT
 	case "gomod":
-		fetchType = pb.FetchType_FETCH_GOMOD
+		fetchType = pb.SourceType_SOURCE_TYPE_GOMOD
 	}
 
-	// Step 3: Register virtual repo on ALL healthy nodes.
+	// Step 3: Register virtual repo on ALL healthy nodes (parallel).
+	var regWg sync.WaitGroup
 	for _, ns := range nodeStates {
-		regCtx, regCancel := context.WithTimeout(ctx, 10*time.Second)
-		_, err := ns.client.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
-			StorageId:     virtualStorageID,
-			DisplayPath:   virtualDisplayPath,
-			Source:        originalInfo.Source,
-			IngestionType: ingestionType,
-			FetchType:     fetchType,
-		})
-		regCancel()
+		ns := ns
+		regWg.Add(1)
+		go func() {
+			defer regWg.Done()
+			regCtx, regCancel := context.WithTimeout(ctx, 10*time.Second)
+			_, err := ns.client.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
+				StorageId:     virtualStorageID,
+				DisplayPath:   virtualDisplayPath,
+				Source:        originalInfo.Source,
+				IngestionType: ingestionType,
+				FetchType:     fetchType,
+			})
+			regCancel()
 
-		if err != nil {
-			r.logger.Warn("failed to register virtual repo on node",
-				"node_id", ns.info.NodeId,
-				"virtual_path", virtualDisplayPath,
-				"error", err)
-			// Non-fatal for individual node failures
-		}
+			if err != nil {
+				r.logger.Warn("failed to register virtual repo on node",
+					"node_id", ns.info.NodeId,
+					"virtual_path", virtualDisplayPath,
+					"error", err)
+				// Non-fatal for individual node failures
+			}
+		}()
 	}
+	regWg.Wait()
 
 	// Step 4: Build protobuf FileMetadata from VirtualEntry + original FileInfo.
 	var batch []*pb.FileMetadata
@@ -206,7 +214,7 @@ func (r *Router) ingestVirtualRepo(
 	const batchSize = 1000
 	for nodeID, fileBatch := range nodeBatches {
 		ns := r.getNodeByID(nodeID)
-		if ns == nil {
+		if ns == nil || ns.client == nil {
 			continue
 		}
 
@@ -239,7 +247,7 @@ func (r *Router) ingestVirtualRepo(
 	// Step 7: Build directory indexes on all nodes that received files.
 	for nodeID := range nodeBatches {
 		ns := r.getNodeByID(nodeID)
-		if ns == nil {
+		if ns == nil || ns.client == nil {
 			continue
 		}
 
@@ -259,7 +267,7 @@ func (r *Router) ingestVirtualRepo(
 	// Step 8: Mark virtual repo as onboarded on all nodes that have files.
 	for nodeID := range nodeBatches {
 		ns := r.getNodeByID(nodeID)
-		if ns == nil {
+		if ns == nil || ns.client == nil {
 			continue
 		}
 

@@ -37,12 +37,12 @@ func (h *MavenIngestionHandler) GetDefaultRef() string {
 
 func (h *MavenIngestionHandler) ValidateSource(source string, ref string) error {
 	if source == "" {
-		return fmt.Errorf("Maven coordinates are required")
+		return fmt.Errorf("maven coordinates are required")
 	}
 	if strings.Contains(source, ":") {
 		parts := strings.Split(source, ":")
 		if len(parts) != 3 {
-			return fmt.Errorf("Maven source must be in format groupId:artifactId:version")
+			return fmt.Errorf("maven source must be in format groupId:artifactId:version")
 		}
 	}
 	return nil
@@ -52,8 +52,8 @@ func (h *MavenIngestionHandler) GetStorageType() storage.IngestionType {
 	return storage.IngestionTypeMaven
 }
 
-func (h *MavenIngestionHandler) GetFetchType() storage.FetchType {
-	return storage.FetchTypeMaven
+func (h *MavenIngestionHandler) GetFetchType() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_MAVEN
 }
 func (h *MavenIngestionHandler) ExtractCanonicalPath(metadata map[string]string) string {
 	if repoURL := metadata["repository_url"]; repoURL != "" {

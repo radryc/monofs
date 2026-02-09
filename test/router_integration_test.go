@@ -89,7 +89,7 @@ func newClusterTestEnv(t *testing.T, numNodes int, basePort int) *clusterTestEnv
 	time.Sleep(200 * time.Millisecond)
 
 	// Connect router client
-	routerConn, err := grpc.Dial(fmt.Sprintf("localhost:%d", basePort),
+	routerConn, err := grpc.NewClient(fmt.Sprintf("localhost:%d", basePort),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
@@ -568,7 +568,7 @@ func TestRouterClusterVersioning(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	conn, err := grpc.Dial("localhost:19380", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("localhost:19380", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}

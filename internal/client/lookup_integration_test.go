@@ -51,8 +51,7 @@ func setupTestServer(t *testing.T) (*captureServer, *Client, func()) {
 		return listener.Dial()
 	}
 
-	conn, err := grpc.DialContext(
-		context.Background(),
+	conn, err := grpc.NewClient(
 		"bufnet",
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),

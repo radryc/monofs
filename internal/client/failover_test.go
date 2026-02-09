@@ -76,22 +76,6 @@ func (m *mockNode) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.Get
 	return &pb.GetAttrResponse{Found: false}, nil
 }
 
-// mockReadServer implements the Read streaming response
-type mockReadServer struct {
-	grpc.ServerStream
-	data []byte
-	sent bool
-	ctx  context.Context
-}
-
-func (s *mockReadServer) Context() context.Context {
-	return s.ctx
-}
-
-func (s *mockReadServer) Send(chunk *pb.DataChunk) error {
-	return nil
-}
-
 func (m *mockNode) Read(req *pb.ReadRequest, stream pb.MonoFS_ReadServer) error {
 	atomic.AddInt32(&m.readCalls, 1)
 	m.mu.Lock()
@@ -209,8 +193,7 @@ func newTestCluster(t *testing.T, nodeIDs []string) *testCluster {
 			}
 		}(listener)
 
-		conn, err := grpc.DialContext(
-			context.Background(),
+		conn, err := grpc.NewClient(
 			id,
 			grpc.WithContextDialer(dialer),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),

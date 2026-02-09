@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	pb "github.com/radryc/monofs/api/proto"
 )
 
 func TestGitBackend_Initialize(t *testing.T) {
@@ -32,8 +34,8 @@ func TestGitBackend_Initialize(t *testing.T) {
 		t.Fatalf("Initialize failed: %v", err)
 	}
 
-	if backend.Type() != SourceTypeGit {
-		t.Errorf("expected SourceTypeGit, got %v", backend.Type())
+	if backend.Type() != pb.SourceType_SOURCE_TYPE_GIT {
+		t.Errorf("expected SOURCE_TYPE_GIT, got %v", backend.Type())
 	}
 
 	// Verify cache directory was created
@@ -144,8 +146,8 @@ func TestGoModBackend_Initialize(t *testing.T) {
 		t.Fatalf("Initialize failed: %v", err)
 	}
 
-	if backend.Type() != SourceTypeGoMod {
-		t.Errorf("expected SourceTypeGoMod, got %v", backend.Type())
+	if backend.Type() != pb.SourceType_SOURCE_TYPE_GOMOD {
+		t.Errorf("expected SOURCE_TYPE_GOMOD, got %v", backend.Type())
 	}
 }
 
@@ -211,17 +213,17 @@ func TestBackendRegistry(t *testing.T) {
 	registry.Register(gomodBackend)
 
 	// Get by type
-	gitResult, ok := registry.Get(SourceTypeGit)
+	gitResult, ok := registry.Get(pb.SourceType_SOURCE_TYPE_GIT)
 	if !ok || gitResult == nil {
 		t.Error("expected to get Git backend")
 	}
 
-	gomodResult, ok := registry.Get(SourceTypeGoMod)
+	gomodResult, ok := registry.Get(pb.SourceType_SOURCE_TYPE_GOMOD)
 	if !ok || gomodResult == nil {
 		t.Error("expected to get GoMod backend")
 	}
 
-	_, ok = registry.Get(SourceTypeS3)
+	_, ok = registry.Get(pb.SourceType_SOURCE_TYPE_UNKNOWN)
 	if ok {
 		t.Error("expected false for unregistered backend")
 	}
@@ -257,49 +259,6 @@ func TestIsGoModPath(t *testing.T) {
 		result := IsGoModPath(tt.url)
 		if result != tt.expected {
 			t.Errorf("IsGoModPath(%q) = %v, want %v", tt.url, result, tt.expected)
-		}
-	}
-}
-
-func TestParseSourceType(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected SourceType
-	}{
-		{"git", SourceTypeGit},
-		{"gomod", SourceTypeGoMod},
-		{"s3", SourceTypeS3},
-		{"http", SourceTypeHTTP},
-		{"oci", SourceTypeOCI},
-		{"unknown", SourceTypeUnknown},
-		{"", SourceTypeUnknown},
-	}
-
-	for _, tt := range tests {
-		result := ParseSourceType(tt.input)
-		if result != tt.expected {
-			t.Errorf("ParseSourceType(%q) = %v, want %v", tt.input, result, tt.expected)
-		}
-	}
-}
-
-func TestSourceTypeString(t *testing.T) {
-	tests := []struct {
-		input    SourceType
-		expected string
-	}{
-		{SourceTypeGit, "git"},
-		{SourceTypeGoMod, "gomod"},
-		{SourceTypeS3, "s3"},
-		{SourceTypeHTTP, "http"},
-		{SourceTypeOCI, "oci"},
-		{SourceTypeUnknown, "unknown"},
-	}
-
-	for _, tt := range tests {
-		result := tt.input.String()
-		if result != tt.expected {
-			t.Errorf("SourceType(%d).String() = %q, want %q", tt.input, result, tt.expected)
 		}
 	}
 }
@@ -348,17 +307,6 @@ func BenchmarkIsGoModPath(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for _, url := range urls {
 			IsGoModPath(url)
-		}
-	}
-}
-
-func BenchmarkParseSourceType(b *testing.B) {
-	types := []string{"git", "gomod", "s3", "http", "oci", "unknown"}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		for _, t := range types {
-			ParseSourceType(t)
 		}
 	}
 }

@@ -8,32 +8,6 @@ import (
 	"github.com/radryc/monofs/internal/storage"
 )
 
-// extractPackageAndVersion parses package name and version from source string.
-// Handles both "package@version" and scoped "@scope/package@version" formats.
-func extractPackageAndVersion(source string) (string, string) {
-	source = strings.TrimSpace(source)
-	if source == "" {
-		return "", ""
-	}
-
-	// Handle scoped packages: @scope/package@version
-	if strings.HasPrefix(source, "@") {
-		// Find the second @ which separates package from version
-		parts := strings.SplitN(source[1:], "@", 2) // Skip first @ and split on second
-		if len(parts) == 2 {
-			return "@" + parts[0], parts[1] // Return @scope/package, version
-		}
-		return "@" + parts[0], "" // Scoped package without version
-	}
-
-	// Handle regular packages: package@version
-	parts := strings.SplitN(source, "@", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
-	}
-	return parts[0], "" // Package without version
-}
-
 // NpmIngestionHandler handles npm package ingestion.
 type NpmIngestionHandler struct{}
 
@@ -77,20 +51,24 @@ func (h *NpmIngestionHandler) GetStorageType() storage.IngestionType {
 	return storage.IngestionTypeNpm
 }
 
-func (h *NpmIngestionHandler) GetFetchType() storage.FetchType {
-	return storage.FetchTypeNpm
+func (h *NpmIngestionHandler) GetFetchType() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_NPM
 }
 func (h *NpmIngestionHandler) ExtractCanonicalPath(metadata map[string]string) string {
 	// Extract canonical GitHub path from package metadata.
 	// This becomes the primary storage location during initial ingestion.
 	// The mapper will then create a virtual hard link at node_modules/.
+	version := metadata["version"]
 	if repoURL := metadata["repository_url"]; repoURL != "" {
-		// Normalize GitHub URL to path format
-		return normalizeGitURL(repoURL)
+		// Normalize GitHub URL to path format and append version
+		canonicalPath := normalizeGitURL(repoURL)
+		if version != "" {
+			return canonicalPath + "@" + version
+		}
+		return canonicalPath
 	}
 	// Fallback to npm registry URL if no repository found
 	if packageName := metadata["package_name"]; packageName != "" {
-		version := metadata["version"]
 		if version != "" {
 			return fmt.Sprintf("registry.npmjs.org/%s@%s", packageName, version)
 		}

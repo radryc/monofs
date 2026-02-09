@@ -68,13 +68,13 @@ func (c *CargoMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.Fi
 	// Extract canonical GitHub repository path from metadata
 	canonicalPath := ""
 	if len(files) > 0 && files[0].BackendMetadata != nil {
-		canonicalPath = files[0].BackendMetadata["repository_url"]
-		canonicalPath = normalizeGitURL(canonicalPath)
+		canonicalPath = normalizeGitURL(files[0].BackendMetadata["repository_url"])
 	}
 	if canonicalPath == "" {
 		// Fallback: use crates.io path if no repository found
 		canonicalPath = "crates.io/" + crateName + "@" + version
 	}
+	_ = canonicalPath // TODO: use canonical path for virtual entry deduplication
 
 	// Initial ingestion already created files at the canonical GitHub path.
 	// Now create virtual hard link entries at .cargo/registry/src/ for Cargo compatibility.
@@ -94,58 +94,6 @@ func (c *CargoMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.Fi
 	}
 
 	return entries, nil
-}
-
-// extractCargoCanonicalPath extracts the normalized GitHub/GitLab path from Cargo.toml
-func extractCargoCanonicalPath(toml map[string]interface{}) string {
-	// Try repository field first
-	if repo, ok := toml["repository"].(string); ok && repo != "" {
-		if normalized := normalizeGitURL(repo); normalized != "" {
-			return normalized
-		}
-	}
-
-	// Try homepage as fallback
-	if homepage, ok := toml["homepage"].(string); ok && homepage != "" {
-		if normalized := normalizeGitURL(homepage); normalized != "" {
-			return normalized
-		}
-	}
-
-	return ""
-}
-
-// parseSimpleToml does basic TOML parsing to extract [package] fields
-// This is simplified - for production use proper TOML library
-func parseSimpleToml(content []byte) map[string]interface{} {
-	result := make(map[string]interface{})
-	lines := strings.Split(string(content), "\n")
-	inPackage := false
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-
-		if line == "[package]" {
-			inPackage = true
-			continue
-		}
-
-		if inPackage && strings.HasPrefix(line, "[") {
-			inPackage = false
-			continue
-		}
-
-		if inPackage && line != "" && !strings.HasPrefix(line, "#") {
-			if parts := strings.SplitN(line, "=", 2); len(parts) == 2 {
-				key := strings.TrimSpace(parts[0])
-				value := strings.TrimSpace(parts[1])
-				value = strings.Trim(value, "\"' ")
-				result[key] = value
-			}
-		}
-	}
-
-	return result
 }
 
 // normalizeGitURL converts a Git URL to canonical path format

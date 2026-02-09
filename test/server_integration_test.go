@@ -70,7 +70,7 @@ func newServerTestEnv(t *testing.T, nodeID string, port int) *serverTestEnv {
 	// Wait for server to be ready
 	time.Sleep(100 * time.Millisecond)
 
-	conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", port),
+	conn, err := grpc.NewClient(fmt.Sprintf("localhost:%d", port),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {

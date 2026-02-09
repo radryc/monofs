@@ -28,18 +28,8 @@ service BlobFetcher {
     rpc GetStats(FetcherStatsRequest) returns (FetcherStatsResponse);
 }
 
-// SourceType identifies the data source backend.
-enum SourceType {
-    SOURCE_TYPE_UNKNOWN = 0;
-    SOURCE_TYPE_GIT = 1;          // Git repository (GitHub, GitLab, etc.)
-    SOURCE_TYPE_GOMOD = 2;        // Go module proxy (proxy.golang.org)
-    SOURCE_TYPE_S3 = 3;           // S3-compatible object storage
-    SOURCE_TYPE_HTTP = 4;         // Generic HTTP/HTTPS URL
-    SOURCE_TYPE_OCI = 5;          // OCI registry (container images)
-    SOURCE_TYPE_NPM = 6;          // npm registry (npmjs.org)
-    SOURCE_TYPE_MAVEN = 7;        // Maven Central (repo1.maven.org)
-    SOURCE_TYPE_CARGO = 8;        // crates.io registry
-}
+// SourceType is defined in monofs.proto (imported above).
+// It is the canonical type identifier used across the system.
 
 message FetchBlobRequest {
     // Content identifier (interpretation depends on source_type):

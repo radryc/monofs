@@ -112,7 +112,7 @@ func (m *MavenIngestionBackend) downloadAndExtract(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Maven repository returned status %d for %s", resp.StatusCode, jarURL)
+		return fmt.Errorf("maven repository returned status %d for %s", resp.StatusCode, jarURL)
 	}
 
 	// Save JAR file

@@ -560,8 +560,8 @@ func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoUR
 	wasPrefetched := inCache
 
 	// Use stored fetch type, fallback to detection if not available
-	sourceType := protoFetchTypeToSourceType(fetchType)
-	if sourceType == fetcher.SourceTypeUnknown {
+	sourceType := parseStoredSourceType(fetchType)
+	if sourceType == pb.SourceType_SOURCE_TYPE_UNKNOWN {
 		sourceType = detectSourceType(repoURL)
 	}
 
@@ -579,7 +579,7 @@ func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoUR
 	sourceConfig["file_path"] = filePath
 
 	// For Go modules, parse module_path and version from sourceURL
-	if sourceType == fetcher.SourceTypeGoMod {
+	if sourceType == pb.SourceType_SOURCE_TYPE_GOMOD {
 		if idx := strings.LastIndex(repoURL, "@"); idx != -1 {
 			sourceConfig["module_path"] = repoURL[:idx]
 			sourceConfig["version"] = repoURL[idx+1:]
@@ -601,58 +601,62 @@ func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoUR
 	return content, wasPrefetched, nil
 }
 
-// protoFetchTypeToSourceType converts proto FetchType string to fetcher SourceType.
-func protoFetchTypeToSourceType(fetchType string) fetcher.SourceType {
+// parseStoredSourceType converts a stored fetch type string to pb.SourceType.
+// Handles both legacy "FETCH_*" format and current "SOURCE_TYPE_*" format.
+func parseStoredSourceType(fetchType string) pb.SourceType {
+	// Try current proto enum format first (e.g. "SOURCE_TYPE_GIT")
+	if v, ok := pb.SourceType_value[fetchType]; ok {
+		return pb.SourceType(v)
+	}
+	// Legacy format from old FetchType enum
 	switch fetchType {
 	case "FETCH_GIT":
-		return fetcher.SourceTypeGit
+		return pb.SourceType_SOURCE_TYPE_GIT
 	case "FETCH_GO_MOD":
-		return fetcher.SourceTypeGoMod
+		return pb.SourceType_SOURCE_TYPE_GOMOD
 	case "FETCH_NPM":
-		return fetcher.SourceTypeNpm
+		return pb.SourceType_SOURCE_TYPE_NPM
 	case "FETCH_MAVEN":
-		return fetcher.SourceTypeMaven
+		return pb.SourceType_SOURCE_TYPE_MAVEN
 	case "FETCH_CARGO":
-		return fetcher.SourceTypeCargo
-	case "FETCH_S3":
-		return fetcher.SourceTypeS3
+		return pb.SourceType_SOURCE_TYPE_CARGO
 	default:
-		return fetcher.SourceTypeUnknown
+		return pb.SourceType_SOURCE_TYPE_UNKNOWN
 	}
 }
 
 // detectSourceType determines the fetcher source type from a repository URL/path.
-func detectSourceType(repoURL string) fetcher.SourceType {
+func detectSourceType(repoURL string) pb.SourceType {
 	// Check for package registries first (most specific)
 	if strings.HasPrefix(repoURL, "registry.npmjs.org/") || strings.Contains(repoURL, "registry.npmjs.org") {
-		return fetcher.SourceTypeNpm
+		return pb.SourceType_SOURCE_TYPE_NPM
 	}
 	if strings.HasPrefix(repoURL, "repo.maven.apache.org/") || strings.Contains(repoURL, "repo.maven.apache.org") {
-		return fetcher.SourceTypeMaven
+		return pb.SourceType_SOURCE_TYPE_MAVEN
 	}
 	if strings.HasPrefix(repoURL, "crates.io/") || strings.Contains(repoURL, "crates.io") {
-		return fetcher.SourceTypeCargo
+		return pb.SourceType_SOURCE_TYPE_CARGO
 	}
 
 	// Check for Go modules
 	if fetcher.IsGoModPath(repoURL) {
-		return fetcher.SourceTypeGoMod
+		return pb.SourceType_SOURCE_TYPE_GOMOD
 	}
 
 	// Default to Git for GitHub/GitLab URLs
-	return fetcher.SourceTypeGit
+	return pb.SourceType_SOURCE_TYPE_GIT
 }
 
 // recordAccessForPredictor records file access for the predictor.
 // The predictor handles prediction and prefetch triggering internally.
 func (s *Server) recordAccessForPredictor(ctx context.Context, storageID, filePath, blobHash, repoURL, branch, fetchType string) {
 	// Create blob metadata for predictor
-	sourceType := protoFetchTypeToSourceType(fetchType)
-	if sourceType == fetcher.SourceTypeUnknown {
+	sourceType := parseStoredSourceType(fetchType)
+	if sourceType == pb.SourceType_SOURCE_TYPE_UNKNOWN {
 		sourceType = detectSourceType(repoURL)
 	}
 	if fetcher.IsGoModPath(repoURL) {
-		sourceType = fetcher.SourceTypeGoMod
+		sourceType = pb.SourceType_SOURCE_TYPE_GOMOD
 	}
 
 	meta := &BlobMeta{

@@ -2,7 +2,6 @@ package fetcher
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -13,12 +12,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	pb "github.com/radryc/monofs/api/proto"
 )
 
 // NpmBackend fetches files from npm registry.
 type NpmBackend struct {
+	BaseBackend
 	config BackendConfig
 
 	// HTTP client for npm registry
@@ -29,8 +30,6 @@ type NpmBackend struct {
 
 	mu       sync.RWMutex
 	packages map[string]*cachedNpmPackage // package@version -> cached package
-
-	stats atomic.Pointer[BackendStats]
 }
 
 type cachedNpmPackage struct {
@@ -66,12 +65,12 @@ func NewNpmBackend() *NpmBackend {
 		},
 		registryURL: "https://registry.npmjs.org",
 	}
-	nb.stats.Store(&BackendStats{})
+	nb.InitStats()
 	return nb
 }
 
-func (nb *NpmBackend) Type() SourceType {
-	return SourceTypeNpm
+func (nb *NpmBackend) Type() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_NPM
 }
 
 func (nb *NpmBackend) Initialize(ctx context.Context, config BackendConfig) error {
@@ -143,26 +142,26 @@ func (nb *NpmBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*FetchR
 	}
 
 	if packageName == "" || version == "" {
-		nb.recordError()
+		nb.RecordError()
 		return nil, fmt.Errorf("invalid npm request: missing package_name or version")
 	}
 
 	// Get or download package
 	cached, err := nb.getOrDownloadPackage(ctx, packageName, version)
 	if err != nil {
-		nb.recordError()
+		nb.RecordError()
 		return nil, fmt.Errorf("failed to get package: %w", err)
 	}
 
 	// Read file from package
 	content, err := nb.readFileFromPackage(cached, filePath)
 	if err != nil {
-		nb.recordError()
+		nb.RecordError()
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
 	latency := time.Since(start).Milliseconds()
-	nb.recordSuccess(int64(len(content)), latency, false)
+	nb.RecordSuccess(int64(len(content)), latency, false, int64(len(nb.packages)))
 
 	return &FetchResult{
 		Content:   content,
@@ -172,11 +171,7 @@ func (nb *NpmBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*FetchR
 }
 
 func (nb *NpmBackend) FetchBlobStream(ctx context.Context, req *FetchRequest) (io.ReadCloser, int64, error) {
-	result, err := nb.FetchBlob(ctx, req)
-	if err != nil {
-		return nil, 0, err
-	}
-	return io.NopCloser(bytes.NewReader(result.Content)), result.Size, nil
+	return DefaultFetchBlobStream(nb, ctx, req)
 }
 
 func (nb *NpmBackend) Warmup(ctx context.Context, sourceKey string, config map[string]string) error {
@@ -224,12 +219,7 @@ func (nb *NpmBackend) Cleanup(ctx context.Context, sourceKey string) error {
 }
 
 func (nb *NpmBackend) Close() error {
-	// Cleanup not strictly necessary, but good practice
 	return nil
-}
-
-func (nb *NpmBackend) Stats() BackendStats {
-	return *nb.stats.Load()
 }
 
 // getOrDownloadPackage retrieves a package from cache or downloads it.
@@ -505,27 +495,4 @@ func sanitizePackageName(name string) string {
 	s := strings.ReplaceAll(name, "/", "_")
 	s = strings.ReplaceAll(s, "@", "_")
 	return s
-}
-
-// recordSuccess updates backend statistics for successful fetch.
-func (nb *NpmBackend) recordSuccess(bytes, latencyMs int64, cached bool) {
-	stats := nb.stats.Load()
-	newStats := *stats
-	newStats.Requests++
-	newStats.BytesFetched += bytes
-	if cached {
-		newStats.CacheHits++
-	} else {
-		newStats.CacheMisses++
-	}
-	nb.stats.Store(&newStats)
-}
-
-// recordError updates backend statistics for failed fetch.
-func (nb *NpmBackend) recordError() {
-	stats := nb.stats.Load()
-	newStats := *stats
-	newStats.Requests++
-	newStats.Errors++
-	nb.stats.Store(&newStats)
 }

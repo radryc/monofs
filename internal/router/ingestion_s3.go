@@ -40,8 +40,8 @@ func (h *S3IngestionHandler) GetStorageType() storage.IngestionType {
 	return storage.IngestionTypeS3
 }
 
-func (h *S3IngestionHandler) GetFetchType() storage.FetchType {
-	return storage.FetchTypeS3
+func (h *S3IngestionHandler) GetFetchType() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_UNKNOWN
 }
 func (h *S3IngestionHandler) ExtractCanonicalPath(metadata map[string]string) string {
 	return "" // S3 buckets use bucket name as canonical path

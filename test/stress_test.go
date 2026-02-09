@@ -386,7 +386,7 @@ func TestClusterConcurrentOperations(t *testing.T) {
 		pb.RegisterMonoFSServer(grpcServer, srv)
 		go grpcServer.Serve(lis)
 
-		conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", port),
+		conn, err := grpc.NewClient(fmt.Sprintf("localhost:%d", port),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 		)
 		if err != nil {

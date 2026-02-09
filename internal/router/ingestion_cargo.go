@@ -45,8 +45,8 @@ func (h *CargoIngestionHandler) GetStorageType() storage.IngestionType {
 	return storage.IngestionTypeCargo
 }
 
-func (h *CargoIngestionHandler) GetFetchType() storage.FetchType {
-	return storage.FetchTypeCargo
+func (h *CargoIngestionHandler) GetFetchType() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_CARGO
 }
 func (h *CargoIngestionHandler) ExtractCanonicalPath(metadata map[string]string) string {
 	if repoURL := metadata["repository_url"]; repoURL != "" {

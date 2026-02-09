@@ -73,14 +73,14 @@ func (m *MavenMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.Fi
 	// Extract canonical GitHub repository path from metadata
 	canonicalPath := ""
 	if len(files) > 0 && files[0].BackendMetadata != nil {
-		canonicalPath = files[0].BackendMetadata["repository_url"]
-		canonicalPath = normalizeGitURL(canonicalPath)
+		canonicalPath = normalizeGitURL(files[0].BackendMetadata["repository_url"])
 	}
 	if canonicalPath == "" {
 		// Fallback: use Maven Central path if no repository found
 		groupPath := strings.ReplaceAll(coords.GroupId, ".", "/")
 		canonicalPath = "repo1.maven.org/" + groupPath + "/" + coords.ArtifactId + "@" + coords.Version
 	}
+	_ = canonicalPath // TODO: use canonical path for virtual entry deduplication
 
 	// Initial ingestion already created files at the canonical GitHub path.
 	// Now create virtual hard link entries at .m2/repository/ for Maven compatibility.
@@ -155,30 +155,6 @@ type POM struct {
 		URL        string `xml:"url"`
 		Connection string `xml:"connection"`
 	} `xml:"scm"`
-}
-
-// extractMavenCanonicalPath extracts the normalized GitHub/GitLab path from pom.xml
-func extractMavenCanonicalPath(pom *POM) string {
-	if pom == nil {
-		return ""
-	}
-
-	// Try SCM URL first
-	if pom.SCM.URL != "" {
-		if normalized := normalizeGitURL(pom.SCM.URL); normalized != "" {
-			return normalized
-		}
-	}
-
-	// Try SCM connection
-	if pom.SCM.Connection != "" {
-		conn := strings.TrimPrefix(pom.SCM.Connection, "scm:git:")
-		if normalized := normalizeGitURL(conn); normalized != "" {
-			return normalized
-		}
-	}
-
-	return ""
 }
 
 // normalizeGitURL converts a Git URL to canonical path format

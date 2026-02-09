@@ -2,7 +2,6 @@ package fetcher
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -12,12 +11,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	pb "github.com/radryc/monofs/api/proto"
 )
 
 // CargoBackend fetches files from crates.io registry.
 type CargoBackend struct {
+	BaseBackend
 	config BackendConfig
 
 	// HTTP client for crates.io
@@ -28,8 +29,6 @@ type CargoBackend struct {
 
 	mu     sync.RWMutex
 	crates map[string]*cachedCargoCrate // crate@version -> cached crate
-
-	stats atomic.Pointer[BackendStats]
 }
 
 type cachedCargoCrate struct {
@@ -41,20 +40,6 @@ type cachedCargoCrate struct {
 	mu         sync.Mutex
 }
 
-type cratesIOCrateMetadata struct {
-	Crate struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-	} `json:"crate"`
-	Versions []cratesIOVersion `json:"versions"`
-}
-
-type cratesIOVersion struct {
-	Num       string `json:"num"`
-	DL_Path   string `json:"dl_path"`
-	Downloads int    `json:"downloads"`
-}
-
 // NewCargoBackend creates a new crates.io backend.
 func NewCargoBackend() *CargoBackend {
 	cb := &CargoBackend{
@@ -64,12 +49,12 @@ func NewCargoBackend() *CargoBackend {
 		},
 		apiURL: "https://crates.io",
 	}
-	cb.stats.Store(&BackendStats{})
+	cb.InitStats()
 	return cb
 }
 
-func (cb *CargoBackend) Type() SourceType {
-	return SourceTypeCargo
+func (cb *CargoBackend) Type() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_CARGO
 }
 
 func (cb *CargoBackend) Initialize(ctx context.Context, config BackendConfig) error {
@@ -141,26 +126,26 @@ func (cb *CargoBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*Fetc
 	}
 
 	if crateName == "" || version == "" {
-		cb.recordError()
+		cb.RecordError()
 		return nil, fmt.Errorf("invalid cargo request: missing crate_name or version")
 	}
 
 	// Get or download crate
 	cached, err := cb.getOrDownloadCrate(ctx, crateName, version)
 	if err != nil {
-		cb.recordError()
+		cb.RecordError()
 		return nil, fmt.Errorf("failed to get crate: %w", err)
 	}
 
 	// Read file from crate
 	content, err := cb.readFileFromCrate(cached, filePath)
 	if err != nil {
-		cb.recordError()
+		cb.RecordError()
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
 	latency := time.Since(start).Milliseconds()
-	cb.recordSuccess(int64(len(content)), latency, false)
+	cb.RecordSuccess(int64(len(content)), latency, false, int64(len(cb.crates)))
 
 	return &FetchResult{
 		Content:   content,
@@ -170,11 +155,7 @@ func (cb *CargoBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*Fetc
 }
 
 func (cb *CargoBackend) FetchBlobStream(ctx context.Context, req *FetchRequest) (io.ReadCloser, int64, error) {
-	result, err := cb.FetchBlob(ctx, req)
-	if err != nil {
-		return nil, 0, err
-	}
-	return io.NopCloser(bytes.NewReader(result.Content)), result.Size, nil
+	return DefaultFetchBlobStream(cb, ctx, req)
 }
 
 func (cb *CargoBackend) Warmup(ctx context.Context, sourceKey string, config map[string]string) error {
@@ -223,10 +204,6 @@ func (cb *CargoBackend) Cleanup(ctx context.Context, sourceKey string) error {
 
 func (cb *CargoBackend) Close() error {
 	return nil
-}
-
-func (cb *CargoBackend) Stats() BackendStats {
-	return *cb.stats.Load()
 }
 
 // getOrDownloadCrate retrieves a crate from cache or downloads it.
@@ -443,27 +420,4 @@ func sanitizeCrateName(name string) string {
 	s := strings.ReplaceAll(name, "/", "_")
 	s = strings.ReplaceAll(s, "\\", "_")
 	return s
-}
-
-// recordSuccess updates backend statistics for successful fetch.
-func (cb *CargoBackend) recordSuccess(bytes, latencyMs int64, cached bool) {
-	stats := cb.stats.Load()
-	newStats := *stats
-	newStats.Requests++
-	newStats.BytesFetched += bytes
-	if cached {
-		newStats.CacheHits++
-	} else {
-		newStats.CacheMisses++
-	}
-	cb.stats.Store(&newStats)
-}
-
-// recordError updates backend statistics for failed fetch.
-func (cb *CargoBackend) recordError() {
-	stats := cb.stats.Load()
-	newStats := *stats
-	newStats.Requests++
-	newStats.Errors++
-	cb.stats.Store(&newStats)
 }

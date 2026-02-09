@@ -65,7 +65,7 @@ func TestDataPersistence(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", port),
+		conn, err := grpc.NewClient(fmt.Sprintf("localhost:%d", port),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 		)
 		if err != nil {
@@ -138,7 +138,7 @@ func TestDataPersistence(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", port2),
+		conn, err := grpc.NewClient(fmt.Sprintf("localhost:%d", port2),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 		)
 		if err != nil {

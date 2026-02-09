@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -117,12 +116,8 @@ func NewClient(config ClientConfig, logger *slog.Logger) (*Client, error) {
 }
 
 func (c *Client) connectFetcher(address string) (*fetcherConn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.config.ConnectionTimeout)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, address,
+	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return nil, err
@@ -140,13 +135,13 @@ func (c *Client) connectFetcher(address string) (*fetcherConn, error) {
 }
 
 // FetchBlob fetches a blob using repo-affinity routing.
-func (c *Client) FetchBlob(ctx context.Context, req *FetchRequest, sourceType SourceType) ([]byte, error) {
+func (c *Client) FetchBlob(ctx context.Context, req *FetchRequest, sourceType pb.SourceType) ([]byte, error) {
 	c.totalRequests.Add(1)
 
 	// Build proto request
 	protoReq := &pb.FetchBlobRequest{
 		ContentId:    req.ContentID,
-		SourceType:   sourceTypeToProto(sourceType),
+		SourceType:   sourceType,
 		SourceConfig: req.SourceConfig,
 		RequestId:    req.RequestID,
 		StorageId:    req.SourceKey, // Used for affinity
@@ -215,41 +210,8 @@ func (c *Client) doFetch(ctx context.Context, fetcher *fetcherConn, req *pb.Fetc
 	return data, nil
 }
 
-// FetchBlobStream fetches a blob and returns a reader.
-func (c *Client) FetchBlobStream(ctx context.Context, req *FetchRequest, sourceType SourceType) (io.ReadCloser, error) {
-	c.totalRequests.Add(1)
-
-	protoReq := &pb.FetchBlobRequest{
-		ContentId:    req.ContentID,
-		SourceType:   sourceTypeToProto(sourceType),
-		SourceConfig: req.SourceConfig,
-		RequestId:    req.RequestID,
-		StorageId:    req.SourceKey,
-		Priority:     int32(req.Priority),
-	}
-
-	fetcher := c.selectFetcher(req.SourceKey)
-	if fetcher == nil {
-		return nil, fmt.Errorf("no healthy fetchers available")
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, c.config.RequestTimeout)
-
-	stream, err := fetcher.client.FetchBlob(ctx, protoReq)
-	if err != nil {
-		cancel()
-		fetcher.recordError()
-		return nil, err
-	}
-
-	return &streamReader{
-		stream: stream,
-		cancel: cancel,
-	}, nil
-}
-
 // Prefetch queues blobs for background prefetching.
-func (c *Client) Prefetch(ctx context.Context, requests []*FetchRequest, sourceType SourceType) error {
+func (c *Client) Prefetch(ctx context.Context, requests []*FetchRequest, sourceType pb.SourceType) error {
 	// Group by source key for efficient batch prefetch
 	byFetcher := make(map[*fetcherConn][]*pb.FetchBlobRequest)
 
@@ -261,7 +223,7 @@ func (c *Client) Prefetch(ctx context.Context, requests []*FetchRequest, sourceT
 
 		protoReq := &pb.FetchBlobRequest{
 			ContentId:    req.ContentID,
-			SourceType:   sourceTypeToProto(sourceType),
+			SourceType:   sourceType,
 			SourceConfig: req.SourceConfig,
 			StorageId:    req.SourceKey,
 			Priority:     int32(req.Priority),
@@ -500,72 +462,6 @@ func (fc *fetcherConn) recordError() {
 	fc.lastError = time.Now()
 }
 
-// streamReader wraps a gRPC stream as an io.ReadCloser.
-type streamReader struct {
-	stream pb.BlobFetcher_FetchBlobClient
-	cancel context.CancelFunc
-	buf    []byte
-	pos    int
-}
-
-func (r *streamReader) Read(p []byte) (int, error) {
-	// Drain buffer first
-	if r.pos < len(r.buf) {
-		n := copy(p, r.buf[r.pos:])
-		r.pos += n
-		return n, nil
-	}
-
-	// Get next chunk
-	chunk, err := r.stream.Recv()
-	if err == io.EOF {
-		return 0, io.EOF
-	}
-	if err != nil {
-		return 0, err
-	}
-
-	// Copy to output
-	n := copy(p, chunk.Data)
-	if n < len(chunk.Data) {
-		// Buffer remainder
-		r.buf = chunk.Data[n:]
-		r.pos = 0
-	} else {
-		r.buf = nil
-	}
-
-	return n, nil
-}
-
-func (r *streamReader) Close() error {
-	r.cancel()
-	return nil
-}
-
-func sourceTypeToProto(st SourceType) pb.SourceType {
-	switch st {
-	case SourceTypeGit:
-		return pb.SourceType_SOURCE_TYPE_GIT
-	case SourceTypeGoMod:
-		return pb.SourceType_SOURCE_TYPE_GOMOD
-	case SourceTypeS3:
-		return pb.SourceType_SOURCE_TYPE_S3
-	case SourceTypeHTTP:
-		return pb.SourceType_SOURCE_TYPE_HTTP
-	case SourceTypeOCI:
-		return pb.SourceType_SOURCE_TYPE_OCI
-	case SourceTypeNpm:
-		return pb.SourceType_SOURCE_TYPE_NPM
-	case SourceTypeMaven:
-		return pb.SourceType_SOURCE_TYPE_MAVEN
-	case SourceTypeCargo:
-		return pb.SourceType_SOURCE_TYPE_CARGO
-	default:
-		return pb.SourceType_SOURCE_TYPE_UNKNOWN
-	}
-}
-
 // HealthyFetchers returns a sorted list of healthy fetcher addresses.
 func (c *Client) HealthyFetchers() []string {
 	c.mu.RLock()
@@ -579,33 +475,6 @@ func (c *Client) HealthyFetchers() []string {
 	}
 	sort.Strings(addresses)
 	return addresses
-}
-
-// FetchBlobSimple is a convenience wrapper for FetchBlob with common Git/GoMod params.
-func (c *Client) FetchBlobSimple(ctx context.Context, sourceURL, blobHash, filePath, branch string, sourceType SourceType) ([]byte, error) {
-	sourceConfig := map[string]string{
-		"repo_url":     sourceURL,
-		"branch":       branch,
-		"display_path": filePath,
-		"file_path":    filePath,
-	}
-
-	// For Go modules, parse module_path and version from sourceURL (e.g., "google.golang.org/grpc@v1.75.0")
-	if sourceType == SourceTypeGoMod {
-		if idx := strings.LastIndex(sourceURL, "@"); idx != -1 {
-			sourceConfig["module_path"] = sourceURL[:idx]
-			sourceConfig["version"] = sourceURL[idx+1:]
-		}
-	}
-
-	req := &FetchRequest{
-		ContentID:    blobHash,
-		SourceKey:    sourceURL,
-		SourceConfig: sourceConfig,
-		Priority:     5,
-	}
-
-	return c.FetchBlob(ctx, req, sourceType)
 }
 
 // CheckCacheSimple checks if a blob is in the prefetch cache of any fetcher.
@@ -640,7 +509,7 @@ type PrefetchFile struct {
 	BlobHash   string
 	FilePath   string
 	Branch     string
-	SourceType SourceType
+	SourceType pb.SourceType
 	Confidence float32
 }
 
@@ -660,7 +529,7 @@ func (c *Client) PrefetchSimple(ctx context.Context, files []PrefetchFile) (int,
 
 		protoReq := &pb.FetchBlobRequest{
 			ContentId:  file.BlobHash,
-			SourceType: sourceTypeToProto(file.SourceType),
+			SourceType: file.SourceType,
 			SourceConfig: map[string]string{
 				"repo_url":     file.SourceURL,
 				"branch":       file.Branch,

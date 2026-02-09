@@ -59,6 +59,7 @@ type ShardedClient struct {
 	stopHeartbeat     chan struct{}
 	operationsCount   int64 // atomic counter
 	bytesRead         int64 // atomic counter
+	errorsCount       int64 // atomic counter
 }
 
 // ShardedClientConfig holds configuration for ShardedClient.
@@ -1476,6 +1477,7 @@ func (sc *ShardedClient) sendHeartbeat() {
 		ClientId:        sc.clientID,
 		OperationsCount: atomic.LoadInt64(&sc.operationsCount),
 		BytesRead:       atomic.LoadInt64(&sc.bytesRead),
+		ErrorsCount:     atomic.LoadInt64(&sc.errorsCount),
 	})
 	if err != nil {
 		if sc.logger != nil {
@@ -1503,6 +1505,11 @@ func (sc *ShardedClient) RecordOperation() {
 // RecordBytesRead adds to the bytes read counter for metrics
 func (sc *ShardedClient) RecordBytesRead(n int64) {
 	atomic.AddInt64(&sc.bytesRead, n)
+}
+
+// RecordError increments the error counter for metrics
+func (sc *ShardedClient) RecordError() {
+	atomic.AddInt64(&sc.errorsCount, 1)
 }
 
 // GetClientID returns the unique client identifier

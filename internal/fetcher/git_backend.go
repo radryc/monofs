@@ -7,23 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	pb "github.com/radryc/monofs/api/proto"
 )
 
 // GitBackend fetches blobs from Git repositories.
 type GitBackend struct {
+	BaseBackend
 	config BackendConfig
 
 	mu    sync.RWMutex
 	repos map[string]*cachedRepo // repoURL -> cached repo
-
-	// Stats
-	stats atomic.Pointer[BackendStats]
 }
 
 type cachedRepo struct {
@@ -38,12 +36,12 @@ func NewGitBackend() *GitBackend {
 	gb := &GitBackend{
 		repos: make(map[string]*cachedRepo),
 	}
-	gb.stats.Store(&BackendStats{})
+	gb.InitStats()
 	return gb
 }
 
-func (gb *GitBackend) Type() SourceType {
-	return SourceTypeGit
+func (gb *GitBackend) Type() pb.SourceType {
+	return pb.SourceType_SOURCE_TYPE_GIT
 }
 
 func (gb *GitBackend) Initialize(ctx context.Context, config BackendConfig) error {
@@ -101,7 +99,7 @@ func (gb *GitBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*FetchR
 	// Get or clone repo
 	cached, err := gb.getOrCloneRepo(ctx, repoURL, branch)
 	if err != nil {
-		gb.recordError()
+		gb.RecordError()
 		return nil, fmt.Errorf("failed to get repo: %w", err)
 	}
 
@@ -118,26 +116,26 @@ func (gb *GitBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*FetchR
 			blob, err = cached.repo.BlobObject(blobHash)
 		}
 		if err != nil {
-			gb.recordError()
+			gb.RecordError()
 			return nil, fmt.Errorf("blob not found: %s: %w", req.ContentID, err)
 		}
 	}
 
 	reader, err := blob.Reader()
 	if err != nil {
-		gb.recordError()
+		gb.RecordError()
 		return nil, fmt.Errorf("failed to read blob: %w", err)
 	}
 	defer reader.Close()
 
 	content, err := io.ReadAll(reader)
 	if err != nil {
-		gb.recordError()
+		gb.RecordError()
 		return nil, fmt.Errorf("failed to read blob content: %w", err)
 	}
 
 	latency := time.Since(start).Milliseconds()
-	gb.recordSuccess(int64(len(content)), latency, false)
+	gb.RecordSuccess(int64(len(content)), latency, false, int64(len(gb.repos)))
 
 	return &FetchResult{
 		Content:        content,
@@ -231,10 +229,6 @@ func (gb *GitBackend) Close() error {
 	return nil
 }
 
-func (gb *GitBackend) Stats() BackendStats {
-	return *gb.stats.Load()
-}
-
 // getOrCloneRepo returns a cached repo or clones it.
 func (gb *GitBackend) getOrCloneRepo(ctx context.Context, repoURL, branch string) (*cachedRepo, error) {
 	gb.mu.RLock()
@@ -326,46 +320,6 @@ func (gb *GitBackend) cleanupOldRepos(maxAge time.Duration) {
 			if cached.repoPath != "" {
 				os.RemoveAll(cached.repoPath)
 			}
-		}
-	}
-}
-
-func (gb *GitBackend) recordSuccess(bytes int64, latencyMs int64, fromCache bool) {
-	for {
-		old := gb.stats.Load()
-		new := &BackendStats{
-			Requests:     old.Requests + 1,
-			Errors:       old.Errors,
-			BytesFetched: old.BytesFetched + bytes,
-			CachedItems:  int64(len(gb.repos)),
-		}
-		if fromCache {
-			new.CacheHits = old.CacheHits + 1
-		} else {
-			new.CacheMisses = old.CacheMisses + 1
-		}
-		// Update average latency
-		new.AvgLatencyMs = (old.AvgLatencyMs*float64(old.Requests) + float64(latencyMs)) / float64(new.Requests)
-		if gb.stats.CompareAndSwap(old, new) {
-			return
-		}
-	}
-}
-
-func (gb *GitBackend) recordError() {
-	for {
-		old := gb.stats.Load()
-		new := &BackendStats{
-			Requests:     old.Requests + 1,
-			Errors:       old.Errors + 1,
-			BytesFetched: old.BytesFetched,
-			CacheHits:    old.CacheHits,
-			CacheMisses:  old.CacheMisses + 1,
-			CachedItems:  old.CachedItems,
-			AvgLatencyMs: old.AvgLatencyMs,
-		}
-		if gb.stats.CompareAndSwap(old, new) {
-			return
 		}
 	}
 }

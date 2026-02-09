@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
 )
@@ -118,6 +119,6 @@ func (r *Router) deleteRepositoryFromNodes(storageID string, filesDeletedPtr *in
 }
 
 const (
-	deleteTimeoutSeconds     = 60
-	deleteFileTimeoutSeconds = 5
+	deleteTimeoutSeconds     = 60 * time.Second
+	deleteFileTimeoutSeconds = 5 * time.Second
 )

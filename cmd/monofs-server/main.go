@@ -164,9 +164,9 @@ func requestFailover(routerAddr, nodeID string, logger *slog.Logger) error {
 
 	logger.Info("connecting to router for failover", "router", routerAddr)
 
-	conn, err := grpc.DialContext(ctx, routerAddr,
+	conn, err := grpc.NewClient(routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock())
+	)
 	if err != nil {
 		return fmt.Errorf("failed to connect to router: %w", err)
 	}

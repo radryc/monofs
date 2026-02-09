@@ -19,7 +19,7 @@ func TestDualAddressing(t *testing.T) {
 	}
 
 	// Connect to router
-	conn, err := grpc.Dial(
+	conn, err := grpc.NewClient(
 		"localhost:9090",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)

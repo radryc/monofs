@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/radryc/monofs/internal/fetcher"
+	pb "github.com/radryc/monofs/api/proto"
 )
 
 func TestPredictor_MarkovChain(t *testing.T) {
@@ -385,28 +385,6 @@ func TestGetExtension(t *testing.T) {
 	}
 }
 
-// Mock fetcher client for testing prefetch triggering
-type mockFetcherClient struct {
-	prefetchCalls [][]string
-}
-
-func (m *mockFetcherClient) FetchBlob(ctx context.Context, req *fetcher.FetchRequest, sourceType fetcher.SourceType) ([]byte, error) {
-	return nil, nil
-}
-
-func (m *mockFetcherClient) FetchBlobStream(ctx context.Context, req *fetcher.FetchRequest, sourceType fetcher.SourceType) (interface{}, error) {
-	return nil, nil
-}
-
-func (m *mockFetcherClient) Prefetch(ctx context.Context, requests []*fetcher.FetchRequest, sourceType fetcher.SourceType) error {
-	files := make([]string, len(requests))
-	for i, r := range requests {
-		files[i] = r.ContentID
-	}
-	m.prefetchCalls = append(m.prefetchCalls, files)
-	return nil
-}
-
 func TestPredictor_Integration(t *testing.T) {
 	// Integration test verifying the full prediction pipeline
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -424,7 +402,7 @@ func TestPredictor_Integration(t *testing.T) {
 		BlobHash:   "abc123",
 		RepoURL:    "https://github.com/test/repo",
 		Branch:     "main",
-		SourceType: fetcher.SourceTypeGit,
+		SourceType: pb.SourceType_SOURCE_TYPE_GIT,
 	}
 
 	// Train with realistic pattern: opening project usually means

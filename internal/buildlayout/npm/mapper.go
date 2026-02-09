@@ -97,8 +97,7 @@ func (n *NpmMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.File
 	// Extract canonical GitHub repository path from metadata
 	canonicalPath := ""
 	if len(files) > 0 && files[0].BackendMetadata != nil {
-		canonicalPath = files[0].BackendMetadata["repository_url"]
-		canonicalPath = normalizeGitURL(canonicalPath)
+		canonicalPath = normalizeGitURL(files[0].BackendMetadata["repository_url"])
 	}
 	if canonicalPath == "" {
 		// Fallback: use registry path if no repository found
@@ -107,6 +106,7 @@ func (n *NpmMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.File
 
 	// Add version to canonical path
 	canonicalPath = canonicalPath + "@" + version
+	_ = canonicalPath // TODO: use canonical path for virtual entry deduplication
 
 	// Initial ingestion already created files at the canonical GitHub path.
 	// Now create virtual hard link entries at node_modules/ for npm compatibility.
@@ -125,41 +125,6 @@ func (n *NpmMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.File
 	}
 
 	return entries, nil
-}
-
-// extractCanonicalRepoPath extracts the normalized GitHub/GitLab path from package.json
-func extractCanonicalRepoPath(pkg map[string]interface{}) string {
-	// Try repository field first
-	if repo, ok := pkg["repository"]; ok {
-		url := parseRepositoryField(repo)
-		if url != "" {
-			if normalized := normalizeGitURL(url); normalized != "" {
-				return normalized
-			}
-		}
-	}
-
-	// Try homepage as fallback
-	if homepage, ok := pkg["homepage"].(string); ok {
-		if normalized := normalizeGitURL(homepage); normalized != "" {
-			return normalized
-		}
-	}
-
-	return ""
-}
-
-// parseRepositoryField extracts URL from repository field (string or object)
-func parseRepositoryField(repo interface{}) string {
-	switch v := repo.(type) {
-	case string:
-		return v
-	case map[string]interface{}:
-		if url, ok := v["url"].(string); ok {
-			return url
-		}
-	}
-	return ""
 }
 
 // normalizeGitURL converts a Git URL to canonical path format

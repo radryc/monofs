@@ -77,7 +77,7 @@ type ingestionContext struct {
 	sourceURL        string
 	ref              string
 	ingestionType    storage.IngestionType
-	fetchType        storage.FetchType
+	fetchType        pb.SourceType
 	backend          storage.IngestionBackend
 	nodes            []sharding.Node
 	nodeClients      map[string]nodeClient
@@ -212,6 +212,7 @@ func (r *Router) initializeBackend(ctx *ingestionContext, sendProgress func(pb.I
 
 // registerOnAllNodes registers repository metadata on all cluster nodes
 func (r *Router) registerOnAllNodes(ctx *ingestionContext) error {
+	var wg sync.WaitGroup
 	for _, node := range ctx.nodes {
 		r.mu.Lock()
 		state, ok := r.nodes[node.ID]
@@ -237,31 +238,37 @@ func (r *Router) registerOnAllNodes(ctx *ingestionContext) error {
 			state.client = pb.NewMonoFSClient(conn)
 		}
 		client := state.client
+		nodeID := node.ID
 		r.mu.Unlock()
 
-		// Register repository on this node
-		regCtx, regCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := client.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
-			StorageId:       ctx.storageID,
-			DisplayPath:     ctx.displayPath,
-			Source:          ctx.sourceURL,
-			IngestionType:   ctx.req.IngestionType,
-			FetchType:       ctx.req.FetchType,
-			IngestionConfig: ctx.req.IngestionConfig,
-			FetchConfig:     ctx.req.FetchConfig,
-		})
-		regCancel()
+		// Register repository on this node (parallel)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			regCtx, regCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, err := client.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
+				StorageId:       ctx.storageID,
+				DisplayPath:     ctx.displayPath,
+				Source:          ctx.sourceURL,
+				IngestionType:   ctx.req.IngestionType,
+				FetchType:       ctx.req.FetchType,
+				IngestionConfig: ctx.req.IngestionConfig,
+				FetchConfig:     ctx.req.FetchConfig,
+			})
+			regCancel()
 
-		if err != nil {
-			r.logger.Error("failed to register repository on node",
-				"node_id", node.ID,
-				"error", err)
-		} else {
-			r.logger.Info("registered repository on node",
-				"node_id", node.ID,
-				"display_path", ctx.displayPath)
-		}
+			if err != nil {
+				r.logger.Error("failed to register repository on node",
+					"node_id", nodeID,
+					"error", err)
+			} else {
+				r.logger.Info("registered repository on node",
+					"node_id", nodeID,
+					"display_path", ctx.displayPath)
+			}
+		}()
 	}
+	wg.Wait()
 	return nil
 }
 
@@ -474,6 +481,12 @@ func (r *Router) updateCanonicalPath(ctx *ingestionContext) {
 		"original_path", ctx.displayPath,
 		"canonical_path", ctx.canonicalPath)
 
+	type nodeUpdate struct {
+		nodeID string
+		client pb.MonoFSClient
+	}
+	var updates []nodeUpdate
+
 	for _, node := range ctx.nodes {
 		r.mu.Lock()
 		state, ok := r.nodes[node.ID]
@@ -481,27 +494,36 @@ func (r *Router) updateCanonicalPath(ctx *ingestionContext) {
 			r.mu.Unlock()
 			continue
 		}
-		client := state.client
+		updates = append(updates, nodeUpdate{nodeID: node.ID, client: state.client})
 		r.mu.Unlock()
-
-		regCtx, regCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := client.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
-			StorageId:       ctx.storageID,
-			DisplayPath:     ctx.canonicalPath,
-			Source:          ctx.sourceURL,
-			IngestionType:   ctx.req.IngestionType,
-			FetchType:       ctx.req.FetchType,
-			IngestionConfig: ctx.req.IngestionConfig,
-			FetchConfig:     ctx.req.FetchConfig,
-		})
-		regCancel()
-
-		if err != nil {
-			r.logger.Warn("failed to update repository registration with canonical path",
-				"node_id", node.ID,
-				"error", err)
-		}
 	}
+
+	var wg sync.WaitGroup
+	for _, u := range updates {
+		u := u
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			regCtx, regCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, err := u.client.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
+				StorageId:       ctx.storageID,
+				DisplayPath:     ctx.canonicalPath,
+				Source:          ctx.sourceURL,
+				IngestionType:   ctx.req.IngestionType,
+				FetchType:       ctx.req.FetchType,
+				IngestionConfig: ctx.req.IngestionConfig,
+				FetchConfig:     ctx.req.FetchConfig,
+			})
+			regCancel()
+
+			if err != nil {
+				r.logger.Warn("failed to update repository registration with canonical path",
+					"node_id", u.nodeID,
+					"error", err)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // ingestPrimaryBatches sends primary file batches to nodes
@@ -709,45 +731,61 @@ func (r *Router) performPostIngestionTasks(ctx *ingestionContext, sendProgress f
 	}
 	r.mu.RUnlock()
 
+	// Build directory indexes in parallel across all nodes
+	var indexWg sync.WaitGroup
 	for _, state := range indexingNodes {
-		indexCtx, indexCancel := context.WithTimeout(context.Background(), 60*time.Second)
-		resp, err := state.client.BuildDirectoryIndexes(indexCtx, &pb.BuildDirectoryIndexesRequest{
-			StorageId: ctx.storageID,
-		})
-		indexCancel()
+		state := state
+		indexWg.Add(1)
+		go func() {
+			defer indexWg.Done()
+			indexCtx, indexCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			resp, err := state.client.BuildDirectoryIndexes(indexCtx, &pb.BuildDirectoryIndexesRequest{
+				StorageId: ctx.storageID,
+			})
+			indexCancel()
 
-		if err != nil {
-			r.logger.Error("failed to build directory indexes on node",
-				"node_id", state.info.NodeId, "error", err)
-		} else {
-			r.logger.Info("directory indexes built on node",
-				"node_id", state.info.NodeId,
-				"directories_indexed", resp.DirectoriesIndexed)
-		}
+			if err != nil {
+				r.logger.Error("failed to build directory indexes on node",
+					"node_id", state.info.NodeId, "error", err)
+			} else {
+				r.logger.Info("directory indexes built on node",
+					"node_id", state.info.NodeId,
+					"directories_indexed", resp.DirectoriesIndexed)
+			}
+		}()
 	}
+	indexWg.Wait()
 
 	// Mark repository as onboarded
 	r.mu.RLock()
 	activeNodes := make([]*nodeState, 0, len(r.nodes))
 	for _, state := range r.nodes {
-		if state.info.Healthy && state.status == NodeActive {
+		if state.info.Healthy && state.status == NodeActive && state.client != nil {
 			activeNodes = append(activeNodes, state)
 		}
 	}
 	r.mu.RUnlock()
 
+	// Mark onboarded in parallel across all nodes
+	var markWg sync.WaitGroup
 	for _, state := range activeNodes {
-		markCtx, markCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := state.client.MarkRepositoryOnboarded(markCtx, &pb.MarkRepositoryOnboardedRequest{
-			StorageId: ctx.storageID,
-		})
-		markCancel()
+		state := state
+		markWg.Add(1)
+		go func() {
+			defer markWg.Done()
+			markCtx, markCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, err := state.client.MarkRepositoryOnboarded(markCtx, &pb.MarkRepositoryOnboardedRequest{
+				StorageId: ctx.storageID,
+			})
+			markCancel()
 
-		if err != nil {
-			r.logger.Warn("failed to mark repository onboarded on node",
-				"node_id", state.info.NodeId, "error", err)
-		}
+			if err != nil {
+				r.logger.Warn("failed to mark repository onboarded on node",
+					"node_id", state.info.NodeId, "error", err)
+			}
+		}()
 	}
+	markWg.Wait()
 
 	// Track ingested repository
 	r.mu.Lock()
@@ -769,7 +807,11 @@ func (r *Router) performPostIngestionTasks(ctx *ingestionContext, sendProgress f
 	if isReingestion {
 		r.logger.Info("detected repository re-ingestion, triggering cluster rebalancing",
 			"storage_id", ctx.storageID)
-		go r.rebalanceRepository(ctx.storageID)
+		go func() {
+			r.rebalanceSem <- struct{}{}
+			defer func() { <-r.rebalanceSem }()
+			r.rebalanceRepository(ctx.storageID)
+		}()
 	}
 
 	// Trigger search indexing
@@ -800,7 +842,7 @@ func (r *Router) performPostIngestionTasks(ctx *ingestionContext, sendProgress f
 			Source:        ctx.sourceURL,
 			Ref:           ctx.ref,
 			IngestionType: string(ctx.ingestionType),
-			FetchType:     string(ctx.fetchType),
+			FetchType:     ctx.fetchType.String(),
 			Config:        ctx.req.IngestionConfig,
 		}
 
@@ -813,7 +855,11 @@ func (r *Router) performPostIngestionTasks(ctx *ingestionContext, sendProgress f
 			}
 		}
 
-		r.generateLayouts(ctx.stream.Context(), layoutInfo, ctx.collectedFiles, layoutProgress)
+		layoutCtx := context.Background()
+		if ctx.stream != nil {
+			layoutCtx = ctx.stream.Context()
+		}
+		r.generateLayouts(layoutCtx, layoutInfo, ctx.collectedFiles, layoutProgress)
 	}
 }
 

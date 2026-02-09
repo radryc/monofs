@@ -45,19 +45,11 @@ func init() {
 		storage.IngestionTypeGit,
 		gitstorage.NewGitIngestionBackend,
 	)
-	storage.DefaultRegistry.RegisterFetchBackend(
-		storage.FetchTypeGit,
-		gitstorage.NewGitFetchBackend,
-	)
 
 	// Register Go module backends
 	storage.DefaultRegistry.RegisterIngestionBackend(
 		storage.IngestionTypeGo,
 		gomodstorage.NewGoModIngestionBackend,
-	)
-	storage.DefaultRegistry.RegisterFetchBackend(
-		storage.FetchTypeGoMod,
-		gomodstorage.NewGoModFetchBackend,
 	)
 
 	// Register npm backends
@@ -79,7 +71,7 @@ func init() {
 	)
 
 	// Future backends will be registered here:
-	// storage.DefaultRegistry.RegisterFetchBackend(storage.FetchTypeS3, s3storage.NewS3FetchBackend)
+	// storage.DefaultRegistry.RegisterIngestionBackend(storage.IngestionTypeS3, s3storage.NewS3IngestionBackend)
 }
 
 func main() {

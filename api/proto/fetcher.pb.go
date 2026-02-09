@@ -21,74 +21,6 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// SourceType identifies the data source backend.
-type SourceType int32
-
-const (
-	SourceType_SOURCE_TYPE_UNKNOWN SourceType = 0
-	SourceType_SOURCE_TYPE_GIT     SourceType = 1 // Git repository (GitHub, GitLab, etc.)
-	SourceType_SOURCE_TYPE_GOMOD   SourceType = 2 // Go module proxy (proxy.golang.org)
-	SourceType_SOURCE_TYPE_S3      SourceType = 3 // S3-compatible object storage
-	SourceType_SOURCE_TYPE_HTTP    SourceType = 4 // Generic HTTP/HTTPS URL
-	SourceType_SOURCE_TYPE_OCI     SourceType = 5 // OCI registry (container images)
-	SourceType_SOURCE_TYPE_NPM     SourceType = 6 // npm registry (npmjs.org)
-	SourceType_SOURCE_TYPE_MAVEN   SourceType = 7 // Maven Central (repo1.maven.org)
-	SourceType_SOURCE_TYPE_CARGO   SourceType = 8 // crates.io registry
-)
-
-// Enum value maps for SourceType.
-var (
-	SourceType_name = map[int32]string{
-		0: "SOURCE_TYPE_UNKNOWN",
-		1: "SOURCE_TYPE_GIT",
-		2: "SOURCE_TYPE_GOMOD",
-		3: "SOURCE_TYPE_S3",
-		4: "SOURCE_TYPE_HTTP",
-		5: "SOURCE_TYPE_OCI",
-		6: "SOURCE_TYPE_NPM",
-		7: "SOURCE_TYPE_MAVEN",
-		8: "SOURCE_TYPE_CARGO",
-	}
-	SourceType_value = map[string]int32{
-		"SOURCE_TYPE_UNKNOWN": 0,
-		"SOURCE_TYPE_GIT":     1,
-		"SOURCE_TYPE_GOMOD":   2,
-		"SOURCE_TYPE_S3":      3,
-		"SOURCE_TYPE_HTTP":    4,
-		"SOURCE_TYPE_OCI":     5,
-		"SOURCE_TYPE_NPM":     6,
-		"SOURCE_TYPE_MAVEN":   7,
-		"SOURCE_TYPE_CARGO":   8,
-	}
-)
-
-func (x SourceType) Enum() *SourceType {
-	p := new(SourceType)
-	*p = x
-	return p
-}
-
-func (x SourceType) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (SourceType) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_proto_fetcher_proto_enumTypes[0].Descriptor()
-}
-
-func (SourceType) Type() protoreflect.EnumType {
-	return &file_api_proto_fetcher_proto_enumTypes[0]
-}
-
-func (x SourceType) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use SourceType.Descriptor instead.
-func (SourceType) EnumDescriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{0}
-}
-
 type AccessType int32
 
 const (
@@ -128,11 +60,11 @@ func (x AccessType) String() string {
 }
 
 func (AccessType) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_proto_fetcher_proto_enumTypes[1].Descriptor()
+	return file_api_proto_fetcher_proto_enumTypes[0].Descriptor()
 }
 
 func (AccessType) Type() protoreflect.EnumType {
-	return &file_api_proto_fetcher_proto_enumTypes[1]
+	return &file_api_proto_fetcher_proto_enumTypes[0]
 }
 
 func (x AccessType) Number() protoreflect.EnumNumber {
@@ -141,7 +73,7 @@ func (x AccessType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AccessType.Descriptor instead.
 func (AccessType) EnumDescriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{1}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{0}
 }
 
 type FetchBlobRequest struct {
@@ -1454,18 +1386,7 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\rsource_config\x18\a \x03(\v2'.monofs.PredictedFile.SourceConfigEntryR\fsourceConfig\x1a?\n" +
 	"\x11SourceConfigEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xd3\x01\n" +
-	"\n" +
-	"SourceType\x12\x17\n" +
-	"\x13SOURCE_TYPE_UNKNOWN\x10\x00\x12\x13\n" +
-	"\x0fSOURCE_TYPE_GIT\x10\x01\x12\x15\n" +
-	"\x11SOURCE_TYPE_GOMOD\x10\x02\x12\x12\n" +
-	"\x0eSOURCE_TYPE_S3\x10\x03\x12\x14\n" +
-	"\x10SOURCE_TYPE_HTTP\x10\x04\x12\x13\n" +
-	"\x0fSOURCE_TYPE_OCI\x10\x05\x12\x13\n" +
-	"\x0fSOURCE_TYPE_NPM\x10\x06\x12\x15\n" +
-	"\x11SOURCE_TYPE_MAVEN\x10\a\x12\x15\n" +
-	"\x11SOURCE_TYPE_CARGO\x10\b*\x85\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x85\x01\n" +
 	"\n" +
 	"AccessType\x12\x17\n" +
 	"\x13ACCESS_TYPE_UNKNOWN\x10\x00\x12\x14\n" +
@@ -1493,59 +1414,59 @@ func file_api_proto_fetcher_proto_rawDescGZIP() []byte {
 	return file_api_proto_fetcher_proto_rawDescData
 }
 
-var file_api_proto_fetcher_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_api_proto_fetcher_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_api_proto_fetcher_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_api_proto_fetcher_proto_goTypes = []any{
-	(SourceType)(0),                // 0: monofs.SourceType
-	(AccessType)(0),                // 1: monofs.AccessType
-	(*FetchBlobRequest)(nil),       // 2: monofs.FetchBlobRequest
-	(*FetchBlobBatchRequest)(nil),  // 3: monofs.FetchBlobBatchRequest
-	(*FetchBlobBatchResponse)(nil), // 4: monofs.FetchBlobBatchResponse
-	(*PrefetchRequest)(nil),        // 5: monofs.PrefetchRequest
-	(*PrefetchResponse)(nil),       // 6: monofs.PrefetchResponse
-	(*CheckCacheRequest)(nil),      // 7: monofs.CheckCacheRequest
-	(*CheckCacheResponse)(nil),     // 8: monofs.CheckCacheResponse
-	(*FetcherStatsRequest)(nil),    // 9: monofs.FetcherStatsRequest
-	(*FetcherStatsResponse)(nil),   // 10: monofs.FetcherStatsResponse
-	(*SourceStats)(nil),            // 11: monofs.SourceStats
-	(*AccessEvent)(nil),            // 12: monofs.AccessEvent
-	(*ReportAccessRequest)(nil),    // 13: monofs.ReportAccessRequest
-	(*ReportAccessResponse)(nil),   // 14: monofs.ReportAccessResponse
-	(*GetPredictionsRequest)(nil),  // 15: monofs.GetPredictionsRequest
-	(*GetPredictionsResponse)(nil), // 16: monofs.GetPredictionsResponse
-	(*PredictedFile)(nil),          // 17: monofs.PredictedFile
-	nil,                            // 18: monofs.FetchBlobRequest.SourceConfigEntry
-	nil,                            // 19: monofs.CheckCacheResponse.CachedEntry
-	nil,                            // 20: monofs.CheckCacheResponse.SizesEntry
-	nil,                            // 21: monofs.FetcherStatsResponse.SourceStatsEntry
-	nil,                            // 22: monofs.PredictedFile.SourceConfigEntry
+	(AccessType)(0),                // 0: monofs.AccessType
+	(*FetchBlobRequest)(nil),       // 1: monofs.FetchBlobRequest
+	(*FetchBlobBatchRequest)(nil),  // 2: monofs.FetchBlobBatchRequest
+	(*FetchBlobBatchResponse)(nil), // 3: monofs.FetchBlobBatchResponse
+	(*PrefetchRequest)(nil),        // 4: monofs.PrefetchRequest
+	(*PrefetchResponse)(nil),       // 5: monofs.PrefetchResponse
+	(*CheckCacheRequest)(nil),      // 6: monofs.CheckCacheRequest
+	(*CheckCacheResponse)(nil),     // 7: monofs.CheckCacheResponse
+	(*FetcherStatsRequest)(nil),    // 8: monofs.FetcherStatsRequest
+	(*FetcherStatsResponse)(nil),   // 9: monofs.FetcherStatsResponse
+	(*SourceStats)(nil),            // 10: monofs.SourceStats
+	(*AccessEvent)(nil),            // 11: monofs.AccessEvent
+	(*ReportAccessRequest)(nil),    // 12: monofs.ReportAccessRequest
+	(*ReportAccessResponse)(nil),   // 13: monofs.ReportAccessResponse
+	(*GetPredictionsRequest)(nil),  // 14: monofs.GetPredictionsRequest
+	(*GetPredictionsResponse)(nil), // 15: monofs.GetPredictionsResponse
+	(*PredictedFile)(nil),          // 16: monofs.PredictedFile
+	nil,                            // 17: monofs.FetchBlobRequest.SourceConfigEntry
+	nil,                            // 18: monofs.CheckCacheResponse.CachedEntry
+	nil,                            // 19: monofs.CheckCacheResponse.SizesEntry
+	nil,                            // 20: monofs.FetcherStatsResponse.SourceStatsEntry
+	nil,                            // 21: monofs.PredictedFile.SourceConfigEntry
+	(SourceType)(0),                // 22: monofs.SourceType
 	(*DataChunk)(nil),              // 23: monofs.DataChunk
 }
 var file_api_proto_fetcher_proto_depIdxs = []int32{
-	0,  // 0: monofs.FetchBlobRequest.source_type:type_name -> monofs.SourceType
-	18, // 1: monofs.FetchBlobRequest.source_config:type_name -> monofs.FetchBlobRequest.SourceConfigEntry
-	2,  // 2: monofs.FetchBlobBatchRequest.blobs:type_name -> monofs.FetchBlobRequest
-	2,  // 3: monofs.PrefetchRequest.blobs:type_name -> monofs.FetchBlobRequest
-	0,  // 4: monofs.CheckCacheRequest.source_type:type_name -> monofs.SourceType
-	19, // 5: monofs.CheckCacheResponse.cached:type_name -> monofs.CheckCacheResponse.CachedEntry
-	20, // 6: monofs.CheckCacheResponse.sizes:type_name -> monofs.CheckCacheResponse.SizesEntry
-	21, // 7: monofs.FetcherStatsResponse.source_stats:type_name -> monofs.FetcherStatsResponse.SourceStatsEntry
-	1,  // 8: monofs.AccessEvent.access_type:type_name -> monofs.AccessType
-	12, // 9: monofs.ReportAccessRequest.events:type_name -> monofs.AccessEvent
-	17, // 10: monofs.GetPredictionsResponse.predictions:type_name -> monofs.PredictedFile
-	0,  // 11: monofs.PredictedFile.source_type:type_name -> monofs.SourceType
-	22, // 12: monofs.PredictedFile.source_config:type_name -> monofs.PredictedFile.SourceConfigEntry
-	11, // 13: monofs.FetcherStatsResponse.SourceStatsEntry.value:type_name -> monofs.SourceStats
-	2,  // 14: monofs.BlobFetcher.FetchBlob:input_type -> monofs.FetchBlobRequest
-	3,  // 15: monofs.BlobFetcher.FetchBlobBatch:input_type -> monofs.FetchBlobBatchRequest
-	5,  // 16: monofs.BlobFetcher.PrefetchBlobs:input_type -> monofs.PrefetchRequest
-	7,  // 17: monofs.BlobFetcher.CheckCache:input_type -> monofs.CheckCacheRequest
-	9,  // 18: monofs.BlobFetcher.GetStats:input_type -> monofs.FetcherStatsRequest
+	22, // 0: monofs.FetchBlobRequest.source_type:type_name -> monofs.SourceType
+	17, // 1: monofs.FetchBlobRequest.source_config:type_name -> monofs.FetchBlobRequest.SourceConfigEntry
+	1,  // 2: monofs.FetchBlobBatchRequest.blobs:type_name -> monofs.FetchBlobRequest
+	1,  // 3: monofs.PrefetchRequest.blobs:type_name -> monofs.FetchBlobRequest
+	22, // 4: monofs.CheckCacheRequest.source_type:type_name -> monofs.SourceType
+	18, // 5: monofs.CheckCacheResponse.cached:type_name -> monofs.CheckCacheResponse.CachedEntry
+	19, // 6: monofs.CheckCacheResponse.sizes:type_name -> monofs.CheckCacheResponse.SizesEntry
+	20, // 7: monofs.FetcherStatsResponse.source_stats:type_name -> monofs.FetcherStatsResponse.SourceStatsEntry
+	0,  // 8: monofs.AccessEvent.access_type:type_name -> monofs.AccessType
+	11, // 9: monofs.ReportAccessRequest.events:type_name -> monofs.AccessEvent
+	16, // 10: monofs.GetPredictionsResponse.predictions:type_name -> monofs.PredictedFile
+	22, // 11: monofs.PredictedFile.source_type:type_name -> monofs.SourceType
+	21, // 12: monofs.PredictedFile.source_config:type_name -> monofs.PredictedFile.SourceConfigEntry
+	10, // 13: monofs.FetcherStatsResponse.SourceStatsEntry.value:type_name -> monofs.SourceStats
+	1,  // 14: monofs.BlobFetcher.FetchBlob:input_type -> monofs.FetchBlobRequest
+	2,  // 15: monofs.BlobFetcher.FetchBlobBatch:input_type -> monofs.FetchBlobBatchRequest
+	4,  // 16: monofs.BlobFetcher.PrefetchBlobs:input_type -> monofs.PrefetchRequest
+	6,  // 17: monofs.BlobFetcher.CheckCache:input_type -> monofs.CheckCacheRequest
+	8,  // 18: monofs.BlobFetcher.GetStats:input_type -> monofs.FetcherStatsRequest
 	23, // 19: monofs.BlobFetcher.FetchBlob:output_type -> monofs.DataChunk
-	4,  // 20: monofs.BlobFetcher.FetchBlobBatch:output_type -> monofs.FetchBlobBatchResponse
-	6,  // 21: monofs.BlobFetcher.PrefetchBlobs:output_type -> monofs.PrefetchResponse
-	8,  // 22: monofs.BlobFetcher.CheckCache:output_type -> monofs.CheckCacheResponse
-	10, // 23: monofs.BlobFetcher.GetStats:output_type -> monofs.FetcherStatsResponse
+	3,  // 20: monofs.BlobFetcher.FetchBlobBatch:output_type -> monofs.FetchBlobBatchResponse
+	5,  // 21: monofs.BlobFetcher.PrefetchBlobs:output_type -> monofs.PrefetchResponse
+	7,  // 22: monofs.BlobFetcher.CheckCache:output_type -> monofs.CheckCacheResponse
+	9,  // 23: monofs.BlobFetcher.GetStats:output_type -> monofs.FetcherStatsResponse
 	19, // [19:24] is the sub-list for method output_type
 	14, // [14:19] is the sub-list for method input_type
 	14, // [14:14] is the sub-list for extension type_name
@@ -1564,7 +1485,7 @@ func file_api_proto_fetcher_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_fetcher_proto_rawDesc), len(file_api_proto_fetcher_proto_rawDesc)),
-			NumEnums:      2,
+			NumEnums:      1,
 			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,

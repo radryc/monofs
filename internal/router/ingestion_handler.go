@@ -33,8 +33,8 @@ type IngestionHandler interface {
 	// GetStorageType returns the storage ingestion type
 	GetStorageType() storage.IngestionType
 
-	// GetFetchType returns the storage fetch type
-	GetFetchType() storage.FetchType
+	// GetFetchType returns the source type for blob fetching
+	GetFetchType() pb.SourceType
 
 	// ExtractCanonicalPath extracts the canonical repository path from backend metadata
 	// This is called during ingestion to determine the actual storage location
