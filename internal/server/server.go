@@ -401,16 +401,29 @@ func (s *Server) resolvePathToStorage(path string) (storageID, filePath string, 
 		// Fallback for Go modules: try without version suffix
 		// This handles repos ingested with displayPath like "google.golang.org/grpc"
 		// when user requests "google.golang.org/grpc@v1.75.0/file.go"
-		if strings.Contains(displayPath, "@") {
-			// Extract module path without version (e.g., "google.golang.org/grpc@v1.75.0" -> "google.golang.org/grpc")
+		//
+		// CRITICAL: Only apply this fallback when the '@' is in the LAST segment
+		// of the candidate display path (i.e., the version suffix like "@v1.75.0").
+		// Without this check, a path like "github.com/webpack/webpack@5.89.0/compiler"
+		// at i=4 would strip "@5.89.0/compiler" and incorrectly match the bare
+		// "github.com/webpack/webpack" git repo with an EMPTY filePath, causing
+		// every subdirectory to resolve to the git repo root and creating an
+		// infinite directory nesting loop.
+		lastSegment := parts[i-1]
+		if strings.Contains(lastSegment, "@") {
+			// The '@' is in the last segment of this candidate — safe to strip version.
+			// e.g., displayPath="github.com/grpc/grpc@v1.75.0", lastSegment="grpc@v1.75.0"
 			atIdx := strings.LastIndex(displayPath, "@")
 			modulePathOnly := displayPath[:atIdx]
 			storageID, exists := s.lookupStorageID(modulePathOnly)
 			if exists {
-				// File path includes everything after the module path
+				// File path includes everything after the matched module path.
+				// modulePathOnly has fewer segments than displayPath (version was in last segment),
+				// so we need to compute filePath relative to modulePathOnly's segment count.
+				moduleParts := strings.Split(modulePathOnly, "/")
 				var filePath string
-				if i < len(parts) {
-					filePath = strings.Join(parts[i:], "/")
+				if len(moduleParts) < len(parts) {
+					filePath = strings.Join(parts[len(moduleParts):], "/")
 				}
 				return storageID, filePath, true
 			}
