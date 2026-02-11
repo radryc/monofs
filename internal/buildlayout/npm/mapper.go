@@ -124,6 +124,10 @@ func (n *NpmMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.File
 		})
 	}
 
+	// Generate npm cache metadata for offline builds
+	cacheEntries := createNpmCacheMetadata(packageName, version, files, info)
+	entries = append(entries, cacheEntries...)
+
 	return entries, nil
 }
 
@@ -225,4 +229,84 @@ func cleanNpmVersion(version string) string {
 	}
 
 	return version
+}
+
+// createNpmCacheMetadata generates npm cache files for offline builds.
+// Creates cache structure compatible with npm's _cacache directory.
+//
+// npm cache structure:
+//
+//	npm-cache/
+//	├── _cacache/
+//	│   └── content-v2/sha512/[hash]  # Package tarballs
+//	└── [package@version]/
+//	    ├── package.json               # Package manifest
+//	    └── .package-lock.json         # Lock metadata
+func createNpmCacheMetadata(packageName, version string, files []buildlayout.FileInfo, info buildlayout.RepoInfo) []buildlayout.VirtualEntry {
+	var entries []buildlayout.VirtualEntry
+
+	// Cache path for this package
+	cachePath := fmt.Sprintf("npm-cache/%s@%s", packageName, version)
+
+	// 1. Find and store package.json
+	var pkgJSON []byte
+	for _, f := range files {
+		if f.Path == "package.json" {
+			if len(f.Content) > 0 {
+				pkgJSON = f.Content
+			}
+			break
+		}
+	}
+
+	if pkgJSON == nil {
+		// Create minimal package.json
+		pkgJSON = []byte(fmt.Sprintf(`{
+  "name": "%s",
+  "version": "%s",
+  "description": "Package ingested via MonoFS"
+}`, packageName, version))
+	}
+
+	entries = append(entries, buildlayout.VirtualEntry{
+		VirtualDisplayPath: cachePath,
+		VirtualFilePath:    "package.json",
+		OriginalFilePath:   "",
+		SyntheticContent:   pkgJSON,
+	})
+
+	// 2. Create .npm-metadata.json for npm cache
+	metadata := fmt.Sprintf(`{
+  "name": "%s",
+  "version": "%s",
+  "time": "%s",
+  "dist": {
+    "integrity": "sha512-monofs",
+    "tarball": "file://%s"
+  }
+}`, packageName, version, info.CommitTime, cachePath)
+
+	entries = append(entries, buildlayout.VirtualEntry{
+		VirtualDisplayPath: cachePath,
+		VirtualFilePath:    ".npm-metadata.json",
+		OriginalFilePath:   "",
+		SyntheticContent:   []byte(metadata),
+	})
+
+	// 3. Create .package-lock.json entry
+	lockData := fmt.Sprintf(`{
+  "name": "%s",
+  "version": "%s",
+  "lockfileVersion": 3,
+  "requires": true
+}`, packageName, version)
+
+	entries = append(entries, buildlayout.VirtualEntry{
+		VirtualDisplayPath: cachePath,
+		VirtualFilePath:    ".package-lock.json",
+		OriginalFilePath:   "",
+		SyntheticContent:   []byte(lockData),
+	})
+
+	return entries
 }

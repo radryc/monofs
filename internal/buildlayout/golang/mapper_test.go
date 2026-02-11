@@ -60,13 +60,17 @@ func TestGoMapper_MapPaths_Standard(t *testing.T) {
 		t.Fatalf("MapPaths failed: %v", err)
 	}
 
-	if len(entries) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(entries))
+	// Should have 3 original files + 3 cache metadata files = 6 total
+	if len(entries) != 6 {
+		t.Fatalf("expected 6 entries (3 files + 3 cache metadata), got %d", len(entries))
 	}
 
 	// The mapper returns just module@version, prefix is added by ingestion handler
 	expectedDisplayPath := "github.com/google/uuid@v1.6.0"
-	for i, e := range entries {
+
+	// First 3 entries should be original files
+	for i := 0; i < 3; i++ {
+		e := entries[i]
 		if e.VirtualDisplayPath != expectedDisplayPath {
 			t.Errorf("entry %d: VirtualDisplayPath = %q, want %q", i, e.VirtualDisplayPath, expectedDisplayPath)
 		}

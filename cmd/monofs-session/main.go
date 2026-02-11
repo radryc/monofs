@@ -38,9 +38,10 @@ var buildBackends = []BuildBackend{
 			gomodcache := filepath.Join(mp, "go-modules/pkg/mod")
 			return []string{
 				"GOMODCACHE=" + gomodcache,
-				"GOPROXY=file://" + gomodcache + "/cache/download,direct",
-				"GOSUMDB=off",
-				"GOFLAGS=-mod=readonly",
+				"GOPROXY=off",                       // Completely offline - no proxy or direct access
+				"GOVCS=*:off",                       // Disable all VCS operations
+				"GOSUMDB=off",                       // Disable checksum database
+				"GOFLAGS=-mod=readonly -modcacherw", // Read-only modules but allow cache writes
 			}
 		},
 	},

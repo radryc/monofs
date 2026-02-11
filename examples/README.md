@@ -1,76 +1,87 @@
 # MonoFS Build Examples
 
-This directory contains comprehensive guides for building real-world projects using MonoFS.
+Comprehensive guides for building real-world projects using MonoFS with 100% offline builds.
 
 ## Quick Start
 
 Choose a guide based on your project type:
 
-### Single Backend Projects
+### Featured Examples
 
 - **[Build MonoFS using MonoFS](howto-build-monofs.md)** - Self-hosting example ✅
   - Language: Go
-  - Build System: **monofs-build** + Make + Go modules
-  - Complexity: ⭐⭐
-  - Build Time: ~3 minutes (100% offline)
-
-- **[Build Prometheus](howto-build-prometheus.md)** - Go monitoring system ✅
-  - Language: Go + Node.js
-  - Build System: **monofs-build** + Make + Go modules + npm
-  - Complexity: ⭐⭐⭐
-  - Build Time: ~3 minutes (100% offline)
-
-- **[Build Bazel Projects](howto-bazel-build.md)** - TensorFlow, Envoy, etc. ✅
-  - Languages: Various (C++, Java, Python, Go)
-  - Build System: **monofs-build** + Bazel
-  - Complexity: ⭐⭐⭐⭐
-  - Build Time: 30-60 minutes (offline after deps ingested)
-
-- **[Build React/NPM Projects](howto-build-react-app.md)** - Modern JavaScript apps ✅
-  - Languages: JavaScript/TypeScript
-  - Build System: **monofs-build** + npm/yarn + Webpack/Vite
+  - Build System: Go modules + Make
   - Complexity: ⭐⭐
   - Build Time: ~2 minutes (100% offline)
 
-### Multi-Backend Projects
+- **[Build Prometheus](howto-build-prometheus.md)** - Go monitoring system ✅
+  - Languages: Go + Node.js
+  - Build Systems: Go modules + npm + Make
+  - Complexity: ⭐⭐⭐
+  - Build Time: ~3 minutes (100% offline)
 
-- **[Build Multi-Backend Projects](howto-build-multi-backend.md)** - Kubernetes, GitLab, VS Code ✅
+- **[Build React/npm Projects](howto-build-react-app.md)** - Modern JavaScript apps ✅
+  - Languages: JavaScript/TypeScript
+  - Build Systems: npm + Webpack/Vite
+  - Complexity: ⭐⭐
+  - Build Time: ~1 minute (100% offline)
+
+- **[Build Bazel Projects](howto-bazel-build.md)** - TensorFlow, Envoy, etc. ✅
+  - Languages: Various (C++, Java, Python, Go)
+  - Build System: Bazel
+  - Complexity: ⭐⭐⭐⭐
+  - Build Time: 30-60 minutes (offline after deps ingested)
+
+- **[Build Multi-Backend Projects](howto-build-multi-backend.md)** - Kubernetes, GitLab ✅
   - Languages: Go + Node.js + C++ + Ruby
-  - Build Systems: **monofs-build** + Make + Bazel + npm + Bundler
+  - Build Systems: Go + npm + Bazel + Bundler
   - Complexity: ⭐⭐⭐⭐⭐
   - Build Time: 10-30 minutes (100% offline)
 
-## Core Concept: Work Directly in /mnt
+---
 
-**The MonoFS Way:** Work directly on ingested source, no copying needed!
+## Core Concept: Direct Work in /mnt
+
+**The MonoFS Way:** Work directly on ingested source with automatic offline builds!
 
 ```bash
 # ❌ WRONG - Old pattern (don't do this)
-mkdir /mnt/build/myproject
-cp -r /mnt/github.com/org/project/* /mnt/build/myproject/
-cd /mnt/build/myproject
-go build  # Downloads from network!
+mkdir /tmp/mybuild
+cp -r /mnt/github.com/org/project/* /tmp/mybuild/
+cd /tmp/mybuild
+go build  # Still downloads from network!
 
 # ✅ CORRECT - MonoFS pattern
 # 1. Ingest source and ALL dependencies
-monofs-admin ingest --url=<repo-url> --ref=main --display-path=<path>
-monofs-admin ingest-deps --file=/mnt/<path>/go.mod --type=go
+./bin/monofs-admin ingest \
+  --source=https://github.com/org/project \
+  --ref=main
+
+./bin/monofs-admin ingest-deps \
+  --file=/mnt/github.com/org/project/go.mod \
+  --type=go
 
 # 2. Work directly in /mnt (no copying!)
 cd /mnt/github.com/org/project/
-monofs-session start  # Only if you need to modify
 
-# 3. Build 100% offline
-monofs-build go -- build ./...  # Zero network access!
+# 3. Configure offline environment
+eval $(./bin/monofs-session setup /mnt)
+
+# 4. Build 100% offline
+go build ./...  # Zero network access!
 ```
+
+---
 
 ## Key Principles
 
-1. **✅ Pre-ingest dependencies**: Use `monofs-admin ingest-deps`
+1. **✅ Pre-ingest dependencies**: Use `monofs-admin ingest-deps` to cache all dependencies
 2. **✅ Work in /mnt directly**: No copying source code
-3. **✅ Use monofs-build**: Enforces offline mode
+3. **✅ Auto-configured offline mode**: `monofs-session setup` handles all env vars
 4. **✅ 100% offline builds**: Zero network during build
 5. **✅ Shared everything**: Source + deps shared cluster-wide
+
+---
 
 ## Performance Benefits
 
@@ -78,7 +89,7 @@ monofs-build go -- build ./...  # Zero network access!
 
 | Project | Traditional Build | MonoFS (Offline) | Speedup |
 |---------|------------------|------------------|---------|
-| MonoFS | 4m 30s (clone+download+build) | 3m (instant+build) | 1.5x |
+| MonoFS | 4m 30s (clone+download+build) | 2m (instant+build) | 2.25x |
 | Prometheus | 8m 45s (clone+deps+build) | 3m (instant+build) | 2.9x |
 | TensorFlow | 78m (clone+deps+build) | 57m (first) / 2m (incremental) | 1.4x / 39x |
 | Kubernetes | 17m (clone+deps+build) | 10m (instant+build) | 1.7x |
@@ -97,8 +108,10 @@ monofs-build go -- build ./...  # Zero network access!
 ✅ **Pre-ingested dependencies** - Zero downloads during build
 ✅ **100% offline builds** - No network access needed
 ✅ **Shared caches** - Everyone uses same dependencies
-✅ **Work in place** - No copying, modify /mnt directly
-✅ **Build artifact sharing** - Commit once, available everywhere
+✅ **Work in place** - Read-only or writable with sessions
+✅ **Cluster-wide sharing** - Ingest once, build anywhere
+
+---
 
 ## Project Type Matrix
 
@@ -107,120 +120,119 @@ monofs-build go -- build ./...  # Zero network access!
 | [MonoFS](howto-build-monofs.md) | ✓ | | | | | | | ✓ |
 | [Prometheus](howto-build-prometheus.md) | ✓ | ✓ | | | | | | ✓ |
 | [Bazel](howto-bazel-build.md) | ✓ | | ✓ | ✓ | ✓ | | ✓ | |
-| [React/NPM](howto-build-react-app.md) | | ✓ | | | | | | |
+| [React/npm](howto-build-react-app.md) | | ✓ | | | | | | |
 | [Multi-Backend](howto-build-multi-backend.md) | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ | ✓ |
+
+---
 
 ## Common Workflows
 
 ### Daily Development
 
 ```bash
-# Morning: Start work
-ssh monofs@client -p 2222
-cd /mnt/build/my-feature-$(date +%Y%m%d)
-monofs-session start
+# Work directly in /mnt (read-only)
+cd /mnt/github.com/myorg/myproject
 
-# Copy latest source
-cp -r /mnt/github.com/myorg/myproject/* ./
+# Configure environment
+eval $(./bin/monofs-session setup /mnt)
+
+# Build and test (100% offline)
+go build ./...
+go test ./...
+
+# For modifications, start a writable session
+./bin/monofs-session start
 
 # Make changes
 vim src/main.go
 
-# Build and test
-make build
-make test
+# Test changes
+go build ./...
 
 # Commit work
-monofs-session commit --message="Feature X implementation"
-
-# Afternoon: Team member pulls your changes
-# On another client
-cd /mnt/build/review-feature
-cp -r /mnt/build/my-feature-20260210/* ./
-# Instant access to your changes + compiled artifacts!
+./bin/monofs-session commit
 ```
 
 ### CI/CD Integration
 
 ```bash
-# CI server pulls latest from MonoFS
-cd /mnt/build/ci-$BUILD_ID
-cp -r /mnt/github.com/myorg/myproject/* ./
+# CI server mounts MonoFS (read-only)
+./bin/monofs-client --mount=/mnt --router=<router>
 
-# Cached dependencies = fast builds
-npm config set cache /mnt/cache/npm
-npm install  # Instant if cached!
+# Configure environment
+eval $(./bin/monofs-session setup /mnt)
 
-# Build
-npm run build
+# Build (instant - dependencies already cached)
+cd /mnt/github.com/myorg/myproject
+go build ./...
 
 # Test
-npm test
+go test ./...
 
-# Commit artifacts for deployment
-monofs-session commit \
-  --message="CI Build $BUILD_ID" \
-  --files="dist/"
+# No network access needed!
 ```
 
 ### Cross-Platform Builds
 
 ```bash
-# Build for multiple platforms in parallel
-mkdir -p /mnt/build/linux-amd64 /mnt/build/darwin-amd64
+# Build for multiple platforms using same source+deps
+cd /mnt/github.com/myorg/myproject
+eval $(./bin/monofs-session setup /mnt)
 
-# Terminal 1: Linux build
-cd /mnt/build/linux-amd64
-GOOS=linux GOARCH=amd64 make build
+# Linux build
+GOOS=linux GOARCH=amd64 go build -o bin/app-linux ./...
 
-# Terminal 2: macOS build
-cd /mnt/build/darwin-amd64
-GOOS=darwin GOARCH=amd64 make build
+# macOS build
+GOOS=darwin GOARCH=amd64 go build -o bin/app-darwin ./...
 
-# Both use same source + dependencies from MonoFS!
+# Windows build
+GOOS=windows GOARCH=amd64 go build -o bin/app-windows.exe ./...
+
+# All use same cached dependencies!
 ```
+
+---
 
 ## Troubleshooting
 
-### Common Issues
+### Dependencies not found
 
-**Dependencies not found:**
 ```bash
-# Check fetcher service status
-monofs-admin status
+# Check if dependencies were ingested
+./bin/monofs-admin repos | grep <package>
 
-# Verify cache
-ls /mnt/cache/npm/
-ls /mnt/cache/bazel/
+# Re-ingest dependencies
+./bin/monofs-admin ingest-deps --file=/mnt/.../go.mod --type=go
 
-# Clear and rebuild cache
-go clean -modcache
-npm cache clean --force
+# Verify cache structure
+ls -la /mnt/go-modules/pkg/mod/cache/download/
 ```
 
-**Permission errors:**
+### Permission errors
+
 ```bash
-# Ensure you're in writable overlay
-monofs-session start
+# For read-only: no session needed
+cd /mnt/github.com/org/project
+go build ./...
 
-# Check mount
-mountpoint /mnt
-
-# Verify permissions
-ls -ld /mnt/build/
+# For modifications: start session
+./bin/monofs-session start
+vim src/main.go
 ```
 
-**Out of disk space:**
+### Environment not configured
+
 ```bash
-# Check overlay usage
-du -sh /var/lib/monofs/overlay/
+# Always run setup for offline builds
+eval $(./bin/monofs-session setup /mnt)
 
-# Clean old sessions
-monofs-session cleanup --older-than=7d
-
-# Remove build artifacts
-rm -rf /mnt/build/old-*
+# Verify environment
+echo $GOMODCACHE
+echo $GOPROXY
+echo $NPM_CONFIG_CACHE
 ```
+
+---
 
 ## Advanced Topics
 
@@ -235,35 +247,78 @@ Each guide includes:
 
 ### Performance Tuning
 
-- Configure shared caches for all tools
-- Use parallel builds with `-j` flags
-- Leverage MonoFS for build artifact sharing
-- Monitor cache hit rates
-- Implement cache cleanup policies
+- **Parallel builds**: Use `-j` flags with make/bazel
+- **Cache hits**: Monitor cache effectiveness
+- **Incremental builds**: Leverage unchanged dependencies
+- **Shared artifacts**: Commit builds back to MonoFS
 
 ### Team Workflows
 
-- **Feature branches**: Create isolated build directories
-- **Code review**: Share build artifacts via MonoFS
-- **Release builds**: Commit versioned artifacts
+- **Feature branches**: Use writable sessions for changes
+- **Code review**: Share modified source via session commits
+- **Release builds**: Tag and commit versioned artifacts
 - **A/B testing**: Compare builds side-by-side
+
+---
+
+## Environment Setup
+
+MonoFS automatically configures build environments:
+
+### Go
+```bash
+eval $(./bin/monofs-session setup /mnt)
+# Sets: GOMODCACHE, GOPROXY=off, GOVCS=*:off, GOSUMDB=off
+```
+
+### npm
+```bash
+eval $(./bin/monofs-session setup /mnt)
+# Sets: NPM_CONFIG_CACHE, NPM_CONFIG_PREFER_OFFLINE=true
+```
+
+### Cargo
+```bash
+eval $(./bin/monofs-session setup /mnt)
+# Sets: CARGO_HOME, CARGO_NET_OFFLINE=true
+```
+
+### Bazel
+```bash
+eval $(./bin/monofs-session setup /mnt)
+# Sets: BAZEL_REPOSITORY_CACHE
+```
+
+---
 
 ## Contributing
 
 To add a new build example:
 
 1. Choose a popular open-source project
-2. Document the full build process
+2. Document the full ingestion + build process
 3. Include performance comparisons
 4. Add troubleshooting section
-5. Submit PR with example
+5. Test completely offline builds
+6. Submit PR with example
+
+---
+
+## See Also
+
+- [OFFLINE_BUILDS.md](../docs/OFFLINE_BUILDS.md) - Complete offline builds guide (all ecosystems)
+- [BUILD_INTEGRATION.md](../docs/BUILD_INTEGRATION.md) - Build tool integration details
+- [TESTING_OFFLINE_BUILDS.md](../docs/TESTING_OFFLINE_BUILDS.md) - Testing guide
+- [CACHE_METADATA_SUMMARY.md](../docs/CACHE_METADATA_SUMMARY.md) - Implementation details
+
+---
 
 ## Support
 
-- Documentation: [../docs/](../docs/)
-- Issues: GitHub Issues
-- Community: Discussions
+- **Documentation**: [../docs/](../docs/)
+- **Issues**: GitHub Issues
+- **Community**: Discussions
 
 ## License
 
-These examples are provided under the same license as MonoFS.
+These examples are provided under the same license as MonoFS (Apache 2.0).

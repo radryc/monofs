@@ -458,10 +458,17 @@ test-e2e-sudo: build ## Run E2E tests with sudo (builds binaries and test as use
 	@echo "Running E2E tests with sudo..."
 	sudo -E ./bin/e2e.test -test.v -test.count=1 -test.timeout=10m
 
+test-offline: build ## Run offline build integration tests (requires FUSE)
+	@echo "Running offline build tests..."
+	@echo "Cleaning up any existing test directories..."
+	@fusermount -u /tmp/monofs-test-*-*/mnt 2>/dev/null || fusermount3 -u /tmp/monofs-test-*-*/mnt 2>/dev/null || true
+	@rm -rf /tmp/monofs-test-* 2>/dev/null || true
+	$(GOTEST) -v -count=1 -timeout=15m ./test/ -run "OfflineBuilds"
+
 test-smoke: build ## Run quick smoke test
 	$(GOTEST) -v -run=TestE2ESmoke ./test/...
 
-test-all: test-unit test-deadlock test-e2e ## Run all tests (unit + deadlock + E2E)
+test-all: test-unit test-deadlock test-e2e test-offline ## Run all tests (unit + deadlock + E2E + offline builds)
 
 test-race: ## Run tests with race detector
 	$(GOTEST) -race -v ./...

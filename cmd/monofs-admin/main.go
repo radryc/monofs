@@ -302,7 +302,7 @@ Usage:
 
 Commands:
   ingest           Ingest a Git repository or Go module into the cluster
-  ingest-deps      Bulk ingest all dependencies from a manifest (go.mod, package.json, etc.)
+  ingest-deps      Bulk ingest dependencies with auto-generated cache metadata for offline builds
   delete           Delete a repository from all nodes, search index, and memory
   status           Show cluster status and health
   repos            Show repositories in the cluster
@@ -324,8 +324,10 @@ Examples:
   # Ingest Go module
   monofs-admin ingest --source=github.com/google/uuid@v1.6.0 --ingestion-type=go --fetch-type=gomod
 
-  # Bulk ingest all dependencies from go.mod
+  # Bulk ingest all dependencies with cache metadata for offline builds
   monofs-admin ingest-deps --file=go.mod --type=go --concurrency=10
+  monofs-admin ingest-deps --file=package.json --type=npm
+  monofs-admin ingest-deps --file=Cargo.toml --type=cargo
 
   # Delete repository by storage ID
   monofs-admin delete --storage-id=<storage-id>

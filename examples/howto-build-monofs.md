@@ -14,17 +14,20 @@ First, ingest the MonoFS repository and ALL its dependencies:
 
 ```bash
 # Ingest MonoFS source
-monofs-admin ingest \
+./bin/monofs-admin ingest \
+  --router=localhost:9090 \
   --source=https://github.com/radryc/monofs \
   --ref=main
 
-# Ingest ALL Go module dependencies automatically
-monofs-admin ingest-deps \
+# Ingest ALL Go module dependencies with cache metadata
+./bin/monofs-admin ingest-deps \
+  --router=localhost:9090 \
   --file=/mnt/github.com/radryc/monofs/go.mod \
-  --type=go
+  --type=go \
+  --concurrency=10
 
 # Wait for ingestion to complete
-monofs-admin status --filter=monofs
+./bin/monofs-admin status --router=localhost:9090
 
 # Verify dependencies are available
 ls /mnt/go-modules/pkg/mod/github.com/nutsdb/
@@ -47,23 +50,19 @@ ls -la
 # Should see: cmd/ internal/ api/ go.mod go.sum Makefile etc.
 
 # Start a writable session if you need to make changes
-# Note: monofs-client must have been started with --writable flag.
-# In Docker, ensure MONOFS_OVERLAY_DIR is set to match --overlay path:
-#   export MONOFS_OVERLAY_DIR=/var/lib/monofs/overlay
-monofs-session start
+# Note: monofs-client must have been started with --writable flag
+./bin/monofs-session start
 ```
 
 ## Step 3: Build with MonoFS (Offline Mode)
 
 Build using ONLY dependencies from MonoFS - no external network access.
 
-**Option A (recommended): One-time setup, then use native commands:**
-
 ```bash
-# Auto-detects go.mod in current directory and sets up the environment
-eval $(monofs-session setup .)
+# Configure environment for offline builds
+eval $(./bin/monofs-session setup /mnt)
 
-# Now use standard go commands — no wrapper needed!
+# Now build 100% offline with standard go commands!
 go build -o bin/monofs-server ./cmd/monofs-server
 go build -o bin/monofs-router ./cmd/monofs-router
 go build -o bin/monofs-client ./cmd/monofs-client
@@ -76,13 +75,12 @@ go build -o bin/monofs-session ./cmd/monofs-session
 make build
 ```
 
-**Option B: Use the monofs-build wrapper for each command:**
-
-```bash
-monofs-build go -- build -o bin/monofs-server ./cmd/monofs-server
-monofs-build go -- build -o bin/monofs-router ./cmd/monofs-router
-# ... etc
-```
+**Environment configured by setup:**
+- `GOMODCACHE=/mnt/go-modules/pkg/mod`
+- `GOPROXY=off` (no network access!)
+- `GOVCS=*:off`
+- `GOSUMDB=off`
+- `GOTOOLCHAIN=local`
 
 ```bash
 # Verify binaries
@@ -98,10 +96,10 @@ ls -lh bin/
 Run the test suite using MonoFS dependencies (offline):
 
 ```bash
-# If you haven't run setup yet:
-# eval $(monofs-session setup go)
+# Configure environment if not already done
+eval $(./bin/monofs-session setup /mnt)
 
-# Run all tests (native go command)
+# Run all tests (100% offline!)
 go test ./...
 
 # Run specific package tests

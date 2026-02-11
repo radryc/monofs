@@ -36,15 +36,25 @@ func (g *GoMapper) Matches(info buildlayout.RepoInfo) bool {
 }
 
 // MapPaths creates virtual entries under go-modules/pkg/mod/<module>@<version>/
+// AND creates cache metadata files for offline Go builds.
 //
 // For a repo ingested as "github.com/google/uuid@v1.6.0" with files [uuid.go, go.mod]:
-// Output:
+// Output includes:
 //
-//	VirtualEntry{
-//	  VirtualDisplayPath: "go-modules/pkg/mod/github.com/google/uuid@v1.6.0",
-//	  VirtualFilePath:    "uuid.go",
-//	  OriginalFilePath:   "uuid.go",
-//	}
+//  1. Extracted module files:
+//     VirtualEntry{
+//     VirtualDisplayPath: "go-modules/pkg/mod/github.com/google/uuid@v1.6.0",
+//     VirtualFilePath:    "uuid.go",
+//     OriginalFilePath:   "uuid.go",
+//     }
+//
+//  2. Cache metadata files:
+//     VirtualEntry{
+//     VirtualDisplayPath: "go-modules/pkg/mod/cache/download/github.com/google/uuid/@v",
+//     VirtualFilePath:    "v1.6.0.info",
+//     OriginalFilePath:   "",  // Synthetic file
+//     SyntheticContent:   `{"Version":"v1.6.0","Time":"..."}`,
+//     }
 //
 // The Go module cache uses case-insensitive encoding:
 //
@@ -69,11 +79,14 @@ func (g *GoMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.FileI
 	// Apply Go module cache case encoding to module path.
 	encodedModule := EncodePath(modulePath)
 
-	// Return just module@version without prefix
-	// The prefix (go-modules/pkg/mod/) is added during ingestion by the handler
+	// Return module@version without prefix for extracted module files.
+	// The prefix (go-modules/pkg/mod/) is added during ingestion by the handler.
+	// Cache metadata files (below) include the full prefix to place them in the correct location.
 	virtualDisplayPath := encodedModule + "@" + version
 
-	entries := make([]buildlayout.VirtualEntry, 0, len(files))
+	entries := make([]buildlayout.VirtualEntry, 0, len(files)+3) // +3 for cache metadata files
+
+	// 1. Add extracted module files
 	for _, f := range files {
 		entries = append(entries, buildlayout.VirtualEntry{
 			VirtualDisplayPath: virtualDisplayPath,
@@ -81,6 +94,11 @@ func (g *GoMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.FileI
 			OriginalFilePath:   f.Path,
 		})
 	}
+
+	// 2. Add cache metadata files for offline builds
+	// These files allow `go build` with GOPROXY=off to work
+	cacheMetadataEntries := createCacheMetadata(modulePath, encodedModule, version, files, info)
+	entries = append(entries, cacheMetadataEntries...)
 
 	return entries, nil
 }
@@ -169,6 +187,83 @@ func parseRequireLine(line string) *buildlayout.Dependency {
 		Version: version,
 		Source:  module + "@" + version,
 	}
+}
+
+// createCacheMetadata generates cache metadata file entries for offline Go builds.
+// These are NOT stored in NutsDB - instead, the fetcher generates content on-demand.
+// Creates virtual files under go-modules/pkg/mod/cache/download/module/path/@v/:
+//   - version.info (JSON with Version and Time)
+//   - version.mod (copy of go.mod)
+//   - list (text file with available versions)
+func createCacheMetadata(modulePath, encodedModule, version string, files []buildlayout.FileInfo, info buildlayout.RepoInfo) []buildlayout.VirtualEntry {
+	// Strip go-modules/pkg/mod/ prefix if present (added by ingestion handler)
+	cleanModulePath := strings.TrimPrefix(modulePath, "go-modules/pkg/mod/")
+	cleanEncodedModule := EncodePath(cleanModulePath)
+
+	// Cache path: go-modules/pkg/mod/cache/download/module/path/@v/
+	// Must include full prefix to place cache metadata in correct location
+	cacheDisplayPath := fmt.Sprintf("go-modules/pkg/mod/cache/download/%s/@v", cleanEncodedModule)
+
+	var entries []buildlayout.VirtualEntry
+
+	// Find go.mod content for version.mod generation
+	var gomodBlobHash string
+	for _, f := range files {
+		if f.Path == "go.mod" {
+			gomodBlobHash = f.BlobHash
+			break
+		}
+	}
+
+	// Base metadata for all cache files
+	baseMetadata := map[string]string{
+		"cache_type":    "go-module",
+		"module_path":   cleanModulePath,
+		"version":       version,
+		"commit_time":   info.CommitTime,
+		"gomod_hash":    gomodBlobHash, // Empty if not found - fetcher will generate minimal go.mod
+	}
+
+	// 1. Create version.info pointer (fetcher generates: {"Version":"...","Time":"..."})
+	infoMetadata := make(map[string]string)
+	for k, v := range baseMetadata {
+		infoMetadata[k] = v
+	}
+	infoMetadata["file_path"] = version + ".info"
+	entries = append(entries, buildlayout.VirtualEntry{
+		VirtualDisplayPath: cacheDisplayPath,
+		VirtualFilePath:    version + ".info",
+		OriginalFilePath:   "", // Empty = fetcher-generated
+		CacheMetadata:      infoMetadata,
+	})
+
+	// 2. Create version.mod pointer (fetcher generates: copy of go.mod or minimal version)
+	modMetadata := make(map[string]string)
+	for k, v := range baseMetadata {
+		modMetadata[k] = v
+	}
+	modMetadata["file_path"] = version + ".mod"
+	entries = append(entries, buildlayout.VirtualEntry{
+		VirtualDisplayPath: cacheDisplayPath,
+		VirtualFilePath:    version + ".mod",
+		OriginalFilePath:   "", // Empty = fetcher-generated
+		CacheMetadata:      modMetadata,
+	})
+
+	// 3. Create list file pointer (fetcher generates: version + "\n")
+	listMetadata := make(map[string]string)
+	for k, v := range baseMetadata {
+		listMetadata[k] = v
+	}
+	listMetadata["file_path"] = "list"
+	entries = append(entries, buildlayout.VirtualEntry{
+		VirtualDisplayPath: cacheDisplayPath,
+		VirtualFilePath:    "list",
+		OriginalFilePath:   "", // Empty = fetcher-generated
+		CacheMetadata:      listMetadata,
+	})
+
+	return entries
 }
 
 // parseModuleVersion extracts module path and version from a display path.

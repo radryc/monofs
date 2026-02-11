@@ -2,6 +2,8 @@ package router
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -84,8 +86,9 @@ func (r *Router) generateLayouts(
 // The virtual files have the same BlobHash as the originals, so the fetcher
 // serves identical content without duplication.
 //
-// CRITICAL: Uses the ORIGINAL storage_id (hard link concept) so both paths
-// resolve to the same storage, making files accessible via either path.
+// CRITICAL: For regular virtual files, uses the ORIGINAL storage_id (hard link concept)
+// so both paths resolve to the same storage. For synthetic files (cache metadata),
+// generates a NEW storage_id since the content doesn't exist in the original storage.
 func (r *Router) ingestVirtualRepo(
 	ctx context.Context,
 	originalStorageID string,
@@ -94,8 +97,24 @@ func (r *Router) ingestVirtualRepo(
 	virtualFiles []buildlayout.VirtualEntry,
 	fileIndex map[string]*buildlayout.FileInfo,
 ) error {
-	// Use the ORIGINAL storage_id (hard link) - both display paths point to same storage
-	virtualStorageID := originalStorageID
+	// Check if this virtual repo contains fetcher-generated or synthetic files (cache metadata)
+	hasFetcherGeneratedFiles := false
+	for _, vf := range virtualFiles {
+		if len(vf.SyntheticContent) > 0 || (len(vf.CacheMetadata) > 0 && vf.OriginalFilePath == "") {
+			hasFetcherGeneratedFiles = true
+			break
+		}
+	}
+
+	// For fetcher-generated files, generate a NEW storage ID since content doesn't exist in original storage
+	// For regular virtual files, use ORIGINAL storage_id (hard link) to reuse existing storage
+	var virtualStorageID string
+	if hasFetcherGeneratedFiles {
+		// Generate unique storage ID for fetcher-generated files repo
+		virtualStorageID = computeBlobHash([]byte(virtualDisplayPath))
+	} else {
+		virtualStorageID = originalStorageID
+	}
 
 	r.logger.Info("ingesting virtual repo",
 		"virtual_path", virtualDisplayPath,
@@ -109,8 +128,9 @@ func (r *Router) ingestVirtualRepo(
 	for id, ns := range r.nodes {
 		if ns.status == NodeActive && ns.client != nil {
 			healthyNodes = append(healthyNodes, sharding.Node{
-				ID:     id,
-				Weight: ns.info.Weight,
+				ID:      id,
+				Weight:  ns.info.Weight,
+				Healthy: true, // CRITICAL: Mark nodes as healthy for HRW filtering
 			})
 			nodeStates = append(nodeStates, ns)
 		}
@@ -169,31 +189,97 @@ func (r *Router) ingestVirtualRepo(
 
 	// Step 4: Build protobuf FileMetadata from VirtualEntry + original FileInfo.
 	var batch []*pb.FileMetadata
+
+	r.logger.Debug("building file batch for virtual repo",
+		"virtual_path", virtualDisplayPath,
+		"total_files", len(virtualFiles))
+
 	for _, vf := range virtualFiles {
-		orig, ok := fileIndex[vf.OriginalFilePath]
-		if !ok {
-			r.logger.Debug("skipping virtual file: original not found",
-				"original_path", vf.OriginalFilePath,
-				"virtual_path", vf.VirtualFilePath)
-			continue
+		var fm *pb.FileMetadata
+
+		r.logger.Debug("processing virtual file",
+			"virtual_path", vf.VirtualFilePath,
+			"original_path", vf.OriginalFilePath,
+			"has_cache_metadata", len(vf.CacheMetadata) > 0,
+			"has_synthetic_content", len(vf.SyntheticContent) > 0)
+
+		// Check if this is a fetcher-generated file (cache metadata)
+		if len(vf.CacheMetadata) > 0 && vf.OriginalFilePath == "" {
+			r.logger.Info("creating fetcher-generated file",
+				"virtual_path", vf.VirtualFilePath,
+				"cache_metadata_keys", len(vf.CacheMetadata))
+
+			// Fetcher-generated file: Store metadata with special marker hash
+			// The hash "fetcher-generated:<file_path>" signals the server/fetcher to generate content on-demand
+			markerHash := computeBlobHash([]byte("fetcher-generated:" + vf.VirtualFilePath))
+
+			fm = &pb.FileMetadata{
+				Path:            vf.VirtualFilePath,
+				StorageId:       virtualStorageID,
+				DisplayPath:     virtualDisplayPath,
+				Ref:             originalInfo.Ref,
+				Size:            100, // Placeholder size - actual size determined at read time
+				Mtime:           time.Now().Unix(),
+				Mode:            0644, // Regular file, readable
+				BlobHash:        markerHash, // Marker hash for fetcher-generated content
+				Source:          originalInfo.Source,
+				SourceType:      ingestionType,
+				FetchType:       fetchType,
+				BackendMetadata: vf.CacheMetadata, // Pass cache metadata to fetcher
+			}
+		} else if len(vf.SyntheticContent) > 0 {
+			// DEPRECATED: Old synthetic file approach (kept for backward compatibility)
+			// Synthetic file: compute blob hash from content
+			blobHash := computeBlobHash(vf.SyntheticContent)
+			fm = &pb.FileMetadata{
+				Path:        vf.VirtualFilePath,
+				StorageId:   virtualStorageID,
+				DisplayPath: virtualDisplayPath,
+				Ref:         originalInfo.Ref,
+				Size:        uint64(len(vf.SyntheticContent)),
+				Mtime:       time.Now().Unix(),
+				Mode:        0644, // Regular file, readable
+				BlobHash:    blobHash,
+				Source:      originalInfo.Source,
+				SourceType:  ingestionType,
+				FetchType:   fetchType,
+				BackendMetadata: map[string]string{
+					"synthetic": "true",
+					"content":   string(vf.SyntheticContent), // Store content for fetcher
+				},
+			}
+		} else {
+			// Regular virtual file: reference original blob
+			orig, ok := fileIndex[vf.OriginalFilePath]
+			if !ok {
+				r.logger.Debug("skipping virtual file: original not found",
+					"original_path", vf.OriginalFilePath,
+					"virtual_path", vf.VirtualFilePath)
+				continue
+			}
+
+			fm = &pb.FileMetadata{
+				Path:            vf.VirtualFilePath,
+				StorageId:       virtualStorageID,
+				DisplayPath:     virtualDisplayPath,
+				Ref:             originalInfo.Ref,
+				Size:            orig.Size,
+				Mtime:           orig.Mtime,
+				Mode:            orig.Mode,
+				BlobHash:        orig.BlobHash,
+				Source:          orig.Source,
+				SourceType:      ingestionType,
+				FetchType:       fetchType,
+				BackendMetadata: orig.BackendMetadata,
+			}
 		}
 
-		fm := &pb.FileMetadata{
-			Path:            vf.VirtualFilePath,
-			StorageId:       virtualStorageID,
-			DisplayPath:     virtualDisplayPath,
-			Ref:             originalInfo.Ref,
-			Size:            orig.Size,
-			Mtime:           orig.Mtime,
-			Mode:            orig.Mode,
-			BlobHash:        orig.BlobHash,
-			Source:          orig.Source,
-			SourceType:      ingestionType,
-			FetchType:       fetchType,
-			BackendMetadata: orig.BackendMetadata,
-		}
 		batch = append(batch, fm)
 	}
+
+	r.logger.Info("batch built for virtual repo",
+		"virtual_path", virtualDisplayPath,
+		"batch_size", len(batch))
 
 	if len(batch) == 0 {
 		return fmt.Errorf("no files could be mapped (all originals missing)")
@@ -202,12 +288,43 @@ func (r *Router) ingestVirtualRepo(
 	// Step 5: Distribute files using HRW sharding (same as normal ingestion).
 	sharder := sharding.NewHRW(healthyNodes)
 	nodeBatches := make(map[string][]*pb.FileMetadata)
-	for _, fm := range batch {
+
+	r.logger.Debug("HRW sharding starting",
+		"virtual_path", virtualDisplayPath,
+		"healthy_nodes", len(healthyNodes),
+		"batch_size", len(batch))
+
+	for i, fm := range batch {
 		shardKey := virtualStorageID + ":" + fm.Path
 		targetNodes := sharder.GetNodes(shardKey, 1) // Primary only for virtual files
+
+		if i < 3 { // Log first 3 files for debugging
+			r.logger.Debug("HRW sharding file",
+				"file_path", fm.Path,
+				"shard_key", shardKey,
+				"target_nodes_count", len(targetNodes),
+				"target_node", func() string {
+					if len(targetNodes) > 0 {
+						return targetNodes[0].ID
+					}
+					return "none"
+				}())
+		}
+
 		if len(targetNodes) > 0 {
 			nodeBatches[targetNodes[0].ID] = append(nodeBatches[targetNodes[0].ID], fm)
 		}
+	}
+
+	r.logger.Info("files distributed to nodes",
+		"virtual_path", virtualDisplayPath,
+		"nodes_with_files", len(nodeBatches))
+
+	for nodeID, files := range nodeBatches {
+		r.logger.Debug("node file distribution",
+			"virtual_path", virtualDisplayPath,
+			"node_id", nodeID,
+			"file_count", len(files))
 	}
 
 	// Step 6: Send batches to nodes (batch size 1000, same as normal ingestion).
@@ -297,4 +414,10 @@ func (r *Router) getNodeByID(nodeID string) *nodeState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.nodes[nodeID]
+}
+
+// computeBlobHash computes SHA-256 hash of content for blob identification
+func computeBlobHash(content []byte) string {
+	hash := sha256.Sum256(content)
+	return hex.EncodeToString(hash[:])
 }

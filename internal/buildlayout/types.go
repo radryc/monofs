@@ -11,6 +11,9 @@ import "fmt"
 // LIFECYCLE: Called by Router AFTER successful ingestion.
 // INPUT:    Original repo info + file list collected during WalkFiles().
 // OUTPUT:   List of VirtualEntry defining new displayPaths.
+//
+// CACHE METADATA: Mappers should generate cache metadata for offline builds.
+// Use SyntheticContent in VirtualEntry to create metadata files (.info, .mod, etc.)
 type LayoutMapper interface {
 	// Type returns a unique identifier (e.g., "go", "bazel", "npm").
 	Type() string
@@ -22,6 +25,9 @@ type LayoutMapper interface {
 	// MapPaths generates virtual layout entries for a repo's files.
 	// Each VirtualEntry creates a new displayPath in the server's NutsDB.
 	// The virtual files reference the SAME blob_hash as the original.
+	//
+	// IMPORTANT: For offline build support, also generate cache metadata files
+	// using VirtualEntry.SyntheticContent. See golang/mapper.go for reference.
 	//
 	// `files` is the complete list of files from the ingestion WalkFiles().
 	// `info` contains displayPath, storageID, source, ref, ingestionType, fetchType.
@@ -38,6 +44,7 @@ type RepoInfo struct {
 	StorageID     string            // SHA-256(DisplayPath)
 	Source        string            // Original source URL/path
 	Ref           string            // Branch, tag, or version
+	CommitTime    string            // Commit timestamp (ISO 8601 format)
 	IngestionType string            // "git", "go"
 	FetchType     string            // "git", "gomod"
 	Config        map[string]string // Backend-specific config
@@ -51,6 +58,7 @@ type FileInfo struct {
 	Mode            uint32            // Unix file mode
 	Mtime           int64             // Modification time (Unix seconds)
 	Source          string            // Source URL (copied from ingestion)
+	Content         []byte            // File content (populated for files needed by mappers, like go.mod)
 	BackendMetadata map[string]string // Backend-specific metadata (e.g., module_path, version)
 }
 
@@ -67,7 +75,18 @@ type VirtualEntry struct {
 
 	// OriginalFilePath is the file path in the original repo.
 	// Used to look up BlobHash, Size, Mode from the collected FileInfo list.
+	// Empty for fetcher-generated files.
 	OriginalFilePath string
+
+	// SyntheticContent is content for files that don't exist in the original repo.
+	// DEPRECATED: Use CacheMetadata instead - fetcher generates content on-demand.
+	// If non-nil, this content will be stored as a new blob instead of referencing OriginalFilePath.
+	SyntheticContent []byte
+
+	// CacheMetadata contains parameters for the fetcher to generate content on-demand.
+	// Used for cache metadata files (.info, .mod, list) that don't need storage.
+	// If present and OriginalFilePath is empty, fetcher generates content using this metadata.
+	CacheMetadata map[string]string
 }
 
 // Dependency represents one dependency from a manifest file.

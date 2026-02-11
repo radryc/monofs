@@ -45,10 +45,10 @@ You should see:
 
 ### Step 3: Ingest Your First Repository
 
-```
-docker exec -it monofs-router1-1 /app/monofs-admin ingest \
+```bash
+./bin/monofs-admin ingest \
   --router=localhost:9090 \
-  --source=https://github.com/golang/example.git \
+  --source=https://github.com/golang/example \
   --ref=master
 ```
 
@@ -62,7 +62,7 @@ make build-client
 
 ### Step 5: Mount the Filesystem
 
-```
+```bash
 mkdir -p /tmp/monofs-mount
 
 ./bin/monofs-client \
@@ -72,12 +72,31 @@ mkdir -p /tmp/monofs-mount
 
 ### Step 6: Browse Your Files
 
-```
+```bash
 ls /tmp/monofs-mount/github.com/golang/example/
 cat /tmp/monofs-mount/github.com/golang/example/README.md
 ```
 
-**Congratulations!** You now have a distributed Git filesystem.
+### Step 7: Enable Offline Builds (Optional)
+
+For Go projects, ingest dependencies with cache metadata:
+
+```bash
+# Ingest all dependencies from go.mod
+./bin/monofs-admin ingest-deps \
+  --file=/tmp/monofs-mount/github.com/golang/example/go.mod \
+  --type=go \
+  --concurrency=10
+
+# Configure environment for offline builds
+eval $(./bin/monofs-session setup /tmp/monofs-mount)
+
+# Build 100% offline!
+cd /tmp/monofs-mount/github.com/golang/example
+go build ./...  # Zero network access!
+```
+
+**Congratulations!** You now have a distributed filesystem with offline build support.
 
 ---
 
@@ -187,11 +206,12 @@ flowchart TB
 
 ### Ingest More Repositories
 
-```
-# Ingest from GitHub (auto-detects branch from URL)
+```bash
+# Ingest from GitHub
 ./bin/monofs-admin ingest \
   --router=localhost:9090 \
-  --source=https://github.com/kubernetes/kubernetes/tree/master
+  --source=https://github.com/kubernetes/kubernetes \
+  --ref=master
 
 # Ingest a Go module
 ./bin/monofs-admin ingest \
@@ -199,12 +219,17 @@ flowchart TB
   --source=github.com/gin-gonic/gin@v1.9.0 \
   --ingestion-type=go \
   --fetch-type=gomod
+
+# Bulk ingest dependencies with cache metadata
+./bin/monofs-admin ingest-deps \
+  --file=/tmp/monofs-mount/path/to/go.mod \
+  --type=go
 ```
 
 ### Enable Write Support
 
 Mount with write capabilities:
-```
+```bash
 ./bin/monofs-client \
   --mount=/tmp/monofs-mount \
   --router=localhost:9090 \
@@ -212,7 +237,10 @@ Mount with write capabilities:
 ```
 
 Manage your changes:
-```
+```bash
+# Start a session
+./bin/monofs-session start
+
 # Check status
 ./bin/monofs-session status
 
@@ -233,8 +261,29 @@ Using the Web UI:
 3. Filter by file pattern if needed
 
 Using the CLI:
-```
+```bash
 ./bin/monofs-session search --query "func main" --max-results 20
+```
+
+### Build Projects Offline
+
+After ingesting dependencies with cache metadata:
+
+```bash
+# Go
+cd /tmp/monofs-mount/github.com/your/project
+eval $(./bin/monofs-session setup .)
+go build ./...  # 100% offline
+
+# npm
+cd /tmp/monofs-mount/github.com/your/project
+eval $(./bin/monofs-session setup .)
+npm install  # Uses cache
+
+# Cargo
+cd /tmp/monofs-mount/github.com/your/project
+eval $(./bin/monofs-session setup .)
+cargo build  # Offline
 ```
 
 ### Monitor the Cluster
@@ -247,7 +296,7 @@ Using the CLI:
 - Fetchers: http://localhost:8080/fetchers
 
 **CLI commands:**
-```
+```bash
 # Cluster status
 ./bin/monofs-admin status --router=localhost:9090
 
@@ -318,20 +367,22 @@ Before planned downtime:
 
 ### Unmount Filesystem
 
-```
+```bash
+make unmount MOUNT_POINT=/tmp/monofs-mount
+# OR
 fusermount -u /tmp/monofs-mount
 ```
 
 ### Stop Docker Cluster
 
-```
-docker-compose down
+```bash
+make deploy-stop
 ```
 
 ### Remove All Data
 
-```
-docker-compose down -v
+```bash
+make deploy-clean
 ```
 
 ---
@@ -375,4 +426,6 @@ sudo usermod -aG fuse $USER
 - **Web UI**: http://localhost:8080 (when cluster is running)
 - **Architecture**: See [ARCHITECTURE.md](ARCHITECTURE.md)
 - **Deployment**: See [DEPLOYMENT.md](DEPLOYMENT.md)
+- **Offline Builds**: See [OFFLINE_BUILDS.md](OFFLINE_BUILDS.md) (all ecosystems)
+- **Testing**: See [TESTING_OFFLINE_BUILDS.md](TESTING_OFFLINE_BUILDS.md)
 - **Issues**: Open an issue on GitHub

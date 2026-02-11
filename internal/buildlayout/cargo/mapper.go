@@ -93,6 +93,10 @@ func (c *CargoMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.Fi
 		})
 	}
 
+	// Generate Cargo cache metadata for offline builds
+	cacheEntries := createCargoCacheMetadata(crateName, version, files, info)
+	entries = append(entries, cacheEntries...)
+
 	return entries, nil
 }
 
@@ -188,4 +192,85 @@ func (c *CargoMapper) ParseDependencyFile(content []byte) ([]buildlayout.Depende
 	}
 
 	return deps, nil
+}
+
+// createCargoCacheMetadata generates Cargo cache files for offline builds.
+// Creates cache structure compatible with Cargo's registry cache.
+//
+// Cargo cache structure:
+//
+//	.cargo/
+//	├── registry/
+//	│   ├── cache/                    # .crate files
+//	│   ├── index/                    # Crate index
+//	│   └── src/                      # Extracted sources
+//	└── config.toml                   # Cargo configuration
+func createCargoCacheMetadata(crateName, version string, files []buildlayout.FileInfo, info buildlayout.RepoInfo) []buildlayout.VirtualEntry {
+	var entries []buildlayout.VirtualEntry
+
+	// 1. Create index entry for the crate
+	// Index path: .cargo/registry/index/[crate-name]
+	indexPath := ".cargo/registry/index"
+	indexContent := fmt.Sprintf(`{
+  "name": "%s",
+  "vers": "%s",
+  "deps": [],
+  "cksum": "monofs",
+  "features": {},
+  "yanked": false,
+  "links": null
+}`, crateName, version)
+
+	entries = append(entries, buildlayout.VirtualEntry{
+		VirtualDisplayPath: indexPath,
+		VirtualFilePath:    crateName,
+		OriginalFilePath:   "",
+		SyntheticContent:   []byte(indexContent),
+	})
+
+	// 2. Store Cargo.toml metadata
+	var cargoToml []byte
+	for _, f := range files {
+		if f.Path == "Cargo.toml" {
+			if len(f.Content) > 0 {
+				cargoToml = f.Content
+			}
+			break
+		}
+	}
+
+	if cargoToml == nil {
+		// Create minimal Cargo.toml
+		cargoToml = []byte(fmt.Sprintf(`[package]
+name = "%s"
+version = "%s"
+edition = "2021"
+
+[dependencies]
+`, crateName, version))
+	}
+
+	// Store Cargo.toml in cache
+	cachePath := fmt.Sprintf(".cargo/registry/cache/%s-%s", crateName, version)
+	entries = append(entries, buildlayout.VirtualEntry{
+		VirtualDisplayPath: cachePath,
+		VirtualFilePath:    "Cargo.toml",
+		OriginalFilePath:   "",
+		SyntheticContent:   cargoToml,
+	})
+
+	// 3. Create .cargo-checksum.json for verification
+	checksum := fmt.Sprintf(`{
+  "files": {},
+  "package": "monofs-%s-%s"
+}`, crateName, version)
+
+	entries = append(entries, buildlayout.VirtualEntry{
+		VirtualDisplayPath: cachePath,
+		VirtualFilePath:    ".cargo-checksum.json",
+		OriginalFilePath:   "",
+		SyntheticContent:   []byte(checksum),
+	})
+
+	return entries
 }

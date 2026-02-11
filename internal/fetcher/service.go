@@ -123,7 +123,52 @@ func (s *Service) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_Fetc
 		"source_key", fetchReq.SourceKey,
 	)
 
-	// Fetch with streaming
+	// Check if this is a cache metadata request (fetcher-generated content)
+	if cacheType := req.SourceConfig["cache_type"]; cacheType != "" {
+		s.logger.Debug("generating cache metadata",
+			"cache_type", cacheType,
+			"content_id", req.ContentId,
+		)
+		reader, size, err := s.generateCacheMetadata(ctx, req, fetchReq)
+		if err != nil {
+			s.logger.Error("cache metadata generation failed", "content_id", req.ContentId, "error", err)
+			return err
+		}
+		defer reader.Close()
+
+		// Stream generated content back
+		buf := make([]byte, s.config.StreamChunkSize)
+		totalSent := int64(0)
+
+		for {
+			n, readErr := reader.Read(buf)
+			if n > 0 {
+				chunk := &pb.DataChunk{
+					Data:   buf[:n],
+					Offset: totalSent,
+				}
+				if sendErr := stream.Send(chunk); sendErr != nil {
+					return sendErr
+				}
+				totalSent += int64(n)
+			}
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				return readErr
+			}
+		}
+
+		s.bytesServed.Add(size)
+		s.logger.Debug("cache metadata generated successfully",
+			"content_id", req.ContentId,
+			"size", size,
+		)
+		return nil
+	}
+
+	// Regular blob fetch with streaming
 	reader, size, err := backend.FetchBlobStream(ctx, fetchReq)
 	if err != nil {
 		s.logger.Error("fetch failed", "content_id", req.ContentId, "error", err)

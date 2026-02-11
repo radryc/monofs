@@ -187,24 +187,24 @@ ENV MONOFS_OVERLAY_DIR=/var/lib/monofs/overlay
 ENV MONOFS_MOUNT=/mnt
 
 # Configure Go for offline builds using MonoFS
-# GOVCS=off: Disable VCS operations to prevent git commands in module cache
+# GOVCS=*:off: Disable VCS operations to prevent git commands in module cache
 # GOPROXY=off: Disable proxy downloads for offline builds
 # GOMODCACHE: Use MonoFS go-modules directory as module cache
 # GOFLAGS=-modcacherw: Make module cache read-write (allows builds without git)
-ENV GOVCS=off
+ENV GOVCS=*:off
 ENV GOPROXY=off
 ENV GOMODCACHE=/mnt/go-modules/pkg/mod
 ENV GOFLAGS=-modcacherw
 
 RUN echo 'export MONOFS_OVERLAY_DIR=/var/lib/monofs/overlay' >> /etc/profile.d/monofs.sh && \
     echo 'export MONOFS_MOUNT=/mnt' >> /etc/profile.d/monofs.sh && \
-    echo 'export GOVCS=off' >> /etc/profile.d/monofs.sh && \
+    echo 'export GOVCS=*:off' >> /etc/profile.d/monofs.sh && \
     echo 'export GOPROXY=off' >> /etc/profile.d/monofs.sh && \
     echo 'export GOMODCACHE=/mnt/go-modules/pkg/mod' >> /etc/profile.d/monofs.sh && \
     echo 'export GOFLAGS=-modcacherw' >> /etc/profile.d/monofs.sh && \
     echo 'export MONOFS_OVERLAY_DIR=/var/lib/monofs/overlay' >> /home/monofs/.bashrc && \
     echo 'export MONOFS_MOUNT=/mnt' >> /home/monofs/.bashrc && \
-    echo 'export GOVCS=off' >> /home/monofs/.bashrc && \
+    echo 'export GOVCS=*:off' >> /home/monofs/.bashrc && \
     echo 'export GOPROXY=off' >> /home/monofs/.bashrc && \
     echo 'export GOMODCACHE=/mnt/go-modules/pkg/mod' >> /home/monofs/.bashrc && \
     echo 'export GOFLAGS=-modcacherw' >> /home/monofs/.bashrc && \

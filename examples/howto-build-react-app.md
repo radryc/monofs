@@ -14,70 +14,75 @@ Modern JavaScript projects rely heavily on NPM dependencies. MonoFS can cache an
 
 ## Example 1: Build Create React App
 
-### Step 1: Ingest React Repository
+### Step 1: Ingest Example React Repository
 
 ```bash
-# Ingest Create React App
-monofs-admin ingest \
-  --url=https://github.com/facebook/create-react-app \
-  --ref=main \
-  --display-path=github.com/facebook/create-react-app
+# Ingest a sample React app for reference
+./bin/monofs-admin ingest \
+  --router=localhost:9090 \
+  --source=https://github.com/facebook/create-react-app \
+  --ref=main
 
 # Verify
 ls /mnt/github.com/facebook/create-react-app/
 ```
 
-### Step 2: Create New React App in /mnt
+### Step 2: Ingest Your React Project
+
+For this example, let's ingest an actual React project:
 
 ```bash
-# Create project directory in /mnt
-mkdir -p /mnt/build/my-react-app
-cd /mnt/build/my-react-app
+# Ingest your React project
+./bin/monofs-admin ingest \
+  --router=localhost:9090 \
+  --source=https://github.com/your/react-project \
+  --ref=main
 
-# Start session
-monofs-session start
-
-# Initialize React app (using create-react-app template)
-monofs-build npm -- create-react-app@latest . --use-npm
-
-# Or manually copy template structure from ingested repo
-cp /mnt/github.com/facebook/create-react-app/packages/cra-template/template.json .
-cp -r /mnt/github.com/facebook/create-react-app/packages/cra-template/template/* .
+# Verify project is ingested
+ls /mnt/github.com/your/react-project/
 ```
 
-### Step 3: Ingest Dependencies (One-Time Setup)
+### Step 3: Ingest Dependencies with Cache Metadata
 
 ```bash
-# Ingest all npm dependencies from package.json
-monofs-admin ingest-deps \
-  --file=/mnt/build/my-react-app/package.json \
-  --type=npm
+# Ingest all npm dependencies with cache metadata (CRITICAL for offline builds)
+./bin/monofs-admin ingest-deps \
+  --router=localhost:9090 \
+  --file=/mnt/github.com/your/react-project/package.json \
+  --type=npm \
+  --concurrency=10
 
 # Wait for ingestion
-monofs-admin status --filter="npm"
+./bin/monofs-admin status --router=localhost:9090
 
-# All packages now cached in /mnt/npm-cache/
-
-# Install dependencies (100% offline, uses MonoFS cache)
-monofs-build npm -- install
-
-# 🚀 Zero downloads! All packages from /mnt/npm-cache/
+# All packages now cached in /mnt/npm-cache/ with metadata
+ls -la /mnt/npm-cache/
 ```
 
-### Step 4: Build the Application (Offline)
+### Step 4: Build the Application (100% Offline)
+
+Work directly in the mounted project:
 
 ```bash
+# Navigate to project
+cd /mnt/github.com/your/react-project/
+
+# Configure environment for offline builds
+eval $(./bin/monofs-session setup /mnt)
+
+# Install dependencies (100% offline, uses MonoFS cache)
+npm install
+# 🚀 Zero downloads! All packages from /mnt/npm-cache/
+
 # Development build
-monofs-build npm -- run start  # Runs on localhost:3000
+npm run start  # Runs on localhost:3000
 
 # Production build (100% offline)
-monofs-build npm -- run build
+npm run build
 
 # Verify build output
 ls -lh build/
 # Should see: static/ index.html manifest.json etc.
-
-# Commit build artifacts to MonoFS
 monofs-session commit \
   --message="React app production build $(date +%Y-%m-%d)"
 
@@ -117,7 +122,7 @@ monofs-admin ingest-deps \
   --type=npm
 
 # Install dependencies (100% offline)
-monofs-build npm -- install
+npminstall
 
 # Verify node_modules
 du -sh node_modules/
@@ -128,13 +133,13 @@ du -sh node_modules/
 
 ```bash
 # Development server
-monofs-build npm -- run dev
+npmrun dev
 
 # Production build (100% offline)
-monofs-build npm -- run build
+npmrun build
 
 # Start production server
-monofs-build npm -- run start
+npmrun start
 
 # Check build size
 du -sh .next/

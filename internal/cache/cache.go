@@ -57,9 +57,9 @@ func New(dir string, logger *slog.Logger) (*Cache, error) {
 	db, err := nutsdb.Open(
 		nutsdb.DefaultOptions,
 		nutsdb.WithDir(dir),
-		nutsdb.WithSegmentSize(64*1024*1024), // 64MB segments
+		nutsdb.WithSegmentSize(64*1024*1024),                 // 64MB segments
 		nutsdb.WithEntryIdxMode(nutsdb.HintKeyAndRAMIdxMode), // Use hint file for faster startup (only keys in RAM)
-		nutsdb.WithRWMode(nutsdb.MMap), // Use mmap for faster reads
+		nutsdb.WithRWMode(nutsdb.MMap),                       // Use mmap for faster reads
 	)
 	if err != nil {
 		logger.Error("failed to open cache database", "dir", dir, "error", err)

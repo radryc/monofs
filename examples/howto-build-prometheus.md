@@ -9,7 +9,7 @@ Prometheus is a popular monitoring system written in Go. This example shows how 
 ## Prerequisites
 
 - MonoFS cluster running
-- Go 1.21+ installed
+- Go 1.24+ installed
 - Node.js 18+ (for UI assets)
 - Make installed
 
@@ -17,23 +17,27 @@ Prometheus is a popular monitoring system written in Go. This example shows how 
 
 ```bash
 # Ingest main Prometheus repository
-monofs-admin ingest \
-  --url=https://github.com/prometheus/prometheus \
-  --ref=main \
-  --display-path=github.com/prometheus/prometheus
+./bin/monofs-admin ingest \
+  --router=localhost:9090 \
+  --source=https://github.com/prometheus/prometheus \
+  --ref=main
 
-# Ingest ALL Go dependencies automatically
-monofs-admin ingest-deps \
+# Ingest ALL Go dependencies with cache metadata
+./bin/monofs-admin ingest-deps \
+  --router=localhost:9090 \
   --file=/mnt/github.com/prometheus/prometheus/go.mod \
-  --type=go
+  --type=go \
+  --concurrency=10
 
-# Ingest npm dependencies for web UI
-monofs-admin ingest-deps \
+# Ingest npm dependencies with cache metadata
+./bin/monofs-admin ingest-deps \
+  --router=localhost:9090 \
   --file=/mnt/github.com/prometheus/prometheus/web/ui/package.json \
-  --type=npm
+  --type=npm \
+  --concurrency=10
 
 # Wait for ingestion (or check status)
-monofs-admin status --filter=prometheus
+./bin/monofs-admin status --router=localhost:9090
 
 # Verify source and dependencies
 ls /mnt/github.com/prometheus/prometheus/
@@ -56,24 +60,28 @@ ls -la
 # Should see: Makefile, go.mod, cmd/, web/, etc.
 
 # Start a session if you need to modify source
-monofs-session start
+./bin/monofs-session start
 ```
 
 ## Step 3: Verify Dependencies (Already Available)
 
-All dependencies are already available - verify offline mode:
+All dependencies are already available - verify cache metadata:
 
 ```bash
-# Check Go dependencies are available
+# Check Go dependencies and cache metadata
 ls /mnt/go-modules/pkg/mod/github.com/go-kit/
-ls /mnt/go-modules/pkg/mod/google.golang.org/grpc@*/
+ls /mnt/go-modules/pkg/mod/cache/download/github.com/go-kit/
 
 # Check npm dependencies
 ls /mnt/npm-cache/
 
-# Verify offline environment
-monofs-build --dry-run go -- build ./...
-# Should show: GOMODCACHE=/mnt/go-modules/pkg/mod, GONOSUMDB=*
+# Configure environment for offline builds
+eval $(./bin/monofs-session setup /mnt)
+
+# Verify offline environment variables
+echo $GOMODCACHE  # Should be /mnt/go-modules/pkg/mod
+echo $GOPROXY     # Should be off
+echo $NPM_CONFIG_CACHE  # Should be /mnt/npm-cache
 ```
 
 ## Step 4: Build Prometheus Components (Offline)
@@ -81,8 +89,9 @@ monofs-build --dry-run go -- build ./...
 ### Build Prometheus Server
 
 ```bash
-# Build using monofs-build wrapper (100% offline!)
-monofs-build go -- build -o prometheus ./cmd/prometheus
+# Environment already configured with monofs-session setup
+# Build 100% offline with standard go commands!
+go build -o prometheus ./cmd/prometheus
 
 # Verify binary
 ./prometheus --version
@@ -97,13 +106,15 @@ Prometheus includes several utilities:
 
 ```bash
 # Build promtool (config validator and query tool)
-monofs-build go -- build -o promtool ./cmd/promtool
+go build -o promtool ./cmd/promtool
 
 # Build query examples
-monofs-build go -- build -o examples/random ./docs/examples/random
+go build -o examples/random ./docs/examples/random
 
 # List all built binaries
 ls -lh prometheus promtool
+
+# All builds 100% offline using MonoFS cache!
 ```
 
 ## Step 5: Build Web UI Assets (Offline)
@@ -114,15 +125,16 @@ Prometheus includes a React-based web UI:
 # Navigate to web UI directory
 cd web/ui
 
-# Build UI assets using monofs-build (offline!)
-monofs-build npm -- ci
-monofs-build npm -- run build
+# Environment already configured for npm offline mode
+# Build UI assets 100% offline!
+npm ci
+npm run build
 
 # Return to root
 cd ../..
 
 # Rebuild Prometheus with UI embedded
-monofs-build go -- build -o prometheus ./cmd/prometheus
+go build -o prometheus ./cmd/prometheus
 
 # Entire build was offline - zero network access!
 ```
@@ -132,22 +144,22 @@ monofs-build go -- build -o prometheus ./cmd/prometheus
 Run Prometheus test suite using MonoFS dependencies:
 
 ```bash
-# Run all tests with monofs-build
-monofs-build go -- test ./...
+# Run all tests (100% offline!)
+go test ./...
 
 # Run specific package tests
-monofs-build go -- test ./promql/...
-monofs-build go -- test ./storage/...
-monofs-build go -- test ./tsdb/...
+go test ./promql/...
+go test ./storage/...
+go test ./tsdb/...
 
 # Run with coverage
-monofs-build go -- test -cover ./...
+go test -cover ./...
 
 # Run race detector tests
-monofs-build go -- test -race ./...
+go test -race ./...
 
 # Benchmark tests
-monofs-build go -- test -bench=. ./tsdb/...
+go test -bench=. ./tsdb/...
 
 # All tests run completely offline!
 ```
@@ -157,8 +169,8 @@ monofs-build go -- test -bench=. ./tsdb/...
 ### Production Build with Optimization
 
 ```bash
-# Build with release flags using monofs-build
-monofs-build go -- build \
+# Build with release flags (100% offline!)
+go build \
   -ldflags="-s -w -X github.com/prometheus/common/version.Version=2.49.0" \
   -o prometheus-prod \
   ./cmd/prometheus
@@ -173,8 +185,8 @@ strip prometheus-prod
 ### Debug Build
 
 ```bash
-# Build with debug symbols
-monofs-build go -- build -gcflags="all=-N -l" -o prometheus-debug ./cmd/prometheus
+# Build with debug symbols (100% offline!)
+go build -gcflags="all=-N -l" -o prometheus-debug ./cmd/prometheus
 
 # Verify debug symbols
 file prometheus-debug
@@ -185,17 +197,17 @@ file prometheus-debug
 Build for multiple platforms using shared dependencies:
 
 ```bash
-# Linux AMD64
-GOOS=linux GOARCH=amd64 monofs-build go -- build -o prometheus-linux-amd64 ./cmd/prometheus
+# Linux AMD64 (100% offline!)
+GOOS=linux GOARCH=amd64 go build -o prometheus-linux-amd64 ./cmd/prometheus
 
-# Linux ARM64
-GOOS=linux GOARCH=arm64 monofs-build go -- build -o prometheus-linux-arm64 ./cmd/prometheus
+# Linux ARM64 (100% offline!)
+GOOS=linux GOARCH=arm64 go build -o prometheus-linux-arm64 ./cmd/prometheus
 
 # macOS AMD64
-GOOS=darwin GOARCH=amd64 monofs-build go -- build -o prometheus-darwin-amd64 ./cmd/prometheus
+GOOS=darwin GOARCH=amd64 gobuild -o prometheus-darwin-amd64 ./cmd/prometheus
 
 # Windows AMD64
-GOOS=windows GOARCH=amd64 monofs-build go -- build -o prometheus-windows-amd64.exe ./cmd/prometheus
+GOOS=windows GOARCH=amd64 gobuild -o prometheus-windows-amd64.exe ./cmd/prometheus
 
 # List all built binaries
 ls -lh prometheus-*
@@ -297,7 +309,7 @@ time ls /mnt/go-modules/pkg/mod/
 # Real: 0.01 seconds (instant!)
 
 # Build (100% offline!)
-time monofs-build go -- build ./cmd/prometheus
+time gobuild ./cmd/prometheus
 # Real: 180 seconds
 
 # Total: ~180 seconds (3m)
@@ -311,7 +323,7 @@ time monofs-build go -- build ./cmd/prometheus
 cd /mnt/github.com/prometheus/prometheus/
 
 # Incremental build (only changed files)
-time monofs-build go -- build ./cmd/prometheus
+time gobuild ./cmd/prometheus
 # Real: 15-30 seconds
 
 # Speedup: 17x-35x faster!
@@ -344,11 +356,11 @@ monofs-admin ingest-deps \
 
 # Build v2.49.0 (work directly in /mnt)
 cd /mnt/github.com/prometheus/prometheus@v2.49.0
-monofs-build go -- build -o prometheus ./cmd/prometheus
+gobuild -o prometheus ./cmd/prometheus
 
 # Build v2.45.0 (work directly in /mnt)
 cd /mnt/github.com/prometheus/prometheus@v2.45.0
-monofs-build go -- build -o prometheus ./cmd/prometheus
+gobuild -o prometheus ./cmd/prometheus
 
 # Compare binaries
 ls -lh /mnt/github.com/prometheus/prometheus@v2.49.0/prometheus
@@ -403,13 +415,13 @@ jobs:
       - name: Build Prometheus (offline)
         run: |
           cd /mnt/github.com/prometheus/prometheus
-          monofs-build go -- build -o prometheus ./cmd/prometheus
-          monofs-build go -- build -o promtool ./cmd/promtool
+          gobuild -o prometheus ./cmd/prometheus
+          gobuild -o promtool ./cmd/promtool
 
       - name: Run tests (offline)
         run: |
           cd /mnt/github.com/prometheus/prometheus
-          monofs-build go -- test ./...
+          gotest ./...
 
       - name: Commit artifacts
         run: |
@@ -429,14 +441,21 @@ jobs:
 ### Go Build Tries to Download Modules
 
 ```bash
-# Ensure you're using monofs-build wrapper
-monofs-build go -- build ./...
+# Ensure environment is configured for offline builds
+eval $(./bin/monofs-session setup /mnt)
+
+# Build 100% offline with standard commands
+gobuild ./...
 
 # NOT: go build ./...
 # The wrapper sets GOMODCACHE and offline flags
 
 # Verify offline configuration
-monofs-build --dry-run go -- build ./...
+# Verify offline environment
+echo $GOMODCACHE
+echo $GOPROXY
+
+# Run dry-run go -- build ./...
 # Should show: GOMODCACHE=/mnt/go-modules/pkg/mod
 ```
 
@@ -465,12 +484,12 @@ monofs-admin ingest-deps \
 cd /mnt/github.com/prometheus/prometheus/web/ui
 
 # Rebuild UI (offline)
-monofs-build npm -- ci
-monofs-build npm -- run build
+npmci
+npmrun build
 
 # Return and rebuild Prometheus
 cd ../..
-monofs-build go -- build ./cmd/prometheus
+gobuild ./cmd/prometheus
 ```
 
 ### Permission Errors
@@ -482,7 +501,7 @@ monofs-session start
 
 # Now you can modify files and build
 vim cmd/prometheus/main.go
-monofs-build go -- build ./cmd/prometheus
+gobuild ./cmd/prometheus
 ```
 
 ## Next Steps
