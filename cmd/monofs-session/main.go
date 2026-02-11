@@ -17,6 +17,95 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// ---- Build environment setup types ----
+
+// BuildBackend describes how to configure a build system with MonoFS
+type BuildBackend struct {
+	Name        string                           // go, bazel, npm, maven, cargo, pip
+	DetectFiles []string                         // Files that indicate this build system
+	CachePath   string                           // Path under mount point
+	Command     string                           // Default command name
+	SetupEnv    func(mountPoint string) []string // Env vars to set
+}
+
+var buildBackends = []BuildBackend{
+	{
+		Name:        "go",
+		DetectFiles: []string{"go.mod", "go.sum"},
+		CachePath:   "go-modules/pkg/mod",
+		Command:     "go",
+		SetupEnv: func(mp string) []string {
+			gomodcache := filepath.Join(mp, "go-modules/pkg/mod")
+			return []string{
+				"GOMODCACHE=" + gomodcache,
+				"GOPROXY=file://" + gomodcache + "/cache/download,direct",
+				"GOSUMDB=off",
+				"GOFLAGS=-mod=readonly",
+			}
+		},
+	},
+	{
+		Name:        "bazel",
+		DetectFiles: []string{"MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel", "BUILD.bazel", "BUILD"},
+		CachePath:   "bazel-repos",
+		Command:     "bazel",
+		SetupEnv: func(mp string) []string {
+			return []string{
+				"BAZEL_REPOSITORY_CACHE=" + filepath.Join(mp, "bazel-repos"),
+			}
+		},
+	},
+	{
+		Name:        "npm",
+		DetectFiles: []string{"package.json", "package-lock.json"},
+		CachePath:   "npm-cache",
+		Command:     "npm",
+		SetupEnv: func(mp string) []string {
+			return []string{
+				"NPM_CONFIG_CACHE=" + filepath.Join(mp, "npm-cache"),
+				"NPM_CONFIG_PREFER_OFFLINE=true",
+			}
+		},
+	},
+	{
+		Name:        "maven",
+		DetectFiles: []string{"pom.xml"},
+		CachePath:   "maven-repo",
+		Command:     "mvn",
+		SetupEnv: func(mp string) []string {
+			return []string{
+				"MAVEN_REPO=" + filepath.Join(mp, "maven-repo"),
+			}
+		},
+	},
+	{
+		Name:        "cargo",
+		DetectFiles: []string{"Cargo.toml", "Cargo.lock"},
+		CachePath:   "cargo-home",
+		Command:     "cargo",
+		SetupEnv: func(mp string) []string {
+			return []string{
+				"CARGO_HOME=" + filepath.Join(mp, "cargo-home"),
+				"CARGO_NET_OFFLINE=true",
+			}
+		},
+	},
+	{
+		Name:        "pip",
+		DetectFiles: []string{"requirements.txt", "pyproject.toml", "setup.py"},
+		CachePath:   "pip-cache",
+		Command:     "pip",
+		SetupEnv: func(mp string) []string {
+			return []string{
+				"PIP_CACHE_DIR=" + filepath.Join(mp, "pip-cache"),
+				"PIP_NO_INDEX=true",
+			}
+		},
+	},
+}
+
+// ---- Session types ----
+
 // SessionRequest is sent to the FUSE client
 type SessionRequest struct {
 	Action string `json:"action"` // start, status, commit, discard
@@ -107,6 +196,8 @@ func (sc *SessionCommand) Execute(args []string) error {
 		return sc.commitSession()
 	case "discard":
 		return sc.discardSession()
+	case "setup":
+		return handleSetup(args[1:])
 	case "search":
 		return sc.searchCode(args[1:])
 	case "help", "--help", "-h":
@@ -117,7 +208,7 @@ func (sc *SessionCommand) Execute(args []string) error {
 }
 
 func (sc *SessionCommand) printUsage() error {
-	fmt.Printf(`MonoFS Session - Write Session Management & Code Search
+	fmt.Printf(`MonoFS Session - Write Session Management, Build Setup & Code Search
 
 Usage: monofs-session [--socket <path>] <command>
 
@@ -126,6 +217,7 @@ Commands:
   status   Show current session status and pending changes
   commit   Push local changes to backend and archive session
   discard  Abandon all local changes and delete session
+  setup    Configure build environment for MonoFS (use with eval)
   search   Search code across indexed repositories
   help     Show this help message
 
@@ -137,10 +229,21 @@ and can be committed to the Git backend when ready.
 
 Environment:
   MONOFS_OVERLAY_DIR  Override default overlay location (~/.monofs/overlay)
+  MONOFS_MOUNT        Override default MonoFS mount point (default: /mnt)
 
 Examples:
-  # Start a new session
+  # Start a session and setup build environment in one go
   monofs-session start
+  eval $(monofs-session setup .)
+
+  # Setup auto-detects ALL build systems (go, npm, cargo, etc.)
+  cd /mnt/github.com/user/project
+  eval $(monofs-session setup .)
+  go build ./...     # works natively!
+  npm install        # works natively!
+
+  # Explicit build type
+  eval $(monofs-session setup go)
 
   # Check what changes are pending
   monofs-session status
@@ -148,17 +251,11 @@ Examples:
   # Search for code
   monofs-session search --query "func main" --max-results 10
 
-  # Search with filters
-  monofs-session search --query "TODO" --regex --case-sensitive
-
-  # Use explicit socket path (useful in Docker)
-  monofs-session --socket /path/to/session.sock status
-
   # Commit all changes to backend
   monofs-session commit
 
-  # Abandon all local changes
-  monofs-session discard
+  # Use explicit socket path (useful in Docker)
+  monofs-session --socket /path/to/session.sock status
 
 Current socket path: %s
 `, sc.socketPath)
@@ -177,8 +274,8 @@ Possible fixes:
   1. Start monofs-client with --writable flag:
      monofs-client --mount /mnt --writable
 
-  2. Set GITFS_OVERLAY_DIR to match monofs-client's --overlay path:
-     export GITFS_OVERLAY_DIR=/path/to/overlay
+  2. Set MONOFS_OVERLAY_DIR to match monofs-client's --overlay path:
+     export MONOFS_OVERLAY_DIR=/path/to/overlay
      monofs-session status
 
   3. Use --socket to specify explicit path:
@@ -493,4 +590,117 @@ func colorize(text string, color string, bold bool) string {
 		return fmt.Sprintf("\033[1;%dm%s\033[0m", code, text)
 	}
 	return fmt.Sprintf("\033[0;%dm%s\033[0m", code, text)
+}
+
+// ---- Build environment setup ----
+
+// detectMountPoint finds the MonoFS mount point.
+func detectMountPoint() string {
+	if envMount := os.Getenv("MONOFS_MOUNT"); envMount != "" {
+		return envMount
+	}
+	for _, candidate := range []string{"/mnt", "/mnt/monofs"} {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			entries, _ := os.ReadDir(candidate)
+			if len(entries) > 0 {
+				return candidate
+			}
+		}
+	}
+	return "/mnt"
+}
+
+// detectAllBuildSystems scans a directory and returns ALL matching build systems.
+func detectAllBuildSystems(dir string) []*BuildBackend {
+	var found []*BuildBackend
+	for i := range buildBackends {
+		for _, file := range buildBackends[i].DetectFiles {
+			path := file
+			if dir != "" {
+				path = filepath.Join(dir, file)
+			}
+			if _, err := os.Stat(path); err == nil {
+				found = append(found, &buildBackends[i])
+				break
+			}
+		}
+	}
+	return found
+}
+
+// handleSetup prints export statements that can be eval'd.
+//
+//	eval $(monofs-session setup)          # auto-detect ALL from cwd
+//	eval $(monofs-session setup .)        # same
+//	eval $(monofs-session setup go)       # explicit single type
+//	eval $(monofs-session setup /path)    # detect ALL from path
+func handleSetup(args []string) error {
+	var explicit []*BuildBackend
+	detectDir := ""
+
+	if len(args) > 0 {
+		arg := args[0]
+
+		// Check if arg is a known build type name
+		for i := range buildBackends {
+			if buildBackends[i].Name == arg {
+				explicit = append(explicit, &buildBackends[i])
+				break
+			}
+		}
+
+		// If not a build type, treat as a directory path
+		if len(explicit) == 0 {
+			if absPath, err := filepath.Abs(arg); err == nil {
+				detectDir = absPath
+			} else {
+				detectDir = arg
+			}
+			if info, err := os.Stat(detectDir); err != nil || !info.IsDir() {
+				return fmt.Errorf("%q is not a known build type or valid directory\nBuild types: go, bazel, npm, maven, cargo, pip", arg)
+			}
+		}
+	}
+
+	// Auto-detect all build systems if not explicitly named
+	detected := explicit
+	if len(detected) == 0 {
+		detected = detectAllBuildSystems(detectDir)
+		if len(detected) == 0 {
+			loc := "current directory"
+			if detectDir != "" {
+				loc = detectDir
+			}
+			return fmt.Errorf("no build systems detected in %s\nLooked for: go.mod, package.json, Cargo.toml, pom.xml, etc.\n\nUsage: eval $(monofs-session setup [.|<path>|<type>])", loc)
+		}
+		names := make([]string, len(detected))
+		for i, b := range detected {
+			names[i] = b.Name
+		}
+		fmt.Fprintf(os.Stderr, "# Auto-detected build systems: %s\n", strings.Join(names, ", "))
+	}
+
+	mountPoint := detectMountPoint()
+
+	// Verify mount
+	if _, err := os.Stat(mountPoint); os.IsNotExist(err) {
+		return fmt.Errorf("MonoFS not mounted at %s\nSet MONOFS_MOUNT or use: monofs-client --mount=/mnt --router=<addr>", mountPoint)
+	}
+
+	// Emit exports for ALL detected build systems
+	seen := map[string]bool{}
+	var cmds []string
+	for _, backend := range detected {
+		for _, env := range backend.SetupEnv(mountPoint) {
+			key := strings.SplitN(env, "=", 2)[0]
+			if !seen[key] {
+				fmt.Printf("export %s\n", env)
+				seen[key] = true
+			}
+		}
+		cmds = append(cmds, backend.Command)
+	}
+	fmt.Printf("export MONOFS_MOUNT=%s\n", mountPoint)
+	fmt.Fprintf(os.Stderr, "# MonoFS environment ready — use native commands directly: %s\n", strings.Join(cmds, ", "))
+	return nil
 }

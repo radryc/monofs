@@ -880,6 +880,22 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	// Read mode: check for local override first
 	if n.sessionMgr != nil && n.sessionMgr.HasLocalOverride(n.path) {
 		localPath, _ := n.sessionMgr.GetLocalPath(n.path)
+
+		// Check file size - for large files (>10MB), use file handle instead of loading into memory
+		if stat, err := os.Stat(localPath); err == nil && stat.Size() > 10*1024*1024 {
+			f, err := os.Open(localPath)
+			if err == nil {
+				n.logger.Debug("open: using local override (large file, returning handle)", "path", n.path, "size", stat.Size())
+				fh := &monofsFileHandle{
+					file:   f,
+					node:   n,
+					logger: n.logger,
+				}
+				return fh, fuse.FOPEN_KEEP_CACHE, 0
+			}
+		}
+
+		// For smaller files, read into memory
 		content, err := os.ReadFile(localPath)
 		if err == nil {
 			n.mu.Lock()
@@ -950,29 +966,48 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 	if content == nil {
 		n.logger.Debug("read: content nil, attempting reload", "path", n.path)
 
-		// Try to reload content with retry
-		const maxRetries = 3
 		var err error
 
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			content, err = n.client.Read(ctx, n.path, 0, 0)
-			if err == nil && content != nil {
-				// Cache the content for future reads
-				n.mu.Lock()
-				n.content = content
-				n.mu.Unlock()
-				n.logger.Debug("read: content reloaded successfully", "path", n.path, "size", len(content))
-				break
+		// First, check if file exists in local overlay
+		if n.sessionMgr != nil && n.sessionMgr.HasLocalOverride(n.path) {
+			if localPath, err := n.sessionMgr.GetLocalPath(n.path); err == nil {
+				if localContent, err := os.ReadFile(localPath); err == nil {
+					n.logger.Debug("read: loaded from local overlay", "path", n.path, "size", len(localContent))
+					n.mu.Lock()
+					n.content = localContent
+					n.mu.Unlock()
+					content = localContent
+					// Continue to read from content below
+				} else {
+					n.logger.Warn("read: local override exists but read failed", "path", n.path, "error", err)
+				}
 			}
+		}
 
-			n.logger.Debug("read: reload retry", "path", n.path, "attempt", attempt+1, "error", err)
+		// If not in overlay, try to reload content from backend with retry
+		if content == nil {
+			const maxRetries = 3
 
-			if attempt < maxRetries-1 {
-				delay := time.Duration(100*(1<<uint(attempt))) * time.Millisecond
-				select {
-				case <-ctx.Done():
-					return nil, syscall.EINTR
-				case <-time.After(delay):
+			for attempt := 0; attempt < maxRetries; attempt++ {
+				content, err = n.client.Read(ctx, n.path, 0, 0)
+				if err == nil && content != nil {
+					// Cache the content for future reads
+					n.mu.Lock()
+					n.content = content
+					n.mu.Unlock()
+					n.logger.Debug("read: content reloaded successfully", "path", n.path, "size", len(content))
+					break
+				}
+
+				n.logger.Debug("read: reload retry", "path", n.path, "attempt", attempt+1, "error", err)
+
+				if attempt < maxRetries-1 {
+					delay := time.Duration(100*(1<<uint(attempt))) * time.Millisecond
+					select {
+					case <-ctx.Done():
+						return nil, syscall.EINTR
+					case <-time.After(delay):
+					}
 				}
 			}
 		}
@@ -1164,6 +1199,11 @@ func (n *MonoNode) Create(ctx context.Context, name string, flags uint32, mode u
 		logger: n.logger,
 	}
 
+	// Invalidate parent directory cache so new file appears in listings
+	if n.cache != nil {
+		n.cache.Invalidate(n.path)
+	}
+
 	n.logger.Info("created file", "path", newPath)
 
 	return inode, fh, fuse.FOPEN_DIRECT_IO, 0
@@ -1248,6 +1288,11 @@ func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 	out.SetEntryTimeout(attrTimeout())
 	out.SetAttrTimeout(attrTimeout())
 
+	// Invalidate parent directory cache so new directory appears in listings
+	if n.cache != nil {
+		n.cache.Invalidate(n.path)
+	}
+
 	n.logger.Info("created directory", "path", newPath)
 
 	return inode, 0
@@ -1288,6 +1333,11 @@ func (n *MonoNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	// Track the deletion
 	if err := n.sessionMgr.TrackChange(ChangeDelete, targetPath, ""); err != nil {
 		n.logger.Warn("unlink: failed to track change", "error", err)
+	}
+
+	// Invalidate parent directory cache so deleted file disappears from listings
+	if n.cache != nil {
+		n.cache.Invalidate(n.path)
 	}
 
 	return 0
@@ -1340,6 +1390,11 @@ func (n *MonoNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		n.logger.Warn("rmdir: failed to track change", "error", err)
 	}
 
+	// Invalidate parent directory cache so deleted directory disappears from listings
+	if n.cache != nil {
+		n.cache.Invalidate(n.path)
+	}
+
 	return 0
 }
 
@@ -1379,14 +1434,17 @@ func (n *MonoNode) Rename(ctx context.Context, name string, newParent fs.InodeEm
 
 	newPath := newParentPath + "/" + newName
 
-	// Ensure local copy exists for the source
-	if err := n.ensureLocalCopyFor(ctx, oldPath); err != nil {
-		n.logger.Error("rename: failed to copy source", "error", err)
-		return syscall.EIO
-	}
-
 	oldLocalPath, _ := n.sessionMgr.GetLocalPath(oldPath)
 	newLocalPath, _ := n.sessionMgr.GetLocalPath(newPath)
+
+	// Only fetch from backend if file doesn't already exist locally
+	if _, err := os.Stat(oldLocalPath); os.IsNotExist(err) {
+		// Ensure local copy exists for the source
+		if err := n.ensureLocalCopyFor(ctx, oldPath); err != nil {
+			n.logger.Error("rename: failed to copy source", "error", err)
+			return syscall.EIO
+		}
+	}
 
 	// Create parent directories for destination
 	if err := os.MkdirAll(filepath.Dir(newLocalPath), 0755); err != nil {
@@ -1403,6 +1461,14 @@ func (n *MonoNode) Rename(ctx context.Context, name string, newParent fs.InodeEm
 	// Track as delete + create
 	n.sessionMgr.TrackChange(ChangeDelete, oldPath, "")
 	n.sessionMgr.TrackChange(ChangeCreate, newPath, "")
+
+	// Invalidate cache for both old and new parent directories
+	if n.cache != nil {
+		n.cache.Invalidate(n.path) // old parent
+		if newParentPath != n.path {
+			n.cache.Invalidate(newParentPath) // new parent if different
+		}
+	}
 
 	n.logger.Info("renamed", "from", oldPath, "to", newPath)
 

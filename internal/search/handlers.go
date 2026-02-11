@@ -30,39 +30,25 @@ func (s *Service) IndexRepository(ctx context.Context, req *pb.IndexRequest) (*p
 	}
 
 	// Try to queue the job
-	select {
-	case s.jobQueue <- job:
-		s.mu.Lock()
-		s.stats.JobsQueued++
-		s.mu.Unlock()
-		s.saveJob(job)
-		s.logger.Info("job queued",
-			"job_id", job.ID,
-			"storage_id", req.StorageId)
+	queued, message := s.enqueueJob(job)
+	if queued {
 		return &pb.IndexResponse{
 			Queued:  true,
-			Message: "Repository queued for indexing",
+			Message: message,
 			JobId:   job.ID,
 		}, nil
-	default:
+	} else {
 		// Track rejection
-		s.mu.Lock()
-		s.stats.JobsRejected++
-		s.mu.Unlock()
-
-		// Save rejected job so it appears in UI as failed
 		job.Status = pb.IndexStatus_INDEX_STATUS_ERROR
-		job.ErrorMessage = "Job queue is full - please retry later"
+		job.ErrorMessage = message
 		job.CompletedAt = time.Now()
 		s.saveJob(job)
 
-		s.logger.Warn("job queue full, rejected indexing request",
-			"storage_id", req.StorageId,
-			"display_path", req.DisplayPath)
+		s.logger.Warn("failed to queue job", "storage_id", req.StorageId, "reason", message)
 
 		return &pb.IndexResponse{
 			Queued:  false,
-			Message: "Job queue is full, please try again later",
+			Message: message,
 			JobId:   job.ID,
 		}, nil
 	}
@@ -358,23 +344,14 @@ func (s *Service) RebuildIndex(ctx context.Context, req *pb.RebuildIndexRequest)
 		QueuedAt:    time.Now(),
 	}
 
-	select {
-	case s.jobQueue <- job:
-		s.saveJob(job)
-		s.logger.Info("rebuild job queued",
-			"job_id", job.ID,
-			"storage_id", req.StorageId)
-		return &pb.RebuildIndexResponse{
-			Queued:  true,
-			Message: "Repository queued for re-indexing",
-			JobId:   job.ID,
-		}, nil
-	default:
-		return &pb.RebuildIndexResponse{
-			Queued:  false,
-			Message: "Job queue is full, please try again later",
-		}, nil
-	}
+	queued, message := s.enqueueJob(job)
+	s.logger.Info("rebuild job queued", "job_id", job.ID, "storage_id", req.StorageId, "queued", queued)
+
+	return &pb.RebuildIndexResponse{
+		Queued:  queued,
+		Message: message,
+		JobId:   job.ID,
+	}, nil
 }
 
 // RebuildAllIndexes implements the RebuildAllIndexes RPC
@@ -409,13 +386,8 @@ func (s *Service) RebuildAllIndexes(ctx context.Context, req *pb.RebuildAllIndex
 				QueuedAt:    time.Now(),
 			}
 
-			select {
-			case s.jobQueue <- job:
-				s.saveJob(job)
+			if queued, _ := s.enqueueJob(job); queued {
 				queuedCount++
-			default:
-				// Queue full, stop adding
-				return nil
 			}
 		}
 		return nil
@@ -511,11 +483,14 @@ func (s *Service) GetStats(ctx context.Context, req *pb.StatsRequest) (*pb.Stats
 		avgDuration = stats.SearchDurationTotal / stats.SearchesTotal
 	}
 
+	// Get total queue size (in-memory + persistent)
+	totalQueued := s.getTotalQueueSize()
+
 	return &pb.StatsResponse{
 		TotalIndexes:        totalIndexes,
 		TotalFilesIndexed:   totalFiles,
 		TotalIndexSizeBytes: totalSize,
-		QueueLength:         int32(len(s.jobQueue)),
+		QueueLength:         int32(totalQueued), // Now includes persistent queue
 		ActiveJobs:          activeJobs,
 		SearchesTotal:       stats.SearchesTotal,
 		AvgSearchDurationMs: avgDuration,

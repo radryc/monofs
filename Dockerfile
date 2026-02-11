@@ -133,7 +133,24 @@ RUN apk add --no-cache \
     grep \
     findutils \
     diffutils \
-    procps
+    procps \
+    make \
+    nodejs \
+    npm \
+    git \
+    protobuf \
+    strace
+
+# Install Go 1.24
+RUN curl -Lo /tmp/go.tar.gz https://go.dev/dl/go1.24.0.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf /tmp/go.tar.gz && \
+    rm /tmp/go.tar.gz && \
+    ln -s /usr/local/go/bin/go /usr/local/bin/go && \
+    ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+
+# Install Bazel via Bazelisk
+RUN curl -Lo /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 && \
+    chmod +x /usr/local/bin/bazel
 
 # Create monofs user
 RUN adduser -D -s /bin/bash monofs && \
@@ -164,10 +181,33 @@ RUN mkdir -p /mnt && \
 # Enable FUSE with user_allow_other
 RUN echo "user_allow_other" >> /etc/fuse.conf
 
-# Set overlay directory for monofs-session (also in user profile for SSH sessions)
-ENV GITFS_OVERLAY_DIR=/var/lib/monofs/overlay
-RUN echo 'export GITFS_OVERLAY_DIR=/var/lib/monofs/overlay' >> /etc/profile.d/monofs.sh && \
-    echo 'export GITFS_OVERLAY_DIR=/var/lib/monofs/overlay' >> /home/monofs/.bashrc && \
+# Set overlay directory for monofs-session and mount point for monofs-build
+# (also in user profile for SSH sessions)
+ENV MONOFS_OVERLAY_DIR=/var/lib/monofs/overlay
+ENV MONOFS_MOUNT=/mnt
+
+# Configure Go for offline builds using MonoFS
+# GOVCS=off: Disable VCS operations to prevent git commands in module cache
+# GOPROXY=off: Disable proxy downloads for offline builds
+# GOMODCACHE: Use MonoFS go-modules directory as module cache
+# GOFLAGS=-modcacherw: Make module cache read-write (allows builds without git)
+ENV GOVCS=off
+ENV GOPROXY=off
+ENV GOMODCACHE=/mnt/go-modules/pkg/mod
+ENV GOFLAGS=-modcacherw
+
+RUN echo 'export MONOFS_OVERLAY_DIR=/var/lib/monofs/overlay' >> /etc/profile.d/monofs.sh && \
+    echo 'export MONOFS_MOUNT=/mnt' >> /etc/profile.d/monofs.sh && \
+    echo 'export GOVCS=off' >> /etc/profile.d/monofs.sh && \
+    echo 'export GOPROXY=off' >> /etc/profile.d/monofs.sh && \
+    echo 'export GOMODCACHE=/mnt/go-modules/pkg/mod' >> /etc/profile.d/monofs.sh && \
+    echo 'export GOFLAGS=-modcacherw' >> /etc/profile.d/monofs.sh && \
+    echo 'export MONOFS_OVERLAY_DIR=/var/lib/monofs/overlay' >> /home/monofs/.bashrc && \
+    echo 'export MONOFS_MOUNT=/mnt' >> /home/monofs/.bashrc && \
+    echo 'export GOVCS=off' >> /home/monofs/.bashrc && \
+    echo 'export GOPROXY=off' >> /home/monofs/.bashrc && \
+    echo 'export GOMODCACHE=/mnt/go-modules/pkg/mod' >> /home/monofs/.bashrc && \
+    echo 'export GOFLAGS=-modcacherw' >> /home/monofs/.bashrc && \
     chown monofs:monofs /home/monofs/.bashrc
 
 EXPOSE 22

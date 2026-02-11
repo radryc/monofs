@@ -82,7 +82,8 @@ services:
       - "--index-dir=/data/indexes"
       - "--cache-dir=/data/cache"
       - "--workers=2"
-      - "--queue-size=20"
+      - "--queue-size=10000"
+      - "--in-memory-queue=100"
       - "--router-addr=router1:9090"
     volumes:
       - search-data:/data

@@ -30,7 +30,8 @@ func main() {
 	indexDir := flag.String("index-dir", "/data/index", "Directory for Zoekt indexes")
 	cacheDir := flag.String("cache-dir", "/data/cache", "Directory for git clones during indexing")
 	workers := flag.Int("workers", 2, "Number of concurrent indexing workers")
-	queueSize := flag.Int("queue-size", 100, "Size of indexing job queue")
+	queueSize := flag.Int("queue-size", 10000, "Total job queue size (memory + disk)")
+	inMemoryQueue := flag.Int("in-memory-queue", 100, "Size of in-memory queue")
 	routerAddr := flag.String("router-addr", "", "Router address for cluster access (optional, enables fetching from storage nodes)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	showVersion := flag.Bool("version", false, "Show version and exit")
@@ -60,12 +61,13 @@ func main() {
 
 	// Create search service
 	cfg := search.Config{
-		IndexDir:   *indexDir,
-		CacheDir:   *cacheDir,
-		Workers:    *workers,
-		QueueSize:  *queueSize,
-		RouterAddr: *routerAddr,
-		Logger:     logger,
+		IndexDir:         *indexDir,
+		CacheDir:         *cacheDir,
+		Workers:          *workers,
+		QueueSize:        *queueSize,
+		MaxInMemoryQueue: *inMemoryQueue,
+		RouterAddr:       *routerAddr,
+		Logger:           logger,
 	}
 
 	svc, err := search.NewService(cfg)

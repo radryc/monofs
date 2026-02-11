@@ -22,6 +22,7 @@ const (
 	bucketJobs  = "jobs"  // Job state persistence
 	bucketRepos = "repos" // Repository metadata
 	bucketStats = "stats" // Service statistics
+	bucketQueue = "queue" // Persistent job queue
 )
 
 // Job represents an indexing job
@@ -75,9 +76,10 @@ type Service struct {
 	logger   *slog.Logger
 
 	// Job queue
-	jobQueue   chan *Job
-	activeJobs sync.Map // jobID -> *Job
-	jobsWg     sync.WaitGroup
+	jobQueue     chan *Job
+	activeJobs   sync.Map // jobID -> *Job
+	jobsWg       sync.WaitGroup
+	queuedJobIDs sync.Map // Track queued job IDs to prevent duplicates
 
 	// Stats
 	stats       ServiceStats
@@ -86,27 +88,33 @@ type Service struct {
 	// Shutdown
 	stopChan chan struct{}
 	workers  int
+
+	// Queue management
+	maxInMemoryQueue int // Small in-memory queue
+	maxTotalQueue    int // Large total queue (in-memory + persistent)
 }
 
 // Config holds service configuration
 type Config struct {
-	IndexDir   string // Directory for Zoekt indexes
-	CacheDir   string // Directory for git clones during indexing
-	Workers    int    // Number of concurrent indexing workers
-	QueueSize  int    // Size of job queue
-	RouterAddr string // Router address for cluster access (enables fetching from storage nodes)
-	Logger     *slog.Logger
+	IndexDir         string // Directory for Zoekt indexes
+	CacheDir         string // Directory for git clones during indexing
+	Workers          int    // Number of concurrent indexing workers
+	QueueSize        int    // Total queue capacity (in-memory + persistent)
+	MaxInMemoryQueue int    // Size of in-memory queue (default: 100)
+	RouterAddr       string // Router address for cluster access (enables fetching from storage nodes)
+	Logger           *slog.Logger
 }
 
 // DefaultConfig returns default configuration
 func DefaultConfig() Config {
 	return Config{
-		IndexDir:   "/data/index",
-		CacheDir:   "/data/cache",
-		Workers:    2,
-		QueueSize:  100,
-		RouterAddr: "",
-		Logger:     slog.Default(),
+		IndexDir:         "/data/index",
+		CacheDir:         "/data/cache",
+		Workers:          2,
+		QueueSize:        10000, // Total queue capacity
+		MaxInMemoryQueue: 100,   // Small in-memory queue
+		RouterAddr:       "",
+		Logger:           slog.Default(),
 	}
 }
 
@@ -120,6 +128,14 @@ func NewService(cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("failed to create cache dir: %w", err)
 	}
 
+	// Validate and adjust configuration
+	if cfg.MaxInMemoryQueue <= 0 {
+		cfg.MaxInMemoryQueue = 100
+	}
+	if cfg.QueueSize < cfg.MaxInMemoryQueue {
+		cfg.QueueSize = cfg.MaxInMemoryQueue * 10 // Ensure total > in-memory
+	}
+
 	// Open NutsDB for state persistence
 	dbPath := filepath.Join(cfg.IndexDir, "state.db")
 	dbOpts := nutsdb.DefaultOptions
@@ -131,9 +147,9 @@ func NewService(cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("failed to open state db: %w", err)
 	}
 
-	// Create buckets
+	// Create buckets including queue bucket
 	if err := db.Update(func(tx *nutsdb.Tx) error {
-		for _, bucket := range []string{bucketJobs, bucketRepos, bucketStats} {
+		for _, bucket := range []string{bucketJobs, bucketRepos, bucketStats, bucketQueue} {
 			if err := tx.NewBucket(nutsdb.DataStructureBTree, bucket); err != nil && err != nutsdb.ErrBucketAlreadyExist {
 				return err
 			}
@@ -199,14 +215,16 @@ func NewService(cfg Config) (*Service, error) {
 	}
 
 	s := &Service{
-		indexDir: cfg.IndexDir,
-		cacheDir: cfg.CacheDir,
-		db:       db,
-		indexer:  indexer,
-		logger:   cfg.Logger,
-		jobQueue: make(chan *Job, cfg.QueueSize),
-		stopChan: make(chan struct{}),
-		workers:  cfg.Workers,
+		indexDir:         cfg.IndexDir,
+		cacheDir:         cfg.CacheDir,
+		db:               db,
+		indexer:          indexer,
+		logger:           cfg.Logger,
+		jobQueue:         make(chan *Job, cfg.MaxInMemoryQueue), // Small in-memory queue
+		stopChan:         make(chan struct{}),
+		workers:          cfg.Workers,
+		maxInMemoryQueue: cfg.MaxInMemoryQueue,
+		maxTotalQueue:    cfg.QueueSize,
 		stats: ServiceStats{
 			StartedAt: time.Now(),
 		},
@@ -223,13 +241,18 @@ func NewService(cfg Config) (*Service, error) {
 		go s.worker(i)
 	}
 
+	// Start queue feeder (moves jobs from DB to in-memory queue)
+	go s.queueFeeder()
+
 	// Restore pending jobs from DB
 	s.restorePendingJobs()
 
 	cfg.Logger.Info("search service initialized",
 		"index_dir", cfg.IndexDir,
 		"cache_dir", cfg.CacheDir,
-		"workers", cfg.Workers)
+		"workers", cfg.Workers,
+		"in_memory_queue", cfg.MaxInMemoryQueue,
+		"total_queue", cfg.QueueSize)
 
 	return s, nil
 }
@@ -255,6 +278,7 @@ func (s *Service) worker(id int) {
 			s.logger.Info("indexing worker stopping", "worker_id", id)
 			return
 		case job := <-s.jobQueue:
+			s.queuedJobIDs.Delete(job.ID) // Remove from tracked IDs
 			s.processJob(job)
 		}
 	}
@@ -448,8 +472,169 @@ func (s *Service) saveStats() {
 	})
 }
 
+// queueFeeder continuously moves jobs from persistent storage to in-memory queue
+func (s *Service) queueFeeder() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopChan:
+			return
+		case <-ticker.C:
+			s.feedQueue()
+		}
+	}
+}
+
+// feedQueue moves jobs from persistent queue to in-memory queue
+func (s *Service) feedQueue() {
+	// Only feed if in-memory queue has space
+	if len(s.jobQueue) >= cap(s.jobQueue)-10 {
+		return
+	}
+
+	var toLoad []*Job
+
+	s.db.View(func(tx *nutsdb.Tx) error {
+		keys, values, err := tx.GetAll(bucketQueue)
+		if err != nil {
+			return err
+		}
+
+		for i, val := range values {
+			var job Job
+			if err := json.Unmarshal(val, &job); err != nil {
+				s.logger.Warn("failed to unmarshal queued job", "key", string(keys[i]), "error", err)
+				continue
+			}
+
+			// Check if already in memory
+			if _, exists := s.queuedJobIDs.Load(job.ID); !exists {
+				toLoad = append(toLoad, &job)
+				if len(toLoad) >= 50 { // Load in batches
+					break
+				}
+			}
+		}
+		return nil
+	})
+
+	// Move jobs to in-memory queue
+	for _, job := range toLoad {
+		select {
+		case s.jobQueue <- job:
+			s.queuedJobIDs.Store(job.ID, true)
+			// Remove from persistent queue
+			s.db.Update(func(tx *nutsdb.Tx) error {
+				return tx.Delete(bucketQueue, []byte(job.ID))
+			})
+		default:
+			return // In-memory queue full
+		}
+	}
+}
+
+// enqueueJob adds a job to the queue (memory or persistent)
+func (s *Service) enqueueJob(job *Job) (bool, string) {
+	// Check total queue size (in-memory + persistent)
+	totalQueued := s.getTotalQueueSize()
+	if totalQueued >= int64(s.maxTotalQueue) {
+		s.mu.Lock()
+		s.stats.JobsRejected++
+		s.mu.Unlock()
+
+		return false, fmt.Sprintf("Total queue full (%d/%d)", totalQueued, s.maxTotalQueue)
+	}
+
+	// Try in-memory queue first
+	select {
+	case s.jobQueue <- job:
+		s.queuedJobIDs.Store(job.ID, true)
+		s.mu.Lock()
+		s.stats.JobsQueued++
+		s.mu.Unlock()
+		s.saveJob(job)
+		s.logger.Info("job queued in memory", "job_id", job.ID, "storage_id", job.StorageID)
+		return true, "Queued in memory"
+	default:
+		// In-memory queue full, save to persistent queue
+		if err := s.saveToPersistentQueue(job); err != nil {
+			s.logger.Error("failed to save to persistent queue", "error", err)
+			return false, "Failed to queue job"
+		}
+
+		s.mu.Lock()
+		s.stats.JobsQueued++
+		s.mu.Unlock()
+		s.saveJob(job)
+		s.logger.Info("job queued to disk", "job_id", job.ID, "storage_id", job.StorageID)
+		return true, "Queued to persistent storage"
+	}
+}
+
+// saveToPersistentQueue saves a job to the persistent queue
+func (s *Service) saveToPersistentQueue(job *Job) error {
+	data, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+
+	return s.db.Update(func(tx *nutsdb.Tx) error {
+		return tx.Put(bucketQueue, []byte(job.ID), data, 0)
+	})
+}
+
+// getTotalQueueSize returns the total number of queued jobs (memory + persistent)
+func (s *Service) getTotalQueueSize() int64 {
+	inMemory := int64(len(s.jobQueue))
+
+	var onDisk int64
+	s.db.View(func(tx *nutsdb.Tx) error {
+		keys, _, err := tx.GetAll(bucketQueue)
+		if err == nil {
+			onDisk = int64(len(keys))
+		}
+		return nil
+	})
+
+	return inMemory + onDisk
+}
+
 // restorePendingJobs restores incomplete jobs after restart
 func (s *Service) restorePendingJobs() {
+	// First, restore from persistent queue
+	var queuedJobs []*Job
+	s.db.View(func(tx *nutsdb.Tx) error {
+		_, values, err := tx.GetAll(bucketQueue)
+		if err != nil {
+			return err
+		}
+
+		for _, val := range values {
+			var job Job
+			if err := json.Unmarshal(val, &job); err != nil {
+				continue
+			}
+			queuedJobs = append(queuedJobs, &job)
+		}
+		return nil
+	})
+
+	// Move to in-memory queue (up to capacity)
+	for _, job := range queuedJobs {
+		select {
+		case s.jobQueue <- job:
+			s.queuedJobIDs.Store(job.ID, true)
+			s.logger.Info("restored queued job from disk", "storage_id", job.StorageID)
+		default:
+			// In-memory queue full, leave in persistent storage
+			goto doneRestoring
+		}
+	}
+doneRestoring:
+
+	// Then restore jobs that were actively indexing
 	s.db.View(func(tx *nutsdb.Tx) error {
 		keys, values, err := tx.GetAll(bucketJobs)
 		if err != nil {
@@ -463,18 +648,20 @@ func (s *Service) restorePendingJobs() {
 				continue
 			}
 
-			// Re-queue incomplete jobs
+			// Re-queue incomplete jobs that weren't already in queue
 			if job.Status == pb.IndexStatus_INDEX_STATUS_QUEUED ||
 				job.Status == pb.IndexStatus_INDEX_STATUS_INDEXING {
-				job.Status = pb.IndexStatus_INDEX_STATUS_QUEUED
-				select {
-				case s.jobQueue <- &job:
-					s.logger.Info("restored pending job",
-						"storage_id", job.StorageID,
-						"display_path", job.DisplayPath)
-				default:
-					s.logger.Warn("job queue full, skipping restore",
-						"storage_id", job.StorageID)
+
+				// Check if already in persistent queue
+				if _, exists := s.queuedJobIDs.Load(job.ID); !exists {
+					job.Status = pb.IndexStatus_INDEX_STATUS_QUEUED
+
+					queued, msg := s.enqueueJob(&job)
+					if queued {
+						s.logger.Info("restored pending job", "storage_id", job.StorageID, "message", msg)
+					} else {
+						s.logger.Warn("could not restore job", "storage_id", job.StorageID, "reason", msg)
+					}
 				}
 			}
 		}
