@@ -39,10 +39,10 @@ func (r *Router) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryR
 	r.partialReposMu.Unlock()
 
 	// Step 2: Delete from all backend nodes (synchronous, parallel)
-	totalFilesDeleted, totalDirsDeleted, nodeErrors := r.deleteRepositoryFromAllNodes(storageID)
+	totalFilesDeleted, totalDirsDeleted, nodeErrors := r.deleteRepositoryFromAllNodes(ctx, storageID)
 
 	// Step 3: Delete search index
-	r.deleteSearchIndex(storageID)
+	r.deleteSearchIndex(ctx, storageID)
 
 	message := fmt.Sprintf("repository deleted: %d files, %d dirs removed from nodes", totalFilesDeleted, totalDirsDeleted)
 	if nodeErrors > 0 {
@@ -64,7 +64,7 @@ func (r *Router) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryR
 
 // deleteRepositoryFromAllNodes calls the node-level DeleteRepository RPC on every node.
 // Returns total files deleted, total dirs deleted, and number of node errors.
-func (r *Router) deleteRepositoryFromAllNodes(storageID string) (int64, int64, int) {
+func (r *Router) deleteRepositoryFromAllNodes(ctx context.Context, storageID string) (int64, int64, int) {
 	r.mu.RLock()
 	nodesSnapshot := make(map[string]*nodeState)
 	for nodeID, state := range r.nodes {
@@ -88,10 +88,11 @@ func (r *Router) deleteRepositoryFromAllNodes(storageID string) (int64, int64, i
 				return
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			// Use parent context with timeout
+			deleteCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
 
-			resp, err := s.client.DeleteRepository(ctx, &pb.DeleteRepositoryOnNodeRequest{
+			resp, err := s.client.DeleteRepository(deleteCtx, &pb.DeleteRepositoryOnNodeRequest{
 				StorageId: storageID,
 			})
 			if err != nil {
@@ -127,20 +128,22 @@ func (r *Router) deleteRepositoryFromAllNodes(storageID string) (int64, int64, i
 
 // deleteRepositoryFromNodes is a compatibility wrapper used by cleanupStalePartialRepos.
 func (r *Router) deleteRepositoryFromNodes(storageID string, filesDeletedPtr *int64) {
-	totalFiles, _, _ := r.deleteRepositoryFromAllNodes(storageID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	totalFiles, _, _ := r.deleteRepositoryFromAllNodes(ctx, storageID)
 	*filesDeletedPtr = totalFiles
 }
 
 // deleteSearchIndex removes the search index for the repository.
-func (r *Router) deleteSearchIndex(storageID string) {
+func (r *Router) deleteSearchIndex(ctx context.Context, storageID string) {
 	if r.searchClient == nil {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	resp, err := r.searchClient.DeleteIndex(ctx, &pb.DeleteIndexRequest{
+	resp, err := r.searchClient.DeleteIndex(deleteCtx, &pb.DeleteIndexRequest{
 		StorageId: storageID,
 	})
 	if err != nil {

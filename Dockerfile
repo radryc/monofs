@@ -133,7 +133,30 @@ RUN apk add --no-cache \
     grep \
     findutils \
     diffutils \
-    procps
+    procps \
+    tree \
+    git \
+    make \
+    protobuf \
+    protobuf-dev \
+    g++ \
+    musl-dev \
+    wget
+
+# Install Go 1.24.0 from official binaries
+RUN wget -O go.tar.gz https://go.dev/dl/go1.24.0.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go.tar.gz && \
+    rm go.tar.gz
+
+ENV PATH=/usr/local/go/bin:$PATH
+ENV GOPATH=/root/go
+ENV PATH=$GOPATH/bin:$PATH
+
+# Add Go to PATH for all users (including SSH sessions)
+RUN echo 'export PATH=/usr/local/go/bin:$PATH' >> /etc/profile.d/go.sh && \
+    echo 'export GOPATH=/root/go' >> /etc/profile.d/go.sh && \
+    echo 'export PATH=$GOPATH/bin:$PATH' >> /etc/profile.d/go.sh && \
+    chmod +x /etc/profile.d/go.sh
 
 # Create monofs user
 RUN adduser -D -s /bin/bash monofs && \
@@ -149,6 +172,168 @@ COPY --from=builder /bin/monofs-client /usr/local/bin/monofs-client
 COPY --from=builder /bin/monofs-admin /usr/local/bin/monofs-admin
 COPY --from=builder /bin/monofs-session /usr/local/bin/monofs-session
 COPY --from=builder /bin/monofs-loadtest /usr/local/bin/monofs-loadtest
+
+# Copy source code for Go cache investigation
+COPY --from=builder /app /home/monofs/monofs-src
+RUN chown -R monofs:monofs /home/monofs/monofs-src
+
+# Create script to examine Go cache structure
+COPY <<-"EXAMINEGOMOD" /usr/local/bin/examine-go-cache
+#!/bin/bash
+set -e
+
+echo "========================================="
+echo "Go Module Cache Structure Examination"
+echo "========================================="
+echo ""
+
+cd /home/monofs/monofs-src
+
+echo "=== Go Environment ==="
+go env | grep -E 'GOMODCACHE|GOCACHE|GOPATH'
+echo ""
+
+GOMODCACHE=$(go env GOMODCACHE)
+GOCACHE=$(go env GOCACHE)
+
+echo "=== Cleaning caches ==="
+go clean -modcache -cache
+echo "Caches cleaned"
+echo ""
+
+echo "=== Downloading dependencies with 'go mod download' ==="
+go mod download
+echo ""
+
+echo "=== GOMODCACHE Directory Structure ==="
+echo "Location: $GOMODCACHE"
+echo ""
+
+echo "--- Top-level structure ---"
+ls -lh "$GOMODCACHE/" 2>/dev/null || echo "Empty or doesn't exist"
+echo ""
+
+echo "--- Sample module (github.com/hanwen/go-fuse/v2@v2.7.2) ---"
+SAMPLE_MODULE="$GOMODCACHE/github.com/hanwen/go-fuse/v2@v2.7.2"
+if [ -d "$SAMPLE_MODULE" ]; then
+    echo "Module directory exists:"
+    ls -la "$SAMPLE_MODULE/" | head -15
+    echo ""
+    echo "Sample files:"
+    find "$SAMPLE_MODULE" -type f | head -10
+else
+    echo "Module not found in extracted form"
+fi
+echo ""
+
+echo "=== GOMODCACHE/cache/download Directory ==="
+CACHE_DOWNLOAD="$GOMODCACHE/cache/download"
+if [ -d "$CACHE_DOWNLOAD" ]; then
+    echo "Cache download directory exists at: $CACHE_DOWNLOAD"
+    echo ""
+    
+    echo "--- Files for go-fuse module ---"
+    find "$CACHE_DOWNLOAD/github.com/hanwen/go-fuse" -type f 2>/dev/null | sort || echo "Not found"
+    echo ""
+    
+    echo "--- File types in cache ---"
+    find "$CACHE_DOWNLOAD" -type f -name "*.mod" | head -5
+    echo ""
+    find "$CACHE_DOWNLOAD" -type f -name "*.zip" | head -5
+    echo ""
+    find "$CACHE_DOWNLOAD" -type f -name "*.ziphash" | head -5
+    echo ""
+    find "$CACHE_DOWNLOAD" -type f -name "*.info" | head -5
+    echo ""
+    
+    echo "--- Examining one .info file ---"
+    INFO_FILE=$(find "$CACHE_DOWNLOAD" -type f -name "*.info" | head -1)
+    if [ -n "$INFO_FILE" ]; then
+        echo "File: $INFO_FILE"
+        cat "$INFO_FILE"
+        echo ""
+    fi
+    
+    echo "--- Examining one .mod file ---"
+    MOD_FILE=$(find "$CACHE_DOWNLOAD" -type f -name "*.mod" | head -1)
+    if [ -n "$MOD_FILE" ]; then
+        echo "File: $MOD_FILE"
+        head -20 "$MOD_FILE"
+        echo ""
+    fi
+    
+    echo "--- Examining one .ziphash file ---"
+    ZIPHASH_FILE=$(find "$CACHE_DOWNLOAD" -type f -name "*.ziphash" | head -1)
+    if [ -n "$ZIPHASH_FILE" ]; then
+        echo "File: $ZIPHASH_FILE"
+        cat "$ZIPHASH_FILE"
+        echo ""
+    fi
+fi
+echo ""
+
+echo "=== Building monofs-client ==="
+go build -v -o /tmp/monofs-client-test ./cmd/monofs-client 2>&1 | tail -30
+echo ""
+echo "Build completed"
+echo ""
+
+echo "=== Testing Makefile build ==="
+echo "Running 'make' to test build system..."
+echo "Note: Proto generation may fail without protoc-gen-go plugins installed"
+make 2>&1 | tail -30 || echo "Make build failed or completed with warnings"
+echo ""
+
+echo "=== Verifying protoc installation ==="
+protoc --version || echo "protoc not found"
+echo "Note: Install protoc-gen-go plugins with:"
+echo "  go install google.golang.org/protobuf/cmd/protoc-gen-go@latest"
+echo "  go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest"
+echo ""
+
+echo "=== GOCACHE Directory (Build Cache) ==="
+echo "Location: $GOCACHE"
+if [ -d "$GOCACHE" ]; then
+    echo "Build cache exists"
+    echo "Top-level contents:"
+    ls -lh "$GOCACHE/" | head -20
+    echo ""
+    echo "Number of cached items:"
+    find "$GOCACHE" -type f | wc -l
+else
+    echo "Build cache doesn't exist"
+fi
+echo ""
+
+echo "========================================="
+echo "Summary of Files Created by Go"
+echo "========================================="
+echo ""
+
+echo "1. Module Sources (GOMODCACHE/module@version/):"
+echo "   - Extracted source files from .zip"
+find "$GOMODCACHE" -maxdepth 3 -type d -name "*@v*" 2>/dev/null | head -5
+echo ""
+
+echo "2. Download Cache (GOMODCACHE/cache/download/):"
+echo "   - *.mod files (module manifests)"
+echo "   - *.zip files (source archives)"
+echo "   - *.ziphash files (checksums)"
+echo "   - *.info files (version metadata)"
+find "$CACHE_DOWNLOAD" -type f | head -20 2>/dev/null
+echo ""
+
+echo "3. Build Cache (GOCACHE/):"
+echo "   - Compiled packages and metadata"
+echo "   Directory: $GOCACHE"
+echo ""
+
+echo "========================================="
+echo "Complete cache tree (truncated):"
+tree -L 4 "$GOMODCACHE" 2>/dev/null | head -100 || find "$GOMODCACHE" -type f | head -50
+EXAMINEGOMOD
+
+RUN chmod +x /usr/local/bin/examine-go-cache
 
 # Create mount point and overlay directory
 RUN mkdir -p /mnt && \
@@ -167,7 +352,12 @@ RUN echo "user_allow_other" >> /etc/fuse.conf
 # Set overlay directory for monofs-session (also in user profile for SSH sessions)
 ENV GITFS_OVERLAY_DIR=/var/lib/monofs/overlay
 RUN echo 'export GITFS_OVERLAY_DIR=/var/lib/monofs/overlay' >> /etc/profile.d/monofs.sh && \
+    echo 'export PATH=/usr/local/go/bin:$GOPATH/bin:$PATH' >> /etc/profile.d/monofs.sh && \
+    echo 'export GOPATH=/root/go' >> /etc/profile.d/monofs.sh && \
+    chmod +x /etc/profile.d/monofs.sh && \
     echo 'export GITFS_OVERLAY_DIR=/var/lib/monofs/overlay' >> /home/monofs/.bashrc && \
+    echo 'export PATH=/usr/local/go/bin:$GOPATH/bin:$PATH' >> /home/monofs/.bashrc && \
+    echo 'export GOPATH=$HOME/go' >> /home/monofs/.bashrc && \
     chown monofs:monofs /home/monofs/.bashrc
 
 EXPOSE 22

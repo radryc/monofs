@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/radryc/monofs/internal/buildcache"
+	gocache "github.com/radryc/monofs/internal/buildcache/golang"
 	"github.com/radryc/monofs/internal/buildlayout"
 )
 
@@ -81,6 +83,12 @@ func (g *GoMapper) MapPaths(info buildlayout.RepoInfo, files []buildlayout.FileI
 			OriginalFilePath:   f.Path,
 		})
 	}
+
+	// Generate cache/download/ entries for offline builds.
+	// These are synthetic entries (no OriginalFilePath) — the fetcher
+	// generates content on-demand when FUSE reads these files.
+	cacheEntries := g.generateCacheDownloadEntries(modulePath, version, info.Source, files)
+	entries = append(entries, cacheEntries...)
 
 	return entries, nil
 }
@@ -219,4 +227,77 @@ func DecodePath(s string) string {
 		}
 	}
 	return buf.String()
+}
+
+// generateCacheDownloadEntries creates synthetic VirtualEntry items for the
+// Go module download cache (cache/download/<escaped_module>/@v/*).
+//
+// These entries have NO OriginalFilePath — they are fully synthetic.
+// The router uses their BlobHash, BackendMetadata etc. directly.
+// Fetchers generate actual content on-demand when FUSE reads occur.
+//
+// Cache entries use a SEPARATE VirtualDisplayPath from source files so they
+// appear at the correct location in the FUSE mount:
+//
+//	<mount>/go-modules/pkg/mod/cache/download/<escaped_module>/@v/<file>
+//
+// NOT inside the module source directory.
+func (g *GoMapper) generateCacheDownloadEntries(modulePath, version, source string, files []buildlayout.FileInfo) []buildlayout.VirtualEntry {
+	// Strip the go-modules prefix if present — in production the display path
+	// includes "go-modules/pkg/mod/" but the Go module path must not contain it.
+	realModulePath := modulePath
+	if pfx := GoModCachePrefix + "/"; strings.HasPrefix(modulePath, pfx) {
+		realModulePath = strings.TrimPrefix(modulePath, pfx)
+	}
+
+	// Find go.mod size from the ingested files so the cache .mod entry
+	// reports the correct size upfront (same content, served from proxy/zip).
+	var goModSize uint64
+	for _, f := range files {
+		if f.Path == "go.mod" {
+			goModSize = f.Size
+			break
+		}
+	}
+
+	gen := gocache.NewGenerator()
+	artifactEntries, err := gen.GenerateEntries(buildcache.ArtifactParams{
+		ModulePath:    realModulePath,
+		Version:       version,
+		Source:        source,
+		GoModFileSize: goModSize,
+	})
+	if err != nil {
+		// Non-fatal: return empty list, source files still work
+		return nil
+	}
+
+	// Cache entries go under a SEPARATE virtual display path so the directory
+	// tree matches what `go build` expects in $GOMODCACHE:
+	//   go-modules/pkg/mod/cache/download/<escaped_module>/@v/
+	escapedRealModule := EncodePath(realModulePath)
+	cacheDisplayPath := GoModCachePrefix + "/cache/download/" + escapedRealModule + "/@v"
+
+	entries := make([]buildlayout.VirtualEntry, 0, len(artifactEntries))
+	for _, ae := range artifactEntries {
+		// Extract just the filename from the generator's full relative path.
+		// e.g. "cache/download/github.com/google/uuid/@v/v1.6.0.info" → "v1.6.0.info"
+		fileName := ae.RelativePath
+		if idx := strings.LastIndex(ae.RelativePath, "/"); idx >= 0 {
+			fileName = ae.RelativePath[idx+1:]
+		}
+
+		entries = append(entries, buildlayout.VirtualEntry{
+			VirtualDisplayPath: cacheDisplayPath,
+			VirtualFilePath:    fileName,
+			OriginalFilePath:   "", // Synthetic: no original file
+			BlobHash:           gocache.DeterministicHash(realModulePath, version, ae.Type),
+			Size:               ae.Size, // Pre-computed where possible, 0 for on-demand
+			Mode:               0444,    // Read-only
+			Source:             source,
+			BackendMetadata:    ae.Metadata,
+		})
+	}
+
+	return entries
 }

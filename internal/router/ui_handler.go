@@ -228,44 +228,65 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 
 // buildStatusData creates cluster status snapshot (called from UI goroutine).
 func (r *Router) buildStatusData() *StatusData {
-	// Snapshot nodes quickly, then release lock
+	// Snapshot nodes with deep copy of fields to avoid races
 	r.mu.RLock()
-	nodesSnapshot := make(map[string]*nodeState, len(r.nodes))
-	for k, v := range r.nodes {
-		nodesSnapshot[k] = v
+	type nodeSnapshot struct {
+		nodeInfo        *pb.NodeInfo
+		externalAddress string
+		status          NodeStatus
+		syncProgress    float64
+		ownedFilesCount int64
+		diskUsedBytes   int64
+		diskTotalBytes  int64
+		diskFreeBytes   int64
+		backingUpNodes  []string
+	}
+	nodesSnapshot := make(map[string]nodeSnapshot, len(r.nodes))
+	for nodeID, state := range r.nodes {
+		nodesSnapshot[nodeID] = nodeSnapshot{
+			nodeInfo:        state.info,
+			externalAddress: state.externalAddress,
+			status:          state.status,
+			syncProgress:    state.syncProgress,
+			ownedFilesCount: state.ownedFilesCount,
+			diskUsedBytes:   state.diskUsedBytes,
+			diskTotalBytes:  state.diskTotalBytes,
+			diskFreeBytes:   state.diskFreeBytes,
+			backingUpNodes:  append([]string(nil), state.backingUpNodes...), // Deep copy slice
+		}
 	}
 	r.mu.RUnlock()
 
 	// Build response without holding lock
 	nodes := make([]map[string]interface{}, 0, len(nodesSnapshot))
-	for _, state := range nodesSnapshot {
+	for _, snap := range nodesSnapshot {
 		nodeInfo := map[string]interface{}{
-			"id":         state.info.NodeId,
-			"address":    state.info.Address,
-			"healthy":    state.info.Healthy,
-			"weight":     state.info.Weight,
-			"status":     state.status.String(),
-			"file_count": state.ownedFilesCount,
-			"disk_used":  state.diskUsedBytes,
-			"disk_total": state.diskTotalBytes,
-			"disk_free":  state.diskFreeBytes,
+			"id":         snap.nodeInfo.NodeId,
+			"address":    snap.nodeInfo.Address,
+			"healthy":    snap.nodeInfo.Healthy,
+			"weight":     snap.nodeInfo.Weight,
+			"status":     snap.status.String(),
+			"file_count": snap.ownedFilesCount,
+			"disk_used":  snap.diskUsedBytes,
+			"disk_total": snap.diskTotalBytes,
+			"disk_free":  snap.diskFreeBytes,
 		}
 
 		// Add backup info
-		if len(state.backingUpNodes) > 0 {
-			nodeInfo["backing_up"] = state.backingUpNodes
+		if len(snap.backingUpNodes) > 0 {
+			nodeInfo["backing_up"] = snap.backingUpNodes
 		}
 
 		// Add "covered_by" for failed nodes
-		if !state.info.Healthy {
-			if backupNodeID, hasFailover := r.failoverMap.Load(state.info.NodeId); hasFailover {
+		if !snap.nodeInfo.Healthy {
+			if backupNodeID, hasFailover := r.failoverMap.Load(snap.nodeInfo.NodeId); hasFailover {
 				nodeInfo["covered_by"] = backupNodeID.(string)
 			}
 		}
 
 		// Add sync progress for new nodes
-		if state.status == NodeSyncing {
-			nodeInfo["sync_progress"] = state.syncProgress
+		if snap.status == NodeSyncing {
+			nodeInfo["sync_progress"] = snap.syncProgress
 		}
 
 		nodes = append(nodes, nodeInfo)

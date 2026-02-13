@@ -2,6 +2,8 @@ package router
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -9,36 +11,36 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/buildlayout"
+	"github.com/radryc/monofs/internal/fetcher"
 	"github.com/radryc/monofs/internal/sharding"
 )
 
 // generateLayouts is called after successful ingestion.
 // It runs all matching layout mappers and ingests virtual entries as new repos.
 //
-// Failures are logged but NOT propagated — the original ingestion already succeeded.
-// Virtual layout generation is best-effort.
+// Returns an error if layout generation fails, which will fail the ingestion.
 func (r *Router) generateLayouts(
 	ctx context.Context,
 	info buildlayout.RepoInfo,
 	files []buildlayout.FileInfo,
 	sendProgress func(stage pb.IngestProgress_Stage, msg string),
-) {
+) error {
 	if r.layoutRegistry == nil || !r.layoutRegistry.HasMappers() {
-		return
+		return nil
 	}
 
 	start := time.Now()
 
 	entries, err := r.layoutRegistry.MapAll(info, files)
 	if err != nil {
-		r.logger.Warn("layout mapper failed (non-fatal)",
+		r.logger.Error("layout mapper failed",
 			"display_path", info.DisplayPath,
 			"error", err)
-		return
+		return fmt.Errorf("failed to generate layouts: %w", err)
 	}
 
 	if len(entries) == 0 {
-		return
+		return nil
 	}
 
 	r.logger.Info("generating build layouts",
@@ -63,19 +65,25 @@ func (r *Router) generateLayouts(
 	}
 
 	// Ingest each virtual repo.
+	var failedRepos []string
 	for virtualDisplayPath, virtualFiles := range grouped {
 		if err := r.ingestVirtualRepo(ctx, info.StorageID, info, virtualDisplayPath, virtualFiles, fileIndex); err != nil {
-			r.logger.Warn("virtual repo ingestion failed (non-fatal)",
+			r.logger.Error("virtual repo ingestion failed",
 				"virtual_path", virtualDisplayPath,
 				"error", err)
-			// Continue with other virtual repos
+			failedRepos = append(failedRepos, virtualDisplayPath)
 		}
+	}
+
+	if len(failedRepos) > 0 {
+		return fmt.Errorf("failed to ingest %d virtual repos: %v", len(failedRepos), failedRepos)
 	}
 
 	r.logger.Info("build layout generation complete",
 		"display_path", info.DisplayPath,
 		"virtual_repos", len(grouped),
 		"duration", time.Since(start))
+	return nil
 }
 
 // ingestVirtualRepo registers a virtual repo on all nodes and distributes file metadata.
@@ -84,8 +92,11 @@ func (r *Router) generateLayouts(
 // The virtual files have the same BlobHash as the originals, so the fetcher
 // serves identical content without duplication.
 //
-// CRITICAL: Uses the ORIGINAL storage_id (hard link concept) so both paths
-// resolve to the same storage, making files accessible via either path.
+// Storage ID strategy:
+//   - Reference entries (OriginalFilePath set): reuse the ORIGINAL storage_id
+//     so the fetcher can resolve blobs via the same storage as the source repo.
+//   - Synthetic entries (OriginalFilePath empty): generate a NEW storage_id
+//     from the virtual display path so they get an isolated directory tree.
 func (r *Router) ingestVirtualRepo(
 	ctx context.Context,
 	originalStorageID string,
@@ -94,8 +105,26 @@ func (r *Router) ingestVirtualRepo(
 	virtualFiles []buildlayout.VirtualEntry,
 	fileIndex map[string]*buildlayout.FileInfo,
 ) error {
-	// Use the ORIGINAL storage_id (hard link) - both display paths point to same storage
-	virtualStorageID := originalStorageID
+	// Determine if this group is fully synthetic (no OriginalFilePath on any entry).
+	allSynthetic := true
+	for _, vf := range virtualFiles {
+		if vf.OriginalFilePath != "" {
+			allSynthetic = false
+			break
+		}
+	}
+
+	var virtualStorageID string
+	if allSynthetic {
+		// Synthetic entries need their own storage ID so their directory tree
+		// is isolated from the source repo (e.g., cache/download/ files).
+		hash := sha256.Sum256([]byte(virtualDisplayPath))
+		virtualStorageID = hex.EncodeToString(hash[:])
+	} else {
+		// Reference entries reuse the original storage ID (hard link concept)
+		// so fetchers can resolve blobs from the same storage.
+		virtualStorageID = originalStorageID
+	}
 
 	r.logger.Info("ingesting virtual repo",
 		"virtual_path", virtualDisplayPath,
@@ -109,8 +138,9 @@ func (r *Router) ingestVirtualRepo(
 	for id, ns := range r.nodes {
 		if ns.status == NodeActive && ns.client != nil {
 			healthyNodes = append(healthyNodes, sharding.Node{
-				ID:     id,
-				Weight: ns.info.Weight,
+				ID:      id,
+				Weight:  ns.info.Weight,
+				Healthy: true,
 			})
 			nodeStates = append(nodeStates, ns)
 		}
@@ -128,15 +158,21 @@ func (r *Router) ingestVirtualRepo(
 	switch strings.ToLower(originalInfo.IngestionType) {
 	case "git":
 		ingestionType = pb.IngestionType_INGESTION_GIT
-	case "go":
+	case "go", "ingestion_go":
 		ingestionType = pb.IngestionType_INGESTION_GO
 	}
 
 	switch strings.ToLower(originalInfo.FetchType) {
-	case "git":
+	case "git", "source_type_git":
 		fetchType = pb.SourceType_SOURCE_TYPE_GIT
-	case "gomod":
+	case "gomod", "source_type_gomod":
 		fetchType = pb.SourceType_SOURCE_TYPE_GOMOD
+	case "npm", "source_type_npm":
+		fetchType = pb.SourceType_SOURCE_TYPE_NPM
+	case "maven", "source_type_maven":
+		fetchType = pb.SourceType_SOURCE_TYPE_MAVEN
+	case "cargo", "source_type_cargo":
+		fetchType = pb.SourceType_SOURCE_TYPE_CARGO
 	}
 
 	// Step 3: Register virtual repo on ALL healthy nodes (parallel).
@@ -168,29 +204,94 @@ func (r *Router) ingestVirtualRepo(
 	regWg.Wait()
 
 	// Step 4: Build protobuf FileMetadata from VirtualEntry + original FileInfo.
+	// Supports two modes:
+	//   a) Reference mode: OriginalFilePath is set → look up from fileIndex (existing).
+	//   b) Synthetic mode: OriginalFilePath is empty → use VirtualEntry's own fields
+	//      (for generated cache artifacts that have no original file).
 	var batch []*pb.FileMetadata
 	for _, vf := range virtualFiles {
-		orig, ok := fileIndex[vf.OriginalFilePath]
-		if !ok {
-			r.logger.Debug("skipping virtual file: original not found",
-				"original_path", vf.OriginalFilePath,
-				"virtual_path", vf.VirtualFilePath)
-			continue
-		}
+		var fm *pb.FileMetadata
 
-		fm := &pb.FileMetadata{
-			Path:            vf.VirtualFilePath,
-			StorageId:       virtualStorageID,
-			DisplayPath:     virtualDisplayPath,
-			Ref:             originalInfo.Ref,
-			Size:            orig.Size,
-			Mtime:           orig.Mtime,
-			Mode:            orig.Mode,
-			BlobHash:        orig.BlobHash,
-			Source:          orig.Source,
-			SourceType:      ingestionType,
-			FetchType:       fetchType,
-			BackendMetadata: orig.BackendMetadata,
+		if vf.OriginalFilePath != "" {
+			// Reference mode: look up original file
+			orig, ok := fileIndex[vf.OriginalFilePath]
+			if !ok {
+				r.logger.Debug("skipping virtual file: original not found",
+					"original_path", vf.OriginalFilePath,
+					"virtual_path", vf.VirtualFilePath)
+				continue
+			}
+
+			fm = &pb.FileMetadata{
+				Path:            vf.VirtualFilePath,
+				StorageId:       virtualStorageID,
+				DisplayPath:     virtualDisplayPath,
+				Ref:             originalInfo.Ref,
+				Size:            orig.Size,
+				Mtime:           orig.Mtime,
+				Mode:            orig.Mode,
+				BlobHash:        orig.BlobHash,
+				Source:          orig.Source,
+				SourceType:      ingestionType,
+				FetchType:       fetchType,
+				BackendMetadata: orig.BackendMetadata,
+			}
+		} else {
+			// Synthetic mode: use VirtualEntry's own fields (generated cache artifacts)
+			source := vf.Source
+			if source == "" {
+				source = originalInfo.Source
+			}
+			mode := vf.Mode
+			if mode == 0 {
+				mode = 0444 // read-only default for generated files
+			}
+
+			// Calculate real size for synthetic files with unknown size
+			size := vf.Size
+			if size == 0 && vf.BlobHash != "" && r.fetcherClient != nil {
+				// Fetch blob content once during ingestion to determine real size
+				fetchReq := &fetcher.FetchRequest{
+					ContentID:    vf.BlobHash,
+					SourceKey:    originalInfo.Source,
+					SourceConfig: vf.BackendMetadata,
+					RequestID:    fmt.Sprintf("size-calc-%s", vf.VirtualFilePath),
+					Priority:     5, // Medium priority
+				}
+
+				fetchCtx, fetchCancel := context.WithTimeout(ctx, 30*time.Second)
+				content, err := r.fetcherClient.FetchBlob(fetchCtx, fetchReq, fetchType)
+				fetchCancel()
+
+				if err != nil {
+					r.logger.Warn("failed to calculate size for synthetic file",
+						"virtual_path", vf.VirtualFilePath,
+						"blob_hash", vf.BlobHash,
+						"error", err)
+					// Continue with size=0, file will still be accessible
+				} else {
+					size = uint64(len(content))
+					r.logger.Debug("calculated size for synthetic file",
+						"virtual_path", vf.VirtualFilePath,
+						"blob_hash", vf.BlobHash,
+						"size", size)
+				}
+			}
+
+			fm = &pb.FileMetadata{
+				Path:            vf.VirtualFilePath,
+				StorageId:       virtualStorageID,
+				DisplayPath:     virtualDisplayPath,
+				Ref:             originalInfo.Ref,
+				Size:            size,
+				Mtime:           vf.Mtime,
+				Mode:            mode,
+				BlobHash:        vf.BlobHash,
+				Source:          source,
+				SourceType:      ingestionType,
+				FetchType:       fetchType,
+				BackendMetadata: vf.BackendMetadata,
+			}
 		}
 		batch = append(batch, fm)
 	}
@@ -199,11 +300,17 @@ func (r *Router) ingestVirtualRepo(
 		return fmt.Errorf("no files could be mapped (all originals missing)")
 	}
 
-	// Step 5: Distribute files using HRW sharding (same as normal ingestion).
+	// Step 5: Distribute files using HRW sharding.
+	// IMPORTANT: The shard key must match what the FUSE client computes when reading.
+	// The client uses: sha256(first 3 path parts) + ":" + remaining path parts
+	// where the full path = displayPath + "/" + filePath.
+	// We must use the same formula so reads route to the same node.
 	sharder := sharding.NewHRW(healthyNodes)
 	nodeBatches := make(map[string][]*pb.FileMetadata)
 	for _, fm := range batch {
-		shardKey := virtualStorageID + ":" + fm.Path
+		// Reconstruct the full filesystem path that the FUSE client will see
+		fullPath := virtualDisplayPath + "/" + fm.Path
+		shardKey := clientShardKey(fullPath)
 		targetNodes := sharder.GetNodes(shardKey, 1) // Primary only for virtual files
 		if len(targetNodes) > 0 {
 			nodeBatches[targetNodes[0].ID] = append(nodeBatches[targetNodes[0].ID], fm)
@@ -297,4 +404,24 @@ func (r *Router) getNodeByID(nodeID string) *nodeState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.nodes[nodeID]
+}
+
+// clientShardKey computes the HRW shard key the same way the FUSE client does.
+// The client splits the full filesystem path, takes the first 3 parts as display path,
+// hashes them with SHA-256, and appends ":" + remaining path as the file path.
+// This MUST stay in sync with client.buildShardKey().
+func clientShardKey(fullPath string) string {
+	parts := strings.Split(fullPath, "/")
+	if len(parts) > 3 {
+		displayPath := strings.Join(parts[:3], "/")
+		filePath := strings.Join(parts[3:], "/")
+		hash := sha256.Sum256([]byte(displayPath))
+		storageID := hex.EncodeToString(hash[:])
+		return storageID + ":" + filePath
+	}
+	if len(parts) == 3 {
+		hash := sha256.Sum256([]byte(fullPath))
+		return hex.EncodeToString(hash[:])
+	}
+	return fullPath
 }

@@ -108,6 +108,13 @@ func (gb *GoModBackend) Initialize(ctx context.Context, config BackendConfig) er
 }
 
 func (gb *GoModBackend) FetchBlob(ctx context.Context, req *FetchRequest) (*FetchResult, error) {
+	// Check if this is a cache artifact request (offline build support).
+	// artifact_type is set in SourceConfig by Server.readViaFetcher()
+	// from the BackendMetadata stored at ingestion time by the layout mapper.
+	if artifactType := req.SourceConfig["artifact_type"]; artifactType != "" {
+		return gb.fetchCacheArtifact(ctx, req)
+	}
+
 	start := time.Now()
 
 	// ContentID format: module@version/path/to/file

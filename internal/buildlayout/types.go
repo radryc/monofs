@@ -55,6 +55,15 @@ type FileInfo struct {
 }
 
 // VirtualEntry is one virtual path the mapper wants to create.
+//
+// There are two usage modes:
+//
+//  1. Reference mode (existing): Set OriginalFilePath to reference an ingested file.
+//     The router looks up BlobHash, Size, Mode, BackendMetadata from the file index.
+//
+//  2. Synthetic mode (new): Leave OriginalFilePath empty and set the optional fields
+//     directly. Used for generated cache artifacts that have no original file.
+//     The router uses these fields instead of looking up from the file index.
 type VirtualEntry struct {
 	// VirtualDisplayPath is the new top-level repo path.
 	// Example: "go-modules/pkg/mod/github.com/google/uuid@v1.6.0"
@@ -67,7 +76,31 @@ type VirtualEntry struct {
 
 	// OriginalFilePath is the file path in the original repo.
 	// Used to look up BlobHash, Size, Mode from the collected FileInfo list.
+	// When empty, the entry is synthetic and the optional fields below are used.
 	OriginalFilePath string
+
+	// --- Optional fields for synthetic entries (used when OriginalFilePath is empty) ---
+
+	// BlobHash is the content hash for this virtual file.
+	// For generated artifacts, this is a deterministic hash of the artifact identity.
+	// Optional: zero value means "look up from OriginalFilePath".
+	BlobHash string
+
+	// Size in bytes. Optional: zero value means "look up from OriginalFilePath".
+	Size uint64
+
+	// Mode is the Unix file mode. Optional: zero value means "look up from OriginalFilePath".
+	Mode uint32
+
+	// Mtime is modification time (Unix seconds). Optional.
+	Mtime int64
+
+	// Source is the source URL. Optional: zero value means "use original info".
+	Source string
+
+	// BackendMetadata holds fetcher-facing metadata (e.g., artifact_type, module, version).
+	// Optional: nil means "look up from OriginalFilePath".
+	BackendMetadata map[string]string
 }
 
 // Dependency represents one dependency from a manifest file.

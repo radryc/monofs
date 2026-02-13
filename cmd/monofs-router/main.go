@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -238,14 +239,23 @@ func main() {
 		}
 	}()
 
+	// Add context for graceful shutdown
+	shutdownTimeout := 30 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 	logger.Info("shutting down router...")
-	httpServer.Close()
+	if err := httpServer.Shutdown(ctx); err != nil {
+		logger.Error("http server shutdown error", "error", err)
+	}
 	grpcServer.GracefulStop()
-	r.Close()
+	if err := r.Close(); err != nil {
+		logger.Error("router close error", "error", err)
+	}
 }
 
 func parseWeights(weightsStr string) map[string]uint32 {
@@ -261,7 +271,9 @@ func parseWeights(weightsStr string) map[string]uint32 {
 		}
 		nodeID := strings.TrimSpace(parts[0])
 		var weight uint32
-		fmt.Sscanf(parts[1], "%d", &weight)
+		if _, err := fmt.Sscanf(parts[1], "%d", &weight); err != nil {
+			continue
+		}
 		if weight > 0 {
 			result[nodeID] = weight
 		}

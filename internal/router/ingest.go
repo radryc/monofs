@@ -754,8 +754,74 @@ func (r *Router) ingestReplicaBatches(ctx *ingestionContext, replicaBatches map[
 }
 
 // performPostIngestionTasks handles indexing, layouts, and marking repo as onboarded
-func (r *Router) performPostIngestionTasks(ctx *ingestionContext, sendProgress func(pb.IngestProgress_Stage, string, int64, int64, string)) {
-	// Build directory indexes
+func (r *Router) performPostIngestionTasks(ctx *ingestionContext, sendProgress func(pb.IngestProgress_Stage, string, int64, int64, string)) error {
+	// Generate build layouts FIRST (before onboarding)
+	// This ensures layouts are available as soon as repository is onboarded
+	if r.layoutRegistry != nil && r.layoutRegistry.HasMappers() {
+		sendProgress(pb.IngestProgress_INGESTING, "Generating build layouts...",
+			atomic.LoadInt64(ctx.filesIngested), atomic.LoadInt64(ctx.filesIngested), "")
+
+		layoutInfo := buildlayout.RepoInfo{
+			DisplayPath:   ctx.displayPath,
+			StorageID:     ctx.storageID,
+			Source:        ctx.sourceURL,
+			Ref:           ctx.ref,
+			IngestionType: string(ctx.ingestionType),
+			FetchType:     ctx.fetchType.String(),
+			Config:        ctx.req.IngestionConfig,
+		}
+
+		layoutProgress := func(stage pb.IngestProgress_Stage, msg string) {
+			if ctx.stream != nil {
+				ctx.stream.Send(&pb.IngestProgress{
+					Stage:   stage,
+					Message: msg,
+				})
+			}
+		}
+
+		layoutCtx := context.Background()
+		if ctx.stream != nil {
+			layoutCtx = ctx.stream.Context()
+		}
+		if err := r.generateLayouts(layoutCtx, layoutInfo, ctx.collectedFiles, layoutProgress); err != nil {
+			return fmt.Errorf("failed to generate layouts: %w", err)
+		}
+	}
+
+	// Mark repository as onboarded
+	r.mu.RLock()
+	activeNodes := make([]*nodeState, 0, len(r.nodes))
+	for _, state := range r.nodes {
+		if state.info.Healthy && state.status == NodeActive && state.client != nil {
+			activeNodes = append(activeNodes, state)
+		}
+	}
+	r.mu.RUnlock()
+
+	// Mark onboarded in parallel across all nodes
+	var markWg sync.WaitGroup
+	for _, state := range activeNodes {
+		state := state
+		markWg.Add(1)
+		go func() {
+			defer markWg.Done()
+			markCtx, markCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, err := state.client.MarkRepositoryOnboarded(markCtx, &pb.MarkRepositoryOnboardedRequest{
+				StorageId: ctx.storageID,
+			})
+			markCancel()
+
+			if err != nil {
+				r.logger.Warn("failed to mark repository onboarded on node",
+					"node_id", state.info.NodeId, "error", err)
+			}
+		}()
+	}
+	markWg.Wait()
+
+	// Build directory indexes AFTER onboarding
+	// This ensures nodes are marked ready before indexing starts
 	sendProgress(pb.IngestProgress_INGESTING, "Building directory indexes...",
 		atomic.LoadInt64(ctx.filesIngested), atomic.LoadInt64(ctx.filesIngested), "")
 
@@ -792,37 +858,6 @@ func (r *Router) performPostIngestionTasks(ctx *ingestionContext, sendProgress f
 		}()
 	}
 	indexWg.Wait()
-
-	// Mark repository as onboarded
-	r.mu.RLock()
-	activeNodes := make([]*nodeState, 0, len(r.nodes))
-	for _, state := range r.nodes {
-		if state.info.Healthy && state.status == NodeActive && state.client != nil {
-			activeNodes = append(activeNodes, state)
-		}
-	}
-	r.mu.RUnlock()
-
-	// Mark onboarded in parallel across all nodes
-	var markWg sync.WaitGroup
-	for _, state := range activeNodes {
-		state := state
-		markWg.Add(1)
-		go func() {
-			defer markWg.Done()
-			markCtx, markCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_, err := state.client.MarkRepositoryOnboarded(markCtx, &pb.MarkRepositoryOnboardedRequest{
-				StorageId: ctx.storageID,
-			})
-			markCancel()
-
-			if err != nil {
-				r.logger.Warn("failed to mark repository onboarded on node",
-					"node_id", state.info.NodeId, "error", err)
-			}
-		}()
-	}
-	markWg.Wait()
 
 	// Track ingested repository
 	r.mu.Lock()
@@ -871,33 +906,7 @@ func (r *Router) performPostIngestionTasks(ctx *ingestionContext, sendProgress f
 		}()
 	}
 
-	// Generate build layouts
-	if r.layoutRegistry != nil && r.layoutRegistry.HasMappers() {
-		layoutInfo := buildlayout.RepoInfo{
-			DisplayPath:   ctx.displayPath,
-			StorageID:     ctx.storageID,
-			Source:        ctx.sourceURL,
-			Ref:           ctx.ref,
-			IngestionType: string(ctx.ingestionType),
-			FetchType:     ctx.fetchType.String(),
-			Config:        ctx.req.IngestionConfig,
-		}
-
-		layoutProgress := func(stage pb.IngestProgress_Stage, msg string) {
-			if ctx.stream != nil {
-				ctx.stream.Send(&pb.IngestProgress{
-					Stage:   stage,
-					Message: msg,
-				})
-			}
-		}
-
-		layoutCtx := context.Background()
-		if ctx.stream != nil {
-			layoutCtx = ctx.stream.Context()
-		}
-		r.generateLayouts(layoutCtx, layoutInfo, ctx.collectedFiles, layoutProgress)
-	}
+	return nil
 }
 
 // IngestRepository implements the IngestRepository RPC with streaming progress.
@@ -1071,7 +1080,9 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 	}
 
 	// Step 8: Post-ingestion tasks
-	r.performPostIngestionTasks(ctx, sendProgress)
+	if err := r.performPostIngestionTasks(ctx, sendProgress); err != nil {
+		return err
+	}
 
 	filesIngestedFinal := atomic.LoadInt64(ctx.filesIngested)
 	sendProgress(pb.IngestProgress_COMPLETED,

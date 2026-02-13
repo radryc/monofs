@@ -930,9 +930,26 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 	n.mu.Lock()
 	n.content = content
+	// Update size to match actual fetched content length.
+	// Synthetic/generated files may have size=0 in metadata but real content
+	// produced on-demand by the fetcher. Without this update the kernel
+	// trusts the stale attr size and may not issue Read() at all.
+	sizeChanged := uint64(len(content)) != n.size
+	if sizeChanged {
+		n.size = uint64(len(content))
+	}
 	n.mu.Unlock()
 
 	n.logger.Debug("open complete", "path", n.path, "size", len(content))
+
+	// Use DIRECT_IO when actual content size differs from the metadata size
+	// reported via Getattr/Lookup. This forces the kernel to bypass its page
+	// cache and issue Read() calls regardless of the previously reported size.
+	// This is essential for synthetic/generated files whose metadata size is 0
+	// but whose content is produced on-demand by the fetcher.
+	if sizeChanged {
+		return nil, fuse.FOPEN_DIRECT_IO, 0
+	}
 	return nil, fuse.FOPEN_KEEP_CACHE, 0
 }
 

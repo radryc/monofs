@@ -1,6 +1,7 @@
 package golang
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/radryc/monofs/internal/buildlayout"
@@ -60,13 +61,15 @@ func TestGoMapper_MapPaths_Standard(t *testing.T) {
 		t.Fatalf("MapPaths failed: %v", err)
 	}
 
-	if len(entries) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(entries))
+	// 3 source file entries + 6 cache/download artifact entries = 9
+	if len(entries) != 9 {
+		t.Fatalf("expected 9 entries (3 source + 6 cache), got %d", len(entries))
 	}
 
-	// The mapper returns just module@version, prefix is added by ingestion handler
+	// First 3 entries are source files referencing originals
 	expectedDisplayPath := "github.com/google/uuid@v1.6.0"
-	for i, e := range entries {
+	for i := 0; i < 3; i++ {
+		e := entries[i]
 		if e.VirtualDisplayPath != expectedDisplayPath {
 			t.Errorf("entry %d: VirtualDisplayPath = %q, want %q", i, e.VirtualDisplayPath, expectedDisplayPath)
 		}
@@ -75,6 +78,89 @@ func TestGoMapper_MapPaths_Standard(t *testing.T) {
 		}
 		if e.OriginalFilePath != files[i].Path {
 			t.Errorf("entry %d: OriginalFilePath = %q, want %q", i, e.OriginalFilePath, files[i].Path)
+		}
+	}
+
+	// Last 6 entries are synthetic cache artifacts (no OriginalFilePath)
+	// They should have a SEPARATE VirtualDisplayPath under cache/download/
+	expectedCacheDisplayPath := "go-modules/pkg/mod/cache/download/github.com/google/uuid/@v"
+	for i := 3; i < 9; i++ {
+		e := entries[i]
+		if e.OriginalFilePath != "" {
+			t.Errorf("cache entry %d: OriginalFilePath should be empty, got %q", i, e.OriginalFilePath)
+		}
+		if e.BlobHash == "" {
+			t.Errorf("cache entry %d: BlobHash should be set", i)
+		}
+		if e.BackendMetadata == nil {
+			t.Errorf("cache entry %d: BackendMetadata should be set", i)
+		}
+		if e.BackendMetadata["artifact_type"] == "" {
+			t.Errorf("cache entry %d: artifact_type metadata missing", i)
+		}
+		if e.BackendMetadata["module"] != "github.com/google/uuid" {
+			t.Errorf("cache entry %d: module = %q", i, e.BackendMetadata["module"])
+		}
+		if e.VirtualDisplayPath != expectedCacheDisplayPath {
+			t.Errorf("cache entry %d: VirtualDisplayPath = %q, want %q", i, e.VirtualDisplayPath, expectedCacheDisplayPath)
+		}
+		// VirtualFilePath should be just the filename (e.g. "v1.6.0.info"), not a full cache/download/... path
+		if strings.Contains(e.VirtualFilePath, "/") {
+			t.Errorf("cache entry %d: VirtualFilePath should be filename only, got %q", i, e.VirtualFilePath)
+		}
+	}
+}
+
+// TestGoMapper_MapPaths_WithPrefix simulates production where the display path
+// already includes the "go-modules/pkg/mod/" prefix. Cache entries must still
+// produce correct paths with the real module name (prefix stripped).
+func TestGoMapper_MapPaths_WithPrefix(t *testing.T) {
+	m := NewGoMapper()
+
+	info := buildlayout.RepoInfo{
+		DisplayPath:   "go-modules/pkg/mod/github.com/google/uuid@v1.6.0",
+		StorageID:     "abc123",
+		Source:        "github.com/google/uuid@v1.6.0",
+		Ref:           "v1.6.0",
+		IngestionType: "go",
+		FetchType:     "gomod",
+	}
+
+	files := []buildlayout.FileInfo{
+		{Path: "uuid.go", BlobHash: "hash1", Size: 100, Mode: 0644},
+	}
+
+	entries, err := m.MapPaths(info, files)
+	if err != nil {
+		t.Fatalf("MapPaths failed: %v", err)
+	}
+
+	// 1 source file + 6 cache artifacts = 7
+	if len(entries) != 7 {
+		t.Fatalf("expected 7 entries, got %d", len(entries))
+	}
+
+	// Source file: VirtualDisplayPath keeps prefix (same as display_path minus version)
+	srcEntry := entries[0]
+	expectedSrcDP := "go-modules/pkg/mod/github.com/google/uuid@v1.6.0"
+	if srcEntry.VirtualDisplayPath != expectedSrcDP {
+		t.Errorf("source VirtualDisplayPath = %q, want %q", srcEntry.VirtualDisplayPath, expectedSrcDP)
+	}
+
+	// Cache entries: must use the cache/download path with REAL module name (no go-modules prefix)
+	expectedCacheDP := "go-modules/pkg/mod/cache/download/github.com/google/uuid/@v"
+	for i := 1; i < 7; i++ {
+		e := entries[i]
+		if e.VirtualDisplayPath != expectedCacheDP {
+			t.Errorf("cache entry %d: VirtualDisplayPath = %q, want %q", i, e.VirtualDisplayPath, expectedCacheDP)
+		}
+		// Module metadata must be the REAL module path without prefix
+		if e.BackendMetadata["module"] != "github.com/google/uuid" {
+			t.Errorf("cache entry %d: module = %q, want %q", i, e.BackendMetadata["module"], "github.com/google/uuid")
+		}
+		// VirtualFilePath should be just the filename
+		if strings.Contains(e.VirtualFilePath, "/") {
+			t.Errorf("cache entry %d: VirtualFilePath should be filename only, got %q", i, e.VirtualFilePath)
 		}
 	}
 }

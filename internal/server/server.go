@@ -98,6 +98,12 @@ const (
 	bucketOwnedFiles       = "ownedfiles"        // Files owned by this node (key: "storageID:filePath", value: "1")
 	bucketReplicaFiles     = "replicafiles"      // Replica file tracking (key: "storageID:filePath", value: ownerNodeID)
 	bucketOnboardingStatus = "onboarding_status" // Repository onboarding status (key: storage_id, value: "true"/"false")
+
+	// Database configuration
+	defaultSegmentSize = 64 * 1024 * 1024 // 64MB segments for NutsDB
+
+	// Session limits
+	maxSessionFiles = 100 // Maximum files to track per client session in predictor
 )
 
 // makeStorageKey generates a SHA-256 hash key for database storage.
@@ -210,10 +216,26 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, logger *slog.Logger)
 	}
 	logger = logger.With("component", "server", "node_id", nodeID)
 
+	// Validate input parameters
+	if nodeID == "" {
+		return nil, fmt.Errorf("nodeID cannot be empty")
+	}
+	if address == "" {
+		return nil, fmt.Errorf("address cannot be empty")
+	}
+	if dbPath == "" {
+		return nil, fmt.Errorf("dbPath cannot be empty")
+	}
+
+	// Ensure dbPath directory exists or can be created
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
+
 	// Open NutsDB with performance optimizations
 	opt := nutsdb.DefaultOptions
 	opt.Dir = dbPath
-	opt.SegmentSize = 64 * 1024 * 1024             // 64MB segments
+	opt.SegmentSize = defaultSegmentSize           // 64MB segments
 	opt.EntryIdxMode = nutsdb.HintKeyAndRAMIdxMode // Use hint file for faster startup (only keys in RAM)
 	opt.RWMode = nutsdb.MMap                       // Use mmap for faster reads
 	opt.SyncEnable = false                         // Async writes for better performance (trade durability for speed)
@@ -1280,10 +1302,33 @@ func (s *Server) NodeID() string {
 }
 
 // Close closes the server resources.
+// Close shuts down the server and cleans up resources.
 func (s *Server) Close() error {
-	if s.db != nil {
-		return s.db.Close()
+	s.logger.Info("shutting down server", "node_id", s.nodeID)
+
+	// Stop predictor if initialized
+	if s.predictor != nil {
+		if err := s.predictor.Close(); err != nil {
+			s.logger.Warn("error closing predictor", "error", err)
+		}
 	}
+
+	// Close fetcher client if initialized
+	if s.fetcherClient != nil {
+		if err := s.fetcherClient.Close(); err != nil {
+			s.logger.Warn("error closing fetcher client", "error", err)
+		}
+	}
+
+	// Close database
+	if s.db != nil {
+		if err := s.db.Close(); err != nil {
+			s.logger.Error("error closing database", "error", err)
+			return err
+		}
+	}
+
+	s.logger.Info("server shutdown complete", "node_id", s.nodeID)
 	return nil
 }
 

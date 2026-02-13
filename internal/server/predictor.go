@@ -15,6 +15,20 @@ import (
 
 // Predictor implements predictive prefetching using Markov chains and clustering.
 // It runs on storage nodes and tracks access patterns to predict future accesses.
+//
+// LOCK HIERARCHY:
+// To prevent deadlocks, locks must be acquired in this order:
+// 1. p.mu (RWMutex) - Protects markovChains and dirAccess maps
+// 2. chain.mu (RWMutex) - Protects individual Markov chain state
+// 3. p.recentMu (Mutex) - Protects recentAccesses ring buffer
+//
+// CRITICAL RULES:
+//   - Never hold p.mu while acquiring chain.mu
+//   - Always release p.mu before locking individual chains
+//   - cleanup() holds p.mu and then chain.mu for each chain - this is safe
+//     because no other code path holds both locks simultaneously
+//   - RecordAccess follows this pattern: lock p.mu briefly to get/create chain,
+//     unlock p.mu, then lock chain.mu
 type Predictor struct {
 	mu sync.RWMutex
 
@@ -36,6 +50,9 @@ type Predictor struct {
 
 	logger *slog.Logger
 
+	// Shutdown coordination
+	stopCleanup chan struct{}
+
 	// Stats
 	predictions  int64
 	prefetches   int64
@@ -55,8 +72,9 @@ type PredictorConfig struct {
 	DirectoryThreshold    float64 // Min access ratio to prefetch
 
 	// Temporal settings
-	SessionTimeout time.Duration // Gap that ends a session
-	RecentWindow   int           // Number of recent accesses to track
+	SessionTimeout  time.Duration // Gap that ends a session
+	RecentWindow    int           // Number of recent accesses to track
+	MaxSessionFiles int           // Max files to track per session
 
 	// Prefetch settings
 	PrefetchThreshold float64 // Min probability to prefetch
@@ -82,6 +100,7 @@ func DefaultPredictorConfig() PredictorConfig {
 		DirectoryThreshold:    0.3,
 		SessionTimeout:        30 * time.Second,
 		RecentWindow:          10000,
+		MaxSessionFiles:       100,
 		PrefetchThreshold:     0.3,
 		MaxPrefetchFiles:      10,
 		PrefetchPriority:      5,
@@ -133,6 +152,35 @@ type directoryAccess struct {
 
 // NewPredictor creates a new prediction engine.
 func NewPredictor(fetcherClient *fetcher.Client, config PredictorConfig, logger *slog.Logger) *Predictor {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	// Validate configuration
+	if config.MaxTransitionsPerFile <= 0 {
+		logger.Warn("invalid MaxTransitionsPerFile, using default", "value", config.MaxTransitionsPerFile)
+		config.MaxTransitionsPerFile = 100
+	}
+	if config.TransitionDecayRate <= 0 || config.TransitionDecayRate > 1 {
+		logger.Warn("invalid TransitionDecayRate, using default", "value", config.TransitionDecayRate)
+		config.TransitionDecayRate = 0.95
+	}
+	if config.MinTransitionCount < 0 {
+		config.MinTransitionCount = 0
+	}
+	if config.RecentWindow <= 0 {
+		logger.Warn("invalid RecentWindow, using default", "value", config.RecentWindow)
+		config.RecentWindow = 10000
+	}
+	if config.MaxSessionFiles <= 0 {
+		logger.Warn("invalid MaxSessionFiles, using default", "value", config.MaxSessionFiles)
+		config.MaxSessionFiles = 100
+	}
+	if config.CleanupInterval <= 0 {
+		logger.Warn("invalid CleanupInterval, using default", "value", config.CleanupInterval)
+		config.CleanupInterval = 5 * time.Minute
+	}
+
 	p := &Predictor{
 		markovChains:   make(map[string]*markovChain),
 		dirAccess:      make(map[string]*directoryAccess),
@@ -140,6 +188,7 @@ func NewPredictor(fetcherClient *fetcher.Client, config PredictorConfig, logger 
 		fetcherClient:  fetcherClient,
 		config:         config,
 		logger:         logger,
+		stopCleanup:    make(chan struct{}),
 	}
 
 	// Start cleanup goroutine
@@ -196,7 +245,7 @@ func (p *Predictor) recordMarkovTransition(storageID, filePath, clientID string,
 	if !ok || now.Sub(session.lastAccess) > p.config.SessionTimeout {
 		// New session
 		session = &clientSession{
-			files: make([]string, 0, 100),
+			files: make([]string, 0, p.config.MaxSessionFiles),
 		}
 		chain.sessions[clientID] = session
 	}
@@ -207,8 +256,8 @@ func (p *Predictor) recordMarkovTransition(storageID, filePath, clientID string,
 	session.files = append(session.files, filePath)
 
 	// Limit session size
-	if len(session.files) > 100 {
-		session.files = session.files[len(session.files)-100:]
+	if len(session.files) > p.config.MaxSessionFiles {
+		session.files = session.files[len(session.files)-p.config.MaxSessionFiles:]
 	}
 
 	// Record transition
@@ -554,8 +603,14 @@ func (p *Predictor) cleanupLoop() {
 	ticker := time.NewTicker(p.config.CleanupInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		p.cleanup()
+	for {
+		select {
+		case <-ticker.C:
+			p.cleanup()
+		case <-p.stopCleanup:
+			p.logger.Info("predictor cleanup loop stopped")
+			return
+		}
 	}
 }
 
@@ -621,6 +676,25 @@ type PredictorStats struct {
 	Predictions   int64
 	Prefetches    int64
 	PrefetchHits  int64
+}
+
+// Close stops the predictor and cleans up resources.
+func (p *Predictor) Close() error {
+	p.logger.Info("shutting down predictor")
+
+	// Stop cleanup loop
+	select {
+	case <-p.stopCleanup:
+		// Already closed
+	default:
+		close(p.stopCleanup)
+	}
+
+	// Give cleanup loop time to finish
+	time.Sleep(100 * time.Millisecond)
+
+	p.logger.Info("predictor shutdown complete")
+	return nil
 }
 
 // Helper functions

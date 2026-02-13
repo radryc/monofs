@@ -1,0 +1,347 @@
+=========================================
+Go Module Cache Structure Examination
+=========================================
+
+=== Go Environment ===
+GOCACHE='/home/monofs/.cache/go-build'
+GOCACHEPROG=''
+GOMODCACHE='/home/monofs/pkg/mod'
+GOPATH='/home/monofs'
+
+=== Cleaning caches ===
+Caches cleaned
+
+=== Downloading dependencies with 'go mod download' ===
+
+=== GOMODCACHE Directory Structure ===
+Location: /home/monofs/pkg/mod
+
+--- Top-level structure ---
+total 28K
+drwxr-sr-x  3 monofs monofs 4.0K Feb 12 09:15 cache
+drwxr-sr-x  3 monofs monofs 4.0K Feb 12 09:15 dario.cat
+drwxr-sr-x 44 monofs monofs 4.0K Feb 12 09:15 github.com
+drwxr-sr-x  3 monofs monofs 4.0K Feb 12 09:15 go.uber.org
+drwxr-sr-x  4 monofs monofs 4.0K Feb 12 09:15 golang.org
+drwxr-sr-x  5 monofs monofs 4.0K Feb 12 09:15 google.golang.org
+drwxr-sr-x  4 monofs monofs 4.0K Feb 12 09:15 gopkg.in
+
+--- Sample module (github.com/hanwen/go-fuse/v2@v2.7.2) ---
+Module directory exists:
+total 84
+dr-xr-sr-x 12 monofs monofs 4096 Feb 12 09:15 .
+drwxr-sr-x  3 monofs monofs 4096 Feb 12 09:15 ..
+dr-xr-sr-x  3 monofs monofs 4096 Feb 12 09:15 .github
+-r--r--r--  1 monofs monofs  293 Feb 12 09:15 .gitignore
+-r--r--r--  1 monofs monofs  707 Feb 12 09:15 AUTHORS
+-r--r--r--  1 monofs monofs  514 Feb 12 09:15 CONTRIBUTING
+-r--r--r--  1 monofs monofs 1502 Feb 12 09:15 LICENSE
+-r--r--r--  1 monofs monofs 3006 Feb 12 09:15 README.md
+-r--r--r--  1 monofs monofs  931 Feb 12 09:15 all.bash
+dr-xr-sr-x  3 monofs monofs 4096 Feb 12 09:15 benchmark
+-r--r--r--  1 monofs monofs  538 Feb 12 09:15 doc.go
+dr-xr-sr-x 10 monofs monofs 4096 Feb 12 09:15 example
+dr-xr-sr-x  2 monofs monofs 4096 Feb 12 09:15 fs
+dr-xr-sr-x  5 monofs monofs 4096 Feb 12 09:15 fuse
+
+Sample files:
+/home/monofs/pkg/mod/github.com/hanwen/go-fuse/v2@v2.7.2/go.sum
+/home/monofs/pkg/mod/github.com/hanwen/go-fuse/v2@v2.7.2/posixtest/xfstests.go
+/home/monofs/pkg/mod/github.com/hanwen/go-fuse/v2@v2.7.2/posixtest/test_freebsd.go
+/home/monofs/pkg/mod/github.com/hanwen/go-fuse/v2@v2.7.2/posixtest/test_darwin.go
+/home/monofs/pkg/mod/github.com/hanwen/go-fuse/v2@v2.7.2/posixtest/test.go
+/home/monofs/pkg/mod/github.com/hanwen/go-fuse/v2@v2.7.2/posixtest/posixtest_test.go
+/home/monofs/pkg/mod/github.com/hanwen/go-fuse/v2@v2.7.2/posixtest/test_linux.go
+/home/monofs/pkg/mod/github.com/hanwen/go-fuse/v2@v2.7.2/posixtest/listfds.go
+/home/monofs/pkg/mod/github.com/hanwen/go-fuse/v2@v2.7.2/doc.go
+/home/monofs/pkg/mod/github.com/hanwen/go-fuse/v2@v2.7.2/go.mod
+
+=== GOMODCACHE/cache/download Directory ===
+Cache download directory exists at: /home/monofs/pkg/mod/cache/download
+
+--- Files for go-fuse module ---
+/home/monofs/pkg/mod/cache/download/github.com/hanwen/go-fuse/v2/@v/list
+/home/monofs/pkg/mod/cache/download/github.com/hanwen/go-fuse/v2/@v/v2.7.2.info
+/home/monofs/pkg/mod/cache/download/github.com/hanwen/go-fuse/v2/@v/v2.7.2.lock
+/home/monofs/pkg/mod/cache/download/github.com/hanwen/go-fuse/v2/@v/v2.7.2.mod
+/home/monofs/pkg/mod/cache/download/github.com/hanwen/go-fuse/v2/@v/v2.7.2.zip
+/home/monofs/pkg/mod/cache/download/github.com/hanwen/go-fuse/v2/@v/v2.7.2.ziphash
+
+--- File types in cache ---
+/home/monofs/pkg/mod/cache/download/go.uber.org/goleak/@v/v1.1.10.mod
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.7.0.mod
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.mod
+/home/monofs/pkg/mod/cache/download/go.uber.org/zap/@v/v1.18.1.mod
+/home/monofs/pkg/mod/cache/download/go.uber.org/multierr/@v/v1.6.0.mod
+
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.zip
+/home/monofs/pkg/mod/cache/download/dario.cat/mergo/@v/v1.0.1.zip
+/home/monofs/pkg/mod/cache/download/golang.org/x/net/@v/v0.49.0.zip
+/home/monofs/pkg/mod/cache/download/golang.org/x/crypto/@v/v0.47.0.zip
+/home/monofs/pkg/mod/cache/download/golang.org/x/sys/@v/v0.40.0.zip
+
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.ziphash
+/home/monofs/pkg/mod/cache/download/dario.cat/mergo/@v/v1.0.1.ziphash
+/home/monofs/pkg/mod/cache/download/golang.org/x/net/@v/v0.49.0.ziphash
+/home/monofs/pkg/mod/cache/download/golang.org/x/crypto/@v/v0.47.0.ziphash
+/home/monofs/pkg/mod/cache/download/golang.org/x/sys/@v/v0.40.0.ziphash
+
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.info
+/home/monofs/pkg/mod/cache/download/dario.cat/mergo/@v/v1.0.1.info
+/home/monofs/pkg/mod/cache/download/golang.org/x/net/@v/v0.49.0.info
+/home/monofs/pkg/mod/cache/download/golang.org/x/crypto/@v/v0.47.0.info
+/home/monofs/pkg/mod/cache/download/golang.org/x/sys/@v/v0.40.0.info
+
+--- Examining one .info file ---
+File: /home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.info
+{"Version":"v1.11.0","Time":"2023-05-03T17:25:03Z","Origin":{"VCS":"git","URL":"https://github.com/uber-go/atomic","Hash":"76f817c8b7e771cdffc2b9f11a7ebb80333ca92b","Ref":"refs/tags/v1.11.0"}}
+--- Examining one .mod file ---
+File: /home/monofs/pkg/mod/cache/download/go.uber.org/goleak/@v/v1.1.10.mod
+module go.uber.org/goleak
+
+go 1.13
+
+require (
+	github.com/kr/pretty v0.1.0 // indirect
+	github.com/stretchr/testify v1.4.0
+	golang.org/x/lint v0.0.0-20190930215403-16217165b5de
+	golang.org/x/tools v0.0.0-20191108193012-7d206e10da11 // indirect
+	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
+)
+
+--- Examining one .ziphash file ---
+File: /home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.ziphash
+h1:ZvwS0R+56ePWxUNi+Atn9dWONBPp/AUETXlHW0DxSjE=
+
+=== Building monofs-client ===
+google.golang.org/grpc/internal/resolver/unix
+google.golang.org/grpc/internal/resolver/dns
+google.golang.org/grpc/resolver/dns
+google.golang.org/grpc/channelz
+google.golang.org/grpc/balancer
+google.golang.org/grpc/balancer/base
+google.golang.org/grpc/internal/serviceconfig
+google.golang.org/grpc/balancer/pickfirst/pickfirstleaf
+google.golang.org/grpc/internal/resolver
+google.golang.org/grpc/balancer/endpointsharding
+google.golang.org/grpc/internal/balancer/gracefulswitch
+google.golang.org/grpc/balancer/pickfirst
+google.golang.org/grpc/balancer/roundrobin
+net/http/httptest
+golang.org/x/net/trace
+net/http/httputil
+golang.org/x/net/http2
+github.com/stretchr/testify/assert
+github.com/stretchr/testify/require
+google.golang.org/grpc/internal/transport
+github.com/nutsdb/nutsdb/internal/testutils
+github.com/nutsdb/nutsdb/internal/data
+github.com/nutsdb/nutsdb
+google.golang.org/grpc/internal/resolver/delegatingresolver
+google.golang.org/grpc
+github.com/radryc/monofs/internal/cache
+github.com/radryc/monofs/api/proto
+github.com/radryc/monofs/internal/sharding
+github.com/radryc/monofs/internal/client
+github.com/radryc/monofs/internal/fuse
+
+Build completed
+
+=== Testing Makefile build ===
+Running 'make' to test build system...
+Note: Proto generation may fail without protoc-gen-go plugins installed
+go build -trimpath -ldflags "-s -w -X main.Version=dev -X main.Commit=unknown -X main.BuildTime=2026-02-12_09:15:53" -o bin/monofs-server ./cmd/monofs-server
+Built bin/monofs-server
+go build -trimpath -ldflags "-s -w -X main.Version=dev -X main.Commit=unknown -X main.BuildTime=2026-02-12_09:15:53" -o bin/monofs-client ./cmd/monofs-client
+Built bin/monofs-client
+go build -trimpath -ldflags "-s -w -X main.Version=dev -X main.Commit=unknown -X main.BuildTime=2026-02-12_09:15:53" -o bin/monofs-router ./cmd/monofs-router
+Built bin/monofs-router
+go build -trimpath -ldflags "-s -w -X main.Version=dev -X main.Commit=unknown -X main.BuildTime=2026-02-12_09:15:53" -o bin/monofs-admin ./cmd/monofs-admin
+Built bin/monofs-admin
+go build -trimpath -ldflags "-s -w -X main.Version=dev -X main.Commit=unknown -X main.BuildTime=2026-02-12_09:15:53" -o bin/monofs-session ./cmd/monofs-session
+Built bin/monofs-session
+go build -trimpath -ldflags "-s -w -X main.Version=dev -X main.Commit=unknown -X main.BuildTime=2026-02-12_09:15:53" -o bin/monofs-search ./cmd/monofs-search
+Built bin/monofs-search
+go build -trimpath -ldflags "-s -w -X main.Version=dev -X main.Commit=unknown -X main.BuildTime=2026-02-12_09:15:53" -o bin/monofs-fetcher ./cmd/monofs-fetcher
+Built bin/monofs-fetcher
+go build -trimpath -ldflags "-s -w -X main.Version=dev -X main.Commit=unknown -X main.BuildTime=2026-02-12_09:15:53" -o bin/monofs-loadtest ./cmd/monofs-loadtest
+Built bin/monofs-loadtest
+
+=== Verifying protoc installation ===
+libprotoc 24.4
+Note: Install protoc-gen-go plugins with:
+  go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+  go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+=== GOCACHE Directory (Build Cache) ===
+Location: /home/monofs/.cache/go-build
+Build cache exists
+Top-level contents:
+total 1.1M
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 00
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 01
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 02
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 03
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 04
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 05
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 06
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 07
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 08
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 09
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 0a
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 0b
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 0c
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 0d
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 0e
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 0f
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 10
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 11
+drwxr-sr-x 2 monofs monofs 4.0K Feb 12 09:16 12
+
+Number of cached items:
+5072
+
+=========================================
+Summary of Files Created by Go
+=========================================
+
+1. Module Sources (GOMODCACHE/module@version/):
+   - Extracted source files from .zip
+/home/monofs/pkg/mod/go.uber.org/atomic@v1.11.0
+/home/monofs/pkg/mod/dario.cat/mergo@v1.0.1
+/home/monofs/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.3.linux-amd64
+/home/monofs/pkg/mod/golang.org/x/crypto@v0.47.0
+/home/monofs/pkg/mod/golang.org/x/text@v0.33.0
+
+2. Download Cache (GOMODCACHE/cache/download/):
+   - *.mod files (module manifests)
+   - *.zip files (source archives)
+   - *.ziphash files (checksums)
+   - *.info files (version metadata)
+/home/monofs/pkg/mod/cache/download/sumdb/sum.golang.org/tile/8/2/002.p/250
+/home/monofs/pkg/mod/cache/download/sumdb/sum.golang.org/tile/8/0/x195/163.p/198
+/home/monofs/pkg/mod/cache/download/sumdb/sum.golang.org/tile/8/0/x144/239
+/home/monofs/pkg/mod/cache/download/sumdb/sum.golang.org/tile/8/3/000.p/2
+/home/monofs/pkg/mod/cache/download/sumdb/sum.golang.org/tile/8/1/563
+/home/monofs/pkg/mod/cache/download/sumdb/sum.golang.org/tile/8/1/762.p/91
+/home/monofs/pkg/mod/cache/download/sumdb/sum.golang.org/lookup/golang.org/toolchain@v0.0.1-go1.24.3.linux-amd64
+/home/monofs/pkg/mod/cache/download/go.uber.org/goleak/@v/v1.1.10.mod
+/home/monofs/pkg/mod/cache/download/go.uber.org/goleak/@v/list
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.zip
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.7.0.mod
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/list
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.mod
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.lock
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.info
+/home/monofs/pkg/mod/cache/download/go.uber.org/atomic/@v/v1.11.0.ziphash
+/home/monofs/pkg/mod/cache/download/go.uber.org/zap/@v/v1.18.1.mod
+/home/monofs/pkg/mod/cache/download/go.uber.org/zap/@v/list
+/home/monofs/pkg/mod/cache/download/go.uber.org/multierr/@v/list
+/home/monofs/pkg/mod/cache/download/go.uber.org/multierr/@v/v1.6.0.mod
+
+3. Build Cache (GOCACHE/):
+   - Compiled packages and metadata
+   Directory: /home/monofs/.cache/go-build
+
+=========================================
+Complete cache tree (truncated):
+/home/monofs/pkg/mod
+├── cache
+│   └── download
+│       ├── cloud.google.com
+│       │   └── go
+│       ├── dario.cat
+│       │   └── mergo
+│       ├── github.com
+│       │   ├── !burnt!sushi
+│       │   ├── !microsoft
+│       │   ├── !proton!mail
+│       │   ├── !roaring!bitmap
+│       │   ├── antlabs
+│       │   ├── benbjohnson
+│       │   ├── beorn7
+│       │   ├── bits-and-blooms
+│       │   ├── bmatcuk
+│       │   ├── bwmarrin
+│       │   ├── census-instrumentation
+│       │   ├── cespare
+│       │   ├── client9
+│       │   ├── cloudflare
+│       │   ├── cncf
+│       │   ├── creack
+│       │   ├── cyphar
+│       │   ├── davecgh
+│       │   ├── dustin
+│       │   ├── edsrzf
+│       │   ├── emirpasic
+│       │   ├── envoyproxy
+│       │   ├── fatih
+│       │   ├── frankban
+│       │   ├── fsnotify
+│       │   ├── go-enry
+│       │   ├── go-git
+│       │   ├── go-kit
+│       │   ├── go-logfmt
+│       │   ├── go-stack
+│       │   ├── gofrs
+│       │   ├── gogo
+│       │   ├── golang
+│       │   ├── google
+│       │   ├── grafana
+│       │   ├── grpc-ecosystem
+│       │   ├── hanwen
+│       │   ├── hexops
+│       │   ├── jbenet
+│       │   ├── kevinburke
+│       │   ├── kisielk
+│       │   ├── klauspost
+│       │   ├── konsorten
+│       │   ├── kr
+│       │   ├── mattn
+│       │   ├── mschoch
+│       │   ├── munnerz
+│       │   ├── nightlyone
+│       │   ├── nutsdb
+│       │   ├── opentracing
+│       │   ├── pjbgf
+│       │   ├── pkg
+│       │   ├── pmezard
+│       │   ├── prometheus
+│       │   ├── rogpeppe
+│       │   ├── rs
+│       │   ├── sergi
+│       │   ├── sirupsen
+│       │   ├── skeema
+│       │   ├── sourcegraph
+│       │   ├── stretchr
+│       │   ├── tidwall
+│       │   ├── xanzy
+│       │   ├── xujiajun
+│       │   └── yuin
+│       ├── go.uber.org
+│       │   ├── atomic
+│       │   ├── goleak
+│       │   ├── multierr
+│       │   └── zap
+│       ├── golang.org
+│       │   ├── toolchain
+│       │   └── x
+│       ├── google.golang.org
+│       │   ├── appengine
+│       │   ├── genproto
+│       │   ├── grpc
+│       │   └── protobuf
+│       ├── gopkg.in
+│       │   ├── check.v1
+│       │   ├── errgo.v2
+│       │   ├── warnings.v0
+│       │   ├── yaml.v2
+│       │   └── yaml.v3
+│       ├── honnef.co
+│       │   └── go
+│       ├── mvdan.cc
+│       │   └── gofumpt
+│       └── sumdb
+│           └── sum.golang.org
+├── dario.cat
+│   └── mergo@v1.0.1

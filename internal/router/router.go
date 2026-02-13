@@ -53,6 +53,65 @@ func DefaultRouterConfig() RouterConfig {
 
 // Router implements the MonoFSRouter gRPC service.
 // It manages cluster topology and node health.
+//
+// LOCK HIERARCHY AND SYNCHRONIZATION RULES:
+// To prevent deadlocks, locks must be acquired in the following order.
+// Never acquire a lock if you already hold a lock that appears later in this list.
+//
+// Lock Order (acquire in this order, release in reverse):
+// 1. r.mu (RWMutex) - Main router state lock
+//   - Protects: nodes, ingestedRepos, inProgressIngestions, layoutRegistry,
+//     config, version, build info
+//   - Critical path: All cluster topology operations
+//   - Usage: Take RLock for reads, Lock for writes
+//
+// 2. r.failoverTimersMu (Mutex) - Failover timer management
+//   - Protects: failoverTimers, failoverStartTimes
+//   - Can be held while reading r.mu protected data
+//
+// 3. r.topologySnapshotsMu (RWMutex) - Topology version tracking
+//   - Protects: topologySnapshots
+//   - Independent of other locks, can be acquired in any order
+//
+// 4. r.pendingIndexRebuildsMu (Mutex) - Index rebuild tracking
+//   - Protects: pendingIndexRebuilds
+//   - Independent of other locks
+//
+// 5. r.clientsMu (RWMutex) - Connected clients tracking
+//   - Protects: clients map
+//   - Independent of other locks
+//
+// 6. r.drainMu (RWMutex) - Drain mode state
+//   - Protects: drainedAt, drainReason
+//   - Uses atomic.Bool for drainMode (lock-free)
+//   - Independent of other locks
+//
+// 7. r.partialReposMu (Mutex) - Partial repository tracking
+//   - Protects: partialRepos
+//   - Independent of other locks
+//
+// 8. UI cache locks (RWMutex) - Can be acquired independently
+//   - r.repoCacheMu: Protects repoCache, repoCacheAt
+//   - r.statusCacheMu: Protects statusCache, statusCacheAt
+//   - r.routersCacheMu: Protects routersCache, routersCacheAt
+//
+// Per-struct locks (acquired after Router locks):
+// - clientState.mu: Protects individual client metrics
+// - inProgressIngestion.mu: Protects ingestion progress
+// - ingestedRepo.mu: Protects rebalance state
+//
+// Lock-free synchronization:
+// - r.version: atomic.Int64 for cluster topology version
+// - r.drainMode: atomic.Bool for drain mode flag
+// - r.failoverMap: sync.Map for failover mappings (lock-free concurrent map)
+// - r.nodeFileIndex: sync.Map for node file index (lock-free concurrent map)
+//
+// CRITICAL RULES:
+// 1. Never hold r.mu while making RPC calls - snapshot data first, release lock
+// 2. Never acquire r.mu if you hold any per-struct lock (e.g., clientState.mu)
+// 3. UI handlers must snapshot data under lock, then release before processing
+// 4. Background goroutines must respect cancellation via stop channels
+// 5. Use context.WithTimeout for all RPCs to prevent indefinite blocking
 type Router struct {
 	pb.UnimplementedMonoFSRouterServer
 
@@ -241,6 +300,33 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		logger = slog.Default()
 	}
 	logger = logger.With("component", "router")
+
+	// Validate configuration
+	if cfg.ClusterID == "" {
+		logger.Warn("cluster ID not set, using default", "cluster_id", "monofs-cluster")
+		cfg.ClusterID = "monofs-cluster"
+	}
+	if cfg.ReplicationFactor < 1 {
+		logger.Error("invalid replication factor, must be >= 1", "replication_factor", cfg.ReplicationFactor)
+		panic(fmt.Sprintf("invalid replication factor: %d", cfg.ReplicationFactor))
+	}
+	if cfg.HealthCheckInterval <= 0 {
+		logger.Warn("invalid health check interval, using default", "interval", 5*time.Second)
+		cfg.HealthCheckInterval = 5 * time.Second
+	}
+	if cfg.UnhealthyThreshold <= 0 {
+		logger.Warn("invalid unhealthy threshold, using default", "threshold", 15*time.Second)
+		cfg.UnhealthyThreshold = 15 * time.Second
+	}
+	if cfg.RebalanceDelay < 0 {
+		logger.Warn("invalid rebalance delay, using default", "delay", 10*time.Minute)
+		cfg.RebalanceDelay = 10 * time.Minute
+	}
+	if cfg.GracefulFailoverDelay < 0 {
+		logger.Warn("invalid graceful failover delay, using default", "delay", 60*time.Second)
+		cfg.GracefulFailoverDelay = 60 * time.Second
+	}
+
 	r := &Router{
 		nodes:                make(map[string]*nodeState),
 		ingestedRepos:        make(map[string]*ingestedRepo),
@@ -1425,27 +1511,59 @@ func (r *Router) checkAllNodes() {
 }
 
 // Close shuts down the router and all connections.
+// It stops all background goroutines and cleans up resources.
 func (r *Router) Close() error {
+	r.logger.Info("shutting down router")
+
+	// Stop health check and partial cleanup loops
 	r.StopHealthCheck()
 
 	// Stop UI handler
-	close(r.stopUI)
+	select {
+	case <-r.stopUI:
+		// Already closed
+	default:
+		close(r.stopUI)
+	}
+
+	// Stop client cleanup loop
+	select {
+	case <-r.stopClients:
+		// Already closed
+	default:
+		close(r.stopClients)
+	}
+
+	// Give goroutines time to finish gracefully
+	time.Sleep(100 * time.Millisecond)
 
 	// Close search connection
 	if r.searchConn != nil {
-		r.searchConn.Close()
+		if err := r.searchConn.Close(); err != nil {
+			r.logger.Warn("error closing search connection", "error", err)
+		}
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	// Close fetcher client
+	if r.fetcherClient != nil {
+		if err := r.fetcherClient.Close(); err != nil {
+			r.logger.Warn("error closing fetcher client", "error", err)
+		}
+	}
 
-	for _, state := range r.nodes {
+	// Close node connections
+	r.mu.Lock()
+	for nodeID, state := range r.nodes {
 		if state.conn != nil {
-			state.conn.Close()
+			if err := state.conn.Close(); err != nil {
+				r.logger.Warn("error closing node connection", "node_id", nodeID, "error", err)
+			}
 		}
 	}
 	r.nodes = nil
+	r.mu.Unlock()
 
+	r.logger.Info("router shutdown complete")
 	return nil
 }
 
