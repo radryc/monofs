@@ -130,17 +130,9 @@ type FileMetadata struct {
 	Mtime    int64
 }
 
-// WalkTree walks the Git tree and yields file metadata.
-// Walks git tree objects directly without requiring a working directory.
-func (rm *RepoManager) WalkTree(repo *git.Repository, branch string, fn func(FileMetadata) error) error {
-	if branch == "" {
-		branch = "main"
-	}
-
-	// Try multiple reference formats in order of preference:
-	// 1. Local branch ref (refs/heads/branch)
-	// 2. Remote tracking ref (refs/remotes/origin/branch)
-	// 3. HEAD (fallback)
+// resolveReference attempts to resolve a git reference using multiple strategies.
+// Tries: branch name, origin/branch name, HEAD
+func resolveReference(repo *git.Repository, branch string) (*plumbing.Reference, error) {
 	refNames := []plumbing.ReferenceName{
 		plumbing.NewBranchReferenceName(branch),
 		plumbing.NewRemoteReferenceName("origin", branch),
@@ -152,11 +144,43 @@ func (rm *RepoManager) WalkTree(repo *git.Repository, branch string, fn func(Fil
 	for _, refName := range refNames {
 		ref, err = repo.Reference(refName, true)
 		if err == nil {
-			break
+			return ref, nil
 		}
 	}
+	return nil, fmt.Errorf("failed to get branch ref (tried local, remote, HEAD): %w", err)
+}
+
+// resolveReferenceWithFallback tries the specified branch, then falls back to main/master
+func resolveReferenceWithFallback(repo *git.Repository, branch string) (*plumbing.Reference, error) {
+	// Try the specified branch first
+	if branch != "" {
+		ref, err := resolveReference(repo, branch)
+		if err == nil {
+			return ref, nil
+		}
+	}
+
+	// Fallback to common default branches
+	for _, fallbackBranch := range []string{"main", "master"} {
+		ref, err := resolveReference(repo, fallbackBranch)
+		if err == nil {
+			return ref, nil
+		}
+	}
+
+	return nil, fmt.Errorf("failed to resolve reference (tried %q, main, master)", branch)
+}
+
+// WalkTree walks the Git tree and yields file metadata.
+// Walks git tree objects directly without requiring a working directory.
+func (rm *RepoManager) WalkTree(repo *git.Repository, branch string, fn func(FileMetadata) error) error {
+	if branch == "" {
+		branch = "main"
+	}
+
+	ref, err := resolveReference(repo, branch)
 	if err != nil {
-		return fmt.Errorf("failed to get branch ref (tried local, remote, HEAD): %w", err)
+		return err
 	}
 
 	commit, err := repo.CommitObject(ref.Hash())
@@ -253,26 +277,9 @@ func (rm *RepoManager) GetFileMetadata(repo *git.Repository, branch, filePath st
 		branch = "main"
 	}
 
-	// Try multiple reference formats in order of preference:
-	// 1. Local branch ref (refs/heads/branch)
-	// 2. Remote tracking ref (refs/remotes/origin/branch)
-	// 3. HEAD (fallback)
-	refNames := []plumbing.ReferenceName{
-		plumbing.NewBranchReferenceName(branch),
-		plumbing.NewRemoteReferenceName("origin", branch),
-		plumbing.HEAD,
-	}
-
-	var ref *plumbing.Reference
-	var err error
-	for _, refName := range refNames {
-		ref, err = repo.Reference(refName, true)
-		if err == nil {
-			break
-		}
-	}
+	ref, err := resolveReference(repo, branch)
 	if err != nil {
-		return FileMetadata{}, fmt.Errorf("failed to get branch ref (tried local, remote, HEAD): %w", err)
+		return FileMetadata{}, err
 	}
 
 	commit, err := repo.CommitObject(ref.Hash())

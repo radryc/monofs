@@ -118,6 +118,8 @@ type clientSession struct {
 }
 
 type directoryAccess struct {
+	mu sync.Mutex
+
 	storageID string
 	dirPath   string
 
@@ -292,9 +294,11 @@ func (p *Predictor) recordDirectoryAccess(storageID, filePath string, now time.T
 	}
 	p.mu.Unlock()
 
+	da.mu.Lock()
 	da.fileCounts[filePath]++
 	da.totalAccesses++
 	da.lastUpdate = now
+	da.mu.Unlock()
 }
 
 type recentAccess struct {
@@ -426,7 +430,13 @@ func (p *Predictor) predictDirectory(storageID, filePath string) []PredictedFile
 	da, ok := p.dirAccess[key]
 	p.mu.RUnlock()
 
-	if !ok || da.totalAccesses < 5 {
+	if !ok {
+		return nil
+	}
+
+	da.mu.Lock()
+	if da.totalAccesses < 5 {
+		da.mu.Unlock()
 		return nil
 	}
 
@@ -446,6 +456,7 @@ func (p *Predictor) predictDirectory(storageID, filePath string) []PredictedFile
 			})
 		}
 	}
+	da.mu.Unlock()
 
 	// Sort and limit
 	sort.Slice(predictions, func(i, j int) bool {
@@ -524,6 +535,12 @@ func (p *Predictor) triggerPrefetch(ctx context.Context, predictions []Predicted
 	requests := make([]*fetcher.FetchRequest, 0, len(predictions))
 
 	for _, pred := range predictions {
+		// Skip predictions without a known blob hash — there's nothing
+		// meaningful to prefetch if we don't know the content ID.
+		if pred.ContentID == "" {
+			continue
+		}
+
 		req := &fetcher.FetchRequest{
 			ContentID: pred.ContentID,
 			SourceKey: pred.StorageID,
@@ -532,11 +549,6 @@ func (p *Predictor) triggerPrefetch(ctx context.Context, predictions []Predicted
 				"repo_url": currentMeta.RepoURL,
 				"branch":   currentMeta.Branch,
 			},
-		}
-
-		if currentMeta.SourceType == fetcher.SourceTypeGoMod {
-			req.SourceConfig["module_path"] = currentMeta.ModulePath
-			req.SourceConfig["version"] = currentMeta.Version
 		}
 
 		requests = append(requests, req)

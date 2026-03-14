@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"testing"
+
+	"github.com/radryc/monofs/internal/sharding"
 )
 
 // TestGenerateStorageID verifies storage ID generation from display paths.
@@ -37,7 +39,7 @@ func TestGenerateStorageID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			storageID := generateStorageID(tt.displayPath)
+			storageID := sharding.GenerateStorageID(tt.displayPath)
 
 			// Verify it's a valid 64-char hex string
 			if len(storageID) != 64 {
@@ -45,9 +47,9 @@ func TestGenerateStorageID(t *testing.T) {
 			}
 
 			// Verify it's deterministic
-			storageID2 := generateStorageID(tt.displayPath)
+			storageID2 := sharding.GenerateStorageID(tt.displayPath)
 			if storageID != storageID2 {
-				t.Error("generateStorageID is not deterministic")
+				t.Error("GenerateStorageID is not deterministic")
 			}
 
 			// Verify it matches SHA-256
@@ -139,7 +141,7 @@ func TestStorageIDCollisionResistance(t *testing.T) {
 
 	seen := make(map[string]string)
 	for _, input := range testCases {
-		storageID := generateStorageID(input)
+		storageID := sharding.GenerateStorageID(input)
 		if existing, found := seen[storageID]; found {
 			t.Errorf("collision: %q and %q produce same storage ID", input, existing)
 		}

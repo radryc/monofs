@@ -1,0 +1,240 @@
+{{define "content"}}
+<div class="header">
+    <h1>Dependencies</h1>
+    <p>Dependency files stored in the cluster (queried live from nodes)</p>
+</div>
+
+<!-- Overview Cards -->
+<div class="grid grid-cols-4" id="overviewCards">
+    <div style="text-align: center; padding: 40px; color: var(--text-secondary); grid-column: span 4;">
+        <div class="loader"></div> Loading dependency data...
+    </div>
+</div>
+
+<!-- Per-Tool Breakdown -->
+<div class="card">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 class="card-title">Ecosystems</h2>
+        <button class="btn btn-primary" onclick="refreshDependencies()">🔄 Refresh</button>
+    </div>
+    <div id="toolGrid" class="grid grid-cols-3">
+        <div style="text-align: center; padding: 20px; color: var(--text-secondary); grid-column: span 3;">
+            <div class="loader"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<!-- Cluster Distribution -->
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Cluster Distribution</h2>
+    </div>
+    <div id="nodeTable">
+        <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<script>
+    const toolMeta = {
+        go:    { icon: '<img src="/static/static/go_logo.jpg" style="width:28px;height:28px;border-radius:4px;object-fit:contain;">', color: '#00ADD8', label: 'Go Modules' },
+        npm:   { icon: '<img src="/static/static/npm_logo.png" style="width:28px;height:28px;border-radius:4px;object-fit:contain;">', color: '#CB3837', label: 'npm' },
+        pip:   { icon: '<img src="/static/static/pip_logo.jpg" style="width:28px;height:28px;border-radius:4px;object-fit:contain;">', color: '#3776AB', label: 'pip' },
+        cargo: { icon: '🦀', color: '#DEA584', label: 'Cargo' },
+        bazel: { icon: '🔨', color: '#43A047', label: 'Bazel' },
+        maven: { icon: '☕', color: '#C71A36', label: 'Maven' },
+        nuget: { icon: '💎', color: '#004880', label: 'NuGet' },
+    };
+
+    function getToolMeta(tool) {
+        return toolMeta[tool] || { icon: '📦', color: 'var(--primary)', label: tool };
+    }
+
+    function formatNumber(num) {
+        return (num || 0).toLocaleString();
+    }
+
+    function timeAgo(unixSeconds) {
+        if (!unixSeconds) return 'never';
+        const now = Date.now() / 1000;
+        const ts = unixSeconds > 1e12 ? unixSeconds / 1000 : unixSeconds;
+        const diff = now - ts;
+        if (diff < 60) return 'just now';
+        if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+        if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+        if (diff < 604800) return Math.floor(diff / 86400) + 'd ago';
+        return new Date(ts * 1000).toLocaleDateString();
+    }
+
+    async function loadDependencies() {
+        try {
+            const response = await fetch('/api/dependencies');
+            const data = await response.json();
+
+            if (data.error) {
+                showError(data.error);
+                return;
+            }
+
+            renderOverview(data);
+            renderToolGrid(data);
+            renderNodeTable(data);
+        } catch (err) {
+            showError('Failed to load dependencies: ' + err.message);
+        }
+    }
+
+    function showError(message) {
+        document.getElementById('overviewCards').innerHTML = `
+            <div class="stat-card" style="grid-column: span 4; text-align: center; padding: 40px;">
+                <div style="font-size: 48px; margin-bottom: 16px;">⚠️</div>
+                <div style="font-size: 18px; color: var(--warning); margin-bottom: 8px;">Dependencies Unavailable</div>
+                <div style="color: var(--text-secondary);">${message}</div>
+            </div>
+        `;
+        document.getElementById('toolGrid').innerHTML = '';
+        document.getElementById('nodeTable').innerHTML = '';
+    }
+
+    function renderOverview(data) {
+        if (!data.total_files && (!data.tools || data.tools.length === 0)) {
+            document.getElementById('overviewCards').innerHTML = `
+                <div class="stat-card" style="grid-column: span 4; text-align: center; padding: 48px;">
+                    <div style="font-size: 48px; margin-bottom: 16px; opacity: 0.5;">📚</div>
+                    <div style="font-size: 18px; color: var(--text-primary); margin-bottom: 8px;">No Dependencies Uploaded Yet</div>
+                    <div style="color: var(--text-secondary); max-width: 500px; margin: 0 auto;">
+                        Dependencies are captured automatically when a build session commits.
+                        Configure <code style="background: rgba(148, 163, 184, 0.2); padding: 2px 6px; border-radius: 4px;">deps_upload</code> in your MonoFS config to enable.
+                    </div>
+                </div>
+            `;
+            return;
+        }
+
+        document.getElementById('overviewCards').innerHTML = `
+            <div class="stat-card">
+                <div class="stat-icon">🗂️</div>
+                <div class="stat-label">Total Files</div>
+                <div class="stat-value">${formatNumber(data.total_files)}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">🔧</div>
+                <div class="stat-label">Ecosystems</div>
+                <div class="stat-value">${data.ecosystems || 0}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">🖥️</div>
+                <div class="stat-label">Nodes with Data</div>
+                <div class="stat-value">${data.nodes_with_data || 0}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">🕐</div>
+                <div class="stat-label">Last Ingested</div>
+                <div class="stat-value" style="font-size: 18px;">${timeAgo(data.ingested_at)}</div>
+            </div>
+        `;
+    }
+
+    function renderToolGrid(data) {
+        if (!data.tools || data.tools.length === 0) {
+            document.getElementById('toolGrid').innerHTML = `
+                <div style="grid-column: span 3; text-align: center; padding: 32px; color: var(--text-secondary);">
+                    No tool data available
+                </div>
+            `;
+            return;
+        }
+
+        document.getElementById('toolGrid').innerHTML = data.tools.map(t => {
+            const meta = getToolMeta(t.tool);
+            const pct = data.total_files > 0 ? ((t.files / data.total_files) * 100).toFixed(1) : '0';
+
+            return `
+                <div class="stat-card" style="border-left: 4px solid ${meta.color};">
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 16px;">
+                        <div>
+                            <div style="font-size: 15px; font-weight: 700; margin-bottom: 2px;">${meta.label}</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">${t.tool}</div>
+                        </div>
+                        <div style="font-size: 28px;">${meta.icon}</div>
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+                        <div>
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Files</div>
+                            <div style="font-size: 20px; font-weight: 600;">${formatNumber(t.files)}</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Share</div>
+                            <div style="font-size: 20px; font-weight: 600;">${pct}%</div>
+                        </div>
+                    </div>
+                    <div style="margin-top: 12px; background: rgba(148,163,184,0.15); border-radius: 4px; height: 6px; overflow: hidden;">
+                        <div style="height: 100%; width: ${pct}%; background: ${meta.color}; border-radius: 4px;"></div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function renderNodeTable(data) {
+        if (!data.nodes || data.nodes.length === 0) {
+            document.getElementById('nodeTable').innerHTML = `
+                <div style="text-align: center; padding: 32px; color: var(--text-secondary);">
+                    No nodes hold dependency files
+                </div>
+            `;
+            return;
+        }
+
+        const maxFiles = Math.max(...data.nodes.map(n => n.files));
+
+        let html = `
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Node</th>
+                        <th>Files</th>
+                        <th>Distribution</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        data.nodes.forEach(n => {
+            const pct = data.total_files > 0 ? ((n.files / data.total_files) * 100).toFixed(1) : '0';
+            const barPct = maxFiles > 0 ? ((n.files / maxFiles) * 100).toFixed(1) : '0';
+
+            html += `
+                <tr>
+                    <td>
+                        <div style="font-weight: 600; font-size: 13px; font-family: monospace;">${n.node_id}</div>
+                    </td>
+                    <td>${formatNumber(n.files)}</td>
+                    <td style="width: 50%;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <div style="flex: 1; background: rgba(148,163,184,0.15); border-radius: 4px; height: 8px; overflow: hidden;">
+                                <div style="height: 100%; width: ${barPct}%; background: var(--primary); border-radius: 4px;"></div>
+                            </div>
+                            <span style="font-size: 12px; color: var(--text-secondary); min-width: 40px;">${pct}%</span>
+                        </div>
+                    </td>
+                </tr>
+            `;
+        });
+
+        html += '</tbody></table>';
+        document.getElementById('nodeTable').innerHTML = html;
+    }
+
+    function refreshDependencies() {
+        loadDependencies();
+    }
+
+    // Initial load
+    loadDependencies();
+
+    // Auto-refresh every 30 seconds
+    setInterval(loadDependencies, 30000);
+</script>
+{{end}}

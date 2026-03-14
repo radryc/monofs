@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ import (
 	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/sharding"
 	"google.golang.org/grpc"
 )
 
@@ -51,13 +53,31 @@ type Server struct {
 	totalFiles     atomic.Int64 // Total files owned by this node
 	prefetchHits   atomic.Uint64
 	prefetchMisses atomic.Uint64
+
+	// Smart proxy / forwarding fields for HRW-based request routing
+	enableForwarding bool                        // Enable server-side request forwarding
+	routerAddr       string                      // Router service address (host:port)
+	routerConn       *grpc.ClientConn            // Router gRPC connection
+	routerClient     pb.MonoFSRouterClient       // Router gRPC client
+	hrw              *sharding.HRW               // HRW hasher for routing decisions
+	peerConns        map[string]*grpc.ClientConn // Connections to peer nodes (nodeID -> conn)
+	peerClients      map[string]pb.MonoFSClient  // gRPC clients to peers (nodeID -> client)
+	clusterVersion   atomic.Int64                // Current cluster topology version
+	refreshInterval  time.Duration               // Topology refresh interval
+	stopRefresh      chan struct{}               // Stop topology refresh goroutine
+	rpcTimeout       time.Duration               // Timeout for forwarded RPCs
+	hrwMu            sync.RWMutex                // Protects hrw and peer clients
 }
 
 type repoInfo struct {
-	StorageID   string `json:"storage_id"`   // SHA-256 hash (primary key)
-	DisplayPath string `json:"display_path"` // User-visible path
-	RepoURL     string `json:"repo_url"`
-	Branch      string `json:"branch"`
+	StorageID     string `json:"storage_id"`   // SHA-256 hash (primary key)
+	DisplayPath   string `json:"display_path"` // User-visible path
+	RepoURL       string `json:"repo_url"`
+	Branch        string `json:"branch"`
+	CommitHash    string `json:"commit_hash,omitempty"`
+	CommitTime    int64  `json:"commit_time,omitempty"`
+	CommitMessage string `json:"commit_message,omitempty"`
+	FetchType     string `json:"fetch_type,omitempty"`
 }
 
 type storedMetadata struct {
@@ -338,15 +358,6 @@ func (s *Server) ConfigureFetcher(fetcherAddrs []string) error {
 	return nil
 }
 
-// GetPredictorStats returns prediction statistics.
-func (s *Server) GetPredictorStats() *PredictorStats {
-	if s.predictor == nil {
-		return nil
-	}
-	stats := s.predictor.GetStats()
-	return &stats
-}
-
 // GetPrefetchStats returns prefetch hit/miss statistics.
 func (s *Server) GetPrefetchStats() (hits, misses uint64) {
 	return s.prefetchHits.Load(), s.prefetchMisses.Load()
@@ -507,10 +518,14 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 
 		// Store repo metadata
 		info := &repoInfo{
-			StorageID:   req.StorageId,
-			DisplayPath: req.DisplayPath,
-			RepoURL:     req.Source,
-			Branch:      "", // Branch will be set during file ingestion
+			StorageID:     req.StorageId,
+			DisplayPath:   req.DisplayPath,
+			RepoURL:       req.Source,
+			Branch:        "", // Branch will be set during file ingestion
+			CommitHash:    req.CommitHash,
+			CommitTime:    req.CommitTime,
+			CommitMessage: req.CommitMessage,
+			FetchType:     req.FetchType.String(),
 		}
 		repoKey := []byte(req.StorageId)
 		repoValue, err := json.Marshal(info)
@@ -771,19 +786,48 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 
 	// Pre-serialize all metadata to avoid doing it inside transaction
 	type preparedFile struct {
-		key          []byte
-		value        []byte
-		indexKey     []byte
-		filePath     string
-		ownershipKey []byte
+		key           []byte
+		value         []byte
+		indexKey      []byte
+		filePath      string
+		ownershipKey  []byte
+		blobHash      string
+		inlineContent []byte
 	}
 
 	prepared := make([]preparedFile, 0, len(req.Files))
 
+	// Separate dir-hint-only entries from real files.
+	// Dir-hint entries update the directory index without storing metadata/ownership.
+	type dirHintFile struct {
+		filePath string
+		mode     uint32
+		size     uint64
+		mtime    int64
+		hashKey  []byte
+		isDir    bool
+	}
+	var dirHints []dirHintFile
+
 	// Prepare all files (serialize JSON outside transaction)
 	for _, meta := range req.Files {
+		// Dir-hint entries only update the directory index.
+		if meta.BackendMetadata["dir_hint"] == "true" {
+			dirHints = append(dirHints, dirHintFile{
+				filePath: meta.Path,
+				mode:     meta.Mode,
+				size:     meta.Size,
+				mtime:    meta.Mtime,
+				hashKey:  makeStorageKey(storageID, meta.Path),
+				isDir:    meta.BackendMetadata["file_type"] == "1",
+			})
+			continue
+		}
+
 		key := makeStorageKey(storageID, meta.Path)
 		fullPath := makeFullPath(displayPath, meta.Path)
+
+		isDir := meta.BackendMetadata["file_type"] == "1"
 
 		stored := storedMetadata{
 			Path:        fullPath,
@@ -796,7 +840,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 			BlobHash:    meta.BlobHash,
 			Branch:      branch,
 			RepoURL:     repoURL,
-			IsDir:       false,
+			IsDir:       isDir,
 		}
 
 		value, err := json.Marshal(stored)
@@ -809,11 +853,13 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 		ownershipKey := []byte(storageID + ":" + meta.Path)
 
 		prepared = append(prepared, preparedFile{
-			key:          key,
-			value:        value,
-			indexKey:     indexKey,
-			filePath:     meta.Path,
-			ownershipKey: ownershipKey,
+			key:           key,
+			value:         value,
+			indexKey:      indexKey,
+			filePath:      meta.Path,
+			ownershipKey:  ownershipKey,
+			blobHash:      meta.BlobHash,
+			inlineContent: meta.InlineContent,
 		})
 	}
 
@@ -839,6 +885,11 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 		if !isNewRepo && existsErr == nil {
 			var existing repoInfo
 			if json.Unmarshal(existingRepoData, &existing) == nil {
+				// Preserve commit info from existing registration
+				info.CommitHash = existing.CommitHash
+				info.CommitTime = existing.CommitTime
+				info.CommitMessage = existing.CommitMessage
+				info.FetchType = existing.FetchType
 				if existing.Branch == "" && branch != "" {
 					s.logger.Info("updating repo branch in batch",
 						"storage_id", storageID,
@@ -909,6 +960,101 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 			}
 		}
 
+		// Process dir-hint entries: update the directory index for files
+		// owned by other nodes so this node has a complete dir listing.
+		if len(dirHints) > 0 {
+			// Build an in-memory dir map from all dir-hint entries,
+			// then merge into the existing on-disk dir index.
+			dirMap := make(map[string][]dirIndexEntry)
+			for _, dh := range dirHints {
+				parts := strings.Split(dh.filePath, "/")
+				for i := 0; i < len(parts); i++ {
+					var dirPath, entryName string
+					var isDir bool
+					if i == 0 {
+						dirPath = ""
+						entryName = parts[0]
+						isDir = (i < len(parts)-1)
+					} else {
+						dirPath = strings.Join(parts[:i], "/")
+						entryName = parts[i]
+						isDir = (i < len(parts)-1)
+					}
+					if i == len(parts)-1 && dh.isDir {
+						isDir = true
+					}
+					entries := dirMap[dirPath]
+					found := false
+					for j, entry := range entries {
+						if entry.Name == entryName {
+							if !isDir {
+								entries[j] = dirIndexEntry{
+									Name: entryName, Mode: dh.mode,
+									Size: dh.size, Mtime: dh.mtime,
+									HashKey: string(dh.hashKey), IsDir: false,
+								}
+							} else if dh.mtime > entry.Mtime {
+								entries[j].Mtime = dh.mtime
+							}
+							found = true
+							break
+						}
+					}
+					if !found {
+						e := dirIndexEntry{Name: entryName, IsDir: isDir, Mtime: dh.mtime}
+						if !isDir {
+							e.Mode = dh.mode
+							e.Size = dh.size
+							e.HashKey = string(dh.hashKey)
+						} else if dh.mode&0222 == 0 {
+							e.Mode = 0555 | uint32(syscall.S_IFDIR)
+						} else {
+							e.Mode = 0755 | uint32(syscall.S_IFDIR)
+						}
+						entries = append(entries, e)
+					}
+					dirMap[dirPath] = entries
+				}
+			}
+
+			// Merge with existing on-disk dir index entries.
+			for dirPath, newEntries := range dirMap {
+				dirIndexKey := makeDirIndexKey(storageID, dirPath)
+				// Read existing entries.
+				var existing []dirIndexEntry
+				if val, err := tx.Get(bucketDirIndex, dirIndexKey); err == nil {
+					json.Unmarshal(val, &existing)
+				}
+				// Merge: keep existing entries, add/update from newEntries.
+				merged := existing
+				for _, ne := range newEntries {
+					found := false
+					for j, ex := range merged {
+						if ex.Name == ne.Name {
+							// Prefer the entry with actual file data.
+							if !ne.IsDir && ne.Size > 0 {
+								merged[j] = ne
+							}
+							found = true
+							break
+						}
+					}
+					if !found {
+						merged = append(merged, ne)
+					}
+				}
+				sort.Slice(merged, func(i, j int) bool {
+					return merged[i].Name < merged[j].Name
+				})
+				val, _ := json.Marshal(merged)
+				tx.Put(bucketDirIndex, dirIndexKey, val, 0)
+			}
+			s.logger.Info("processed dir hints",
+				"storage_id", storageID,
+				"hint_files", len(dirHints),
+				"dirs_updated", len(dirMap))
+		}
+
 		return nil
 	})
 
@@ -929,6 +1075,39 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 		"files_ingested", filesIngested,
 		"files_failed", filesFailed,
 		"new_files", newFiles)
+
+	// Forward blob content to fetchers synchronously.
+	// We must wait for blobs to be stored before returning, otherwise
+	// subsequent Read requests may fail with "blob not found" (EIO).
+	if s.fetcherClient != nil {
+		blobsToForward := make(map[string][]byte)
+		for _, pf := range prepared {
+			if len(pf.inlineContent) > 0 && pf.blobHash != "" {
+				blobsToForward[pf.blobHash] = pf.inlineContent
+			}
+		}
+		if len(blobsToForward) > 0 {
+			fwdCtx, fwdCancel := context.WithTimeout(ctx, 120*time.Second)
+			defer fwdCancel()
+			stored, failed, fwdErr := s.fetcherClient.StoreBlobBatch(fwdCtx, blobsToForward)
+			if fwdErr != nil {
+				s.logger.Error("failed to forward blobs to fetcher",
+					"error", fwdErr,
+					"stored", stored,
+					"failed", failed,
+					"total", len(blobsToForward))
+				return &pb.IngestFileBatchResponse{
+					Success:       false,
+					FilesIngested: filesIngested,
+					FilesFailed:   int64(len(blobsToForward)),
+				}, fmt.Errorf("blob forwarding to fetcher failed: %w", fwdErr)
+			}
+			s.logger.Info("forwarded blobs to fetcher",
+				"stored", stored,
+				"failed", failed,
+				"total", len(blobsToForward))
+		}
+	}
 
 	// Invalidate intermediate directory cache (batch operation)
 	parts := strings.Split(displayPath, "/")
@@ -1132,6 +1311,33 @@ func (s *Server) GetNodeInfo(ctx context.Context, req *pb.NodeInfoRequest) (*pb.
 	}, nil
 }
 
+// GetPredictorStats returns predictor statistics for this node via gRPC.
+func (s *Server) GetPredictorStats(ctx context.Context, req *pb.PredictorStatsRequest) (*pb.PredictorStatsResponse, error) {
+	resp := &pb.PredictorStatsResponse{
+		NodeId:  s.nodeID,
+		Enabled: s.predictor != nil,
+	}
+
+	if s.predictor != nil {
+		stats := s.predictor.GetStats()
+		hits, misses := s.GetPrefetchStats()
+
+		resp.MarkovChains = int32(stats.MarkovChains)
+		resp.DirectoryMaps = int32(stats.DirectoryMaps)
+		resp.Predictions = stats.Predictions
+		resp.Prefetches = stats.Prefetches
+		resp.PrefetchHits = stats.PrefetchHits
+		resp.PrefetchMisses = int64(misses)
+
+		total := float64(hits + misses)
+		if total > 0 {
+			resp.HitRate = float64(hits) / total
+		}
+	}
+
+	return resp, nil
+}
+
 // ListRepositories returns all repository IDs stored on this node.
 func (s *Server) ListRepositories(ctx context.Context, req *pb.ListRepositoriesRequest) (*pb.ListRepositoriesResponse, error) {
 	var repoIDs []string
@@ -1180,10 +1386,13 @@ func (s *Server) GetRepositoryInfo(ctx context.Context, req *pb.GetRepositoryInf
 	}
 
 	return &pb.GetRepositoryInfoResponse{
-		StorageId:   repoInfoData.StorageID,
-		DisplayPath: repoInfoData.DisplayPath,
-		Source:      repoInfoData.RepoURL,
-		Ref:         repoInfoData.Branch,
+		StorageId:     repoInfoData.StorageID,
+		DisplayPath:   repoInfoData.DisplayPath,
+		Source:        repoInfoData.RepoURL,
+		Ref:           repoInfoData.Branch,
+		CommitHash:    repoInfoData.CommitHash,
+		CommitTime:    repoInfoData.CommitTime,
+		CommitMessage: repoInfoData.CommitMessage,
 	}, nil
 }
 
@@ -1254,14 +1463,15 @@ func (s *Server) Close() error {
 	return nil
 }
 
-// hashPath generates a simple inode number from path.
+// hashPath generates a stable inode number from a path using FNV-1a.
 func hashPath(path string) uint64 {
 	if path == "" {
 		return 1
 	}
-	var h uint64 = 5381
-	for _, c := range path {
-		h = h*33 + uint64(c)
+	h := uint64(14695981039346656037) // FNV offset basis
+	for _, c := range []byte(path) {
+		h ^= uint64(c)
+		h *= 1099511628211 // FNV prime
 	}
 	return h
 }

@@ -547,14 +547,8 @@ func sourceTypeToProto(st SourceType) pb.SourceType {
 	switch st {
 	case SourceTypeGit:
 		return pb.SourceType_SOURCE_TYPE_GIT
-	case SourceTypeGoMod:
-		return pb.SourceType_SOURCE_TYPE_GOMOD
-	case SourceTypeS3:
-		return pb.SourceType_SOURCE_TYPE_S3
-	case SourceTypeHTTP:
-		return pb.SourceType_SOURCE_TYPE_HTTP
-	case SourceTypeOCI:
-		return pb.SourceType_SOURCE_TYPE_OCI
+	case SourceTypeBlob:
+		return pb.SourceType_SOURCE_TYPE_BLOB
 	default:
 		return pb.SourceType_SOURCE_TYPE_UNKNOWN
 	}
@@ -575,21 +569,13 @@ func (c *Client) HealthyFetchers() []string {
 	return addresses
 }
 
-// FetchBlobSimple is a convenience wrapper for FetchBlob with common Git/GoMod params.
+// FetchBlobSimple is a convenience wrapper for FetchBlob.
 func (c *Client) FetchBlobSimple(ctx context.Context, sourceURL, blobHash, filePath, branch string, sourceType SourceType) ([]byte, error) {
 	sourceConfig := map[string]string{
 		"repo_url":     sourceURL,
 		"branch":       branch,
 		"display_path": filePath,
 		"file_path":    filePath,
-	}
-
-	// For Go modules, parse module_path and version from sourceURL (e.g., "google.golang.org/grpc@v1.75.0")
-	if sourceType == SourceTypeGoMod {
-		if idx := strings.LastIndex(sourceURL, "@"); idx != -1 {
-			sourceConfig["module_path"] = sourceURL[:idx]
-			sourceConfig["version"] = sourceURL[idx+1:]
-		}
 	}
 
 	req := &FetchRequest{
@@ -599,7 +585,34 @@ func (c *Client) FetchBlobSimple(ctx context.Context, sourceURL, blobHash, fileP
 		Priority:     5,
 	}
 
-	return c.FetchBlob(ctx, req, sourceType)
+	// [CONTENT_AUDIT] Log fetch request for tracking content corruption issues
+	c.logger.Debug("[CONTENT_AUDIT] fetch_blob_request",
+		"source_url", sourceURL,
+		"blob_hash", blobHash,
+		"file_path", filePath,
+		"branch", branch,
+		"source_type", sourceType.String())
+
+	content, err := c.FetchBlob(ctx, req, sourceType)
+	if err != nil {
+		c.logger.Info("[CONTENT_AUDIT] fetch_blob_error",
+			"source_url", sourceURL,
+			"blob_hash", blobHash,
+			"file_path", filePath,
+			"error", err.Error())
+		return nil, err
+	}
+
+	// [CONTENT_AUDIT] Log successful fetch
+	// Note: blobHash is Git SHA-1 for Git repos, SHA-256 for dependency uploads
+	// Cannot verify hash match here due to different hash algorithms
+	c.logger.Debug("[CONTENT_AUDIT] fetch_blob_success",
+		"source_url", sourceURL,
+		"blob_hash", blobHash,
+		"file_path", filePath,
+		"content_size", len(content))
+
+	return content, nil
 }
 
 // CheckCacheSimple checks if a blob is in the prefetch cache of any fetcher.
@@ -715,26 +728,38 @@ type SourceStatsInfo struct {
 	BytesFetched int64   `json:"bytes_fetched"`
 	AvgLatencyMs float64 `json:"avg_latency_ms"`
 	CachedItems  int64   `json:"cached_items"`
+	CacheBytes   int64   `json:"cache_bytes"`
 }
 
 // ClusterStats contains aggregated statistics for the entire fetcher cluster.
 type ClusterStats struct {
-	TotalFetchers        int            `json:"total_fetchers"`
-	HealthyFetchers      int            `json:"healthy_fetchers"`
-	TotalRequests        int64          `json:"total_requests"`
-	TotalCacheHits       int64          `json:"total_cache_hits"`
-	TotalCacheMisses     int64          `json:"total_cache_misses"`
-	AggregatedHitRate    float64        `json:"aggregated_hit_rate"`
-	TotalCacheSizeBytes  int64          `json:"total_cache_size_bytes"`
-	TotalCacheEntries    int64          `json:"total_cache_entries"`
-	TotalActiveFetches   int64          `json:"total_active_fetches"`
-	TotalQueuedPrefetch  int64          `json:"total_queued_prefetch"`
-	TotalBytesFetched    int64          `json:"total_bytes_fetched"`
-	TotalBytesServed     int64          `json:"total_bytes_served"`
-	Fetchers             []FetcherStats `json:"fetchers"`
-	ClientAffinityHits   int64          `json:"client_affinity_hits"`
-	ClientAffinityMisses int64          `json:"client_affinity_misses"`
-	ClientTotalRequests  int64          `json:"client_total_requests"`
+	TotalFetchers        int                       `json:"total_fetchers"`
+	HealthyFetchers      int                       `json:"healthy_fetchers"`
+	TotalRequests        int64                     `json:"total_requests"`
+	TotalCacheHits       int64                     `json:"total_cache_hits"`
+	TotalCacheMisses     int64                     `json:"total_cache_misses"`
+	AggregatedHitRate    float64                   `json:"aggregated_hit_rate"`
+	TotalCacheSizeBytes  int64                     `json:"total_cache_size_bytes"`
+	TotalCacheEntries    int64                     `json:"total_cache_entries"`
+	TotalActiveFetches   int64                     `json:"total_active_fetches"`
+	TotalQueuedPrefetch  int64                     `json:"total_queued_prefetch"`
+	TotalBytesFetched    int64                     `json:"total_bytes_fetched"`
+	TotalBytesServed     int64                     `json:"total_bytes_served"`
+	Fetchers             []FetcherStats            `json:"fetchers"`
+	ClientAffinityHits   int64                     `json:"client_affinity_hits"`
+	ClientAffinityMisses int64                     `json:"client_affinity_misses"`
+	ClientTotalRequests  int64                     `json:"client_total_requests"`
+	BlobStats            map[string]BlobBackendSum `json:"blob_stats,omitempty"`
+	// StorageBlobs maps storage ID to per-dependency blob count, aggregated
+	// across all fetcher instances.
+	StorageBlobs map[string]BlobBackendSum `json:"storage_blobs,omitempty"`
+}
+
+// BlobBackendSum aggregates blob counts and sizes per backend type across
+// all fetcher instances (e.g. git, blob).
+type BlobBackendSum struct {
+	BlobCount int64 `json:"blob_count"`
+	BlobBytes int64 `json:"blob_bytes"`
 }
 
 // GetClusterStats retrieves statistics from all fetchers in the cluster.
@@ -803,6 +828,7 @@ func (c *Client) GetClusterStats(ctx context.Context, includeSourceStats bool) (
 						BytesFetched: v.BytesFetched,
 						AvgLatencyMs: v.AvgLatencyMs,
 						CachedItems:  v.CachedItems,
+						CacheBytes:   v.CacheBytes,
 					}
 				}
 			}
@@ -812,6 +838,9 @@ func (c *Client) GetClusterStats(ctx context.Context, includeSourceStats bool) (
 	}
 
 	// Collect results
+	blobAgg := make(map[string]BlobBackendSum)
+	storageAgg := make(map[string]BlobBackendSum)
+
 	for i := 0; i < len(fetchers); i++ {
 		result := <-results
 		if result.stats != nil {
@@ -830,7 +859,29 @@ func (c *Client) GetClusterStats(ctx context.Context, includeSourceStats bool) (
 			stats.TotalQueuedPrefetch += result.stats.QueuedPrefetches
 			stats.TotalBytesFetched += result.stats.BytesFetched
 			stats.TotalBytesServed += result.stats.BytesServed
+
+			// Aggregate blob stats per backend type; separate per-storage-ID entries.
+			for srcType, ss := range result.stats.SourceStats {
+				if strings.HasPrefix(srcType, "storage:") {
+					storageID := strings.TrimPrefix(srcType, "storage:")
+					entry := storageAgg[storageID]
+					entry.BlobCount += ss.CachedItems
+					storageAgg[storageID] = entry
+					continue
+				}
+				entry := blobAgg[srcType]
+				entry.BlobCount += ss.CachedItems
+				entry.BlobBytes += ss.CacheBytes
+				blobAgg[srcType] = entry
+			}
 		}
+	}
+
+	if len(blobAgg) > 0 {
+		stats.BlobStats = blobAgg
+	}
+	if len(storageAgg) > 0 {
+		stats.StorageBlobs = storageAgg
 	}
 
 	// Calculate aggregate hit rate
@@ -845,4 +896,269 @@ func (c *Client) GetClusterStats(ctx context.Context, includeSourceStats bool) (
 	})
 
 	return stats, nil
+}
+
+// StoreBlob stores a blob on a fetcher instance.
+func (c *Client) StoreBlob(ctx context.Context, blobHash string, content []byte) error {
+	fetcher := c.selectFetcher("blob")
+	if fetcher == nil {
+		return fmt.Errorf("no healthy fetchers available")
+	}
+
+	req := &pb.StoreBlobRequest{
+		BlobHash: blobHash,
+		Content:  content,
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, c.config.RequestTimeout)
+	defer cancel()
+
+	resp, err := fetcher.client.StoreBlob(callCtx, req)
+	if err != nil {
+		fetcher.recordError()
+		return fmt.Errorf("store blob RPC failed: %w", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("store blob failed: %s", resp.ErrorMessage)
+	}
+
+	fetcher.healthy.Store(true)
+	return nil
+}
+
+// maxUnaryBlobSize is the maximum blob size that can be sent via the unary
+// StoreBlob RPC. Anything larger must use the streaming RPC to avoid
+// hitting the gRPC message size limit (~100 MB default).
+const maxUnaryBlobSize = 64 * 1024 * 1024 // 64 MB
+
+// maxStreamChunkSize is the maximum content bytes per StoreBlobEntry
+// message on the streaming RPC. Blobs larger than this are split into
+// multiple messages sharing the same blob_hash.
+const maxStreamChunkSize = 64 * 1024 * 1024 // 64 MB
+
+// StoreBlobBatch stores blobs on a fetcher. For a single small blob it uses
+// the unary StoreBlob RPC. For multiple blobs or any blob exceeding
+// maxUnaryBlobSize it streams entries via StoreBlobBatchStream so the fetcher
+// can pack them into large (~512 MB) archives without gRPC message size limits.
+// Blobs larger than maxStreamChunkSize are automatically chunked across
+// multiple stream messages.
+func (c *Client) StoreBlobBatch(ctx context.Context, blobs map[string][]byte) (stored int, failed int, err error) {
+	if len(blobs) == 0 {
+		return 0, 0, nil
+	}
+
+	// Single small blob — use simple unary call
+	if len(blobs) == 1 {
+		for hash, content := range blobs {
+			if len(content) <= maxUnaryBlobSize {
+				if storeErr := c.StoreBlob(ctx, hash, content); storeErr != nil {
+					return 0, 1, storeErr
+				}
+				return 1, 0, nil
+			}
+			// Blob too large for unary RPC — fall through to streaming path
+		}
+	}
+
+	// Multiple blobs or oversized single blob — stream them
+	fetcher := c.selectFetcher("blob")
+	if fetcher == nil {
+		return 0, len(blobs), fmt.Errorf("no healthy fetchers available")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Minute) // large pushes
+	defer cancel()
+
+	stream, streamErr := fetcher.client.StoreBlobBatchStream(callCtx)
+	if streamErr != nil {
+		fetcher.recordError()
+		c.logger.Warn("StoreBlobBatchStream RPC unavailable, falling back to individual StoreBlob",
+			"blobs", len(blobs),
+			"error", streamErr)
+		// Fallback to individual calls
+		var firstErr error
+		for hash, content := range blobs {
+			if fallbackErr := c.StoreBlob(ctx, hash, content); fallbackErr != nil {
+				failed++
+				if firstErr == nil {
+					firstErr = fallbackErr
+				}
+			} else {
+				stored++
+			}
+		}
+		if failed > 0 {
+			return stored, failed, fmt.Errorf("StoreBlobBatchStream failed (%w), fallback had %d/%d failures, first error: %w",
+				streamErr, failed, len(blobs), firstErr)
+		}
+		return stored, 0, fmt.Errorf("StoreBlobBatchStream failed (%w), fallback succeeded for all %d blobs",
+			streamErr, len(blobs))
+	}
+
+	// Stream each blob, chunking if needed
+	var sent int
+	for hash, content := range blobs {
+		if sendErr := c.sendBlobChunked(stream, hash, content); sendErr != nil {
+			c.logger.Warn("stream send error, closing early",
+				"sent", sent, "error", sendErr)
+			break
+		}
+		sent++
+	}
+
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		fetcher.recordError()
+		return 0, len(blobs), fmt.Errorf("close blob batch stream: %w", err)
+	}
+
+	fetcher.healthy.Store(true)
+	stored = int(resp.Stored) + int(resp.Skipped)
+	failed = int(resp.Failed)
+
+	if resp.Stored > 0 {
+		c.logger.Info("stored blob batch via stream",
+			"stored", resp.Stored,
+			"skipped", resp.Skipped,
+			"archives", resp.ArchivesCreated,
+			"archive_bytes", resp.ArchiveBytes)
+	}
+
+	return stored, failed, nil
+}
+
+// sendBlobChunked sends a single blob over the stream, splitting it into
+// multiple StoreBlobEntry messages if it exceeds maxStreamChunkSize.
+func (c *Client) sendBlobChunked(stream pb.BlobFetcher_StoreBlobBatchStreamClient, hash string, content []byte) error {
+	totalSize := int64(len(content))
+
+	// Small blob — single message (common fast path)
+	if len(content) <= maxStreamChunkSize {
+		return stream.Send(&pb.StoreBlobEntry{
+			BlobHash:   hash,
+			Content:    content,
+			ChunkIndex: 0,
+			IsLast:     true,
+			TotalSize:  totalSize,
+		})
+	}
+
+	// Large blob — split into chunks
+	var chunkIdx int32
+	for len(content) > 0 {
+		end := maxStreamChunkSize
+		if end > len(content) {
+			end = len(content)
+		}
+		chunk := content[:end]
+		content = content[end:]
+		isLast := len(content) == 0
+
+		entry := &pb.StoreBlobEntry{
+			BlobHash:   hash,
+			Content:    chunk,
+			ChunkIndex: chunkIdx,
+			IsLast:     isLast,
+		}
+		if chunkIdx == 0 {
+			entry.TotalSize = totalSize
+		}
+
+		if err := stream.Send(entry); err != nil {
+			return err
+		}
+		chunkIdx++
+	}
+	return nil
+}
+
+// DeleteBlobs asks a fetcher to remove blobs from its index.
+// If compact is true, archive files that become empty are deleted from disk.
+func (c *Client) DeleteBlobs(ctx context.Context, blobHashes []string, compact bool) (deleted int, notFound int, err error) {
+	if len(blobHashes) == 0 {
+		return 0, 0, nil
+	}
+
+	fetcher := c.selectFetcher("blob")
+	if fetcher == nil {
+		return 0, 0, fmt.Errorf("no healthy fetchers available")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, c.config.RequestTimeout)
+	defer cancel()
+
+	resp, err := fetcher.client.DeleteBlobs(callCtx, &pb.DeleteBlobsRequest{
+		BlobHashes: blobHashes,
+		Compact:    compact,
+	})
+	if err != nil {
+		fetcher.recordError()
+		return 0, 0, fmt.Errorf("DeleteBlobs RPC failed: %w", err)
+	}
+
+	if !resp.Success {
+		return 0, 0, fmt.Errorf("DeleteBlobs failed: %s", resp.ErrorMessage)
+	}
+
+	fetcher.healthy.Store(true)
+	return int(resp.Deleted), int(resp.NotFound), nil
+}
+
+// StoreArchive streams a packager archive to a fetcher.
+func (c *Client) StoreArchive(ctx context.Context, storageID string, chunkIndex int, archiveData []byte) error {
+	fetcher := c.selectFetcher(storageID)
+	if fetcher == nil {
+		return fmt.Errorf("no healthy fetchers available")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Minute) // Large archives may take time
+	defer cancel()
+
+	stream, err := fetcher.client.StoreArchive(callCtx)
+	if err != nil {
+		fetcher.recordError()
+		return fmt.Errorf("open archive stream: %w", err)
+	}
+
+	// Send in 1MB chunks
+	const chunkSize = 1024 * 1024
+	for offset := 0; offset < len(archiveData); offset += chunkSize {
+		end := offset + chunkSize
+		if end > len(archiveData) {
+			end = len(archiveData)
+		}
+
+		chunk := &pb.StoreArchiveChunk{
+			StorageId:  storageID,
+			ChunkIndex: int32(chunkIndex),
+			Data:       archiveData[offset:end],
+			IsLast:     end >= len(archiveData),
+		}
+
+		if err := stream.Send(chunk); err != nil {
+			fetcher.recordError()
+			return fmt.Errorf("send archive chunk: %w", err)
+		}
+	}
+
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		fetcher.recordError()
+		return fmt.Errorf("close archive stream: %w", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("store archive failed: %s", resp.ErrorMessage)
+	}
+
+	c.logger.Info("stored archive on fetcher",
+		"fetcher", fetcher.address,
+		"storage_id", storageID,
+		"chunk_index", chunkIndex,
+		"total_bytes", resp.TotalBytes,
+		"files_indexed", resp.FilesIndexed)
+
+	fetcher.healthy.Store(true)
+	return nil
 }

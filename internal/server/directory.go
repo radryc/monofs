@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -105,12 +106,24 @@ func (s *Server) updateDirectoryIndexHierarchy(tx *nutsdb.Tx, storageID, filePat
 				entry.Size = size
 				entry.HashKey = string(fileHashKey)
 			} else {
-				// It's a directory - use default directory mode
-				entry.Mode = 0755 | uint32(syscall.S_IFDIR)
+				// It's a directory - check if the incoming file's mode
+				// hints at a read-only tree (e.g. Go module cache 0444).
+				// If so, use 0555 for the directory; otherwise default 0755.
+				if mode&0222 == 0 {
+					// File is read-only → directory should be read-only too
+					entry.Mode = 0555 | uint32(syscall.S_IFDIR)
+				} else {
+					entry.Mode = 0755 | uint32(syscall.S_IFDIR)
+				}
 			}
 
 			dirIndex = append(dirIndex, entry)
 		}
+
+		// Sort entries by name for deterministic ordering
+		sort.Slice(dirIndex, func(i, j int) bool {
+			return dirIndex[i].Name < dirIndex[j].Name
+		})
 
 		// Store updated directory index
 		dirIndexValue, err := json.Marshal(dirIndex)
@@ -207,7 +220,7 @@ func (s *Server) checkVirtualDirectory(storageID, dirPath string) *pb.LookupResp
 
 		return &pb.LookupResponse{
 			Ino:   hashPath(storageID + ":" + dirPath),
-			Mode:  0755 | uint32(syscall.S_IFDIR),
+			Mode:  foundEntry.Mode,
 			Size:  0,
 			Mtime: mtime,
 			Found: true,
@@ -217,6 +230,104 @@ func (s *Server) checkVirtualDirectory(storageID, dirPath string) *pb.LookupResp
 	s.logger.Debug("virtual directory not found",
 		"storage_id", storageID,
 		"dir_path", dirPath,
+		"error", err)
+	return nil
+}
+
+// checkVirtualFile checks if a file path exists as a file entry in the directory index.
+// This handles the case where a file's metadata may not be in bucketMetadata but the
+// file is listed in its parent's directory index (e.g., after overlay cleanup before
+// full metadata ingestion is complete).
+func (s *Server) checkVirtualFile(storageID, filePath string) *pb.LookupResponse {
+	// Check parent directory to see if this path exists as a file entry
+	parentDir := extractDirPath(filePath)
+	entryName := extractFileName(filePath)
+
+	dirIndexKey := makeDirIndexKey(storageID, parentDir)
+
+	s.logger.Debug("checking virtual file",
+		"storage_id", storageID,
+		"file_path", filePath,
+		"parent_dir", parentDir,
+		"entry_name", entryName,
+		"dir_index_key", string(dirIndexKey))
+
+	var foundEntry *dirIndexEntry
+	err := s.db.View(func(tx *nutsdb.Tx) error {
+		value, err := tx.Get(bucketDirIndex, dirIndexKey)
+		if err != nil {
+			s.logger.Debug("dir index not found for parent",
+				"parent_dir", parentDir,
+				"error", err)
+			return err
+		}
+
+		var dirIndex []dirIndexEntry
+		if err := json.Unmarshal(value, &dirIndex); err != nil {
+			s.logger.Warn("failed to unmarshal dir index",
+				"parent_dir", parentDir,
+				"error", err)
+			return err
+		}
+
+		s.logger.Debug("checking dir index for file",
+			"parent_dir", parentDir,
+			"entry_count", len(dirIndex),
+			"looking_for", entryName)
+
+		// Look for this entry in the parent directory
+		for i, entry := range dirIndex {
+			if entry.Name == entryName {
+				s.logger.Debug("found matching entry",
+					"entry_name", entry.Name,
+					"is_dir", entry.IsDir)
+				if !entry.IsDir {
+					foundEntry = &dirIndex[i]
+					return nil
+				}
+				return fmt.Errorf("entry exists but is a directory, not a file")
+			}
+		}
+
+		s.logger.Debug("file entry not found in dir index",
+			"looking_for", entryName,
+			"entries", dirIndex)
+		return fmt.Errorf("not found")
+	})
+
+	if err == nil && foundEntry != nil {
+		s.logger.Debug("found virtual file",
+			"storage_id", storageID,
+			"file_path", filePath,
+			"parent_dir", parentDir,
+			"entry_name", entryName,
+			"size", foundEntry.Size,
+			"mtime", foundEntry.Mtime)
+
+		// Use stored Mtime, fallback to now if not set
+		mtime := foundEntry.Mtime
+		if mtime == 0 {
+			mtime = time.Now().Unix()
+		}
+
+		// Ensure the mode has the regular file bit set
+		mode := foundEntry.Mode
+		if mode&uint32(syscall.S_IFMT) == 0 {
+			mode = mode | uint32(syscall.S_IFREG)
+		}
+
+		return &pb.LookupResponse{
+			Ino:   hashPath(storageID + ":" + filePath),
+			Mode:  mode,
+			Size:  foundEntry.Size,
+			Mtime: mtime,
+			Found: true,
+		}
+	}
+
+	s.logger.Debug("virtual file not found",
+		"storage_id", storageID,
+		"file_path", filePath,
 		"error", err)
 	return nil
 }
@@ -286,7 +397,13 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 		}
 
 		// Send top-level directories
+		// Collect and sort entries for deterministic ordering
+		dirs := make([]string, 0, len(topLevelDirs))
 		for dir := range topLevelDirs {
+			dirs = append(dirs, dir)
+		}
+		sort.Strings(dirs)
+		for _, dir := range dirs {
 			stream.Send(&pb.DirEntry{
 				Name: dir,
 				Mode: 0755 | uint32(syscall.S_IFDIR),
@@ -351,7 +468,13 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 			return nil
 		})
 
+		// Collect and sort entries for deterministic ordering
+		dirs := make([]string, 0, len(intermediateDirs))
 		for dir := range intermediateDirs {
+			dirs = append(dirs, dir)
+		}
+		sort.Strings(dirs)
+		for _, dir := range dirs {
 			stream.Send(&pb.DirEntry{
 				Name: dir,
 				Mode: 0755 | uint32(syscall.S_IFDIR),
@@ -402,6 +525,39 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 	})
 
 	if err != nil {
+		// Directory index not found locally — try forwarding to the correct node
+		if s.enableForwarding && !isAlreadyForwarded(stream.Context()) {
+			targetNode := s.getTargetNode(storageID, filePath)
+
+			// Try primary node first if healthy
+			if targetNode != nil && targetNode.ID != s.nodeID && s.isNodeHealthy(targetNode.ID) {
+				s.logger.Debug("readdir forwarding to primary node",
+					"path", path,
+					"storage_id", storageID,
+					"file_path", filePath,
+					"target_node", targetNode.ID)
+				return s.forwardReadDir(req, stream, targetNode)
+			}
+
+			// Primary is unhealthy, try backup nodes
+			if targetNode != nil && !s.isNodeHealthy(targetNode.ID) {
+				backupNodes := s.getBackupNodes(storageID, filePath)
+				for _, backup := range backupNodes {
+					if backup.ID == s.nodeID {
+						break
+					}
+					s.logger.Debug("readdir forwarding to backup node",
+						"path", path,
+						"primary", targetNode.ID,
+						"backup", backup.ID)
+					fwdErr := s.forwardReadDir(req, stream, backup)
+					if fwdErr == nil {
+						return nil
+					}
+				}
+			}
+		}
+
 		// Fallback: directory might be empty or index not built yet
 		elapsed := time.Since(startTime)
 		s.logger.Debug("readdir completed (empty or no index)",
@@ -527,6 +683,13 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 				isDir = (i < len(parts)-1)
 			}
 
+			// For the final component, respect the stored IsDir flag.
+			// Explicitly-ingested directories have meta.IsDir=true even
+			// though they are the last path component.
+			if i == len(parts)-1 && meta.IsDir {
+				isDir = true
+			}
+
 			// Check if entry already exists in this directory
 			entries := dirMap[dirPath]
 			found := false
@@ -543,7 +706,13 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 							IsDir:   false,
 						}
 					} else {
-						// Update directory Mtime if current file is newer
+						// Promote to directory if needed and update Mtime.
+						if !entry.IsDir {
+							entries[j].IsDir = true
+							entries[j].Mode = 0755 | uint32(syscall.S_IFDIR)
+							entries[j].Size = 0
+							entries[j].HashKey = ""
+						}
 						if meta.Mtime > entry.Mtime {
 							entries[j].Mtime = meta.Mtime
 						}
@@ -566,7 +735,14 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 					entry.Size = meta.Size
 					entry.HashKey = string(hashKey)
 				} else {
-					entry.Mode = 0755 | uint32(syscall.S_IFDIR)
+					// Infer directory mode from child file mode: if files
+					// are read-only (e.g. Go module cache 0444), directories
+					// should also be read-only (0555).
+					if meta.Mode&0222 == 0 {
+						entry.Mode = 0555 | uint32(syscall.S_IFDIR)
+					} else {
+						entry.Mode = 0755 | uint32(syscall.S_IFDIR)
+					}
 				}
 
 				entries = append(entries, entry)
@@ -580,7 +756,36 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 	dirsIndexed := int64(0)
 	err = s.db.Update(func(tx *nutsdb.Tx) error {
 		for dirPath, entries := range dirMap {
+			// Sort entries by name before storing for deterministic ordering
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].Name < entries[j].Name
+			})
 			dirIndexKey := makeDirIndexKey(storageID, dirPath)
+
+			// Merge with existing dir index entries (e.g. from dir-hint
+			// batches sent for files owned by other nodes) instead of
+			// overwriting. This ensures the complete directory listing is
+			// preserved across HRW-sharded nodes.
+			if existingVal, err := tx.Get(bucketDirIndex, dirIndexKey); err == nil {
+				var existing []dirIndexEntry
+				if json.Unmarshal(existingVal, &existing) == nil && len(existing) > 0 {
+					// Build lookup of locally-built entries.
+					localNames := make(map[string]struct{}, len(entries))
+					for _, e := range entries {
+						localNames[e.Name] = struct{}{}
+					}
+					// Keep entries from existing index that aren't in the local set.
+					for _, e := range existing {
+						if _, ok := localNames[e.Name]; !ok {
+							entries = append(entries, e)
+						}
+					}
+					sort.Slice(entries, func(i, j int) bool {
+						return entries[i].Name < entries[j].Name
+					})
+				}
+			}
+
 			dirIndexValue, err := json.Marshal(entries)
 			if err != nil {
 				return fmt.Errorf("marshal dir index for %q: %w", dirPath, err)
