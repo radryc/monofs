@@ -1,5 +1,5 @@
 services:
-  # Fetcher 1 - External blob fetcher (Git, Go modules, etc.)
+  # Fetcher 1 - External blob fetcher (packager archives + optional Git)
   # Runs in DMZ with external network access
   fetcher1:
     build:
@@ -16,8 +16,11 @@ services:
       - "--cache-age-hours=2"
       - "--prefetch-workers=4"
       - "--log-level=info"
+    environment:
+      - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
     volumes:
       - fetcher1-cache:/data/cache
+      - ./config:/etc/monofs:ro
     networks:
       - monofs-net
       - monofs-external  # External network access
@@ -50,8 +53,11 @@ services:
       - "--cache-age-hours=2"
       - "--prefetch-workers=4"
       - "--log-level=info"
+    environment:
+      - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
     volumes:
       - fetcher2-cache:/data/cache
+      - ./config:/etc/monofs:ro
     networks:
       - monofs-net
       - monofs-external  # External network access
@@ -145,6 +151,8 @@ services:
       - "--search-addr=search:9100"
       - "--fetcher-addrs=fetcher1:9200,fetcher2:9200"
       - "--debug"
+    environment:
+      - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
     networks:
       - monofs-net
     depends_on:
@@ -183,6 +191,8 @@ services:
       - "--search-addr=search:9100"
       - "--fetcher-addrs=fetcher1:9200,fetcher2:9200"
       - "--debug"
+    environment:
+      - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
     networks:
       - monofs-net
     depends_on:
@@ -382,7 +392,7 @@ services:
     volumes:
       - client-logs:/var/log
       - client-cache:/var/cache/monofs
-      - client-overlay:/var/lib/monofs/overlay
+      - client-overlay:/home/monofs/.monofs/overlay
     networks:
       - monofs-net
     depends_on:
@@ -411,7 +421,7 @@ services:
     volumes:
       - client2-logs:/var/log
       - client2-cache:/var/cache/monofs
-      - client2-overlay:/var/lib/monofs/overlay
+      - client2-overlay:/home/monofs/.monofs/overlay
     networks:
       - monofs-net
     depends_on:
@@ -440,7 +450,7 @@ services:
     volumes:
       - client3-logs:/var/log
       - client3-cache:/var/cache/monofs
-      - client3-overlay:/var/lib/monofs/overlay
+      - client3-overlay:/home/monofs/.monofs/overlay
     networks:
       - monofs-net
     depends_on:

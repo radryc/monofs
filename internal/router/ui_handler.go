@@ -3,6 +3,8 @@ package router
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -43,6 +45,10 @@ func (r *Router) processUIRequest(req UIRequest) {
 
 	case UIRequestRouters:
 		data := r.buildRoutersData()
+		req.Response <- UIResponse{Data: data, Error: nil}
+
+	case UIRequestDependencies:
+		data := r.buildDependenciesData()
 		req.Response <- UIResponse{Data: data, Error: nil}
 	}
 }
@@ -144,6 +150,9 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 					"repo_id":            repoInfo.DisplayPath,
 					"repo_url":           repoInfo.Source,
 					"branch":             repoInfo.Ref,
+					"commit_hash":        repoInfo.CommitHash,
+					"commit_time":        repoInfo.CommitTime,
+					"commit_message":     repoInfo.CommitMessage,
 					"files_count":        filesCount,
 					"ingested_at":        ingestedAt.Unix(),
 					"topology_version":   currentVersion,
@@ -442,3 +451,132 @@ func (r *Router) sendUIRequest(reqType UIRequestType, timeout time.Duration) (in
 }
 
 var ErrUITimeout = fmt.Errorf("UI request timeout")
+
+// buildDependenciesData queries the cluster nodes for files in the
+// "dependency" repository and aggregates them into a UI-friendly summary.
+func (r *Router) buildDependenciesData() *DependenciesData {
+	data := &DependenciesData{}
+
+	// The dependency repo uses a deterministic storageID.
+	hash := sha256.Sum256([]byte("dependency"))
+	storageID := hex.EncodeToString(hash[:])
+
+	// Snapshot healthy nodes and ingested repo info.
+	r.mu.RLock()
+	nodesSnapshot := make(map[string]*nodeState, len(r.nodes))
+	for k, v := range r.nodes {
+		nodesSnapshot[k] = v
+	}
+	ingestedSnapshot := make(map[string]*ingestedRepo, len(r.ingestedRepos))
+	for k, v := range r.ingestedRepos {
+		ingestedSnapshot[k] = v
+	}
+	staleThreshold := r.config.UnhealthyThreshold
+	r.mu.RUnlock()
+
+	// Get ingestedAt from router tracking (if discovered).
+	if tracked, ok := ingestedSnapshot[storageID]; ok {
+		tracked.mu.RLock()
+		data.IngestedAt = tracked.ingestedAt.Unix()
+		tracked.mu.RUnlock()
+	}
+
+	// Query every healthy node for files in the dependency repo.
+	type nodeResult struct {
+		nodeID string
+		files  []string
+	}
+	var results []nodeResult
+	var resMu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 6)
+
+	for _, state := range nodesSnapshot {
+		state := state
+		if state.client == nil || !state.info.Healthy {
+			continue
+		}
+		if staleThreshold > 0 && time.Since(state.lastSeen) > staleThreshold {
+			continue
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			resp, err := state.client.GetRepositoryFiles(ctx, &pb.GetRepositoryFilesRequest{
+				StorageId: storageID,
+			})
+			cancel()
+
+			if err != nil {
+				r.logger.Warn("failed to get dependency files from node",
+					"node_id", state.info.NodeId, "error", err)
+				return
+			}
+
+			resMu.Lock()
+			results = append(results, nodeResult{
+				nodeID: state.info.NodeId,
+				files:  resp.Files,
+			})
+			resMu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	// Aggregate: deduplicate files across nodes and group by tool prefix.
+	// Paths look like "go/mod/cache/..." where the first segment is the tool.
+	uniqueFiles := make(map[string]bool)
+	toolCounts := make(map[string]int)
+
+	for _, nr := range results {
+		for _, f := range nr.files {
+			if uniqueFiles[f] {
+				continue // already counted (replication / dual-active)
+			}
+			uniqueFiles[f] = true
+
+			parts := strings.SplitN(f, "/", 2)
+			tool := "unknown"
+			if len(parts) >= 1 && parts[0] != "" {
+				tool = parts[0]
+			}
+			toolCounts[tool]++
+		}
+	}
+
+	data.TotalFiles = len(uniqueFiles)
+
+	// Build per-tool summaries sorted by file count descending.
+	for tool, count := range toolCounts {
+		data.Tools = append(data.Tools, DepsToolSummary{
+			Tool:  tool,
+			Files: count,
+		})
+	}
+	sort.Slice(data.Tools, func(i, j int) bool {
+		return data.Tools[i].Files > data.Tools[j].Files
+	})
+	data.Ecosystems = len(data.Tools)
+
+	// Build per-node distribution.
+	for _, nr := range results {
+		if len(nr.files) > 0 {
+			data.Nodes = append(data.Nodes, DepsNodeInfo{
+				NodeID: nr.nodeID,
+				Files:  len(nr.files),
+			})
+		}
+	}
+	sort.Slice(data.Nodes, func(i, j int) bool {
+		return data.Nodes[i].Files > data.Nodes[j].Files
+	})
+	data.NodesWithData = len(data.Nodes)
+
+	return data
+}

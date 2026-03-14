@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestSessionManager_StartSession(t *testing.T) {
@@ -15,23 +14,18 @@ func TestSessionManager_StartSession(t *testing.T) {
 		t.Fatalf("NewSessionManager failed: %v", err)
 	}
 
-	// Initially no session
-	if sm.HasActiveSession() {
-		t.Error("expected no active session initially")
-	}
-
-	// Start session
-	session, err := sm.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession failed: %v", err)
-	}
-
-	if session.ID == "" {
-		t.Error("session ID should not be empty")
-	}
-
+	// Auto-start creates a session immediately
 	if !sm.HasActiveSession() {
-		t.Error("expected active session after start")
+		t.Error("expected active session from auto-start")
+	}
+
+	// Get the auto-started session
+	id1, _, _, ok := sm.GetSessionInfo()
+	if !ok {
+		t.Fatal("expected session info")
+	}
+	if id1 == "" {
+		t.Error("session ID should not be empty")
 	}
 
 	// Starting again should return same session
@@ -40,7 +34,7 @@ func TestSessionManager_StartSession(t *testing.T) {
 		t.Fatalf("second StartSession failed: %v", err)
 	}
 
-	if session2.ID != session.ID {
+	if session2.ID != id1 {
 		t.Error("expected same session ID on second start")
 	}
 }
@@ -53,19 +47,7 @@ func TestSessionManager_TrackChange(t *testing.T) {
 		t.Fatalf("NewSessionManager failed: %v", err)
 	}
 
-	// Track change without session should fail
-	err = sm.TrackChange(ChangeCreate, "test/file.txt", "")
-	if err == nil {
-		t.Error("expected error when tracking change without session")
-	}
-
-	// Start session
-	_, err = sm.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession failed: %v", err)
-	}
-
-	// Track some changes
+	// Session is auto-started, track some changes directly
 	err = sm.TrackChange(ChangeCreate, "github.com/user/repo/new.txt", "")
 	if err != nil {
 		t.Fatalf("TrackChange failed: %v", err)
@@ -81,20 +63,25 @@ func TestSessionManager_TrackChange(t *testing.T) {
 		t.Fatalf("TrackChange failed: %v", err)
 	}
 
-	// Verify changes
+	// Verify changes (NutsDB BTree orders by key, not insertion order)
 	changes := sm.GetChanges()
 	if len(changes) != 3 {
 		t.Errorf("expected 3 changes, got %d", len(changes))
 	}
 
-	if changes[0].Type != ChangeCreate {
-		t.Errorf("expected first change to be create, got %s", changes[0].Type)
+	// Verify all change types are present
+	typeSet := map[ChangeType]bool{}
+	for _, c := range changes {
+		typeSet[c.Type] = true
 	}
-	if changes[1].Type != ChangeModify {
-		t.Errorf("expected second change to be modify, got %s", changes[1].Type)
+	if !typeSet[ChangeCreate] {
+		t.Error("expected a create change")
 	}
-	if changes[2].Type != ChangeDelete {
-		t.Errorf("expected third change to be delete, got %s", changes[2].Type)
+	if !typeSet[ChangeModify] {
+		t.Error("expected a modify change")
+	}
+	if !typeSet[ChangeDelete] {
+		t.Error("expected a delete change")
 	}
 }
 
@@ -106,19 +93,11 @@ func TestSessionManager_CommitSession(t *testing.T) {
 		t.Fatalf("NewSessionManager failed: %v", err)
 	}
 
-	// Commit without session should fail
-	err = sm.CommitSession()
-	if err == nil {
-		t.Error("expected error when committing without session")
+	// Session is auto-started, get its ID
+	sessionID, _, _, ok := sm.GetSessionInfo()
+	if !ok {
+		t.Fatal("expected auto-started session")
 	}
-
-	// Start session
-	session, err := sm.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession failed: %v", err)
-	}
-
-	sessionID := session.ID
 
 	// Commit
 	err = sm.CommitSession()
@@ -159,13 +138,12 @@ func TestSessionManager_DiscardSession(t *testing.T) {
 		t.Fatalf("NewSessionManager failed: %v", err)
 	}
 
-	// Start session
-	session, err := sm.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession failed: %v", err)
+	// Session is auto-started, get its path
+	_, _, _, ok := sm.GetSessionInfo()
+	if !ok {
+		t.Fatal("expected auto-started session")
 	}
-
-	sessionPath := session.BasePath
+	sessionPath := sm.current.BasePath
 
 	// Verify session directory exists
 	if _, err := os.Stat(sessionPath); err != nil {
@@ -197,18 +175,7 @@ func TestSessionManager_LocalOverride(t *testing.T) {
 		t.Fatalf("NewSessionManager failed: %v", err)
 	}
 
-	// No override without session
-	if sm.HasLocalOverride("test/file.txt") {
-		t.Error("should not have override without session")
-	}
-
-	// Start session
-	_, err = sm.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession failed: %v", err)
-	}
-
-	// No override for non-existent file
+	// Session is auto-started; no override for non-existent file
 	if sm.HasLocalOverride("test/file.txt") {
 		t.Error("should not have override for non-existent file")
 	}
@@ -227,6 +194,12 @@ func TestSessionManager_LocalOverride(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
+	// Track the change so the DB knows about it
+	err = sm.TrackChange(ChangeCreate, "github.com/user/repo/test.txt", "")
+	if err != nil {
+		t.Fatalf("TrackChange failed: %v", err)
+	}
+
 	// Should have override now
 	if !sm.HasLocalOverride("github.com/user/repo/test.txt") {
 		t.Error("should have override after creating local file")
@@ -241,12 +214,7 @@ func TestSessionManager_IsDeleted(t *testing.T) {
 		t.Fatalf("NewSessionManager failed: %v", err)
 	}
 
-	// Start session
-	_, err = sm.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession failed: %v", err)
-	}
-
+	// Session is auto-started
 	testPath := "github.com/user/repo/deleted.txt"
 
 	// Not deleted initially
@@ -269,24 +237,38 @@ func TestSessionManager_IsDeleted(t *testing.T) {
 func TestSessionManager_RecoverSession(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create first session manager and start a session
+	// Create first session manager (auto-starts a session)
 	sm1, err := NewSessionManager(tmpDir, nil)
 	if err != nil {
 		t.Fatalf("NewSessionManager failed: %v", err)
 	}
 
-	session, err := sm1.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession failed: %v", err)
+	// Get the auto-started session ID
+	sessionID, _, _, ok := sm1.GetSessionInfo()
+	if !ok {
+		t.Fatal("expected auto-started session")
 	}
 
-	sessionID := session.ID
-
-	// Track a change
+	// Track a change — also create the file on disk so RebuildFromDisk
+	// can rediscover it during recovery (matching what FUSE ops do).
+	localPath := filepath.Join(sm1.GetCurrentSession().BasePath, "test", "file.txt")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
 	err = sm1.TrackChange(ChangeCreate, "test/file.txt", "")
 	if err != nil {
 		t.Fatalf("TrackChange failed: %v", err)
 	}
+
+	// Close sm1's DB before creating sm2 (simulates process exit)
+	if sm1.db != nil {
+		sm1.db.Close()
+		sm1.db = nil
+	}
+	sm1 = nil // help GC release any file locks
 
 	// Create new session manager (simulates restart)
 	sm2, err := NewSessionManager(tmpDir, nil)
@@ -322,32 +304,18 @@ func TestSessionManager_GetSessionInfo(t *testing.T) {
 		t.Fatalf("NewSessionManager failed: %v", err)
 	}
 
-	// No session initially
-	_, _, _, ok := sm.GetSessionInfo()
-	if ok {
-		t.Error("expected no session info initially")
-	}
-
-	// Start session
-	beforeStart := time.Now()
-	session, err := sm.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession failed: %v", err)
-	}
-	afterStart := time.Now()
-
-	// Get session info
+	// Session is auto-started, so we should have info immediately
 	id, createdAt, changeCount, ok := sm.GetSessionInfo()
 	if !ok {
-		t.Fatal("expected session info")
+		t.Fatal("expected session info from auto-started session")
 	}
 
-	if id != session.ID {
-		t.Errorf("expected session ID %s, got %s", session.ID, id)
+	if id == "" {
+		t.Error("expected non-empty session ID")
 	}
 
-	if createdAt.Before(beforeStart) || createdAt.After(afterStart) {
-		t.Error("createdAt should be between beforeStart and afterStart")
+	if createdAt.IsZero() {
+		t.Error("expected non-zero createdAt")
 	}
 
 	if changeCount != 0 {
@@ -363,19 +331,7 @@ func TestSessionManager_UserRootDir(t *testing.T) {
 		t.Fatalf("NewSessionManager failed: %v", err)
 	}
 
-	// Create user root dir without session should fail
-	err = sm.CreateUserRootDir("mydir")
-	if err == nil {
-		t.Error("expected error when creating user root dir without session")
-	}
-
-	// Start session
-	_, err = sm.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession failed: %v", err)
-	}
-
-	// Initially no user root dirs
+	// Session is auto-started, so initially no user root dirs
 	dirs := sm.ListUserRootDirs()
 	if len(dirs) != 0 {
 		t.Errorf("expected 0 user root dirs, got %d", len(dirs))
@@ -444,19 +400,7 @@ func TestSessionManager_Symlink(t *testing.T) {
 		t.Fatalf("NewSessionManager failed: %v", err)
 	}
 
-	// Create symlink without session should fail
-	err = sm.CreateSymlink("repo/link", "/target/path")
-	if err == nil {
-		t.Error("expected error when creating symlink without session")
-	}
-
-	// Start session
-	_, err = sm.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession failed: %v", err)
-	}
-
-	// Create symlink
+	// Session is auto-started, create symlink directly
 	err = sm.CreateSymlink("repo/link", "/target/path")
 	if err != nil {
 		t.Fatalf("CreateSymlink failed: %v", err)
@@ -551,5 +495,78 @@ func TestSessionManager_UserRootDir_RecreateAfterRemove(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected testdir in list after recreate")
+	}
+}
+
+// TestSessionManager_DeleteSessionOnlyFile verifies that deleting a file
+// that was created in this session (never existed in the base layer) does
+// NOT leave a phantom "[-]" deletion entry in the overlay.
+// This matches the Go module download pattern: create .tmp → rename to .zip.
+func TestSessionManager_DeleteSessionOnlyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	sm, err := NewSessionManager(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewSessionManager failed: %v", err)
+	}
+
+	tmpPath := "dependency/go/mod/cache/download/example.com/@v/v1.0.0.zip12345.tmp"
+	finalPath := "dependency/go/mod/cache/download/example.com/@v/v1.0.0.zip"
+
+	// Create the local .tmp file on disk so TrackChange can stat it
+	localTmp, _ := sm.GetLocalPath(tmpPath)
+	if err := os.MkdirAll(filepath.Dir(localTmp), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(localTmp, []byte("zipdata"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Step 1: create the .tmp file (simulates Go writing)
+	if err := sm.TrackChange(ChangeCreate, tmpPath, ""); err != nil {
+		t.Fatalf("TrackChange create .tmp: %v", err)
+	}
+
+	// Step 2: simulate rename → delete old + create new
+	// Rename the file on disk first
+	localFinal, _ := sm.GetLocalPath(finalPath)
+	if err := os.Rename(localTmp, localFinal); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	if err := sm.TrackChange(ChangeDelete, tmpPath, ""); err != nil {
+		t.Fatalf("TrackChange delete .tmp: %v", err)
+	}
+	if err := sm.TrackChange(ChangeCreate, finalPath, ""); err != nil {
+		t.Fatalf("TrackChange create final: %v", err)
+	}
+
+	// The .tmp path should NOT appear as deleted
+	if sm.IsDeleted(tmpPath) {
+		t.Error(".tmp file was created in this session; its deletion should not be tracked")
+	}
+
+	// The .tmp path should NOT appear in overlay files either
+	if sm.HasLocalOverride(tmpPath) {
+		t.Error(".tmp file should have been removed from overlay files")
+	}
+
+	// The final path should exist as a create
+	if !sm.HasLocalOverride(finalPath) {
+		t.Error("final path should exist in overlay")
+	}
+
+	// GetChanges should only contain the final file, not the .tmp deletion
+	changes := sm.GetChanges()
+	for _, c := range changes {
+		if c.Path == tmpPath {
+			t.Errorf("changes should not contain .tmp path, found: type=%s path=%s", c.Type, c.Path)
+		}
+	}
+
+	// Verify total change count: should be 1 (create for final path)
+	_, _, changeCount, _ := sm.GetSessionInfo()
+	if changeCount != 1 {
+		t.Errorf("expected 1 change (final file), got %d", changeCount)
 	}
 }

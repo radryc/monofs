@@ -87,6 +87,10 @@ func (m *mockClient) RecordBytesRead(n int64) {
 	// No-op for mock
 }
 
+func (m *mockClient) RecordError() {
+	// No-op for mock
+}
+
 // TestErrorFile tests that FS_ERROR.txt appears when backend fails
 func TestErrorFileAppearsOnBackendFailure(t *testing.T) {
 	// Create mock client that fails
@@ -212,7 +216,7 @@ func TestErrorFileLookup(t *testing.T) {
 		t.Fatal("Backend error should be set after failed Readdir")
 	}
 
-	err, errTime := root.getBackendError()
+	errTime, err := root.getBackendError()
 	if err == nil {
 		t.Fatal("Backend error should not be nil")
 	}
@@ -235,7 +239,7 @@ func TestErrorFileContent(t *testing.T) {
 	_, _ = root.Readdir(ctx)
 
 	// Get the error details
-	err, _ := root.getBackendError()
+	_, err := root.getBackendError()
 	if err == nil {
 		t.Fatal("Backend error should be set")
 	}

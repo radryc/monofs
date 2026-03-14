@@ -58,7 +58,6 @@ func TestHooksDirectorySharding(t *testing.T) {
 		_, err := server.IngestFile(context.Background(), &pb.IngestFileRequest{
 			Metadata: &pb.FileMetadata{
 				Path:        tf.path,
-				RepoId:      displayPath,
 				StorageId:   storageID,
 				DisplayPath: displayPath,
 				Ref:         "main",

@@ -4,7 +4,7 @@
     <p>FUSE clients currently mounted to the cluster</p>
 </div>
 
-<div class="grid grid-cols-4" id="clientStats">
+<div class="grid grid-cols-5" id="clientStats">
     <div class="stat-card">
         <div class="stat-icon">💻</div>
         <div class="stat-info">
@@ -31,6 +31,13 @@
         <div class="stat-info">
             <div class="stat-value" id="totalOps">-</div>
             <div class="stat-label">Total Operations</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">🚨</div>
+        <div class="stat-info">
+            <div class="stat-value" id="totalErrors">-</div>
+            <div class="stat-label">Total Errors</div>
         </div>
     </div>
 </div>
@@ -93,12 +100,13 @@
             const clients = data.clients || [];
             
             // Calculate stats
-            let connected = 0, stale = 0, totalOps = 0, totalBytes = 0;
+            let connected = 0, stale = 0, totalOps = 0, totalBytes = 0, totalErrors = 0;
             clients.forEach(c => {
                 if (c.state === 1) connected++;
                 else if (c.state === 2) stale++;
                 totalOps += c.operations_count || 0;
                 totalBytes += c.bytes_read || 0;
+                totalErrors += c.errors_count || 0;
             });
             
             // Update stat cards
@@ -106,6 +114,9 @@
             document.getElementById('connectedClients').textContent = connected;
             document.getElementById('staleClients').textContent = stale;
             document.getElementById('totalOps').textContent = formatNumber(totalOps);
+            const errEl = document.getElementById('totalErrors');
+            errEl.textContent = formatNumber(totalErrors);
+            errEl.style.color = totalErrors > 0 ? 'var(--danger)' : '';
             
             if (clients.length === 0) {
                 document.getElementById('clientTable').innerHTML = `
@@ -133,6 +144,7 @@
                             <th>Last Heartbeat</th>
                             <th>Operations</th>
                             <th>Data Read</th>
+                            <th>Errors</th>
                             <th>Mode</th>
                         </tr>
                     </thead>
@@ -163,6 +175,9 @@
                                     <td>${hbAgo}s ago</td>
                                     <td style="font-weight: 600;">${formatNumber(client.operations_count || 0)}</td>
                                     <td>${formatBytes(client.bytes_read || 0)}</td>
+                                    <td style="font-weight: 600; color: ${(client.errors_count || 0) > 0 ? 'var(--danger)' : 'var(--success)'}">
+                                        ${(client.errors_count || 0) > 0 ? '⚠️ ' : ''}${formatNumber(client.errors_count || 0)}
+                                    </td>
                                     <td>
                                         <span class="badge ${client.writable ? 'badge-warning' : 'badge-info'}">
                                             ${client.writable ? '✏️ Writable' : '👁️ Read-only'}

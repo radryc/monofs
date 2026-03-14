@@ -3,9 +3,7 @@ package search
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/url"
@@ -355,89 +353,24 @@ func (i *Indexer) indexFromExternal(ctx context.Context, req IndexRequest, start
 	// Clean up any existing clone
 	os.RemoveAll(repoDir)
 
-	// Check if this is a Go module (contains @ sign)
-	isGoModule := strings.Contains(req.RepoURL, "@")
+	// Git repository - clone for indexing
+	i.logger.Info("cloning repository for indexing",
+		"storage_id", req.StorageID,
+		"url", req.RepoURL,
+		"branch", req.Ref)
 
-	if isGoModule {
-		// For Go modules, we need to download from Go proxy or use go get
-		i.logger.Info("fetching Go module for indexing",
-			"storage_id", req.StorageID,
-			"module", req.RepoURL)
+	// Clone using git command (more reliable than go-git for large repos)
+	cloneCmd := exec.CommandContext(ctx, "git", "clone",
+		"--depth=1",
+		"--single-branch",
+		"--branch", req.Ref,
+		req.RepoURL,
+		repoDir,
+	)
+	cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 
-		// Create directory for the module
-		if err := os.MkdirAll(repoDir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create module directory: %w", err)
-		}
-
-		// Parse module path and version
-		parts := strings.Split(req.RepoURL, "@")
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid Go module format (expected module@version): %s", req.RepoURL)
-		}
-		modulePath := parts[0]
-		moduleVersion := parts[1]
-
-		// Use go mod download to fetch the module
-		downloadCmd := exec.CommandContext(ctx, "go", "mod", "download", "-json", req.RepoURL)
-		downloadCmd.Dir = repoDir
-		downloadCmd.Env = append(os.Environ(),
-			"GO111MODULE=on",
-			"GOPROXY=https://proxy.golang.org,direct",
-		)
-
-		output, err := downloadCmd.CombinedOutput()
-		if err != nil {
-			return nil, fmt.Errorf("go mod download failed: %w: %s", err, string(output))
-		}
-
-		// Parse the output to find the module directory
-		var downloadInfo struct {
-			Path    string `json:"Path"`
-			Version string `json:"Version"`
-			Dir     string `json:"Dir"`
-			Error   string `json:"Error"`
-		}
-		if err := json.Unmarshal(output, &downloadInfo); err != nil {
-			return nil, fmt.Errorf("failed to parse go mod download output: %w", err)
-		}
-
-		if downloadInfo.Error != "" {
-			return nil, fmt.Errorf("go mod download error: %s", downloadInfo.Error)
-		}
-
-		if downloadInfo.Dir == "" {
-			return nil, fmt.Errorf("go mod download did not return module directory")
-		}
-
-		// Copy files from the downloaded module to our repo directory
-		if err := copyDir(downloadInfo.Dir, repoDir); err != nil {
-			return nil, fmt.Errorf("failed to copy module files: %w", err)
-		}
-
-		i.logger.Info("go module fetched successfully",
-			"storage_id", req.StorageID,
-			"module", modulePath,
-			"version", moduleVersion)
-	} else {
-		// Git repository - clone as before
-		i.logger.Info("cloning repository for indexing",
-			"storage_id", req.StorageID,
-			"url", req.RepoURL,
-			"branch", req.Ref)
-
-		// Clone using git command (more reliable than go-git for large repos)
-		cloneCmd := exec.CommandContext(ctx, "git", "clone",
-			"--depth=1",
-			"--single-branch",
-			"--branch", req.Ref,
-			req.RepoURL,
-			repoDir,
-		)
-		cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-
-		if output, err := cloneCmd.CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("git clone failed: %w: %s", err, string(output))
-		}
+	if output, err := cloneCmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("git clone failed: %w: %s", err, string(output))
 	}
 
 	defer func() {
@@ -962,50 +895,4 @@ func isBinaryContent(content []byte) bool {
 		}
 	}
 	return false
-}
-
-// copyDir recursively copies a directory tree
-func copyDir(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Calculate destination path
-		relPath, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		dstPath := filepath.Join(dst, relPath)
-
-		if info.IsDir() {
-			// Create directory with writable permissions
-			if err := os.MkdirAll(dstPath, 0755); err != nil {
-				return err
-			}
-			// Ensure the directory is writable (in case it already existed)
-			return os.Chmod(dstPath, 0755)
-		}
-
-		// Copy file
-		srcFile, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer srcFile.Close()
-
-		// Create file with readable permissions (preserve execute bit if present)
-		mode := os.FileMode(0644)
-		if info.Mode()&0111 != 0 {
-			mode = 0755
-		}
-		dstFile, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
-		if err != nil {
-			return err
-		}
-		defer dstFile.Close()
-
-		_, err = io.Copy(dstFile, srcFile)
-		return err
-	})
 }

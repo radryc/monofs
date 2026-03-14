@@ -84,8 +84,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create gRPC server
-	grpcServer := grpc.NewServer()
+	// Create gRPC server with raised message limits for inline dep blobs
+	grpcServer := grpc.NewServer(
+		grpc.MaxRecvMsgSize(256*1024*1024), // 256 MB
+		grpc.MaxSendMsgSize(256*1024*1024),
+	)
 
 	// Create server with NutsDB backend
 	srv, err := server.NewServer(*nodeID, *addr, *dbPath, *gitCache, logger)
@@ -106,6 +109,18 @@ func main() {
 		}
 	} else if len(fetcherAddrs) > 0 {
 		logger.Info("fetcher addresses provided but prediction not enabled, use --enable-prediction to enable")
+	}
+
+	// Enable server-side request forwarding if router is configured
+	if *routerAddr != "" {
+		if err := srv.EnableForwarding(*routerAddr, 30*time.Second); err != nil {
+			logger.Warn("failed to enable forwarding, continuing without it",
+				"error", err,
+				"router", *routerAddr)
+		} else {
+			logger.Info("server-side request forwarding enabled",
+				"router", *routerAddr)
+		}
 	}
 
 	srv.Register(grpcServer)

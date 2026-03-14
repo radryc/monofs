@@ -80,6 +80,13 @@
         }
     }
     
+    function toggleRepoDetails(detailsId) {
+        const detailsRow = document.getElementById(detailsId);
+        if (detailsRow) {
+            detailsRow.style.display = detailsRow.style.display === 'none' ? 'table-row' : 'none';
+        }
+    }
+    
     async function triggerRebalance(storageId) {
         if (!confirm('Are you sure you want to trigger rebalancing for this repository?')) {
             return;
@@ -217,18 +224,14 @@
                 <thead>
                     <tr>
                         <th>Repository ID</th>
-                        <th>Router</th>
                         <th>Source</th>
-                        <th>Ref</th>
-                        <th>Files</th>
-                        <th>Topology</th>
                         <th>Status</th>
+                        <th style="text-align: right;">Files</th>
                         <th>Ingested At</th>
-                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
-                    ${filteredRepos.map(repo => {
+                    ${filteredRepos.map((repo, idx) => {
                         const date = new Date(repo.ingested_at * 1000);
                         
                         // Check if this is an in-progress ingestion
@@ -311,24 +314,54 @@
                             : (repo.files_count || 0).toLocaleString();
                         
                         return `
-                            <tr>
+                            <tr style="cursor: pointer;" onclick="toggleRepoDetails('repo-${idx}')" title="Click for details">
                                 <td><strong>${repo.repo_id}</strong></td>
-                                <td><span class="pill">${(repo._routers || [repo._router || 'local']).join(', ')}</span></td>
                                 <td>
-                                    <a href="${repo.repo_url}" target="_blank" style="color: var(--primary); text-decoration: none;">
-                                        ${repo.repo_url}
-                                    </a>
-                                </td>
-                                <td><span class="badge badge-info">${repo.branch}</span></td>
-                                <td style="text-align: right;">${filesDisplay}</td>
-                                <td>${topologyInfo}</td>
-                                <td>${statusBadge}</td>
-                                <td style="white-space: nowrap; font-size: 12px;">${inProgress ? 'In Progress...' : date.toLocaleString()}</td>
-                                <td style="white-space: nowrap;">
-                                    ${inProgress || repo.rebalance_state === 'Rebalancing' || repo.rebalance_state === 'DualActive'
-                                        ? '<span class="badge badge-secondary" style="opacity: 0.5;">⏳ In Progress</span>'
-                                        : `<button class="btn btn-sm" onclick="triggerRebalance('${repo.storage_id}')" style="padding: 4px 8px; font-size: 11px;">🔄 Rebalance</button>`
+                                    ${repo.repo_url === 'dir-hint'
+                                        ? `<a href="/dependencies" style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">📦 Dependencies</a>`
+                                        : `<a href="${repo.repo_url}" target="_blank" style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">${repo.repo_url.length > 50 ? repo.repo_url.substring(0, 47) + '...' : repo.repo_url}</a>`
                                     }
+                                </td>
+                                <td>${statusBadge}</td>
+                                <td style="text-align: right;">${filesDisplay}</td>
+                                <td style="white-space: nowrap; font-size: 12px;">${inProgress ? 'In Progress...' : date.toLocaleString()}</td>
+                            </tr>
+                            <tr id="repo-${idx}" style="display: none;">
+                                <td colspan="5" style="background: var(--bg-secondary); padding: 16px; border-left: 3px solid var(--primary);">
+                                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                                        <div>
+                                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">ROUTER</div>
+                                            <div><span class="pill">${(repo._routers || [repo._router || 'local']).join(', ')}</span></div>
+                                        </div>
+                                        <div>
+                                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">REF / VERSION</div>
+                                            <div><span class="badge badge-info">${repo.branch || 'N/A'}</span></div>
+                                        </div>
+                                        ${repo.commit_hash ? `
+                                        <div>
+                                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">COMMIT</div>
+                                            <div style="font-family: monospace; font-size: 12px;">
+                                                <span class="badge badge-secondary" title="${repo.commit_message || 'No message'}">${repo.commit_hash.substring(0, 7)}</span>
+                                            </div>
+                                            ${repo.commit_time ? `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">${new Date(repo.commit_time * 1000).toLocaleString()}</div>` : ''}
+                                        </div>
+                                        ` : ''}
+                                        <div>
+                                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">TOPOLOGY</div>
+                                            <div>${topologyInfo}</div>
+                                        </div>
+                                        <div>
+                                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">STORAGE ID</div>
+                                            <div style="font-size: 12px; font-family: monospace; color: var(--text-primary); word-break: break-all;" title="${repo.storage_id || 'N/A'}">${repo.storage_id ? repo.storage_id.substring(0, 12) + '...' : 'N/A'}</div>
+                                        </div>
+                                    </div>
+                                    <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+                                        ${inProgress || repo.rebalance_state === 'Rebalancing' || repo.rebalance_state === 'DualActive'
+                                            ? '<span class="badge badge-secondary" style="opacity: 0.5;">⏳ Rebalancing in Progress</span>'
+                                            : `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); triggerRebalance('${repo.storage_id}')" style="padding: 6px 12px; font-size: 12px;">🔄 Trigger Rebalance</button>`
+                                        }
+                                        <button class="btn btn-sm" onclick="event.stopPropagation(); toggleRepoDetails('repo-${idx}')" style="padding: 6px 12px; font-size: 12px; margin-left: 8px;">✕ Close</button>
+                                    </div>
                                 </td>
                             </tr>
                         `;

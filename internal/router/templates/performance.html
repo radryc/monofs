@@ -4,7 +4,7 @@
     <p>Identify resource usage patterns and bottleneck clients</p>
 </div>
 
-<div class="grid grid-cols-4" id="perfStats">
+<div class="grid grid-cols-5" id="perfStats">
     <div class="stat-card">
         <div class="stat-icon">⚡</div>
         <div class="stat-info">
@@ -20,6 +20,13 @@
         </div>
     </div>
     <div class="stat-card">
+        <div class="stat-icon">🚨</div>
+        <div class="stat-info">
+            <div class="stat-value" id="totalErrors">-</div>
+            <div class="stat-label">Total Errors</div>
+        </div>
+    </div>
+    <div class="stat-card">
         <div class="stat-icon">💻</div>
         <div class="stat-info">
             <div class="stat-value" id="activeClients">-</div>
@@ -31,6 +38,19 @@
         <div class="stat-info">
             <div class="stat-value" id="avgOpsClient">-</div>
             <div class="stat-label">Avg Ops/Client</div>
+        </div>
+    </div>
+</div>
+
+<!-- Predictor / Prefetch Intelligence -->
+<div class="card" id="predictorCard">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 class="card-title">🧠 Predictor &amp; Prefetch Intelligence</h2>
+        <button class="btn btn-primary" onclick="loadPredictor()" style="font-size: 12px; padding: 4px 12px;">🔄 Refresh</button>
+    </div>
+    <div id="predictorContent">
+        <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading predictor stats...
         </div>
     </div>
 </div>
@@ -237,10 +257,11 @@
             const sortBy = document.getElementById('sortBy').value;
             
             // Calculate totals
-            let totalOps = 0, totalBytes = 0;
+            let totalOps = 0, totalBytes = 0, totalErrors = 0;
             clients.forEach(c => {
                 totalOps += c.operations_count || 0;
                 totalBytes += c.bytes_read || 0;
+                totalErrors += c.errors_count || 0;
             });
             
             const activeClients = clients.filter(c => c.state === 1).length;
@@ -249,6 +270,9 @@
             // Update stats
             document.getElementById('totalOps').textContent = formatNumber(totalOps);
             document.getElementById('totalData').textContent = formatBytes(totalBytes);
+            const errEl = document.getElementById('totalErrors');
+            errEl.textContent = formatNumber(totalErrors);
+            errEl.style.color = totalErrors > 0 ? 'var(--danger)' : '';
             document.getElementById('activeClients').textContent = activeClients;
             document.getElementById('avgOpsClient').textContent = formatNumber(avgOps);
             
@@ -292,6 +316,7 @@
                             <th>% of Total Data</th>
                             <th>Uptime</th>
                             <th>Ops/Hour</th>
+                            <th>Errors</th>
                             <th>Impact</th>
                         </tr>
                     </thead>
@@ -334,6 +359,9 @@
                                     </td>
                                     <td>${formatDuration(uptimeSeconds)}</td>
                                     <td>${formatNumber(opsPerHour)}</td>
+                                    <td style="font-weight: 600; color: ${(client.errors_count || 0) > 0 ? 'var(--danger)' : 'var(--success)'}">
+                                        ${formatNumber(client.errors_count || 0)}
+                                    </td>
                                     <td>
                                         <span class="badge" style="background: ${impact.color}20; color: ${impact.color}; border: 1px solid ${impact.color}40;">
                                             ${impact.label}
@@ -357,6 +385,157 @@
 
     // Initial load and auto-refresh
     loadPerformance();
-    setInterval(loadPerformance, 15000); // Refresh every 15 seconds
+    loadPredictor();
+    setInterval(loadPerformance, 15000);
+    setInterval(loadPredictor, 10000); // Predictor refreshes every 10 seconds
+
+    async function loadPredictor() {
+        try {
+            const response = await fetch('/api/predictor');
+            const data = await response.json();
+            
+            const nodes = data.nodes || [];
+            const enabledNodes = data.enabled_nodes || 0;
+            
+            if (enabledNodes === 0) {
+                document.getElementById('predictorContent').innerHTML = `
+                    <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                        <div style="font-size: 36px; margin-bottom: 12px;">🧠</div>
+                        <div style="font-size: 16px; font-weight: 600;">Predictor Inactive</div>
+                        <div style="margin-top: 8px;">No nodes have predictor enabled. Access files to start building prediction models.</div>
+                    </div>
+                `;
+                return;
+            }
+            
+            const hitRate = (data.cluster_hit_rate * 100).toFixed(1);
+            const hitRateColor = data.cluster_hit_rate >= 0.5 ? 'var(--success)' : data.cluster_hit_rate >= 0.2 ? 'var(--warning)' : 'var(--danger)';
+            
+            let html = `
+                <div class="grid grid-cols-5" style="margin-bottom: 20px;">
+                    <div class="stat-card">
+                        <div class="stat-icon">🔮</div>
+                        <div class="stat-info">
+                            <div class="stat-value">${formatNumber(data.total_predictions || 0)}</div>
+                            <div class="stat-label">Predictions Made</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📡</div>
+                        <div class="stat-info">
+                            <div class="stat-value">${formatNumber(data.total_prefetches || 0)}</div>
+                            <div class="stat-label">Prefetches Triggered</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🎯</div>
+                        <div class="stat-info">
+                            <div class="stat-value" style="color: ${hitRateColor}">${hitRate}%</div>
+                            <div class="stat-label">Prefetch Hit Rate</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🔗</div>
+                        <div class="stat-info">
+                            <div class="stat-value">${formatNumber(data.total_chains || 0)}</div>
+                            <div class="stat-label">Markov Chains</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📂</div>
+                        <div class="stat-info">
+                            <div class="stat-value">${formatNumber(data.total_dir_maps || 0)}</div>
+                            <div class="stat-label">Directory Maps</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Prefetch efficiency bar
+            const totalOps = (data.total_hits || 0) + (data.total_misses || 0);
+            if (totalOps > 0) {
+                const hitPct = (data.total_hits / totalOps * 100).toFixed(1);
+                const missPct = (data.total_misses / totalOps * 100).toFixed(1);
+                html += `
+                    <div style="margin-bottom: 20px;">
+                        <div style="font-size: 14px; font-weight: 600; margin-bottom: 8px;">Prefetch Efficiency</div>
+                        <div style="display: flex; height: 28px; border-radius: 8px; overflow: hidden; font-size: 11px; font-weight: 600;">
+                            <div style="width: ${hitPct}%; background: var(--success); color: white; display: flex; align-items: center; justify-content: center;">
+                                ${hitPct > 10 ? 'Hits ' + hitPct + '%' : ''}
+                            </div>
+                            <div style="width: ${missPct}%; background: var(--danger); color: white; display: flex; align-items: center; justify-content: center;">
+                                ${missPct > 10 ? 'Misses ' + missPct + '%' : ''}
+                            </div>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-top: 4px; font-size: 12px; color: var(--text-secondary);">
+                            <span>✅ ${formatNumber(data.total_hits || 0)} hits</span>
+                            <span>❌ ${formatNumber(data.total_misses || 0)} misses</span>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            // Per-node table
+            html += `
+                <div style="font-size: 14px; font-weight: 600; margin-bottom: 8px;">Per-Node Predictor Status</div>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Node</th>
+                            <th>Status</th>
+                            <th>Markov Chains</th>
+                            <th>Dir Maps</th>
+                            <th>Predictions</th>
+                            <th>Prefetches</th>
+                            <th>Hit Rate</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            
+            const sortedNodes = [...nodes].sort((a, b) => (b.predictions || 0) - (a.predictions || 0));
+            for (const node of sortedNodes) {
+                if (node.error) {
+                    html += `
+                        <tr>
+                            <td><span style="font-weight: 600;">${node.node_id}</span><br><span style="font-size: 11px; color: var(--text-secondary);">${node.address}</span></td>
+                            <td><span class="badge" style="background: var(--danger)20; color: var(--danger);">Error</span></td>
+                            <td colspan="5" style="color: var(--danger);">${node.error}</td>
+                        </tr>
+                    `;
+                    continue;
+                }
+                
+                const nodeHitRate = (node.hit_rate * 100).toFixed(1);
+                const statusBadge = node.enabled 
+                    ? '<span class="badge" style="background: var(--success)20; color: var(--success); border: 1px solid var(--success)40;">Active</span>'
+                    : '<span class="badge" style="background: var(--text-secondary)20; color: var(--text-secondary);">Disabled</span>';
+                const hitColor = node.hit_rate >= 0.5 ? 'var(--success)' : node.hit_rate >= 0.2 ? 'var(--warning)' : 'var(--text-secondary)';
+                
+                html += `
+                    <tr>
+                        <td><span style="font-weight: 600;">${node.node_id}</span><br><span style="font-size: 11px; color: var(--text-secondary);">${node.address}</span></td>
+                        <td>${statusBadge}</td>
+                        <td>${formatNumber(node.markov_chains || 0)}</td>
+                        <td>${formatNumber(node.directory_maps || 0)}</td>
+                        <td style="font-weight: 700;">${formatNumber(node.predictions || 0)}</td>
+                        <td>${formatNumber(node.prefetches || 0)}</td>
+                        <td style="font-weight: 700; color: ${hitColor};">${nodeHitRate}%</td>
+                    </tr>
+                `;
+            }
+            
+            html += '</tbody></table>';
+            
+            document.getElementById('predictorContent').innerHTML = html;
+        } catch (error) {
+            console.error('Failed to load predictor data:', error);
+            document.getElementById('predictorContent').innerHTML = `
+                <div style="text-align: center; padding: 40px; color: var(--danger);">
+                    Failed to load predictor data: ${error.message}
+                </div>
+            `;
+        }
+    }
 </script>
 {{end}}

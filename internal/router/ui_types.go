@@ -8,6 +8,7 @@ const (
 	UIRequestRepositories UIRequestType = iota
 	UIRequestStatus
 	UIRequestRouters
+	UIRequestDependencies
 )
 
 // UIRequest represents a request from the UI handler.
@@ -50,4 +51,26 @@ type RouterSnapshot struct {
 type RoutersData struct {
 	Routers     []RouterSnapshot `json:"routers"`
 	GeneratedAt int64            `json:"generated_at"`
+}
+
+// DependenciesData contains aggregated dependency information queried from the cluster.
+type DependenciesData struct {
+	TotalFiles    int               `json:"total_files"`
+	Ecosystems    int               `json:"ecosystems"`
+	NodesWithData int               `json:"nodes_with_data"`
+	IngestedAt    int64             `json:"ingested_at"`
+	Tools         []DepsToolSummary `json:"tools"`
+	Nodes         []DepsNodeInfo    `json:"nodes"`
+}
+
+// DepsToolSummary aggregates per-tool dependency information.
+type DepsToolSummary struct {
+	Tool  string `json:"tool"`
+	Files int    `json:"files"`
+}
+
+// DepsNodeInfo describes dependency file distribution on a single node.
+type DepsNodeInfo struct {
+	NodeID string `json:"node_id"`
+	Files  int    `json:"files"`
 }

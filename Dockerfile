@@ -106,9 +106,10 @@ RUN apk add --no-cache ca-certificates git
 RUN addgroup -S monofs && adduser -S monofs -G monofs
 
 # Create cache directories
-RUN mkdir -p /data/cache/git /data/cache/gomod && chown -R monofs:monofs /data
+RUN mkdir -p /data/cache/git /data/cache/blob /etc/monofs && chown -R monofs:monofs /data /etc/monofs
 
 COPY --from=builder /bin/monofs-fetcher /usr/local/bin/monofs-fetcher
+COPY config/fetcher.json /etc/monofs/fetcher.json
 
 USER monofs
 
@@ -126,7 +127,34 @@ RUN apk add --no-cache \
     openssh-server \
     bash \
     sudo \
-    shadow
+    shadow \
+    strace \
+    jq \
+    nodejs \
+    npm \
+    python3 \
+    py3-pip \
+    gcc \
+    musl-dev \
+    curl \
+    gcompat \
+    libstdc++ \
+    libgcc
+
+# Install Rust via rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable --no-modify-path
+ENV PATH=/root/.cargo/bin:$PATH
+
+# Install Bazel via Bazelisk
+RUN curl -fsSL https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 \
+    -o /usr/local/bin/bazel && \
+    chmod +x /usr/local/bin/bazel
+
+# Copy Go 1.25 toolchain from the builder stage
+COPY --from=builder /usr/local/go /usr/local/go
+ENV GOROOT=/usr/local/go
+ENV PATH=$GOROOT/bin:$PATH
 
 # Create monofs user
 RUN adduser -D -s /bin/bash monofs && \
@@ -143,25 +171,48 @@ COPY --from=builder /bin/monofs-admin /usr/local/bin/monofs-admin
 COPY --from=builder /bin/monofs-session /usr/local/bin/monofs-session
 COPY --from=builder /bin/monofs-loadtest /usr/local/bin/monofs-loadtest
 
-# Create mount point and overlay directory
-RUN mkdir -p /mnt && \
-    chmod 777 /mnt && \
+# Create mount point, overlay directory, and log files (monofs-owned)
+RUN mkdir -p /mnt/monofs && \
+    chmod 777 /mnt/monofs && \
     mkdir -p /var/cache/monofs && \
     chmod 777 /var/cache/monofs && \
-    mkdir -p /var/lib/monofs/overlay && \
-    chmod 777 /var/lib/monofs/overlay && \
-    chown -R monofs:monofs /mnt && \
+    mkdir -p /home/monofs/.monofs/overlay && \
+    chmod 777 /home/monofs/.monofs/overlay && \
+    chown -R monofs:monofs /mnt/monofs && \
     chown -R monofs:monofs /var/cache/monofs && \
-    chown -R monofs:monofs /var/lib/monofs
+    chown -R monofs:monofs /home/monofs/.monofs && \
+    touch /var/log/monofs-client.log /var/log/monofs-client.json && \
+    chown monofs:monofs /var/log/monofs-client.log /var/log/monofs-client.json
 
 # Enable FUSE with user_allow_other
 RUN echo "user_allow_other" >> /etc/fuse.conf
 
 # Set overlay directory for monofs-session (also in user profile for SSH sessions)
-ENV GITFS_OVERLAY_DIR=/var/lib/monofs/overlay
-RUN echo 'export GITFS_OVERLAY_DIR=/var/lib/monofs/overlay' >> /etc/profile.d/monofs.sh && \
-    echo 'export GITFS_OVERLAY_DIR=/var/lib/monofs/overlay' >> /home/monofs/.bashrc && \
-    chown monofs:monofs /home/monofs/.bashrc
+ENV GITFS_OVERLAY_DIR=/home/monofs/.monofs/overlay
+RUN echo 'export GITFS_OVERLAY_DIR=/home/monofs/.monofs/overlay' >> /etc/profile.d/monofs.sh && \
+    echo 'export GOROOT=/usr/local/go' >> /etc/profile.d/monofs.sh && \
+    echo 'export PATH=$GOROOT/bin:/root/.cargo/bin:$PATH' >> /etc/profile.d/monofs.sh && \
+    echo 'export GITFS_OVERLAY_DIR=/home/monofs/.monofs/overlay' >> /home/monofs/.bashrc && \
+    echo 'export GOROOT=/usr/local/go' >> /home/monofs/.bashrc && \
+    echo 'export PATH=$GOROOT/bin:/root/.cargo/bin:$PATH' >> /home/monofs/.bashrc && \
+    echo '' >> /home/monofs/.bashrc && \
+    echo '# monofs-setup: export build-cache env vars from the mounted filesystem.' >> /home/monofs/.bashrc && \
+    echo '# Called automatically at login; run manually after the mount appears.' >> /home/monofs/.bashrc && \
+    echo 'monofs-setup() {' >> /home/monofs/.bashrc && \
+    echo '  local _out' >> /home/monofs/.bashrc && \
+    echo '  _out=$(monofs-session setup --mount /mnt/monofs 2>&1) || {' >> /home/monofs/.bashrc && \
+    echo '    echo "[monofs] setup skipped: $_out" >&2; return 1; }' >> /home/monofs/.bashrc && \
+    echo '  eval "$_out"' >> /home/monofs/.bashrc && \
+    echo '}' >> /home/monofs/.bashrc && \
+    echo 'monofs-setup 2>/dev/null || echo "[monofs] Run monofs-setup once filesystem mounts to configure build caches."' >> /home/monofs/.bashrc && \
+    chown monofs:monofs /home/monofs/.bashrc && \
+    echo '# .bash_profile: source .bashrc for login shells (SSH, su -).' >> /home/monofs/.bash_profile && \
+    echo '# Bash login shells read .bash_profile but NOT .bashrc, so we' >> /home/monofs/.bash_profile && \
+    echo '# must explicitly source it here.' >> /home/monofs/.bash_profile && \
+    echo 'if [ -f "$HOME/.bashrc" ]; then' >> /home/monofs/.bash_profile && \
+    echo '  . "$HOME/.bashrc"' >> /home/monofs/.bash_profile && \
+    echo 'fi' >> /home/monofs/.bash_profile && \
+    chown monofs:monofs /home/monofs/.bash_profile
 
 EXPOSE 22
 
@@ -179,46 +230,56 @@ sleep 2
 echo "[$(date)] Starting GitFS client..."
 echo "[$(date)] Connecting to router at: ${ROUTER_ADDR:-router:9090}"
 
-# Mount filesystem as monofs user with allow_other option (using full path)
+# Mount filesystem as monofs user.
+# Logging strategy:
+#   --debug            → MonoFS layer DEBUG+ goes into --log-file (JSON)
+#   --log-file         → /var/log/monofs-client.json (structured, DEBUG+)
+#   stdout (INFO text) → /var/log/monofs-client.log
+#   go-fuse C layer    → discarded (add --fuse-debug + --log-file to see it in .json.fuse)
 su - monofs -c "/usr/local/bin/monofs-client \
   --router=${ROUTER_ADDR:-router:9090} \
-  --mount=/mnt \
+  --mount=/mnt/monofs \
   --cache=/var/cache/monofs \
   --writable \
-  --overlay=/var/lib/monofs/overlay \
-  --debug" \
+  --overlay=/home/monofs/.monofs/overlay \
+  --debug \
+  --log-file=/var/log/monofs-client.json" \
   > /var/log/monofs-client.log 2>&1 &
 
 # Wait for mount to complete
 for i in {1..10}; do
-  if mountpoint -q /mnt 2>/dev/null; then
-    echo "[$(date)] ✅ GitFS mounted at /mnt"
+  if mountpoint -q /mnt/monofs 2>/dev/null; then
+    echo "[$(date)] ✅ MonoFS mounted at /mnt/monofs"
     break
   fi
   echo "[$(date)] Waiting for mount... ($i/10)"
   sleep 1
 done
 
-if ! mountpoint -q /mnt 2>/dev/null; then
-  echo "[$(date)] ⚠️  GitFS not yet mounted (backends may be unavailable)"
-  echo "[$(date)] But filesystem is accessible - FS_ERROR.txt will show connection status"
+if ! mountpoint -q /mnt/monofs 2>/dev/null; then
+  echo "[$(date)] ⚠️  MonoFS not yet mounted (backends may be unavailable)"
+  echo "[$(date)] FS_ERROR.txt will appear at mount root when backend is unreachable"
 fi
 
-# Make sure /mnt is accessible to all users
-chmod 755 /mnt 2>/dev/null || true
+# Make sure /mnt/monofs is accessible to all users
+chmod 755 /mnt/monofs 2>/dev/null || true
 
-echo "[$(date)] GitFS Client Ready (Write Support Enabled)"
+echo "[$(date)] MonoFS Client Ready (Write Support Enabled)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  SSH Access: ssh monofs@localhost -p 2222"
 echo "  Password:   monofs"
-echo "  Mount:      /mnt (writable)"
-echo "  Overlay:    /var/lib/monofs/overlay"
-echo "  Logs:       tail -f /var/log/monofs-client.log"
+echo "  Mount:      /mnt/monofs (writable)"
+echo "  Overlay:    /home/monofs/.monofs/overlay"
+echo ""
+echo "  Logs:"
+echo "    INFO  text : tail -f /var/log/monofs-client.log"
+echo "    DEBUG JSON : tail -f /var/log/monofs-client.json | jq ."
+echo "    FUSE  C    : (add --fuse-debug to enable → /var/log/monofs-client.json.fuse)"
 echo ""
 echo "  Write Examples:"
-echo "    mkdir /mnt/mydir            - Create user directory"
-echo "    echo test > /mnt/mydir/f.txt - Create file"
-echo "    ln -s /target /mnt/mydir/lnk - Create symlink"
+echo "    mkdir /mnt/monofs/mydir            - Create user directory"
+echo "    echo test > /mnt/monofs/mydir/f.txt - Create file"
+echo "    ln -s /target /mnt/monofs/mydir/lnk - Create symlink"
 echo ""
 echo "  Session CLI: monofs-session start"
 echo "               monofs-session status"
@@ -228,29 +289,8 @@ echo "  Admin CLI:  monofs-admin ingest --url=<repo-url>"
 echo "              monofs-admin status"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# Start load test after 1 minute if ENABLE_LOADTEST is set
-if [ "${ENABLE_LOADTEST}" = "true" ]; then
-  (
-    echo "[$(date)] Load test scheduled to start in 60 seconds..."
-    sleep 60
-    echo "[$(date)] Starting load test..."
-    su - monofs -c "/usr/local/bin/monofs-loadtest \
-      --mount=/mnt \
-      --duration=5m \
-      --concurrency=10 \
-      --file-size=4096 \
-      --read-ratio=0.5 \
-      --write-ratio=0.3 \
-      --delete-ratio=0.1 \
-      --mkdir-ratio=0.05 \
-      --list-ratio=0.05 \
-      --verbose" \
-      > /var/log/monofs-loadtest.log 2>&1
-    echo "[$(date)] Load test completed"
-  ) &
-fi
-
-# Keep container running and show logs
+# Keep container running - follow the human-readable INFO log.
+# For debug-level detail: docker exec <container> tail -f /var/log/monofs-client.json | jq .
 tail -f /var/log/monofs-client.log
 STARTSCRIPT
 

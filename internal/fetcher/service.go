@@ -1,6 +1,7 @@
 package fetcher
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,8 +11,14 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	blob "github.com/radryc/monofs/internal/storage/blob"
 	"google.golang.org/grpc"
 )
+
+// loggerAccessor interface to get logger from writer
+type loggerAccessor interface {
+	GetLogger() *slog.Logger
+}
 
 // Service implements the BlobFetcher gRPC service.
 type Service struct {
@@ -104,6 +111,14 @@ func (s *Service) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_Fetc
 	ctx := stream.Context()
 	sourceType := protoToSourceType(req.SourceType)
 
+	// [CONTENT_AUDIT] Log incoming fetch request at service entry point
+	s.logger.Debug("[CONTENT_AUDIT] fetcher_service_request",
+		"content_id", req.ContentId,
+		"source_type", sourceType.String(),
+		"source_key", getSourceKey(req),
+		"request_id", req.RequestId,
+		"source_config", req.SourceConfig)
+
 	backend, ok := s.registry.Get(sourceType)
 	if !ok {
 		return fmt.Errorf("unsupported source type: %s", sourceType)
@@ -157,6 +172,13 @@ func (s *Service) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_Fetc
 	}
 
 	s.bytesServed.Add(totalSent)
+	// [CONTENT_AUDIT] Log successful blob fetch at service level
+	s.logger.Debug("[CONTENT_AUDIT] fetcher_service_complete",
+		"content_id", req.ContentId,
+		"size", size,
+		"total_sent", totalSent,
+		"source_type", sourceType.String())
+
 	s.logger.Debug("blob fetched", "content_id", req.ContentId, "size", size)
 
 	return nil
@@ -356,11 +378,21 @@ func (s *Service) GetStats(ctx context.Context, req *pb.FetcherStatsRequest) (*p
 				BytesFetched: stats.BytesFetched,
 				AvgLatencyMs: stats.AvgLatencyMs,
 				CachedItems:  stats.CachedItems,
+				CacheBytes:   stats.CacheBytes,
 			}
 			resp.CacheHits += stats.CacheHits
 			resp.CacheMisses += stats.CacheMisses
 			resp.CacheEntries += stats.CachedItems
 			resp.CacheSizeBytes += stats.CacheBytes
+
+			// Expose per-storage-ID blob counts for the blob backend.
+			if bb, ok := backend.(*blob.BlobBackend); ok {
+				for storageID, count := range bb.StorageStats() {
+					resp.SourceStats["storage:"+storageID] = &pb.SourceStats{
+						CachedItems: count,
+					}
+				}
+			}
 		}
 	}
 
@@ -444,14 +476,8 @@ func protoToSourceType(pt pb.SourceType) SourceType {
 	switch pt {
 	case pb.SourceType_SOURCE_TYPE_GIT:
 		return SourceTypeGit
-	case pb.SourceType_SOURCE_TYPE_GOMOD:
-		return SourceTypeGoMod
-	case pb.SourceType_SOURCE_TYPE_S3:
-		return SourceTypeS3
-	case pb.SourceType_SOURCE_TYPE_HTTP:
-		return SourceTypeHTTP
-	case pb.SourceType_SOURCE_TYPE_OCI:
-		return SourceTypeOCI
+	case pb.SourceType_SOURCE_TYPE_BLOB:
+		return SourceTypeBlob
 	default:
 		return SourceTypeUnknown
 	}
@@ -466,9 +492,297 @@ func getSourceKey(req *pb.FetchBlobRequest) string {
 	switch req.SourceType {
 	case pb.SourceType_SOURCE_TYPE_GIT:
 		return req.SourceConfig["repo_url"]
-	case pb.SourceType_SOURCE_TYPE_GOMOD:
-		return req.SourceConfig["module_path"]
+	case pb.SourceType_SOURCE_TYPE_BLOB:
+		return req.SourceConfig["storage_id"]
 	default:
 		return req.ContentId
 	}
+}
+
+// StoreBlob stores a single blob on the fetcher.
+func (s *Service) StoreBlob(ctx context.Context, req *pb.StoreBlobRequest) (*pb.StoreBlobResponse, error) {
+	if req.BlobHash == "" {
+		return &pb.StoreBlobResponse{
+			Success:      false,
+			ErrorMessage: "blob_hash is required",
+		}, nil
+	}
+	if len(req.Content) == 0 {
+		return &pb.StoreBlobResponse{
+			Success:      false,
+			ErrorMessage: "content is empty",
+		}, nil
+	}
+
+	backend, ok := s.registry.Get(SourceTypeBlob)
+	if !ok {
+		return &pb.StoreBlobResponse{
+			Success:      false,
+			ErrorMessage: "blob backend not registered",
+		}, nil
+	}
+
+	blobBackend, ok := backend.(*blob.BlobBackend)
+	if !ok {
+		return &pb.StoreBlobResponse{
+			Success:      false,
+			ErrorMessage: "blob backend type assertion failed",
+		}, nil
+	}
+
+	if err := blobBackend.StoreBlob(req.BlobHash, req.Content); err != nil {
+		s.logger.Error("failed to store blob",
+			"blob_hash", req.BlobHash,
+			"size", len(req.Content),
+			"error", err)
+		return &pb.StoreBlobResponse{
+			Success:      false,
+			ErrorMessage: err.Error(),
+		}, nil
+	}
+
+	s.logger.Debug("stored blob",
+		"blob_hash", req.BlobHash,
+		"size", len(req.Content))
+
+	return &pb.StoreBlobResponse{
+		Success: true,
+		Size:    int64(len(req.Content)),
+	}, nil
+}
+
+// StoreBlobBatchStream receives a stream of StoreBlobEntry messages and
+// packs them into archive(s), splitting at ~512 MB. This supports
+// arbitrarily large pushes without gRPC message size limits.
+// Large blobs may arrive as multiple messages sharing the same blob_hash
+// with incrementing chunk_index; they are reassembled before archiving.
+func (s *Service) StoreBlobBatchStream(stream pb.BlobFetcher_StoreBlobBatchStreamServer) error {
+	backend, ok := s.registry.Get(SourceTypeBlob)
+	if !ok {
+		return stream.SendAndClose(&pb.StoreBlobBatchResponse{
+			Success:      false,
+			ErrorMessage: "blob backend not registered",
+		})
+	}
+
+	blobBackend, ok := backend.(*blob.BlobBackend)
+	if !ok {
+		return stream.SendAndClose(&pb.StoreBlobBatchResponse{
+			Success:      false,
+			ErrorMessage: "blob backend type assertion failed",
+		})
+	}
+
+	writer, err := blobBackend.NewStoreBlobBatchWriter()
+	if err != nil {
+		return stream.SendAndClose(&pb.StoreBlobBatchResponse{
+			Success:      false,
+			ErrorMessage: err.Error(),
+		})
+	}
+
+	var received int
+
+	// Chunk reassembly state for a single in-progress large blob.
+	var chunkedHash string
+	var chunkedBuf []byte
+
+	for {
+		entry, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			// Seal what we have so far, then report the error
+			result, _ := writer.Finish()
+			s.logger.Error("stream receive error during blob batch",
+				"received", received,
+				"stored", result.Stored,
+				"error", err)
+			return stream.SendAndClose(&pb.StoreBlobBatchResponse{
+				Success:         false,
+				ErrorMessage:    fmt.Sprintf("stream error after %d entries: %v", received, err),
+				Stored:          int32(result.Stored),
+				Skipped:         int32(result.Skipped),
+				Failed:          int32(result.Failed),
+				ArchiveBytes:    result.ArchiveBytes,
+				ArchivesCreated: int32(result.ArchivesCreated),
+			})
+		}
+		received++
+
+		// Handle chunked blobs: if ChunkIndex > 0 or IsLast is explicitly
+		// false on chunk 0, the blob is split across messages.
+		if entry.ChunkIndex == 0 && entry.IsLast {
+			// Fast path — single-message blob (common case)
+			// Flush any pending chunked blob first (shouldn't happen in
+			// well-formed streams, but be safe).
+			if len(chunkedBuf) > 0 {
+				writer.AddBlob(chunkedHash, chunkedBuf)
+				chunkedBuf = nil
+				chunkedHash = ""
+			}
+			writer.AddBlob(entry.BlobHash, entry.Content)
+			continue
+		}
+
+		// Multi-chunk blob
+		if entry.ChunkIndex == 0 {
+			// First chunk of a new large blob — flush any previous
+			if len(chunkedBuf) > 0 {
+				writer.AddBlob(chunkedHash, chunkedBuf)
+			}
+			chunkedHash = entry.BlobHash
+			if entry.TotalSize > 0 {
+				chunkedBuf = make([]byte, 0, entry.TotalSize)
+			} else {
+				chunkedBuf = make([]byte, 0, len(entry.Content)*2)
+			}
+			chunkedBuf = append(chunkedBuf, entry.Content...)
+		} else {
+			// Continuation chunk
+			chunkedBuf = append(chunkedBuf, entry.Content...)
+		}
+
+		if entry.IsLast {
+			writer.AddBlob(chunkedHash, chunkedBuf)
+			chunkedBuf = nil
+			chunkedHash = ""
+		}
+	}
+
+	// Flush any trailing chunked blob (stream ended without is_last)
+	if len(chunkedBuf) > 0 {
+		writer.AddBlob(chunkedHash, chunkedBuf)
+	}
+
+	result, err := writer.Finish()
+	if err != nil {
+		s.logger.Error("failed to finish blob batch",
+			"received", received,
+			"error", err)
+		return stream.SendAndClose(&pb.StoreBlobBatchResponse{
+			Success:         false,
+			ErrorMessage:    err.Error(),
+			Stored:          int32(result.Stored),
+			Skipped:         int32(result.Skipped),
+			Failed:          int32(result.Failed),
+			ArchiveBytes:    result.ArchiveBytes,
+			ArchivesCreated: int32(result.ArchivesCreated),
+		})
+	}
+
+	s.logger.Info("stored blob batch (stream)",
+		"received", received,
+		"stored", result.Stored,
+		"skipped", result.Skipped,
+		"archives", result.ArchivesCreated,
+		"archive_bytes", result.ArchiveBytes)
+
+	return stream.SendAndClose(&pb.StoreBlobBatchResponse{
+		Success:         true,
+		Stored:          int32(result.Stored),
+		Skipped:         int32(result.Skipped),
+		Failed:          int32(result.Failed),
+		ArchiveBytes:    result.ArchiveBytes,
+		ArchivesCreated: int32(result.ArchivesCreated),
+	})
+}
+
+// DeleteBlobs removes blobs from the fetcher's index and optionally
+// cleans up empty archive files.
+func (s *Service) DeleteBlobs(ctx context.Context, req *pb.DeleteBlobsRequest) (*pb.DeleteBlobsResponse, error) {
+	if len(req.BlobHashes) == 0 {
+		return &pb.DeleteBlobsResponse{Success: true}, nil
+	}
+
+	backend, ok := s.registry.Get(SourceTypeBlob)
+	if !ok {
+		return &pb.DeleteBlobsResponse{
+			Success:      false,
+			ErrorMessage: "blob backend not registered",
+		}, nil
+	}
+
+	blobBackend, ok := backend.(*blob.BlobBackend)
+	if !ok {
+		return &pb.DeleteBlobsResponse{
+			Success:      false,
+			ErrorMessage: "blob backend type assertion failed",
+		}, nil
+	}
+
+	result := blobBackend.DeleteBlobs(req.BlobHashes, req.Compact)
+
+	s.logger.Info("deleted blobs",
+		"requested", len(req.BlobHashes),
+		"deleted", result.Deleted,
+		"not_found", result.NotFound,
+		"archives_removed", result.ArchivesRemoved)
+
+	return &pb.DeleteBlobsResponse{
+		Success:         true,
+		Deleted:         int32(result.Deleted),
+		NotFound:        int32(result.NotFound),
+		ArchivesRemoved: int32(result.ArchivesRemoved),
+	}, nil
+}
+
+// StoreArchive receives a packager archive stream and stores it on the fetcher.
+func (s *Service) StoreArchive(stream pb.BlobFetcher_StoreArchiveServer) error {
+	backend, ok := s.registry.Get(SourceTypeBlob)
+	if !ok {
+		return fmt.Errorf("blob backend not registered")
+	}
+
+	blobBackend, ok := backend.(*blob.BlobBackend)
+	if !ok {
+		return fmt.Errorf("blob backend type assertion failed")
+	}
+
+	var storageID string
+	var chunkIndex int32
+	var buf bytes.Buffer
+
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("receive archive chunk: %w", err)
+		}
+
+		if storageID == "" {
+			storageID = chunk.StorageId
+			chunkIndex = chunk.ChunkIndex
+		}
+
+		buf.Write(chunk.Data)
+
+		if chunk.IsLast {
+			break
+		}
+	}
+
+	if storageID == "" {
+		return fmt.Errorf("no storage_id provided in archive stream")
+	}
+
+	totalBytes, filesIndexed, err := blobBackend.StoreArchive(storageID, int(chunkIndex), &buf)
+	if err != nil {
+		return fmt.Errorf("store archive: %w", err)
+	}
+
+	s.logger.Info("stored archive",
+		"storage_id", storageID,
+		"chunk_index", chunkIndex,
+		"total_bytes", totalBytes,
+		"files_indexed", filesIndexed)
+
+	return stream.SendAndClose(&pb.StoreArchiveResponse{
+		Success:      true,
+		TotalBytes:   totalBytes,
+		FilesIndexed: int64(filesIndexed),
+	})
 }

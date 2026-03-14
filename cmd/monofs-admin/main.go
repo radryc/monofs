@@ -38,11 +38,11 @@ func main() {
 
 	// Ingest flags
 	routerAddr := ingestCmd.String("router", "localhost:9090", "MonoFS router address")
-	source := ingestCmd.String("source", "", "Source: Git URL, Go module path (module@version), S3 bucket (required)")
-	ref := ingestCmd.String("ref", "", "Ref: branch for Git, version for Go, prefix for S3 (optional)")
+	source := ingestCmd.String("source", "", "Source: Git URL, S3 bucket (required)")
+	ref := ingestCmd.String("ref", "", "Ref: branch for Git, prefix for S3 (optional)")
 	sourceID := ingestCmd.String("source-id", "", "Custom source ID (optional, auto-generated if empty)")
-	ingestionType := ingestCmd.String("ingestion-type", "git", "Ingestion backend type (git, go, s3, file)")
-	fetchType := ingestCmd.String("fetch-type", "git", "Fetch backend type (git, gomod, s3, local)")
+	ingestionType := ingestCmd.String("ingestion-type", "git", "Ingestion backend type (git, s3, file)")
+	fetchType := ingestCmd.String("fetch-type", "blob", "Fetch backend type (blob, git, s3, local)")
 	replicateData := ingestCmd.Bool("replicate-data", false, "Replicate blob data to fetch backend during ingestion")
 
 	// Delete flags
@@ -569,8 +569,6 @@ func parseIngestionType(s string) pb.IngestionType {
 	switch strings.ToLower(s) {
 	case "git":
 		return pb.IngestionType_INGESTION_GIT
-	case "go":
-		return pb.IngestionType_INGESTION_GO
 	case "s3":
 		return pb.IngestionType_INGESTION_S3
 	case "file":
@@ -580,17 +578,15 @@ func parseIngestionType(s string) pb.IngestionType {
 	}
 }
 
-// parseFetchType converts string to FetchType enum
-func parseFetchType(s string) pb.FetchType {
+// parseFetchType converts string to SourceType enum
+func parseFetchType(s string) pb.SourceType {
 	switch strings.ToLower(s) {
 	case "git":
-		return pb.FetchType_FETCH_GIT
-	case "s3":
-		return pb.FetchType_FETCH_S3
-	case "local":
-		return pb.FetchType_FETCH_LOCAL
+		return pb.SourceType_SOURCE_TYPE_GIT
+	case "blob":
+		return pb.SourceType_SOURCE_TYPE_BLOB
 	default:
-		return pb.FetchType_FETCH_GIT
+		return pb.SourceType_SOURCE_TYPE_BLOB
 	}
 }
 
@@ -888,6 +884,32 @@ func showClusterStatus(routerAddr string) error {
 		}
 	}
 
+	// Fetch and display Predictor status summary
+	predictorStats := fetchPredictorStatsSummary(routerAddr)
+	if predictorStats != nil {
+		fmt.Printf("PREDICTOR (Prefetch Intelligence)\n")
+		if predictorStats.enabledNodes == 0 {
+			fmt.Printf("[--] No nodes with predictor enabled\n\n")
+		} else {
+			healthIcon := "[OK]"
+			if predictorStats.hitRate < 0.2 && predictorStats.totalPrefetches > 0 {
+				healthIcon = "[!!]"
+			}
+			fmt.Printf("%s Nodes: %d/%d enabled | Predictions: %s | Prefetches: %s | Hit Rate: %.1f%%\n",
+				healthIcon,
+				predictorStats.enabledNodes,
+				predictorStats.totalNodes,
+				formatNumber(predictorStats.totalPredictions),
+				formatNumber(predictorStats.totalPrefetches),
+				predictorStats.hitRate*100)
+			fmt.Printf("    Markov Chains: %s | Dir Maps: %s | Hits: %s | Misses: %s\n\n",
+				formatNumber(int64(predictorStats.totalChains)),
+				formatNumber(int64(predictorStats.totalDirMaps)),
+				formatNumber(predictorStats.totalHits),
+				formatNumber(predictorStats.totalMisses))
+		}
+	}
+
 	return nil
 }
 
@@ -975,6 +997,60 @@ func fetchSearchStatsSummary(routerAddr string) *searchStatsSummary {
 		failedJobs:   stats.JobsFailed,
 		searches:     stats.SearchesTotal,
 		uptime:       stats.Uptime,
+	}
+}
+
+// predictorStatsSummary holds aggregated predictor stats from the cluster
+type predictorStatsSummary struct {
+	totalNodes       int
+	enabledNodes     int
+	totalPredictions int64
+	totalPrefetches  int64
+	totalHits        int64
+	totalMisses      int64
+	hitRate          float64
+	totalChains      int32
+	totalDirMaps     int32
+}
+
+// fetchPredictorStatsSummary fetches predictor stats via router HTTP API
+func fetchPredictorStatsSummary(routerAddr string) *predictorStatsSummary {
+	// Convert gRPC address (host:9090) to HTTP address (host:8080)
+	httpAddr := strings.Replace(routerAddr, ":9090", ":8080", 1)
+	apiURL := fmt.Sprintf("http://%s/api/predictor", httpAddr)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var stats struct {
+		TotalNodes       int     `json:"total_nodes"`
+		EnabledNodes     int     `json:"enabled_nodes"`
+		TotalPredictions int64   `json:"total_predictions"`
+		TotalPrefetches  int64   `json:"total_prefetches"`
+		TotalHits        int64   `json:"total_hits"`
+		TotalMisses      int64   `json:"total_misses"`
+		ClusterHitRate   float64 `json:"cluster_hit_rate"`
+		TotalChains      int32   `json:"total_chains"`
+		TotalDirMaps     int32   `json:"total_dir_maps"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return nil
+	}
+
+	return &predictorStatsSummary{
+		totalNodes:       stats.TotalNodes,
+		enabledNodes:     stats.EnabledNodes,
+		totalPredictions: stats.TotalPredictions,
+		totalPrefetches:  stats.TotalPrefetches,
+		totalHits:        stats.TotalHits,
+		totalMisses:      stats.TotalMisses,
+		hitRate:          stats.ClusterHitRate,
+		totalChains:      stats.TotalChains,
+		totalDirMaps:     stats.TotalDirMaps,
 	}
 }
 
@@ -1725,6 +1801,11 @@ func showNodeFiles(routerAddr, nodeID, storageID, format string) error {
 
 	nodeClient := pb.NewMonoFSClient(nodeConn)
 
+	// When no storage ID is given, show an overview of all repos on the node.
+	if storageID == "" {
+		return showNodeOverview(ctx, nodeClient, routerAddr, nodeID, nodeAddr, format)
+	}
+
 	resp, err := nodeClient.GetRepositoryFiles(ctx, &pb.GetRepositoryFilesRequest{
 		StorageId: storageID,
 	})
@@ -1747,48 +1828,129 @@ func showNodeFiles(routerAddr, nodeID, storageID, format string) error {
 	fmt.Printf("  [*] Router:       %s\n", routerAddr)
 	fmt.Printf("  [*] Node ID:      %s\n", nodeID)
 	fmt.Printf("  [*] Node Address: %s\n", nodeAddr)
-	if storageID != "" {
-		fmt.Printf("  [*] Storage ID:   %s\n", storageID)
-	}
+	fmt.Printf("  [*] Storage ID:   %s\n", storageID)
 	fmt.Printf("  [*] Total Files:  %d (on this node only)\n", len(resp.Files))
 	fmt.Printf("\n")
 	fmt.Printf("  [i] NOTE: Files are sharded across nodes. Use --node-id=all to see all files.\n")
 	fmt.Printf("\n")
 
 	if len(resp.Files) == 0 {
-		fmt.Printf("  [i] No files found on this node\n")
+		fmt.Printf("  [i] No files found on this node for this storage ID\n")
 		fmt.Printf("\n")
 		return nil
 	}
 
-	// Group files by storage ID
-	filesByStorage := make(map[string][]string)
-	for _, file := range resp.Files {
-		parts := strings.SplitN(file, "/", 2)
-		if len(parts) == 2 {
-			sid := parts[0]
-			path := parts[1]
-			filesByStorage[sid] = append(filesByStorage[sid], path)
-		} else {
-			filesByStorage["unknown"] = append(filesByStorage["unknown"], file)
+	// Show first 20 files
+	displayed := 0
+	for _, path := range resp.Files {
+		if displayed >= 20 {
+			fmt.Printf("    ... and %d more files\n", len(resp.Files)-20)
+			break
 		}
+		fmt.Printf("    %s\n", path)
+		displayed++
+	}
+	fmt.Printf("\n")
+
+	return nil
+}
+
+// showNodeOverview shows a summary of all repositories and file counts on a single node.
+func showNodeOverview(ctx context.Context, nodeClient pb.MonoFSClient, routerAddr, nodeID, nodeAddr, format string) error {
+	// Get total file count from node info
+	nodeInfo, err := nodeClient.GetNodeInfo(ctx, &pb.NodeInfoRequest{})
+	if err != nil {
+		return fmt.Errorf("failed to get node info: %w", err)
 	}
 
-	// Display grouped results
-	for sid, files := range filesByStorage {
-		fmt.Printf("  Storage: %s (%d files)\n", sid, len(files))
-		// Show first 10 files
-		displayed := 0
-		for _, path := range files {
-			if displayed >= 10 {
-				fmt.Printf("    ... and %d more files\n", len(files)-10)
-				break
-			}
-			fmt.Printf("    %s\n", path)
-			displayed++
-		}
-		fmt.Printf("\n")
+	// List all repositories on this node
+	repoList, err := nodeClient.ListRepositories(ctx, &pb.ListRepositoriesRequest{})
+	if err != nil {
+		return fmt.Errorf("failed to list repositories: %w", err)
 	}
+
+	type repoSummary struct {
+		StorageID   string `json:"storage_id"`
+		DisplayPath string `json:"display_path"`
+		Source      string `json:"source,omitempty"`
+		FileCount   int    `json:"file_count"`
+	}
+
+	var repos []repoSummary
+	for _, sid := range repoList.RepositoryIds {
+		rs := repoSummary{StorageID: sid}
+
+		// Get display path
+		info, err := nodeClient.GetRepositoryInfo(ctx, &pb.GetRepositoryInfoRequest{
+			StorageId: sid,
+		})
+		if err == nil {
+			rs.DisplayPath = info.DisplayPath
+			rs.Source = info.Source
+		}
+
+		// Get file count for this repo
+		filesResp, err := nodeClient.GetRepositoryFiles(ctx, &pb.GetRepositoryFilesRequest{
+			StorageId: sid,
+		})
+		if err == nil {
+			rs.FileCount = len(filesResp.Files)
+		}
+
+		repos = append(repos, rs)
+	}
+
+	if format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(map[string]interface{}{
+			"node_id":      nodeID,
+			"node_address": nodeAddr,
+			"total_files":  nodeInfo.TotalFiles,
+			"repositories": repos,
+		})
+	}
+
+	fmt.Printf("\n")
+	fmt.Printf("╔═══════════════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║                         NODE FILES (Single Node)                              ║\n")
+	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n")
+	fmt.Printf("\n")
+	fmt.Printf("  [*] Router:       %s\n", routerAddr)
+	fmt.Printf("  [*] Node ID:      %s\n", nodeID)
+	fmt.Printf("  [*] Node Address: %s\n", nodeAddr)
+	fmt.Printf("  [*] Total Files:  %d (on this node only)\n", nodeInfo.TotalFiles)
+	fmt.Printf("  [*] Repositories: %d\n", len(repos))
+	fmt.Printf("\n")
+	fmt.Printf("  [i] NOTE: Files are sharded across nodes. Use --node-id=all to see all files.\n")
+	fmt.Printf("\n")
+
+	if len(repos) == 0 {
+		fmt.Printf("  [i] No repositories found on this node\n")
+		fmt.Printf("\n")
+		return nil
+	}
+
+	// Print repo table
+	fmt.Printf("  %-14s %-40s %s\n", "FILES", "DISPLAY PATH", "STORAGE ID")
+	fmt.Printf("  %-14s %-40s %s\n", "─────", "────────────", "──────────")
+	for _, r := range repos {
+		display := r.DisplayPath
+		if display == "" {
+			display = "(unknown)"
+		}
+		if len(display) > 38 {
+			display = display[:35] + "..."
+		}
+		sidShort := r.StorageID
+		if len(sidShort) > 16 {
+			sidShort = sidShort[:16] + "..."
+		}
+		fmt.Printf("  %-14d %-40s %s\n", r.FileCount, display, sidShort)
+	}
+	fmt.Printf("\n")
+	fmt.Printf("  [i] Use --storage-id=<hash> to list individual files for a repository.\n")
+	fmt.Printf("\n")
 
 	return nil
 }

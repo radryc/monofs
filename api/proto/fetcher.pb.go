@@ -21,65 +21,6 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// SourceType identifies the data source backend.
-type SourceType int32
-
-const (
-	SourceType_SOURCE_TYPE_UNKNOWN SourceType = 0
-	SourceType_SOURCE_TYPE_GIT     SourceType = 1 // Git repository (GitHub, GitLab, etc.)
-	SourceType_SOURCE_TYPE_GOMOD   SourceType = 2 // Go module proxy (proxy.golang.org)
-	SourceType_SOURCE_TYPE_S3      SourceType = 3 // S3-compatible object storage
-	SourceType_SOURCE_TYPE_HTTP    SourceType = 4 // Generic HTTP/HTTPS URL
-	SourceType_SOURCE_TYPE_OCI     SourceType = 5 // OCI registry (container images)
-)
-
-// Enum value maps for SourceType.
-var (
-	SourceType_name = map[int32]string{
-		0: "SOURCE_TYPE_UNKNOWN",
-		1: "SOURCE_TYPE_GIT",
-		2: "SOURCE_TYPE_GOMOD",
-		3: "SOURCE_TYPE_S3",
-		4: "SOURCE_TYPE_HTTP",
-		5: "SOURCE_TYPE_OCI",
-	}
-	SourceType_value = map[string]int32{
-		"SOURCE_TYPE_UNKNOWN": 0,
-		"SOURCE_TYPE_GIT":     1,
-		"SOURCE_TYPE_GOMOD":   2,
-		"SOURCE_TYPE_S3":      3,
-		"SOURCE_TYPE_HTTP":    4,
-		"SOURCE_TYPE_OCI":     5,
-	}
-)
-
-func (x SourceType) Enum() *SourceType {
-	p := new(SourceType)
-	*p = x
-	return p
-}
-
-func (x SourceType) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (SourceType) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_proto_fetcher_proto_enumTypes[0].Descriptor()
-}
-
-func (SourceType) Type() protoreflect.EnumType {
-	return &file_api_proto_fetcher_proto_enumTypes[0]
-}
-
-func (x SourceType) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use SourceType.Descriptor instead.
-func (SourceType) EnumDescriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{0}
-}
-
 type AccessType int32
 
 const (
@@ -119,11 +60,11 @@ func (x AccessType) String() string {
 }
 
 func (AccessType) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_proto_fetcher_proto_enumTypes[1].Descriptor()
+	return file_api_proto_fetcher_proto_enumTypes[0].Descriptor()
 }
 
 func (AccessType) Type() protoreflect.EnumType {
-	return &file_api_proto_fetcher_proto_enumTypes[1]
+	return &file_api_proto_fetcher_proto_enumTypes[0]
 }
 
 func (x AccessType) Number() protoreflect.EnumNumber {
@@ -132,24 +73,20 @@ func (x AccessType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AccessType.Descriptor instead.
 func (AccessType) EnumDescriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{1}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{0}
 }
 
 type FetchBlobRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Content identifier (interpretation depends on source_type):
 	// - GIT: blob SHA hash
-	// - GOMOD: module@version/path
-	// - S3: bucket/key
-	// - HTTP: full URL
+	// - BLOB: blob hash within packager archive
 	ContentId string `protobuf:"bytes,1,opt,name=content_id,json=contentId,proto3" json:"content_id,omitempty"`
 	// Source type determines which backend handles the request.
 	SourceType SourceType `protobuf:"varint,2,opt,name=source_type,json=sourceType,proto3,enum=monofs.SourceType" json:"source_type,omitempty"`
 	// Source-specific configuration:
 	// GIT: repo_url, branch, display_path
-	// GOMOD: module_path, version
-	// S3: endpoint, bucket, region
-	// HTTP: (none, content_id is the URL)
+	// BLOB: storage_id
 	SourceConfig map[string]string `protobuf:"bytes,3,rep,name=source_config,json=sourceConfig,proto3" json:"source_config,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Request metadata for tracing/metrics.
 	RequestId     string `protobuf:"bytes,10,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -854,6 +791,7 @@ type SourceStats struct {
 	BytesFetched  int64                  `protobuf:"varint,3,opt,name=bytes_fetched,json=bytesFetched,proto3" json:"bytes_fetched,omitempty"`
 	AvgLatencyMs  float64                `protobuf:"fixed64,4,opt,name=avg_latency_ms,json=avgLatencyMs,proto3" json:"avg_latency_ms,omitempty"`
 	CachedItems   int64                  `protobuf:"varint,5,opt,name=cached_items,json=cachedItems,proto3" json:"cached_items,omitempty"`
+	CacheBytes    int64                  `protobuf:"varint,6,opt,name=cache_bytes,json=cacheBytes,proto3" json:"cache_bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -919,6 +857,13 @@ func (x *SourceStats) GetAvgLatencyMs() float64 {
 func (x *SourceStats) GetCachedItems() int64 {
 	if x != nil {
 		return x.CachedItems
+	}
+	return 0
+}
+
+func (x *SourceStats) GetCacheBytes() int64 {
+	if x != nil {
+		return x.CacheBytes
 	}
 	return 0
 }
@@ -1318,6 +1263,596 @@ func (x *PredictedFile) GetSourceConfig() map[string]string {
 	return nil
 }
 
+// StoreBlob stores a single blob on the fetcher.
+type StoreBlobRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// SHA-256 hash of the blob content (used as storage key).
+	BlobHash string `protobuf:"bytes,1,opt,name=blob_hash,json=blobHash,proto3" json:"blob_hash,omitempty"`
+	// Raw blob content.
+	Content []byte `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	// Request ID for tracing.
+	RequestId     string `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoreBlobRequest) Reset() {
+	*x = StoreBlobRequest{}
+	mi := &file_api_proto_fetcher_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreBlobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreBlobRequest) ProtoMessage() {}
+
+func (x *StoreBlobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_fetcher_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreBlobRequest.ProtoReflect.Descriptor instead.
+func (*StoreBlobRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *StoreBlobRequest) GetBlobHash() string {
+	if x != nil {
+		return x.BlobHash
+	}
+	return ""
+}
+
+func (x *StoreBlobRequest) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+func (x *StoreBlobRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+type StoreBlobResponse struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Success      bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	ErrorMessage string                 `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// Size of stored blob in bytes.
+	Size          int64 `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoreBlobResponse) Reset() {
+	*x = StoreBlobResponse{}
+	mi := &file_api_proto_fetcher_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreBlobResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreBlobResponse) ProtoMessage() {}
+
+func (x *StoreBlobResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_fetcher_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreBlobResponse.ProtoReflect.Descriptor instead.
+func (*StoreBlobResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *StoreBlobResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *StoreBlobResponse) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+func (x *StoreBlobResponse) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+// StoreArchiveChunk streams a packager archive to the fetcher.
+// The first chunk must contain the header with storage_id.
+type StoreArchiveChunk struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Storage ID this archive belongs to (set in first chunk).
+	StorageId string `protobuf:"bytes,1,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	// Archive chunk index (for split archives, 0-based).
+	ChunkIndex int32 `protobuf:"varint,2,opt,name=chunk_index,json=chunkIndex,proto3" json:"chunk_index,omitempty"`
+	// Raw archive data.
+	Data []byte `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	// True if this is the last chunk of this archive piece.
+	IsLast        bool `protobuf:"varint,4,opt,name=is_last,json=isLast,proto3" json:"is_last,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoreArchiveChunk) Reset() {
+	*x = StoreArchiveChunk{}
+	mi := &file_api_proto_fetcher_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreArchiveChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreArchiveChunk) ProtoMessage() {}
+
+func (x *StoreArchiveChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_fetcher_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreArchiveChunk.ProtoReflect.Descriptor instead.
+func (*StoreArchiveChunk) Descriptor() ([]byte, []int) {
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *StoreArchiveChunk) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *StoreArchiveChunk) GetChunkIndex() int32 {
+	if x != nil {
+		return x.ChunkIndex
+	}
+	return 0
+}
+
+func (x *StoreArchiveChunk) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *StoreArchiveChunk) GetIsLast() bool {
+	if x != nil {
+		return x.IsLast
+	}
+	return false
+}
+
+type StoreArchiveResponse struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Success      bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	ErrorMessage string                 `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// Total bytes stored.
+	TotalBytes int64 `protobuf:"varint,3,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	// Number of files indexed from the archive.
+	FilesIndexed  int64 `protobuf:"varint,4,opt,name=files_indexed,json=filesIndexed,proto3" json:"files_indexed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoreArchiveResponse) Reset() {
+	*x = StoreArchiveResponse{}
+	mi := &file_api_proto_fetcher_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreArchiveResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreArchiveResponse) ProtoMessage() {}
+
+func (x *StoreArchiveResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_fetcher_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreArchiveResponse.ProtoReflect.Descriptor instead.
+func (*StoreArchiveResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *StoreArchiveResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *StoreArchiveResponse) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+func (x *StoreArchiveResponse) GetTotalBytes() int64 {
+	if x != nil {
+		return x.TotalBytes
+	}
+	return 0
+}
+
+func (x *StoreArchiveResponse) GetFilesIndexed() int64 {
+	if x != nil {
+		return x.FilesIndexed
+	}
+	return 0
+}
+
+// StoreBlobEntry is a single blob (or chunk of a blob) sent in a
+// StoreBlobBatchStream.  Small blobs are sent as one message with
+// chunk_index=0 and is_last=true (the default).  Large blobs are
+// split across multiple messages sharing the same blob_hash;
+// chunk_index increments from 0 and the final chunk sets is_last=true.
+type StoreBlobEntry struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// SHA-256 hash of the full blob content (used as storage/index key).
+	BlobHash string `protobuf:"bytes,1,opt,name=blob_hash,json=blobHash,proto3" json:"blob_hash,omitempty"`
+	// Raw blob content (or a chunk of it for large blobs).
+	Content []byte `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	// Chunk sequence number within this blob (0-based).
+	ChunkIndex int32 `protobuf:"varint,3,opt,name=chunk_index,json=chunkIndex,proto3" json:"chunk_index,omitempty"`
+	// True when this is the last (or only) chunk for this blob_hash.
+	IsLast bool `protobuf:"varint,4,opt,name=is_last,json=isLast,proto3" json:"is_last,omitempty"`
+	// Total uncompressed size of the complete blob in bytes.
+	// Only required on the first chunk (chunk_index == 0).
+	TotalSize     int64 `protobuf:"varint,5,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoreBlobEntry) Reset() {
+	*x = StoreBlobEntry{}
+	mi := &file_api_proto_fetcher_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreBlobEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreBlobEntry) ProtoMessage() {}
+
+func (x *StoreBlobEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_fetcher_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreBlobEntry.ProtoReflect.Descriptor instead.
+func (*StoreBlobEntry) Descriptor() ([]byte, []int) {
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *StoreBlobEntry) GetBlobHash() string {
+	if x != nil {
+		return x.BlobHash
+	}
+	return ""
+}
+
+func (x *StoreBlobEntry) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+func (x *StoreBlobEntry) GetChunkIndex() int32 {
+	if x != nil {
+		return x.ChunkIndex
+	}
+	return 0
+}
+
+func (x *StoreBlobEntry) GetIsLast() bool {
+	if x != nil {
+		return x.IsLast
+	}
+	return false
+}
+
+func (x *StoreBlobEntry) GetTotalSize() int64 {
+	if x != nil {
+		return x.TotalSize
+	}
+	return 0
+}
+
+// StoreBlobBatchResponse summarises the streaming batch storage operation.
+type StoreBlobBatchResponse struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Success      bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	ErrorMessage string                 `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// Number of blobs written to archive(s).
+	Stored int32 `protobuf:"varint,3,opt,name=stored,proto3" json:"stored,omitempty"`
+	// Number of blobs skipped (already indexed).
+	Skipped int32 `protobuf:"varint,4,opt,name=skipped,proto3" json:"skipped,omitempty"`
+	// Number of blobs that failed.
+	Failed int32 `protobuf:"varint,5,opt,name=failed,proto3" json:"failed,omitempty"`
+	// Total archive bytes written to disk.
+	ArchiveBytes int64 `protobuf:"varint,6,opt,name=archive_bytes,json=archiveBytes,proto3" json:"archive_bytes,omitempty"`
+	// Number of archive files created.
+	ArchivesCreated int32 `protobuf:"varint,7,opt,name=archives_created,json=archivesCreated,proto3" json:"archives_created,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *StoreBlobBatchResponse) Reset() {
+	*x = StoreBlobBatchResponse{}
+	mi := &file_api_proto_fetcher_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreBlobBatchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreBlobBatchResponse) ProtoMessage() {}
+
+func (x *StoreBlobBatchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_fetcher_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreBlobBatchResponse.ProtoReflect.Descriptor instead.
+func (*StoreBlobBatchResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *StoreBlobBatchResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *StoreBlobBatchResponse) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+func (x *StoreBlobBatchResponse) GetStored() int32 {
+	if x != nil {
+		return x.Stored
+	}
+	return 0
+}
+
+func (x *StoreBlobBatchResponse) GetSkipped() int32 {
+	if x != nil {
+		return x.Skipped
+	}
+	return 0
+}
+
+func (x *StoreBlobBatchResponse) GetFailed() int32 {
+	if x != nil {
+		return x.Failed
+	}
+	return 0
+}
+
+func (x *StoreBlobBatchResponse) GetArchiveBytes() int64 {
+	if x != nil {
+		return x.ArchiveBytes
+	}
+	return 0
+}
+
+func (x *StoreBlobBatchResponse) GetArchivesCreated() int32 {
+	if x != nil {
+		return x.ArchivesCreated
+	}
+	return 0
+}
+
+// DeleteBlobsRequest asks the fetcher to remove blobs from its index.
+type DeleteBlobsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// SHA-256 hashes of blobs to delete.
+	BlobHashes []string `protobuf:"bytes,1,rep,name=blob_hashes,json=blobHashes,proto3" json:"blob_hashes,omitempty"`
+	// When true, also remove archive files that become empty after
+	// deleting these entries (compaction). Default false.
+	Compact       bool `protobuf:"varint,2,opt,name=compact,proto3" json:"compact,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteBlobsRequest) Reset() {
+	*x = DeleteBlobsRequest{}
+	mi := &file_api_proto_fetcher_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteBlobsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteBlobsRequest) ProtoMessage() {}
+
+func (x *DeleteBlobsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_fetcher_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteBlobsRequest.ProtoReflect.Descriptor instead.
+func (*DeleteBlobsRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *DeleteBlobsRequest) GetBlobHashes() []string {
+	if x != nil {
+		return x.BlobHashes
+	}
+	return nil
+}
+
+func (x *DeleteBlobsRequest) GetCompact() bool {
+	if x != nil {
+		return x.Compact
+	}
+	return false
+}
+
+// DeleteBlobsResponse reports how many blobs were deleted.
+type DeleteBlobsResponse struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Success      bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	ErrorMessage string                 `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// Number of blobs removed from the index.
+	Deleted int32 `protobuf:"varint,3,opt,name=deleted,proto3" json:"deleted,omitempty"`
+	// Number of hashes not found in the index.
+	NotFound int32 `protobuf:"varint,4,opt,name=not_found,json=notFound,proto3" json:"not_found,omitempty"`
+	// Number of archive files removed during compaction.
+	ArchivesRemoved int32 `protobuf:"varint,5,opt,name=archives_removed,json=archivesRemoved,proto3" json:"archives_removed,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *DeleteBlobsResponse) Reset() {
+	*x = DeleteBlobsResponse{}
+	mi := &file_api_proto_fetcher_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteBlobsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteBlobsResponse) ProtoMessage() {}
+
+func (x *DeleteBlobsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_fetcher_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteBlobsResponse.ProtoReflect.Descriptor instead.
+func (*DeleteBlobsResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *DeleteBlobsResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *DeleteBlobsResponse) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+func (x *DeleteBlobsResponse) GetDeleted() int32 {
+	if x != nil {
+		return x.Deleted
+	}
+	return 0
+}
+
+func (x *DeleteBlobsResponse) GetNotFound() int32 {
+	if x != nil {
+		return x.NotFound
+	}
+	return 0
+}
+
+func (x *DeleteBlobsResponse) GetArchivesRemoved() int32 {
+	if x != nil {
+		return x.ArchivesRemoved
+	}
+	return 0
+}
+
 var File_api_proto_fetcher_proto protoreflect.FileDescriptor
 
 const file_api_proto_fetcher_proto_rawDesc = "" +
@@ -1400,13 +1935,15 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\fbytes_served\x18\r \x01(\x03R\vbytesServed\x1aS\n" +
 	"\x10SourceStatsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
-	"\x05value\x18\x02 \x01(\v2\x13.monofs.SourceStatsR\x05value:\x028\x01\"\xaf\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x13.monofs.SourceStatsR\x05value:\x028\x01\"\xd0\x01\n" +
 	"\vSourceStats\x12\x1a\n" +
 	"\brequests\x18\x01 \x01(\x03R\brequests\x12\x16\n" +
 	"\x06errors\x18\x02 \x01(\x03R\x06errors\x12#\n" +
 	"\rbytes_fetched\x18\x03 \x01(\x03R\fbytesFetched\x12$\n" +
 	"\x0eavg_latency_ms\x18\x04 \x01(\x01R\favgLatencyMs\x12!\n" +
-	"\fcached_items\x18\x05 \x01(\x03R\vcachedItems\"\xf1\x01\n" +
+	"\fcached_items\x18\x05 \x01(\x03R\vcachedItems\x12\x1f\n" +
+	"\vcache_bytes\x18\x06 \x01(\x03R\n" +
+	"cacheBytes\"\xf1\x01\n" +
 	"\vAccessEvent\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1d\n" +
 	"\n" +
@@ -1445,29 +1982,73 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\rsource_config\x18\a \x03(\v2'.monofs.PredictedFile.SourceConfigEntryR\fsourceConfig\x1a?\n" +
 	"\x11SourceConfigEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x90\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"h\n" +
+	"\x10StoreBlobRequest\x12\x1b\n" +
+	"\tblob_hash\x18\x01 \x01(\tR\bblobHash\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\fR\acontent\x12\x1d\n" +
 	"\n" +
-	"SourceType\x12\x17\n" +
-	"\x13SOURCE_TYPE_UNKNOWN\x10\x00\x12\x13\n" +
-	"\x0fSOURCE_TYPE_GIT\x10\x01\x12\x15\n" +
-	"\x11SOURCE_TYPE_GOMOD\x10\x02\x12\x12\n" +
-	"\x0eSOURCE_TYPE_S3\x10\x03\x12\x14\n" +
-	"\x10SOURCE_TYPE_HTTP\x10\x04\x12\x13\n" +
-	"\x0fSOURCE_TYPE_OCI\x10\x05*\x85\x01\n" +
+	"request_id\x18\x03 \x01(\tR\trequestId\"f\n" +
+	"\x11StoreBlobResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x12\n" +
+	"\x04size\x18\x03 \x01(\x03R\x04size\"\x80\x01\n" +
+	"\x11StoreArchiveChunk\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x01 \x01(\tR\tstorageId\x12\x1f\n" +
+	"\vchunk_index\x18\x02 \x01(\x05R\n" +
+	"chunkIndex\x12\x12\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\x12\x17\n" +
+	"\ais_last\x18\x04 \x01(\bR\x06isLast\"\x9b\x01\n" +
+	"\x14StoreArchiveResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x1f\n" +
+	"\vtotal_bytes\x18\x03 \x01(\x03R\n" +
+	"totalBytes\x12#\n" +
+	"\rfiles_indexed\x18\x04 \x01(\x03R\ffilesIndexed\"\xa0\x01\n" +
+	"\x0eStoreBlobEntry\x12\x1b\n" +
+	"\tblob_hash\x18\x01 \x01(\tR\bblobHash\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\fR\acontent\x12\x1f\n" +
+	"\vchunk_index\x18\x03 \x01(\x05R\n" +
+	"chunkIndex\x12\x17\n" +
+	"\ais_last\x18\x04 \x01(\bR\x06isLast\x12\x1d\n" +
+	"\n" +
+	"total_size\x18\x05 \x01(\x03R\ttotalSize\"\xf1\x01\n" +
+	"\x16StoreBlobBatchResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x16\n" +
+	"\x06stored\x18\x03 \x01(\x05R\x06stored\x12\x18\n" +
+	"\askipped\x18\x04 \x01(\x05R\askipped\x12\x16\n" +
+	"\x06failed\x18\x05 \x01(\x05R\x06failed\x12#\n" +
+	"\rarchive_bytes\x18\x06 \x01(\x03R\farchiveBytes\x12)\n" +
+	"\x10archives_created\x18\a \x01(\x05R\x0farchivesCreated\"O\n" +
+	"\x12DeleteBlobsRequest\x12\x1f\n" +
+	"\vblob_hashes\x18\x01 \x03(\tR\n" +
+	"blobHashes\x12\x18\n" +
+	"\acompact\x18\x02 \x01(\bR\acompact\"\xb6\x01\n" +
+	"\x13DeleteBlobsResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x18\n" +
+	"\adeleted\x18\x03 \x01(\x05R\adeleted\x12\x1b\n" +
+	"\tnot_found\x18\x04 \x01(\x05R\bnotFound\x12)\n" +
+	"\x10archives_removed\x18\x05 \x01(\x05R\x0farchivesRemoved*\x85\x01\n" +
 	"\n" +
 	"AccessType\x12\x17\n" +
 	"\x13ACCESS_TYPE_UNKNOWN\x10\x00\x12\x14\n" +
 	"\x10ACCESS_TYPE_READ\x10\x01\x12\x17\n" +
 	"\x13ACCESS_TYPE_READDIR\x10\x02\x12\x16\n" +
 	"\x12ACCESS_TYPE_LOOKUP\x10\x03\x12\x17\n" +
-	"\x13ACCESS_TYPE_GETATTR\x10\x042\xec\x02\n" +
+	"\x13ACCESS_TYPE_GETATTR\x10\x042\x93\x05\n" +
 	"\vBlobFetcher\x12:\n" +
 	"\tFetchBlob\x12\x18.monofs.FetchBlobRequest\x1a\x11.monofs.DataChunk0\x01\x12Q\n" +
 	"\x0eFetchBlobBatch\x12\x1d.monofs.FetchBlobBatchRequest\x1a\x1e.monofs.FetchBlobBatchResponse0\x01\x12B\n" +
 	"\rPrefetchBlobs\x12\x17.monofs.PrefetchRequest\x1a\x18.monofs.PrefetchResponse\x12C\n" +
 	"\n" +
 	"CheckCache\x12\x19.monofs.CheckCacheRequest\x1a\x1a.monofs.CheckCacheResponse\x12E\n" +
-	"\bGetStats\x12\x1b.monofs.FetcherStatsRequest\x1a\x1c.monofs.FetcherStatsResponseB$Z\"github.com/radryc/monofs/api/protob\x06proto3"
+	"\bGetStats\x12\x1b.monofs.FetcherStatsRequest\x1a\x1c.monofs.FetcherStatsResponse\x12@\n" +
+	"\tStoreBlob\x12\x18.monofs.StoreBlobRequest\x1a\x19.monofs.StoreBlobResponse\x12P\n" +
+	"\x14StoreBlobBatchStream\x12\x16.monofs.StoreBlobEntry\x1a\x1e.monofs.StoreBlobBatchResponse(\x01\x12F\n" +
+	"\vDeleteBlobs\x12\x1a.monofs.DeleteBlobsRequest\x1a\x1b.monofs.DeleteBlobsResponse\x12I\n" +
+	"\fStoreArchive\x12\x19.monofs.StoreArchiveChunk\x1a\x1c.monofs.StoreArchiveResponse(\x01B$Z\"github.com/radryc/monofs/api/protob\x06proto3"
 
 var (
 	file_api_proto_fetcher_proto_rawDescOnce sync.Once
@@ -1481,61 +2062,77 @@ func file_api_proto_fetcher_proto_rawDescGZIP() []byte {
 	return file_api_proto_fetcher_proto_rawDescData
 }
 
-var file_api_proto_fetcher_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_api_proto_fetcher_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_api_proto_fetcher_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_api_proto_fetcher_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_api_proto_fetcher_proto_goTypes = []any{
-	(SourceType)(0),                // 0: monofs.SourceType
-	(AccessType)(0),                // 1: monofs.AccessType
-	(*FetchBlobRequest)(nil),       // 2: monofs.FetchBlobRequest
-	(*FetchBlobBatchRequest)(nil),  // 3: monofs.FetchBlobBatchRequest
-	(*FetchBlobBatchResponse)(nil), // 4: monofs.FetchBlobBatchResponse
-	(*PrefetchRequest)(nil),        // 5: monofs.PrefetchRequest
-	(*PrefetchResponse)(nil),       // 6: monofs.PrefetchResponse
-	(*CheckCacheRequest)(nil),      // 7: monofs.CheckCacheRequest
-	(*CheckCacheResponse)(nil),     // 8: monofs.CheckCacheResponse
-	(*FetcherStatsRequest)(nil),    // 9: monofs.FetcherStatsRequest
-	(*FetcherStatsResponse)(nil),   // 10: monofs.FetcherStatsResponse
-	(*SourceStats)(nil),            // 11: monofs.SourceStats
-	(*AccessEvent)(nil),            // 12: monofs.AccessEvent
-	(*ReportAccessRequest)(nil),    // 13: monofs.ReportAccessRequest
-	(*ReportAccessResponse)(nil),   // 14: monofs.ReportAccessResponse
-	(*GetPredictionsRequest)(nil),  // 15: monofs.GetPredictionsRequest
-	(*GetPredictionsResponse)(nil), // 16: monofs.GetPredictionsResponse
-	(*PredictedFile)(nil),          // 17: monofs.PredictedFile
-	nil,                            // 18: monofs.FetchBlobRequest.SourceConfigEntry
-	nil,                            // 19: monofs.CheckCacheResponse.CachedEntry
-	nil,                            // 20: monofs.CheckCacheResponse.SizesEntry
-	nil,                            // 21: monofs.FetcherStatsResponse.SourceStatsEntry
-	nil,                            // 22: monofs.PredictedFile.SourceConfigEntry
-	(*DataChunk)(nil),              // 23: monofs.DataChunk
+	(AccessType)(0),                // 0: monofs.AccessType
+	(*FetchBlobRequest)(nil),       // 1: monofs.FetchBlobRequest
+	(*FetchBlobBatchRequest)(nil),  // 2: monofs.FetchBlobBatchRequest
+	(*FetchBlobBatchResponse)(nil), // 3: monofs.FetchBlobBatchResponse
+	(*PrefetchRequest)(nil),        // 4: monofs.PrefetchRequest
+	(*PrefetchResponse)(nil),       // 5: monofs.PrefetchResponse
+	(*CheckCacheRequest)(nil),      // 6: monofs.CheckCacheRequest
+	(*CheckCacheResponse)(nil),     // 7: monofs.CheckCacheResponse
+	(*FetcherStatsRequest)(nil),    // 8: monofs.FetcherStatsRequest
+	(*FetcherStatsResponse)(nil),   // 9: monofs.FetcherStatsResponse
+	(*SourceStats)(nil),            // 10: monofs.SourceStats
+	(*AccessEvent)(nil),            // 11: monofs.AccessEvent
+	(*ReportAccessRequest)(nil),    // 12: monofs.ReportAccessRequest
+	(*ReportAccessResponse)(nil),   // 13: monofs.ReportAccessResponse
+	(*GetPredictionsRequest)(nil),  // 14: monofs.GetPredictionsRequest
+	(*GetPredictionsResponse)(nil), // 15: monofs.GetPredictionsResponse
+	(*PredictedFile)(nil),          // 16: monofs.PredictedFile
+	(*StoreBlobRequest)(nil),       // 17: monofs.StoreBlobRequest
+	(*StoreBlobResponse)(nil),      // 18: monofs.StoreBlobResponse
+	(*StoreArchiveChunk)(nil),      // 19: monofs.StoreArchiveChunk
+	(*StoreArchiveResponse)(nil),   // 20: monofs.StoreArchiveResponse
+	(*StoreBlobEntry)(nil),         // 21: monofs.StoreBlobEntry
+	(*StoreBlobBatchResponse)(nil), // 22: monofs.StoreBlobBatchResponse
+	(*DeleteBlobsRequest)(nil),     // 23: monofs.DeleteBlobsRequest
+	(*DeleteBlobsResponse)(nil),    // 24: monofs.DeleteBlobsResponse
+	nil,                            // 25: monofs.FetchBlobRequest.SourceConfigEntry
+	nil,                            // 26: monofs.CheckCacheResponse.CachedEntry
+	nil,                            // 27: monofs.CheckCacheResponse.SizesEntry
+	nil,                            // 28: monofs.FetcherStatsResponse.SourceStatsEntry
+	nil,                            // 29: monofs.PredictedFile.SourceConfigEntry
+	(SourceType)(0),                // 30: monofs.SourceType
+	(*DataChunk)(nil),              // 31: monofs.DataChunk
 }
 var file_api_proto_fetcher_proto_depIdxs = []int32{
-	0,  // 0: monofs.FetchBlobRequest.source_type:type_name -> monofs.SourceType
-	18, // 1: monofs.FetchBlobRequest.source_config:type_name -> monofs.FetchBlobRequest.SourceConfigEntry
-	2,  // 2: monofs.FetchBlobBatchRequest.blobs:type_name -> monofs.FetchBlobRequest
-	2,  // 3: monofs.PrefetchRequest.blobs:type_name -> monofs.FetchBlobRequest
-	0,  // 4: monofs.CheckCacheRequest.source_type:type_name -> monofs.SourceType
-	19, // 5: monofs.CheckCacheResponse.cached:type_name -> monofs.CheckCacheResponse.CachedEntry
-	20, // 6: monofs.CheckCacheResponse.sizes:type_name -> monofs.CheckCacheResponse.SizesEntry
-	21, // 7: monofs.FetcherStatsResponse.source_stats:type_name -> monofs.FetcherStatsResponse.SourceStatsEntry
-	1,  // 8: monofs.AccessEvent.access_type:type_name -> monofs.AccessType
-	12, // 9: monofs.ReportAccessRequest.events:type_name -> monofs.AccessEvent
-	17, // 10: monofs.GetPredictionsResponse.predictions:type_name -> monofs.PredictedFile
-	0,  // 11: monofs.PredictedFile.source_type:type_name -> monofs.SourceType
-	22, // 12: monofs.PredictedFile.source_config:type_name -> monofs.PredictedFile.SourceConfigEntry
-	11, // 13: monofs.FetcherStatsResponse.SourceStatsEntry.value:type_name -> monofs.SourceStats
-	2,  // 14: monofs.BlobFetcher.FetchBlob:input_type -> monofs.FetchBlobRequest
-	3,  // 15: monofs.BlobFetcher.FetchBlobBatch:input_type -> monofs.FetchBlobBatchRequest
-	5,  // 16: monofs.BlobFetcher.PrefetchBlobs:input_type -> monofs.PrefetchRequest
-	7,  // 17: monofs.BlobFetcher.CheckCache:input_type -> monofs.CheckCacheRequest
-	9,  // 18: monofs.BlobFetcher.GetStats:input_type -> monofs.FetcherStatsRequest
-	23, // 19: monofs.BlobFetcher.FetchBlob:output_type -> monofs.DataChunk
-	4,  // 20: monofs.BlobFetcher.FetchBlobBatch:output_type -> monofs.FetchBlobBatchResponse
-	6,  // 21: monofs.BlobFetcher.PrefetchBlobs:output_type -> monofs.PrefetchResponse
-	8,  // 22: monofs.BlobFetcher.CheckCache:output_type -> monofs.CheckCacheResponse
-	10, // 23: monofs.BlobFetcher.GetStats:output_type -> monofs.FetcherStatsResponse
-	19, // [19:24] is the sub-list for method output_type
-	14, // [14:19] is the sub-list for method input_type
+	30, // 0: monofs.FetchBlobRequest.source_type:type_name -> monofs.SourceType
+	25, // 1: monofs.FetchBlobRequest.source_config:type_name -> monofs.FetchBlobRequest.SourceConfigEntry
+	1,  // 2: monofs.FetchBlobBatchRequest.blobs:type_name -> monofs.FetchBlobRequest
+	1,  // 3: monofs.PrefetchRequest.blobs:type_name -> monofs.FetchBlobRequest
+	30, // 4: monofs.CheckCacheRequest.source_type:type_name -> monofs.SourceType
+	26, // 5: monofs.CheckCacheResponse.cached:type_name -> monofs.CheckCacheResponse.CachedEntry
+	27, // 6: monofs.CheckCacheResponse.sizes:type_name -> monofs.CheckCacheResponse.SizesEntry
+	28, // 7: monofs.FetcherStatsResponse.source_stats:type_name -> monofs.FetcherStatsResponse.SourceStatsEntry
+	0,  // 8: monofs.AccessEvent.access_type:type_name -> monofs.AccessType
+	11, // 9: monofs.ReportAccessRequest.events:type_name -> monofs.AccessEvent
+	16, // 10: monofs.GetPredictionsResponse.predictions:type_name -> monofs.PredictedFile
+	30, // 11: monofs.PredictedFile.source_type:type_name -> monofs.SourceType
+	29, // 12: monofs.PredictedFile.source_config:type_name -> monofs.PredictedFile.SourceConfigEntry
+	10, // 13: monofs.FetcherStatsResponse.SourceStatsEntry.value:type_name -> monofs.SourceStats
+	1,  // 14: monofs.BlobFetcher.FetchBlob:input_type -> monofs.FetchBlobRequest
+	2,  // 15: monofs.BlobFetcher.FetchBlobBatch:input_type -> monofs.FetchBlobBatchRequest
+	4,  // 16: monofs.BlobFetcher.PrefetchBlobs:input_type -> monofs.PrefetchRequest
+	6,  // 17: monofs.BlobFetcher.CheckCache:input_type -> monofs.CheckCacheRequest
+	8,  // 18: monofs.BlobFetcher.GetStats:input_type -> monofs.FetcherStatsRequest
+	17, // 19: monofs.BlobFetcher.StoreBlob:input_type -> monofs.StoreBlobRequest
+	21, // 20: monofs.BlobFetcher.StoreBlobBatchStream:input_type -> monofs.StoreBlobEntry
+	23, // 21: monofs.BlobFetcher.DeleteBlobs:input_type -> monofs.DeleteBlobsRequest
+	19, // 22: monofs.BlobFetcher.StoreArchive:input_type -> monofs.StoreArchiveChunk
+	31, // 23: monofs.BlobFetcher.FetchBlob:output_type -> monofs.DataChunk
+	3,  // 24: monofs.BlobFetcher.FetchBlobBatch:output_type -> monofs.FetchBlobBatchResponse
+	5,  // 25: monofs.BlobFetcher.PrefetchBlobs:output_type -> monofs.PrefetchResponse
+	7,  // 26: monofs.BlobFetcher.CheckCache:output_type -> monofs.CheckCacheResponse
+	9,  // 27: monofs.BlobFetcher.GetStats:output_type -> monofs.FetcherStatsResponse
+	18, // 28: monofs.BlobFetcher.StoreBlob:output_type -> monofs.StoreBlobResponse
+	22, // 29: monofs.BlobFetcher.StoreBlobBatchStream:output_type -> monofs.StoreBlobBatchResponse
+	24, // 30: monofs.BlobFetcher.DeleteBlobs:output_type -> monofs.DeleteBlobsResponse
+	20, // 31: monofs.BlobFetcher.StoreArchive:output_type -> monofs.StoreArchiveResponse
+	23, // [23:32] is the sub-list for method output_type
+	14, // [14:23] is the sub-list for method input_type
 	14, // [14:14] is the sub-list for extension type_name
 	14, // [14:14] is the sub-list for extension extendee
 	0,  // [0:14] is the sub-list for field type_name
@@ -1552,8 +2149,8 @@ func file_api_proto_fetcher_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_fetcher_proto_rawDesc), len(file_api_proto_fetcher_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   21,
+			NumEnums:      1,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

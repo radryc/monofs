@@ -1,23 +1,33 @@
 // Command monofs-fetcher runs the blob fetcher service.
 //
 // Fetchers are stateless proxies that handle external network access
-// (Git remotes, Go module proxies, etc.) on behalf of storage nodes.
+// (Git remotes, etc.) on behalf of storage nodes.
 // They run in the DMZ with external connectivity while storage nodes
 // remain on internal network only.
 //
 // Features:
-//   - Multi-backend support (Git, Go modules, extensible)
-//   - Local repo/module cache for efficiency
+//   - Multi-backend support (Git optional, Blob default via packager archives)
+//   - Local blob/repo cache for efficiency
 //   - Background prefetch queue
 //   - Repo-affinity for cache locality
 //
+// Configuration (in order of precedence):
+//  1. CLI flags
+//  2. Environment variables (MONOFS_ENCRYPTION_KEY, MONOFS_FETCHER_PORT, etc.)
+//  3. Config file (--config or /etc/monofs/fetcher.json)
+//  4. Built-in defaults
+//
 // Usage:
 //
-//	monofs-fetcher --port 9200 --cache-dir /data/fetcher-cache
+//	monofs-fetcher --port 9200 --cache-dir /data/fetcher-cache --encryption-key <hex-key>
+//	monofs-fetcher --config /etc/monofs/fetcher.json
+//	MONOFS_ENCRYPTION_KEY=<hex> monofs-fetcher
 package main
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -28,24 +38,139 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/storage/blob"
+	storagegit "github.com/radryc/monofs/internal/storage/git"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
 
+// fetcherConfig holds all fetcher configuration, loadable from JSON.
+type fetcherConfig struct {
+	Port            int           `json:"port"`
+	CacheDir        string        `json:"cache_dir"`
+	MaxCacheGB      int           `json:"max_cache_gb"`
+	CacheAgeHours   int           `json:"cache_age_hours"`
+	PrefetchWorkers int           `json:"prefetch_workers"`
+	EncryptionKey   string        `json:"encryption_key"`
+	EnableGit       bool          `json:"enable_git"`
+	LogLevel        string        `json:"log_level"`
+	Storage         storageConfig `json:"storage"`
+}
+
+type storageConfig struct {
+	Type      string `json:"type"`       // "local" (default)
+	LocalPath string `json:"local_path"` // path on disk for blob archives
+}
+
+// defaultConfig returns built-in defaults.
+func defaultConfig() fetcherConfig {
+	return fetcherConfig{
+		Port:            9200,
+		CacheDir:        "/data/fetcher-cache",
+		MaxCacheGB:      50,
+		CacheAgeHours:   2,
+		PrefetchWorkers: 4,
+		LogLevel:        "info",
+		Storage: storageConfig{
+			Type: "local",
+		},
+	}
+}
+
+// loadConfigFile reads a JSON config file, returning defaults on missing file.
+func loadConfigFile(path string) (fetcherConfig, error) {
+	cfg := defaultConfig()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil // missing file → use defaults
+		}
+		return cfg, fmt.Errorf("reading config %s: %w", path, err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parsing config %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
 func main() {
-	// Flags
-	port := flag.Int("port", 9200, "gRPC server port")
-	cacheDir := flag.String("cache-dir", "/data/fetcher-cache", "Directory for caching repos/modules")
-	maxCacheGB := flag.Int("max-cache-gb", 50, "Maximum cache size in GB")
-	cacheAgeHours := flag.Int("cache-age-hours", 2, "Max age for cached repos before eviction")
-	prefetchWorkers := flag.Int("prefetch-workers", 4, "Number of background prefetch workers")
-	goModProxy := flag.String("gomod-proxy", "https://proxy.golang.org", "Go module proxy URL")
-	logLevel := flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+	// Flags (override config file values)
+	configFile := flag.String("config", "", "Path to JSON config file (default: /etc/monofs/fetcher.json)")
+	port := flag.Int("port", 0, "gRPC server port (default: 9200)")
+	cacheDir := flag.String("cache-dir", "", "Directory for caching repos/modules")
+	maxCacheGB := flag.Int("max-cache-gb", 0, "Maximum cache size in GB")
+	cacheAgeHours := flag.Int("cache-age-hours", 0, "Max age for cached repos before eviction")
+	prefetchWorkers := flag.Int("prefetch-workers", 0, "Number of background prefetch workers")
+	encryptionKeyHex := flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
+	enableGit := flag.Bool("enable-git", false, "Enable optional Git backend")
+	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
 	flag.Parse()
+
+	// Load config: file → env → flags (flags win)
+	cfgPath := *configFile
+	if cfgPath == "" {
+		cfgPath = os.Getenv("MONOFS_FETCHER_CONFIG")
+	}
+	if cfgPath == "" {
+		cfgPath = "/etc/monofs/fetcher.json"
+	}
+	cfg, err := loadConfigFile(cfgPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Apply environment variables (override config file)
+	if v := os.Getenv("MONOFS_ENCRYPTION_KEY"); v != "" {
+		cfg.EncryptionKey = v
+	}
+	if v := os.Getenv("MONOFS_FETCHER_PORT"); v != "" {
+		fmt.Sscanf(v, "%d", &cfg.Port)
+	}
+	if v := os.Getenv("MONOFS_FETCHER_CACHE_DIR"); v != "" {
+		cfg.CacheDir = v
+	}
+	if v := os.Getenv("MONOFS_FETCHER_LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+
+	// Apply CLI flags (highest precedence)
+	if *port != 0 {
+		cfg.Port = *port
+	}
+	if *cacheDir != "" {
+		cfg.CacheDir = *cacheDir
+		// Re-derive storage path from the new cache dir so --cache-dir always
+		// governs where archives land, overriding any path set in the config file.
+		cfg.Storage.LocalPath = ""
+	}
+	if *maxCacheGB != 0 {
+		cfg.MaxCacheGB = *maxCacheGB
+	}
+	if *cacheAgeHours != 0 {
+		cfg.CacheAgeHours = *cacheAgeHours
+	}
+	if *prefetchWorkers != 0 {
+		cfg.PrefetchWorkers = *prefetchWorkers
+	}
+	if *encryptionKeyHex != "" {
+		cfg.EncryptionKey = *encryptionKeyHex
+	}
+	if *enableGit {
+		cfg.EnableGit = true
+	}
+	if *logLevel != "" {
+		cfg.LogLevel = *logLevel
+	}
+
+	// Derive blob storage path from cache dir if not set explicitly
+	if cfg.Storage.LocalPath == "" {
+		cfg.Storage.LocalPath = cfg.CacheDir + "/blobs"
+	}
 
 	// Setup logger
 	var level slog.Level
-	switch *logLevel {
+	switch cfg.LogLevel {
 	case "debug":
 		level = slog.LevelDebug
 	case "warn":
@@ -63,57 +188,76 @@ func main() {
 
 	// Generate fetcher ID
 	hostname, _ := os.Hostname()
-	fetcherID := fmt.Sprintf("fetcher-%s-%d", hostname, *port)
+	fetcherID := fmt.Sprintf("fetcher-%s-%d", hostname, cfg.Port)
 
 	logger.Info("starting monofs-fetcher",
 		"id", fetcherID,
-		"port", *port,
-		"cache_dir", *cacheDir,
+		"port", cfg.Port,
+		"cache_dir", cfg.CacheDir,
+		"blob_storage", cfg.Storage.LocalPath,
 	)
 
 	// Ensure cache directory exists
-	if err := os.MkdirAll(*cacheDir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.CacheDir, 0755); err != nil {
 		logger.Error("failed to create cache directory", "error", err)
+		os.Exit(1)
+	}
+
+	// Parse encryption key
+	var encryptionKey []byte
+	if cfg.EncryptionKey != "" {
+		var err error
+		encryptionKey, err = hex.DecodeString(cfg.EncryptionKey)
+		if err != nil || len(encryptionKey) != 32 {
+			logger.Error("encryption key must be 32 bytes (64 hex chars)", "len", len(encryptionKey), "error", err)
+			os.Exit(1)
+		}
+	} else {
+		logger.Error("encryption key is required: set --encryption-key flag, MONOFS_ENCRYPTION_KEY env var, or encryption_key in config file")
 		os.Exit(1)
 	}
 
 	// Create backend registry
 	registry := fetcher.NewRegistry()
 
-	// Initialize Git backend
-	gitBackend := fetcher.NewGitBackend()
-	if err := gitBackend.Initialize(ctx, fetcher.BackendConfig{
-		CacheDir:        *cacheDir + "/git",
-		MaxCacheSize:    int64(*maxCacheGB) * 1024 * 1024 * 1024 / 2, // Half for Git
-		MaxCacheAgeSecs: int64(*cacheAgeHours) * 3600,
-		Concurrency:     10,
+	// Initialize Blob backend (default, packager-based)
+	blobBackend := blob.NewBlobBackend()
+	if err := blobBackend.Initialize(ctx, fetcher.BackendConfig{
+		CacheDir:      cfg.Storage.LocalPath,
+		MaxCacheSize:  int64(cfg.MaxCacheGB) * 1024 * 1024 * 1024,
+		Concurrency:   10,
+		EncryptionKey: encryptionKey,
 	}); err != nil {
-		logger.Error("failed to initialize git backend", "error", err)
+		logger.Error("failed to initialize blob backend", "error", err)
 		os.Exit(1)
 	}
-	registry.Register(gitBackend)
-	logger.Info("git backend initialized", "cached_repos", len(gitBackend.CachedSources()))
+	blobBackend.SetLogger(logger)
+	registry.Register(blobBackend)
+	logger.Info("blob backend initialized",
+		"storage_type", cfg.Storage.Type,
+		"storage_path", cfg.Storage.LocalPath,
+		"archives", blobBackend.ArchiveCount(),
+	)
 
-	// Initialize Go modules backend
-	gomodBackend := fetcher.NewGoModBackend()
-	if err := gomodBackend.Initialize(ctx, fetcher.BackendConfig{
-		CacheDir:        *cacheDir + "/gomod",
-		MaxCacheSize:    int64(*maxCacheGB) * 1024 * 1024 * 1024 / 2, // Half for GoMod
-		MaxCacheAgeSecs: int64(*cacheAgeHours) * 3600,
-		Concurrency:     10,
-		Extra: map[string]string{
-			"proxy_url": *goModProxy,
-		},
-	}); err != nil {
-		logger.Error("failed to initialize gomod backend", "error", err)
-		os.Exit(1)
+	// Optional Git backend
+	if cfg.EnableGit {
+		gitBackend := storagegit.NewGitBackend()
+		if err := gitBackend.Initialize(ctx, fetcher.BackendConfig{
+			CacheDir:        cfg.CacheDir + "/git",
+			MaxCacheSize:    int64(cfg.MaxCacheGB) * 1024 * 1024 * 1024 / 4,
+			MaxCacheAgeSecs: int64(cfg.CacheAgeHours) * 3600,
+			Concurrency:     10,
+		}); err != nil {
+			logger.Error("failed to initialize git backend", "error", err)
+			os.Exit(1)
+		}
+		registry.Register(gitBackend)
+		logger.Info("git backend initialized", "cached_repos", len(gitBackend.CachedSources()))
 	}
-	registry.Register(gomodBackend)
-	logger.Info("gomod backend initialized", "cached_modules", len(gomodBackend.CachedSources()))
 
 	// Create fetcher service
 	serviceConfig := fetcher.DefaultServiceConfig()
-	serviceConfig.PrefetchWorkers = *prefetchWorkers
+	serviceConfig.PrefetchWorkers = cfg.PrefetchWorkers
 	service := fetcher.NewService(fetcherID, registry, serviceConfig, logger)
 
 	// Create gRPC server
@@ -125,7 +269,7 @@ func main() {
 	reflection.Register(grpcServer) // For debugging
 
 	// Start listening
-	addr := fmt.Sprintf(":%d", *port)
+	addr := fmt.Sprintf(":%d", cfg.Port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		logger.Error("failed to listen", "address", addr, "error", err)

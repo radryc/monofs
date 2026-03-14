@@ -59,7 +59,6 @@
                     onchange="updateFormFields()"
                 >
                     <option value="git" selected>Git Repository</option>
-                    <option value="go">Go Modules</option>
                     <option value="s3" disabled>S3 Bucket (Coming Soon)</option>
                     <option value="file" disabled>Local Filesystem (Coming Soon)</option>
                 </select>
@@ -136,8 +135,8 @@
                             name="fetch_type"
                             class="select-dark"
                         >
-                            <option value="git" selected>Git (Lazy Fetch)</option>
-                            <option value="gomod">Go Module Cache</option>
+                            <option value="git">Git (Lazy Fetch)</option>
+                            <option value="blob" selected>Blob (Packager Archive)</option>
                             <option value="s3" disabled>S3 Storage (Coming Soon)</option>
                             <option value="local" disabled>Local Cache (Coming Soon)</option>
                         </select>
@@ -220,52 +219,7 @@ const typeConfig = {
         },
         validateRef: (val) => null,
         submitText: 'Ingest Repository',
-        defaultFetchType: 'git'
-    },
-    go: {
-        pageTitle: 'Ingest Go Module',
-        pageSubtitle: 'Add a Go module to the cluster',
-        sourceLabel: 'Module Path',
-        sourcePlaceholder: 'github.com/google/uuid@v1.3.0',
-        sourceHelp: 'Go module path with version (module@version)',
-        refLabel: 'Version',
-        refPlaceholder: 'v1.0.0',
-        refHelp: 'Semantic version (required if not included in module path above)',
-        refVisible: true,
-        refDynamic: true,
-        examples: [
-            'github.com/google/uuid@v1.3.0',
-            'golang.org/x/crypto@v0.17.0',
-            'github.com/gin-gonic/gin@v1.9.1'
-        ],
-        helpDescription: 'Enter a Go module path with version. The system will download from the Go module proxy, index all files, and distribute them across cluster nodes.',
-        processSteps: [
-            'Module is downloaded from GOPROXY',
-            'Files are extracted and indexed',
-            'Content is distributed using HRW sharding'
-        ],
-        validateSource: (val) => {
-            if (!val) return 'Module path is required';
-            if (val.includes('@')) {
-                const parts = val.split('@');
-                if (parts.length !== 2) return 'Invalid format, use module@version';
-                if (!parts[1].match(/^v\d+\.\d+\.\d+/)) {
-                    return 'Version must follow semver (e.g., v1.2.3)';
-                }
-            }
-            if (!val.includes('/')) {
-                return 'Module path must contain at least one slash';
-            }
-            return null;
-        },
-        validateRef: (val) => {
-            if (val && !val.match(/^v\d+\.\d+\.\d+/)) {
-                return 'Version must follow semver (e.g., v1.2.3)';
-            }
-            return null;
-        },
-        submitText: 'Ingest Module',
-        defaultFetchType: 'gomod'
+        defaultFetchType: 'blob'
     },
     s3: {
         pageTitle: 'Ingest S3 Bucket',
@@ -343,17 +297,12 @@ function updateFormFields() {
     
     // Update fetch type default
     document.getElementById('fetch_type').value = config.defaultFetchType;
-    
-    // For Go modules, update ref field based on source
-    if (config.refDynamic) {
-        updateGoModuleRefField();
-    } else {
-        // Reset ref field to normal state
-        const refInput = document.getElementById('ref');
-        refInput.disabled = false;
-        refInput.style.backgroundColor = '';
-        refInput.style.cursor = '';
-    }
+
+    // Reset ref field to normal state
+    const refInput = document.getElementById('ref');
+    refInput.disabled = false;
+    refInput.style.backgroundColor = '';
+    refInput.style.cursor = '';
     
     // Clear any errors
     clearValidationError();
@@ -395,17 +344,10 @@ function validateForm() {
 
 // Normalize source to filesystem path format
 function normalizeRepoURL(source) {
-    const type = document.getElementById('ingestion_type').value;
-    
-    // For Go modules, keep as-is (preserve dots, slashes, and @version)
-    if (type === 'go') {
-        return source;
-    }
-    
     // For Git repositories, convert URL to path format
     try {
         const url = new URL(source);
-        const host = url.hostname; // Keep dots in hostname
+        const host = url.hostname;
         let path = url.pathname.replace(/^\//, '').replace(/\.git$/, '');
         if (path) {
             return host + '/' + path;
@@ -414,38 +356,6 @@ function normalizeRepoURL(source) {
     } catch (e) {
         // Not a valid URL, return as-is
         return source;
-    }
-}
-
-// Update Go module ref field based on source content
-function updateGoModuleRefField() {
-    const type = document.getElementById('ingestion_type').value;
-    if (type !== 'go') return;
-    
-    const source = document.getElementById('source').value;
-    const refInput = document.getElementById('ref');
-    const refHelp = document.getElementById('refHelp');
-    
-    // Check if source contains @version
-    if (source.includes('@')) {
-        // Version is in source, disable ref field
-        refInput.disabled = true;
-        refInput.value = '';
-        refInput.style.backgroundColor = 'var(--bg-secondary)';
-        refInput.style.cursor = 'not-allowed';
-        refInput.style.opacity = '0.6';
-        refHelp.textContent = 'Version is already specified in module path above';
-        refHelp.style.color = 'var(--text-secondary)';
-        refHelp.style.fontStyle = 'italic';
-    } else {
-        // No version in source, enable ref field
-        refInput.disabled = false;
-        refInput.style.backgroundColor = '';
-        refInput.style.cursor = '';
-        refInput.style.opacity = '';
-        refHelp.textContent = 'Semantic version (required if not included in module path above)';
-        refHelp.style.color = 'var(--text-secondary)';
-        refHelp.style.fontStyle = '';
     }
 }
 
@@ -458,12 +368,6 @@ document.getElementById('source').addEventListener('input', (e) => {
             sourceIdField.value = normalized;
             sourceIdField.dataset.autoFilled = 'true';
         }
-    }
-    
-    // Update Go module ref field state
-    const type = document.getElementById('ingestion_type').value;
-    if (type === 'go') {
-        updateGoModuleRefField();
     }
 });
 

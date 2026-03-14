@@ -68,9 +68,27 @@ func (cm *CommitManager) CommitChanges(ctx context.Context) (*CommitResult, erro
 		return result, nil
 	}
 
+	// Filter out blob files — those are handled by push, not commit.
+	const depPrefix = "dependency/"
+	var filtered []Change
+	for _, c := range changes {
+		if len(c.Path) > len(depPrefix) && c.Path[:len(depPrefix)] == depPrefix {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+
+	if len(filtered) == 0 {
+		cm.logger.Info("no non-blob changes to commit")
+		if err := cm.sessionMgr.CommitSession(); err != nil {
+			return nil, fmt.Errorf("archive session: %w", err)
+		}
+		return result, nil
+	}
+
 	// Group changes by repository
 	repoChanges := make(map[string][]Change)
-	for _, c := range changes {
+	for _, c := range filtered {
 		// Extract repo from path: github.com/user/repo/file.txt -> github.com/user/repo
 		parts := strings.SplitN(c.Path, "/", 4)
 		if len(parts) >= 3 {

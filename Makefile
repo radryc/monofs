@@ -50,7 +50,7 @@ ROUTER2_PEERS ?= router1=http://router1:8080
 .DEFAULT_GOAL := build
 
 # Phony targets
-.PHONY: all build build-server build-client build-router build-admin build-session build-search clean proto proto-check \
+.PHONY: all build build-server build-client build-router build-admin build-session build-search build-fetcher build-loadtest build-modverify clean proto proto-check \
         test test-unit test-e2e test-e2e-sudo test-smoke test-race test-coverage vet fmt fmt-check tidy \
         install-tools run-server run-client run-router run-cluster help \
         deploy deploy-stop deploy-clean deploy-restart deploy-local deploy-local-stop deploy-local-clean deploy-local-restart \
@@ -99,6 +99,10 @@ build-fetcher: $(BIN_DIR) ## Build the fetcher service binary
 build-loadtest: $(BIN_DIR) ## Build the load test binary
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/monofs-loadtest ./$(CMD_DIR)/monofs-loadtest
 	@echo "Built $(BIN_DIR)/monofs-loadtest"
+
+build-modverify: $(BIN_DIR) ## Build the module verification tool
+	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/modverify ./$(CMD_DIR)/modverify
+	@echo "Built $(BIN_DIR)/modverify"
 
 $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
@@ -287,7 +291,7 @@ deploy-local: build ## Deploy local dev cluster (router + 3 nodes with proper di
 
 deploy-stop: ## Stop dev deployment
 	@echo "Stopping MonoFS deployment..."
-	@$(DOCKER_COMPOSE) down || true
+	@$(DOCKER_COMPOSE) down --remove-orphans || true
 	@if pgrep -x monofs-server > /dev/null; then echo "  - Stopping monofs-server"; pkill -9 -x monofs-server; fi
 	@if pgrep -x monofs-router > /dev/null; then echo "  - Stopping monofs-router"; pkill -9 -x monofs-router; fi
 	@if pgrep -x monofs-client > /dev/null; then echo "  - Stopping monofs-client"; pkill -9 -x monofs-client; fi
@@ -295,7 +299,8 @@ deploy-stop: ## Stop dev deployment
 
 deploy-clean: ## Stop deployment and remove all data
 	@echo "Cleaning deployment..."
-	@$(DOCKER_COMPOSE) down -v || true
+	@$(DOCKER_COMPOSE) down -v --remove-orphans || true
+	@docker ps -a --filter 'name=monofs-' -q | xargs -r docker rm -f 2>/dev/null || true
 	@rm -rf /tmp/monofs-dev || true
 	@echo "✅ Cleaned deployment data"
 
@@ -314,7 +319,7 @@ deploy-local-clean: deploy-local-stop ## Clean local dev deployment data
 
 deploy-local-restart: deploy-local-stop deploy-local ## Restart local dev deployment
 
-deploy-client: ## Deploy FUSE client in Docker container with auto-mount at /mnt
+deploy-client: ## Deploy FUSE client in Docker container with auto-mount at /mnt/monofs
 	@echo "======================================"
 	@echo "MonoFS Docker Client Deployment"
 	@echo "======================================"
@@ -339,7 +344,7 @@ deploy-client: ## Deploy FUSE client in Docker container with auto-mount at /mnt
 	@echo ""
 	@echo "📂 Inside container:"
 	@echo "  Mount point: /mnt"
-	@echo "  View files:  ls -la /mnt"
+	@echo "  View files:  ls -la /mnt/monofs"
 	@echo "  View logs:   tail -f /var/log/monofs-client.log"
 	@echo ""
 	@echo "🔍 From host:"
