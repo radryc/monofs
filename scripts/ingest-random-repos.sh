@@ -96,75 +96,16 @@ REPOS=(
     "https://github.com/vercel/next.js/tree/canary"
 )
 
-# Go modules from go.mod (will be ingested as Go modules, not Git repos)
-GO_MODULES=(
-    # Direct dependencies
-    "github.com/go-git/go-git/v6@v6.0.0-20260123133532-f99a98e81ce9"
-    "github.com/grafana/regexp@v0.0.0-20240607082908-2cb410fa05da"
-    "github.com/hanwen/go-fuse/v2@v2.7.2"
-    "github.com/nutsdb/nutsdb@v1.1.0"
-    "github.com/sourcegraph/zoekt@v0.0.0-20260114143800-c747a3bccc2a"
-    "google.golang.org/grpc@v1.75.0"
-    "google.golang.org/protobuf@v1.36.8"
-    # Indirect dependencies
-    "github.com/Microsoft/go-winio@v0.6.2"
-    "github.com/ProtonMail/go-crypto@v1.3.0"
-    "github.com/RoaringBitmap/roaring@v1.9.4"
-    "github.com/antlabs/stl@v0.0.2"
-    "github.com/antlabs/timer@v0.1.4"
-    "github.com/beorn7/perks@v1.0.1"
-    "github.com/bits-and-blooms/bitset@v1.20.0"
-    "github.com/bmatcuk/doublestar@v1.3.4"
-    "github.com/bwmarrin/snowflake@v0.3.0"
-    "github.com/cespare/xxhash/v2@v2.3.0"
-    "github.com/cloudflare/circl@v1.6.1"
-    "github.com/cyphar/filepath-securejoin@v0.6.1"
-    "github.com/davecgh/go-spew@v1.1.1"
-    "github.com/dustin/go-humanize@v1.0.1"
-    "github.com/edsrzf/mmap-go@v1.2.0"
-    "github.com/emirpasic/gods@v1.18.1"
-    "github.com/fsnotify/fsnotify@v1.8.0"
-    "github.com/go-enry/go-enry/v2@v2.9.1"
-    "github.com/go-enry/go-oniguruma@v1.2.1"
-    "github.com/go-git/gcfg/v2@v2.0.2"
-    "github.com/go-git/go-billy/v6@v6.0.0-20260114122816-19306b749ecc"
-    "github.com/gofrs/flock@v0.8.1"
-    "github.com/golang/groupcache@v0.0.0-20241129210726-2c02b8208cf8"
-    "github.com/grpc-ecosystem/go-grpc-middleware@v1.4.0"
-    "github.com/kevinburke/ssh_config@v1.4.0"
-    "github.com/klauspost/cpuid/v2@v2.3.0"
-    "github.com/mschoch/smat@v0.2.0"
-    "github.com/munnerz/goautoneg@v0.0.0-20191010083416-a7dc8b61c822"
-    "github.com/opentracing/opentracing-go@v1.2.0"
-    "github.com/pjbgf/sha1cd@v0.5.0"
-    "github.com/pkg/errors@v0.9.1"
-    "github.com/pmezard/go-difflib@v1.0.0"
-    "github.com/prometheus/client_golang@v1.20.5"
-    "github.com/prometheus/client_model@v0.6.1"
-    "github.com/prometheus/common@v0.62.0"
-    "github.com/prometheus/procfs@v0.15.1"
-    "github.com/rs/xid@v1.6.0"
-    "github.com/sergi/go-diff@v1.4.0"
-    "github.com/sourcegraph/go-ctags@v0.0.0-20250729094530-349a251d78d8"
-    "github.com/stretchr/testify@v1.11.1"
-    "github.com/tidwall/btree@v1.6.0"
-    "github.com/xujiajun/utils@v0.0.0-20220904132955-5f7c5b914235"
-)
-
-# Combine and shuffle both types
+# Combine and shuffle
 ALL_SOURCES=()
 for repo in "${REPOS[@]}"; do
     ALL_SOURCES+=("git|$repo")
 done
-for mod in "${GO_MODULES[@]}"; do
-    ALL_SOURCES+=("gomod|$mod")
-done
 
 SELECTED_SOURCES=($(printf '%s\n' "${ALL_SOURCES[@]}" | shuf))
 
-echo "Selected sources to ingest (repositories + Go modules):"
+echo "Selected sources to ingest:"
 echo "  Git repositories: ${#REPOS[@]}"
-echo "  Go modules: ${#GO_MODULES[@]}"
 echo "  Total: ${#SELECTED_SOURCES[@]}"
 echo ""
 
@@ -187,13 +128,8 @@ for source_entry in "${SELECTED_SOURCES[@]}"; do
     echo "----------------------------------------"
     
     # Build command based on type
-    if [ "$type" = "gomod" ]; then
-        # Go module ingestion
-        cmd="$ADMIN_BIN ingest --router=\"$ROUTER\" --source=\"$source\" --ingestion-type=go --fetch-type=gomod"
-    else
-        # Git repository ingestion
-        cmd="$ADMIN_BIN ingest --router=\"$ROUTER\" --source=\"$source\""
-    fi
+    # Git repository ingestion
+    cmd="$ADMIN_BIN ingest --router=\"$ROUTER\" --source=\"$source\""
     
     if eval $cmd; then
         echo "✅ Successfully ingested: $source"

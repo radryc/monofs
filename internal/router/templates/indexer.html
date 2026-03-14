@@ -55,8 +55,13 @@
 <!-- Failed Indexes -->
 <div class="card" id="failedCard" style="display: none; margin-bottom: 24px;">
     <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
-        <h2 class="card-title">❌ Failed Repositories</h2>
-        <span class="badge badge-danger" id="failedCount">0</span>
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <h2 class="card-title">❌ Failed Repositories</h2>
+            <span class="badge badge-danger" id="failedCount">0</span>
+        </div>
+        <button class="btn btn-warning" onclick="rebuildAllFailed()" style="font-size: 13px; padding: 8px 16px;">
+            🔄 Rebuild All Failed
+        </button>
     </div>
     <div style="padding: 0;">
         <table class="table" id="failedTable">
@@ -181,7 +186,7 @@ async function loadIndexes() {
         }
         
         // Separate failed and successful indexes
-        const failedIndexes = data.indexes.filter(idx => idx.status === 4); // INDEX_STATUS_ERROR
+        failedIndexes = data.indexes.filter(idx => idx.status === 4); // INDEX_STATUS_ERROR
         const successIndexes = data.indexes.filter(idx => idx.status !== 4);
         
         // Update failed repositories table
@@ -267,8 +272,9 @@ async function rebuildIndex(storageId) {
             return;
         }
         if (data.queued) {
-            alert('Rebuild queued successfully');
+            // Success - just refresh the data without alert
             loadIndexes();
+            loadStats();
         } else {
             alert('Failed to queue rebuild: ' + (data.message || 'Unknown error'));
         }
@@ -297,11 +303,66 @@ async function rebuildAll() {
             alert('Failed to rebuild: ' + (data.error || 'Unknown error'));
             return;
         }
-        alert(`Queued ${data.queued_count || 0} repositories for re-indexing`);
+        // Success - refresh data without alert, show queued count in UI
         loadIndexes();
+        loadStats();
     } catch (err) {
         alert('Error: ' + err.message);
     }
+}
+
+// Rebuild all failed indexes gradually
+let failedIndexes = [];
+async function rebuildAllFailed() {
+    if (failedIndexes.length === 0) {
+        alert('No failed indexes to rebuild');
+        return;
+    }
+    
+    if (!confirm(`Are you sure you want to rebuild ${failedIndexes.length} failed repositories? They will be queued gradually to avoid overloading.`)) {
+        return;
+    }
+    
+    let queued = 0;
+    let failed = 0;
+    const delay = 500; // 500ms delay between requests to avoid overloading
+    
+    for (let i = 0; i < failedIndexes.length; i++) {
+        const idx = failedIndexes[i];
+        try {
+            const resp = await fetch('/api/search/rebuild', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    storage_id: idx.storage_id,
+                    force: true
+                })
+            });
+            const data = await resp.json();
+            
+            if (resp.ok && data.queued) {
+                queued++;
+            } else {
+                failed++;
+            }
+            
+            // Update stats periodically
+            if (i % 5 === 0 || i === failedIndexes.length - 1) {
+                loadStats();
+            }
+            
+            // Small delay between requests
+            if (i < failedIndexes.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        } catch (err) {
+            failed++;
+        }
+    }
+    
+    // Refresh the page data
+    loadIndexes();
+    loadStats();
 }
 
 // Initial load

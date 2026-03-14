@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"syscall"
 	"time"
 
@@ -139,6 +140,13 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		return virtualDir, nil
 	}
 
+	// NEW: Check if it's a virtual file in the directory index
+	// This handles files that may not have explicit metadata entries but are
+	// listed in their parent's directory index (e.g., after overlay cleanup)
+	if virtualFile := s.checkVirtualFile(storageID, filePath); virtualFile != nil {
+		return virtualFile, nil
+	}
+
 	// Check failover cache (for files from failed nodes)
 	if failoverMeta, ok := s.checkFailoverCache(storageID, filePath); ok {
 		s.logger.Debug("serving from failover cache",
@@ -162,6 +170,41 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		}, nil
 	}
 
+
+	// NEW: Forward to correct node if not handling locally (and not already forwarded)
+	if s.enableForwarding && !isAlreadyForwarded(ctx) {
+		targetNode := s.getTargetNode(storageID, filePath)
+		
+		// Try primary node first if healthy
+		if targetNode != nil && targetNode.ID != s.nodeID && s.isNodeHealthy(targetNode.ID) {
+			s.logger.Debug("lookup forwarding to primary node",
+				"path", path,
+				"storage_id", storageID,
+				"file_path", filePath,
+				"target_node", targetNode.ID)
+			return s.forwardLookup(ctx, req, targetNode)
+		}
+		
+		// Primary is unhealthy, try backup nodes
+		if targetNode != nil && !s.isNodeHealthy(targetNode.ID) {
+			backupNodes := s.getBackupNodes(storageID, filePath)
+			for _, backup := range backupNodes {
+				if backup.ID == s.nodeID {
+					// This node is a backup, handle locally
+					break
+				}
+				s.logger.Debug("lookup forwarding to backup node",
+					"path", path,
+					"primary", targetNode.ID,
+					"backup", backup.ID)
+				resp, err := s.forwardLookup(ctx, req, backup)
+				if err == nil && resp.Found {
+					return resp, nil
+				}
+				// Try next backup
+			}
+		}
+	}
 	// Not found
 	s.logger.Debug("lookup not found", "path", path)
 	return &pb.LookupResponse{Found: false}, nil
@@ -325,6 +368,55 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 		}, nil
 	}
 
+	// NEW: Check if it's a virtual file in the directory index
+	if virtualFile := s.checkVirtualFile(storageID, filePath); virtualFile != nil {
+		return &pb.GetAttrResponse{
+			Ino:   virtualFile.Ino,
+			Mode:  virtualFile.Mode,
+			Size:  virtualFile.Size,
+			Mtime: virtualFile.Mtime,
+			Atime: virtualFile.Mtime,
+			Ctime: virtualFile.Mtime,
+			Nlink: 1,
+			Uid:   uint32(1000),
+			Gid:   uint32(1000),
+			Found: true,
+		}, nil
+	}
+
+
+	// NEW: Forward to correct node if not handling locally (and not already forwarded)
+	if s.enableForwarding && !isAlreadyForwarded(ctx) {
+		targetNode := s.getTargetNode(storageID, filePath)
+		
+		// Try primary node first if healthy
+		if targetNode != nil && targetNode.ID != s.nodeID && s.isNodeHealthy(targetNode.ID) {
+			s.logger.Debug("getattr forwarding to primary node",
+				"path", path,
+				"storage_id", storageID,
+				"file_path", filePath,
+				"target_node", targetNode.ID)
+			return s.forwardGetAttr(ctx, req, targetNode)
+		}
+		
+		// Primary is unhealthy, try backup nodes
+		if targetNode != nil && !s.isNodeHealthy(targetNode.ID) {
+			backupNodes := s.getBackupNodes(storageID, filePath)
+			for _, backup := range backupNodes {
+				if backup.ID == s.nodeID {
+					break
+				}
+				s.logger.Debug("getattr forwarding to backup node",
+					"path", path,
+					"primary", targetNode.ID,
+					"backup", backup.ID)
+				resp, err := s.forwardGetAttr(ctx, req, backup)
+				if err == nil && resp.Found {
+					return resp, nil
+				}
+			}
+		}
+	}
 	s.logger.Debug("getattr not found", "path", path, "key", string(key))
 	return &pb.GetAttrResponse{Found: false}, nil
 }
@@ -342,7 +434,8 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		return status.Errorf(codes.NotFound, "path resolution failed: %s", path)
 	}
 
-	// Find file metadata using path index
+
+	// Try local metadata first (covers both owned files AND replicas from IngestReplicaBatch)
 	var blobHash, repoURL, branch, displayPath string
 	key, cached := s.getHashFromPath(storageID, filePath)
 
@@ -386,7 +479,40 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		}
 	}
 
-	// If not found, return error
+	// If not found locally, try forwarding to the correct node
+	if err != nil && s.enableForwarding && !isAlreadyForwarded(stream.Context()) {
+		targetNode := s.getTargetNode(storageID, filePath)
+
+		// Try primary node first if healthy
+		if targetNode != nil && targetNode.ID != s.nodeID && s.isNodeHealthy(targetNode.ID) {
+			s.logger.Debug("read forwarding to primary node",
+				"path", path,
+				"storage_id", storageID,
+				"file_path", filePath,
+				"target_node", targetNode.ID)
+			return s.forwardRead(req, stream, targetNode)
+		}
+
+		// Primary is unhealthy, try backup nodes
+		if targetNode != nil && !s.isNodeHealthy(targetNode.ID) {
+			backupNodes := s.getBackupNodes(storageID, filePath)
+			for _, backup := range backupNodes {
+				if backup.ID == s.nodeID {
+					break
+				}
+				s.logger.Debug("read forwarding to backup node",
+					"path", path,
+					"primary", targetNode.ID,
+					"backup", backup.ID)
+				fwdErr := s.forwardRead(req, stream, backup)
+				if fwdErr == nil {
+					return nil
+				}
+			}
+		}
+	}
+
+	// If not found anywhere, return error
 	if err != nil {
 		s.logger.Warn("read: metadata not found",
 			"path", path,
@@ -400,12 +526,19 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		return status.Errorf(codes.NotFound, "blob hash is empty for: %s", path)
 	}
 
-	// All blob reads go through fetchers - storage nodes don't have local Git access
-	s.logger.Debug("read: reading blob via fetcher", "blob_hash", blobHash, "repo_url", repoURL, "display_path", displayPath, "branch", branch)
+	// SHA-256 of empty content — no need to hit the fetcher for 0-byte files.
+	const emptyBlobHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if blobHash == emptyBlobHash {
+		// Empty file — nothing to stream
+		return nil
+	}
 
-	ctx := context.Background()
+	// Read blob content via fetcher
 	var content []byte
 	var wasPrefetched bool
+	ctx := stream.Context()
+
+	s.logger.Debug("read: reading blob via fetcher", "blob_hash", blobHash, "repo_url", repoURL, "display_path", displayPath, "branch", branch)
 
 	// Fetcher client is required for all blob reads
 	if s.fetcherClient == nil {
@@ -413,10 +546,11 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		return status.Errorf(codes.FailedPrecondition, "storage node not configured: fetcher client required")
 	}
 
-	content, wasPrefetched, err = s.readViaFetcher(ctx, storageID, blobHash, repoURL, filePath, branch)
-	if err != nil {
-		s.logger.Error("read: fetcher request failed", "path", path, "blob_hash", blobHash, "error", err)
-		return status.Errorf(codes.Unavailable, "failed to read blob via fetcher: %v", err)
+	var fetchErr error
+	content, wasPrefetched, fetchErr = s.readViaFetcher(ctx, storageID, blobHash, repoURL, filePath, branch)
+	if fetchErr != nil {
+		s.logger.Error("read: fetcher request failed", "path", path, "blob_hash", blobHash, "error", fetchErr)
+		return status.Errorf(codes.Unavailable, "failed to read blob via fetcher: %v", fetchErr)
 	}
 
 	// Track prefetch hit/miss metrics
@@ -490,12 +624,21 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 
 	// Track if file existed to properly update counter
 	var fileExisted bool
+	var blobHash string
 
 	err := s.db.Update(func(tx *nutsdb.Tx) error {
 		// Check if file exists in owned files bucket
 		ownershipKey := []byte(req.StorageId + ":" + req.FilePath)
 		_, err := tx.Get(bucketOwnedFiles, ownershipKey)
 		fileExisted = (err == nil)
+
+		// Read metadata to get blob hash before deleting
+		if metaData, getErr := tx.Get(bucketMetadata, key); getErr == nil {
+			var meta storedMetadata
+			if json.Unmarshal(metaData, &meta) == nil {
+				blobHash = meta.BlobHash
+			}
+		}
 
 		// Remove from main metadata bucket
 		if err := tx.Delete(bucketMetadata, key); err != nil && err != nutsdb.ErrKeyNotFound {
@@ -532,6 +675,22 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 		s.totalFiles.Add(-1)
 	}
 
+	// Forward blob deletion to fetcher (async, best-effort)
+	if s.fetcherClient != nil && blobHash != "" {
+		go func() {
+			fwdCtx, fwdCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer fwdCancel()
+			deleted, _, fwdErr := s.fetcherClient.DeleteBlobs(fwdCtx, []string{blobHash}, false)
+			if fwdErr != nil {
+				s.logger.Warn("failed to forward blob deletion to fetcher",
+					"blob_hash", blobHash, "error", fwdErr)
+			} else if deleted > 0 {
+				s.logger.Debug("forwarded blob deletion to fetcher",
+					"blob_hash", blobHash)
+			}
+		}()
+	}
+
 	s.logger.Debug("file deleted after rebalancing",
 		"storage_id", req.StorageId,
 		"file_path", req.FilePath)
@@ -542,22 +701,153 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 	}, nil
 }
 
+// DeleteRepository removes all data for a repository from this node.
+// This includes: repo info, display path lookup, onboarding status,
+// all owned files, all replica files, all directory indexes.
+func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryOnNodeRequest) (*pb.DeleteRepositoryOnNodeResponse, error) {
+	storageID := req.StorageId
+	s.logger.Info("deleting repository from node", "storage_id", storageID)
+
+	var filesDeleted int64
+	var dirsDeleted int64
+
+	err := s.db.Update(func(tx *nutsdb.Tx) error {
+		// 1. Delete repo info
+		repoKey := []byte(storageID)
+		var displayPath string
+		if val, err := tx.Get(bucketRepos, repoKey); err == nil {
+			var info repoInfo
+			if json.Unmarshal(val, &info) == nil {
+				displayPath = info.DisplayPath
+			}
+		}
+		if err := tx.Delete(bucketRepos, repoKey); err != nil && err != nutsdb.ErrKeyNotFound {
+			return fmt.Errorf("delete repo info: %w", err)
+		}
+
+		// 2. Delete display path → storage_id lookup
+		if displayPath != "" {
+			lookupKey := []byte(displayPath)
+			if err := tx.Delete(bucketRepoLookup, lookupKey); err != nil && err != nutsdb.ErrKeyNotFound {
+				return fmt.Errorf("delete path lookup: %w", err)
+			}
+		}
+
+		// 3. Delete onboarding status
+		onboardKey := []byte(storageID)
+		if err := tx.Delete(bucketOnboardingStatus, onboardKey); err != nil && err != nutsdb.ErrKeyNotFound {
+			// Ignore: bucket may not exist
+		}
+
+		// 4. Delete all owned files
+		prefix := storageID + ":"
+		ownedKeys, err := tx.GetKeys(bucketOwnedFiles)
+		if err == nil {
+			for _, key := range ownedKeys {
+				keyStr := string(key)
+				if !strings.HasPrefix(keyStr, prefix) {
+					continue
+				}
+				// Delete from metadata bucket
+				if err := tx.Delete(bucketMetadata, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Warn("failed to delete owned file metadata", "key", keyStr)
+				}
+				// Delete ownership tracking
+				if err := tx.Delete(bucketOwnedFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Warn("failed to delete ownership key", "key", keyStr)
+				}
+				// Delete from path index
+				if err := tx.Delete(bucketPathIndex, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					// path index may use different key format
+				}
+				filesDeleted++
+			}
+		}
+
+		// 5. Delete all replica files
+		replicaKeys, err := tx.GetKeys(bucketReplicaFiles)
+		if err == nil {
+			for _, key := range replicaKeys {
+				keyStr := string(key)
+				if !strings.HasPrefix(keyStr, prefix) {
+					continue
+				}
+				if err := tx.Delete(bucketReplicaFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Warn("failed to delete replica key", "key", keyStr)
+				}
+				// Also clean metadata for replicas
+				if err := tx.Delete(bucketMetadata, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					// may not exist
+				}
+			}
+		}
+
+		// 6. Delete all directory indexes for this repo
+		dirPrefix := storageID + "/"
+		dirKeys, err := tx.GetKeys(bucketDirIndex)
+		if err == nil {
+			for _, key := range dirKeys {
+				keyStr := string(key)
+				if !strings.HasPrefix(keyStr, dirPrefix) {
+					continue
+				}
+				if err := tx.Delete(bucketDirIndex, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Warn("failed to delete dir index", "key", keyStr)
+				}
+				dirsDeleted++
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		s.logger.Error("failed to delete repository", "storage_id", storageID, "error", err)
+		return &pb.DeleteRepositoryOnNodeResponse{
+			Success: false,
+			Message: err.Error(),
+		}, err
+	}
+
+	// Update file counter
+	s.totalFiles.Add(-filesDeleted)
+
+	// Clear intermediate directory cache
+	s.intermediateDirCache.Range(func(key, value interface{}) bool {
+		if k, ok := key.(string); ok {
+			if len(k) > len(storageID) && k[:len(storageID)] == storageID {
+				s.intermediateDirCache.Delete(key)
+			}
+		}
+		return true
+	})
+
+	s.logger.Info("repository deleted from node",
+		"storage_id", storageID,
+		"files_deleted", filesDeleted,
+		"dirs_deleted", dirsDeleted)
+
+	return &pb.DeleteRepositoryOnNodeResponse{
+		Success:      true,
+		Message:      "Repository deleted successfully",
+		FilesDeleted: filesDeleted,
+		DirsDeleted:  dirsDeleted,
+	}, nil
+}
+
 // readViaFetcher attempts to read blob content via the fetcher service.
 // Returns the content, whether it was a prefetch hit, and any error.
 func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoURL, filePath, branch string) ([]byte, bool, error) {
-	// Check if blob is in prefetch cache
+	// Default to blob source type (packager archive). Git is optional.
+	sourceType := fetcher.SourceTypeBlob
+
+	// Check prefetch cache
+	var wasPrefetched bool
 	inCache, err := s.fetcherClient.CheckCacheSimple(ctx, repoURL, blobHash)
 	if err != nil {
 		return nil, false, fmt.Errorf("check cache failed: %w", err)
 	}
-
-	wasPrefetched := inCache
-
-	// Determine source type from URL
-	sourceType := fetcher.SourceTypeGit
-	if fetcher.IsGoModPath(repoURL) {
-		sourceType = fetcher.SourceTypeGoMod
-	}
+	wasPrefetched = inCache
 
 	// Fetch via fetcher service
 	content, err := s.fetcherClient.FetchBlobSimple(ctx, repoURL, blobHash, filePath, branch, sourceType)
@@ -571,15 +861,14 @@ func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoUR
 // recordAccessForPredictor records file access for the predictor.
 // The predictor handles prediction and prefetch triggering internally.
 func (s *Server) recordAccessForPredictor(ctx context.Context, storageID, filePath, blobHash, repoURL, branch string) {
-	// Create blob metadata for predictor
+	// Default to blob source type
+	sourceType := fetcher.SourceTypeBlob
+
 	meta := &BlobMeta{
 		BlobHash:   blobHash,
 		RepoURL:    repoURL,
 		Branch:     branch,
-		SourceType: fetcher.SourceTypeGit,
-	}
-	if fetcher.IsGoModPath(repoURL) {
-		meta.SourceType = fetcher.SourceTypeGoMod
+		SourceType: sourceType,
 	}
 
 	// Extract client ID from gRPC metadata if available

@@ -57,9 +57,9 @@ func New(dir string, logger *slog.Logger) (*Cache, error) {
 	db, err := nutsdb.Open(
 		nutsdb.DefaultOptions,
 		nutsdb.WithDir(dir),
-		nutsdb.WithSegmentSize(64*1024*1024), // 64MB segments
+		nutsdb.WithSegmentSize(64*1024*1024),                 // 64MB segments
 		nutsdb.WithEntryIdxMode(nutsdb.HintKeyAndRAMIdxMode), // Use hint file for faster startup (only keys in RAM)
-		nutsdb.WithRWMode(nutsdb.MMap), // Use mmap for faster reads
+		nutsdb.WithRWMode(nutsdb.MMap),                       // Use mmap for faster reads
 	)
 	if err != nil {
 		logger.Error("failed to open cache database", "dir", dir, "error", err)
@@ -181,6 +181,31 @@ func (c *Cache) Invalidate(path string) {
 		return nil
 	})
 	c.logger.Debug("invalidated cache", "path", path)
+}
+
+// InvalidatePrefix removes all cached entries whose key starts with prefix.
+// Used after dependency push to ensure stale attrs/dirs are not served.
+func (c *Cache) InvalidatePrefix(prefix string) int {
+	count := 0
+	for _, bucket := range []string{attrBucket, dirBucket} {
+		bkt := bucket
+		c.db.Update(func(tx *nutsdb.Tx) error {
+			keys, _, err := tx.PrefixScanEntries(bkt, []byte(prefix), "", 0, -1, true, false)
+			if err != nil {
+				return nil // bucket empty or prefix not found — ok
+			}
+			for _, k := range keys {
+				if err := tx.Delete(bkt, k); err == nil {
+					count++
+				}
+			}
+			return nil
+		})
+	}
+	if count > 0 {
+		c.logger.Info("invalidated cache prefix", "prefix", prefix, "entries", count)
+	}
+	return count
 }
 
 // Close closes the cache database.

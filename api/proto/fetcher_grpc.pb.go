@@ -19,11 +19,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	BlobFetcher_FetchBlob_FullMethodName      = "/monofs.BlobFetcher/FetchBlob"
-	BlobFetcher_FetchBlobBatch_FullMethodName = "/monofs.BlobFetcher/FetchBlobBatch"
-	BlobFetcher_PrefetchBlobs_FullMethodName  = "/monofs.BlobFetcher/PrefetchBlobs"
-	BlobFetcher_CheckCache_FullMethodName     = "/monofs.BlobFetcher/CheckCache"
-	BlobFetcher_GetStats_FullMethodName       = "/monofs.BlobFetcher/GetStats"
+	BlobFetcher_FetchBlob_FullMethodName            = "/monofs.BlobFetcher/FetchBlob"
+	BlobFetcher_FetchBlobBatch_FullMethodName       = "/monofs.BlobFetcher/FetchBlobBatch"
+	BlobFetcher_PrefetchBlobs_FullMethodName        = "/monofs.BlobFetcher/PrefetchBlobs"
+	BlobFetcher_CheckCache_FullMethodName           = "/monofs.BlobFetcher/CheckCache"
+	BlobFetcher_GetStats_FullMethodName             = "/monofs.BlobFetcher/GetStats"
+	BlobFetcher_StoreBlob_FullMethodName            = "/monofs.BlobFetcher/StoreBlob"
+	BlobFetcher_StoreBlobBatchStream_FullMethodName = "/monofs.BlobFetcher/StoreBlobBatchStream"
+	BlobFetcher_DeleteBlobs_FullMethodName          = "/monofs.BlobFetcher/DeleteBlobs"
+	BlobFetcher_StoreArchive_FullMethodName         = "/monofs.BlobFetcher/StoreArchive"
 )
 
 // BlobFetcherClient is the client API for BlobFetcher service.
@@ -48,6 +52,20 @@ type BlobFetcherClient interface {
 	CheckCache(ctx context.Context, in *CheckCacheRequest, opts ...grpc.CallOption) (*CheckCacheResponse, error)
 	// Service health and statistics.
 	GetStats(ctx context.Context, in *FetcherStatsRequest, opts ...grpc.CallOption) (*FetcherStatsResponse, error)
+	// Store a single blob on the fetcher.
+	// Called by storage nodes during ingestion.
+	StoreBlob(ctx context.Context, in *StoreBlobRequest, opts ...grpc.CallOption) (*StoreBlobResponse, error)
+	// Store multiple blobs as packed archives via client-streaming.
+	// The client streams StoreBlobEntry messages; the fetcher packs them
+	// into archive(s) splitting at ~512 MB. This avoids thousands of
+	// individual loose files and supports arbitrarily large pushes.
+	StoreBlobBatchStream(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[StoreBlobEntry, StoreBlobBatchResponse], error)
+	// Delete blobs from the fetcher's index and optionally clean up
+	// archives that become empty.
+	DeleteBlobs(ctx context.Context, in *DeleteBlobsRequest, opts ...grpc.CallOption) (*DeleteBlobsResponse, error)
+	// Store a packager archive on the fetcher.
+	// Called by the router during ingestion to push pre-built archives.
+	StoreArchive(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[StoreArchiveChunk, StoreArchiveResponse], error)
 }
 
 type blobFetcherClient struct {
@@ -126,6 +144,52 @@ func (c *blobFetcherClient) GetStats(ctx context.Context, in *FetcherStatsReques
 	return out, nil
 }
 
+func (c *blobFetcherClient) StoreBlob(ctx context.Context, in *StoreBlobRequest, opts ...grpc.CallOption) (*StoreBlobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StoreBlobResponse)
+	err := c.cc.Invoke(ctx, BlobFetcher_StoreBlob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *blobFetcherClient) StoreBlobBatchStream(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[StoreBlobEntry, StoreBlobBatchResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &BlobFetcher_ServiceDesc.Streams[2], BlobFetcher_StoreBlobBatchStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[StoreBlobEntry, StoreBlobBatchResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type BlobFetcher_StoreBlobBatchStreamClient = grpc.ClientStreamingClient[StoreBlobEntry, StoreBlobBatchResponse]
+
+func (c *blobFetcherClient) DeleteBlobs(ctx context.Context, in *DeleteBlobsRequest, opts ...grpc.CallOption) (*DeleteBlobsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteBlobsResponse)
+	err := c.cc.Invoke(ctx, BlobFetcher_DeleteBlobs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *blobFetcherClient) StoreArchive(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[StoreArchiveChunk, StoreArchiveResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &BlobFetcher_ServiceDesc.Streams[3], BlobFetcher_StoreArchive_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[StoreArchiveChunk, StoreArchiveResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type BlobFetcher_StoreArchiveClient = grpc.ClientStreamingClient[StoreArchiveChunk, StoreArchiveResponse]
+
 // BlobFetcherServer is the server API for BlobFetcher service.
 // All implementations must embed UnimplementedBlobFetcherServer
 // for forward compatibility.
@@ -148,6 +212,20 @@ type BlobFetcherServer interface {
 	CheckCache(context.Context, *CheckCacheRequest) (*CheckCacheResponse, error)
 	// Service health and statistics.
 	GetStats(context.Context, *FetcherStatsRequest) (*FetcherStatsResponse, error)
+	// Store a single blob on the fetcher.
+	// Called by storage nodes during ingestion.
+	StoreBlob(context.Context, *StoreBlobRequest) (*StoreBlobResponse, error)
+	// Store multiple blobs as packed archives via client-streaming.
+	// The client streams StoreBlobEntry messages; the fetcher packs them
+	// into archive(s) splitting at ~512 MB. This avoids thousands of
+	// individual loose files and supports arbitrarily large pushes.
+	StoreBlobBatchStream(grpc.ClientStreamingServer[StoreBlobEntry, StoreBlobBatchResponse]) error
+	// Delete blobs from the fetcher's index and optionally clean up
+	// archives that become empty.
+	DeleteBlobs(context.Context, *DeleteBlobsRequest) (*DeleteBlobsResponse, error)
+	// Store a packager archive on the fetcher.
+	// Called by the router during ingestion to push pre-built archives.
+	StoreArchive(grpc.ClientStreamingServer[StoreArchiveChunk, StoreArchiveResponse]) error
 	mustEmbedUnimplementedBlobFetcherServer()
 }
 
@@ -172,6 +250,18 @@ func (UnimplementedBlobFetcherServer) CheckCache(context.Context, *CheckCacheReq
 }
 func (UnimplementedBlobFetcherServer) GetStats(context.Context, *FetcherStatsRequest) (*FetcherStatsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetStats not implemented")
+}
+func (UnimplementedBlobFetcherServer) StoreBlob(context.Context, *StoreBlobRequest) (*StoreBlobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StoreBlob not implemented")
+}
+func (UnimplementedBlobFetcherServer) StoreBlobBatchStream(grpc.ClientStreamingServer[StoreBlobEntry, StoreBlobBatchResponse]) error {
+	return status.Error(codes.Unimplemented, "method StoreBlobBatchStream not implemented")
+}
+func (UnimplementedBlobFetcherServer) DeleteBlobs(context.Context, *DeleteBlobsRequest) (*DeleteBlobsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteBlobs not implemented")
+}
+func (UnimplementedBlobFetcherServer) StoreArchive(grpc.ClientStreamingServer[StoreArchiveChunk, StoreArchiveResponse]) error {
+	return status.Error(codes.Unimplemented, "method StoreArchive not implemented")
 }
 func (UnimplementedBlobFetcherServer) mustEmbedUnimplementedBlobFetcherServer() {}
 func (UnimplementedBlobFetcherServer) testEmbeddedByValue()                     {}
@@ -270,6 +360,56 @@ func _BlobFetcher_GetStats_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BlobFetcher_StoreBlob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StoreBlobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BlobFetcherServer).StoreBlob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BlobFetcher_StoreBlob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BlobFetcherServer).StoreBlob(ctx, req.(*StoreBlobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BlobFetcher_StoreBlobBatchStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(BlobFetcherServer).StoreBlobBatchStream(&grpc.GenericServerStream[StoreBlobEntry, StoreBlobBatchResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type BlobFetcher_StoreBlobBatchStreamServer = grpc.ClientStreamingServer[StoreBlobEntry, StoreBlobBatchResponse]
+
+func _BlobFetcher_DeleteBlobs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteBlobsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BlobFetcherServer).DeleteBlobs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BlobFetcher_DeleteBlobs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BlobFetcherServer).DeleteBlobs(ctx, req.(*DeleteBlobsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BlobFetcher_StoreArchive_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(BlobFetcherServer).StoreArchive(&grpc.GenericServerStream[StoreArchiveChunk, StoreArchiveResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type BlobFetcher_StoreArchiveServer = grpc.ClientStreamingServer[StoreArchiveChunk, StoreArchiveResponse]
+
 // BlobFetcher_ServiceDesc is the grpc.ServiceDesc for BlobFetcher service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -289,6 +429,14 @@ var BlobFetcher_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetStats",
 			Handler:    _BlobFetcher_GetStats_Handler,
 		},
+		{
+			MethodName: "StoreBlob",
+			Handler:    _BlobFetcher_StoreBlob_Handler,
+		},
+		{
+			MethodName: "DeleteBlobs",
+			Handler:    _BlobFetcher_DeleteBlobs_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -300,6 +448,16 @@ var BlobFetcher_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "FetchBlobBatch",
 			Handler:       _BlobFetcher_FetchBlobBatch_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "StoreBlobBatchStream",
+			Handler:       _BlobFetcher_StoreBlobBatchStream_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "StoreArchive",
+			Handler:       _BlobFetcher_StoreArchive_Handler,
+			ClientStreams: true,
 		},
 	},
 	Metadata: "api/proto/fetcher.proto",

@@ -11,20 +11,118 @@ type IngestionType string
 
 const (
 	IngestionTypeGit  IngestionType = "git"
-	IngestionTypeGo   IngestionType = "go"   // Future: Go module cache
 	IngestionTypeS3   IngestionType = "s3"   // Future: S3 bucket
 	IngestionTypeFile IngestionType = "file" // Future: Local filesystem
 )
 
-// FetchType identifies the backend for blob storage
+// FetchType identifies the backend for blob storage/retrieval.
+// Used by both the fetcher service (runtime reads) and the router (ingestion).
 type FetchType string
 
 const (
-	FetchTypeGit   FetchType = "git"   // Fetch from Git repository
-	FetchTypeGoMod FetchType = "gomod" // Fetch from Go module cache
-	FetchTypeS3    FetchType = "s3"    // Fetch from S3 bucket
-	FetchTypeLocal FetchType = "local" // Fetch from local cache
+	FetchTypeUnknown FetchType = ""      // Unknown/unset
+	FetchTypeGit     FetchType = "git"   // Fetch from Git repository
+	FetchTypeBlob    FetchType = "blob"  // Fetch from packager blob archive
+	FetchTypeS3      FetchType = "s3"    // Fetch from S3 bucket
+	FetchTypeLocal   FetchType = "local" // Fetch from local cache
 )
+
+// String returns the string representation of the FetchType.
+func (ft FetchType) String() string {
+	if ft == "" {
+		return "unknown"
+	}
+	return string(ft)
+}
+
+// ParseFetchType converts a string to FetchType.
+func ParseFetchType(s string) FetchType {
+	switch s {
+	case "git":
+		return FetchTypeGit
+	case "blob":
+		return FetchTypeBlob
+	case "s3":
+		return FetchTypeS3
+	case "local":
+		return FetchTypeLocal
+	default:
+		return FetchTypeUnknown
+	}
+}
+
+// BackendConfig holds common configuration for all fetch backends.
+type BackendConfig struct {
+	// CacheDir is the local directory for caching source data.
+	// Git: cloned repos. Blob: packager archives.
+	CacheDir string
+
+	// MaxCacheSize is the maximum cache size in bytes.
+	// 0 = unlimited.
+	MaxCacheSize int64
+
+	// MaxCacheAge is how long cached items live before eviction.
+	MaxCacheAgeSecs int64
+
+	// Concurrency limits parallel operations within the backend.
+	Concurrency int
+
+	// EncryptionKey is the 32-byte ChaCha20-Poly1305 key for packager archives.
+	// Required for BlobBackend, ignored by other backends.
+	EncryptionKey []byte
+
+	// Extra holds backend-specific configuration.
+	Extra map[string]string
+}
+
+// FetchRequest contains all information needed to fetch a blob.
+type FetchRequest struct {
+	// ContentID is the blob identifier.
+	// Git: blob SHA. Blob: blob hash within packager archive.
+	ContentID string
+
+	// SourceKey is used for repo-affinity routing.
+	// Git: repo URL. Blob: storage ID.
+	SourceKey string
+
+	// SourceConfig contains backend-specific parameters.
+	// Git: repo_url, branch, display_path
+	// Blob: storage_id
+	SourceConfig map[string]string
+
+	// RequestID for tracing.
+	RequestID string
+
+	// Priority: 0 = highest, 10 = lowest.
+	Priority int
+}
+
+// FetchResult contains the fetched blob data.
+type FetchResult struct {
+	// Content is the blob data (for non-streaming).
+	Content []byte
+
+	// Size is the blob size in bytes.
+	Size int64
+
+	// FromCache indicates if this was served from local cache.
+	FromCache bool
+
+	// FetchLatencyMs is the remote fetch time (0 if from cache).
+	FetchLatencyMs int64
+}
+
+// BackendStats holds statistics for a fetch backend.
+type BackendStats struct {
+	Requests     int64
+	Errors       int64
+	BytesFetched int64
+	CacheHits    int64
+	CacheMisses  int64
+	CachedItems  int64
+	CacheBytes   int64
+	AvgLatencyMs float64
+}
 
 // FileMetadata represents file metadata from any source
 type FileMetadata struct {
@@ -33,6 +131,7 @@ type FileMetadata struct {
 	Mode        uint32
 	ModTime     int64
 	ContentHash string            // Hash of content (blob hash for Git, checksum for S3, etc.)
+	Content     []byte            // File content (populated during ingestion for archive building)
 	Metadata    map[string]string // Backend-specific metadata
 }
 
@@ -58,29 +157,39 @@ type IngestionBackend interface {
 	Validate(ctx context.Context, sourceURL string, config map[string]string) error
 }
 
-// FetchBackend handles blob/content retrieval
+// FetchBackend handles blob/content retrieval and caching.
+// This is the canonical interface for all fetch backends (Git, Blob, S3, etc.).
+// Used by the fetcher service (runtime reads) and available to the router.
 type FetchBackend interface {
-	// Type returns the fetch type identifier
+	// Type returns the fetch type identifier.
 	Type() FetchType
 
-	// Initialize prepares the backend (open repo, connect to S3, etc.)
-	Initialize(ctx context.Context, config map[string]string) error
+	// Initialize prepares the backend with configuration.
+	// Called once at service startup.
+	Initialize(ctx context.Context, config BackendConfig) error
 
-	// FetchBlob retrieves blob content by hash/key
-	FetchBlob(ctx context.Context, blobID string) ([]byte, error)
+	// FetchBlob retrieves a blob by content ID.
+	FetchBlob(ctx context.Context, req *FetchRequest) (*FetchResult, error)
 
-	// FetchBlobStream retrieves blob content as a stream (for large files)
-	FetchBlobStream(ctx context.Context, blobID string) (io.ReadCloser, error)
+	// FetchBlobStream is like FetchBlob but streams content.
+	// Useful for large blobs to avoid memory pressure.
+	FetchBlobStream(ctx context.Context, req *FetchRequest) (io.ReadCloser, int64, error)
 
-	// StoreBlob stores blob content (for ingestion with data replication)
-	// Returns the blob ID (hash/key)
-	StoreBlob(ctx context.Context, data []byte) (string, error)
+	// Warmup prepares the backend for fetching from a specific source.
+	// For Git: clones/fetches the repo. For Blob: no-op (archives pushed during ingestion).
+	Warmup(ctx context.Context, sourceKey string, config map[string]string) error
 
-	// StoreBlobStream stores blob content from a stream
-	StoreBlobStream(ctx context.Context, reader io.Reader) (string, error)
+	// CachedSources returns list of sources this backend has warmed up.
+	CachedSources() []string
 
-	// Cleanup releases resources
-	Cleanup() error
+	// Cleanup releases resources for a specific source.
+	Cleanup(ctx context.Context, sourceKey string) error
+
+	// Close shuts down the backend and releases all resources.
+	Close() error
+
+	// Stats returns backend-specific statistics.
+	Stats() BackendStats
 }
 
 // BackendRegistry manages available backends

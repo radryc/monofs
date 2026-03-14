@@ -3,27 +3,31 @@ package fuse
 
 import (
 	"os"
-	"path/filepath"
-	"strings"
+	"sort"
+	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// OverlayManager handles merging local changes with backend data
+// OverlayManager handles merging local changes with backend data.
+// Uses OverlayDB for all overlay queries — no filesystem scanning needed.
 type OverlayManager struct {
 	sessionMgr *SessionManager
 }
 
-// NewOverlayManager creates a new overlay manager
+// NewOverlayManager creates a new overlay manager.
 func NewOverlayManager(sessionMgr *SessionManager) *OverlayManager {
 	return &OverlayManager{
 		sessionMgr: sessionMgr,
 	}
 }
 
-// MergeReadDir merges backend directory entries with local overlay changes
+// MergeReadDir merges backend directory entries with local overlay changes.
+// Uses OverlayDB + disk scanning to produce a complete directory listing.
+// For user-root-dir paths (where backend is nil), disk is always scanned
+// as the authoritative source, with DB providing supplementary metadata.
 func (om *OverlayManager) MergeReadDir(backendEntries []fuse.DirEntry, dirPath string) []fuse.DirEntry {
-	if om.sessionMgr == nil || !om.sessionMgr.HasActiveSession() {
+	if om.sessionMgr == nil {
 		return backendEntries
 	}
 
@@ -33,9 +37,50 @@ func (om *OverlayManager) MergeReadDir(backendEntries []fuse.DirEntry, dirPath s
 		entries[e.Name] = e
 	}
 
+	// For user-root-dir paths (backendEntries == nil), scan disk directly.
+	// This is the authoritative source — any file on disk is visible,
+	// regardless of whether it's been tracked in the DB yet.
+	// This eliminates the race between file creation and DB tracking.
+	if backendEntries == nil {
+		localPath, err := om.sessionMgr.GetLocalPath(dirPath)
+		if err == nil {
+			if diskEntries, err := os.ReadDir(localPath); err == nil {
+				for _, de := range diskEntries {
+					name := de.Name()
+					// Skip overlay.db directory
+					if name == "overlay.db" {
+						continue
+					}
+					fullPath := name
+					if dirPath != "" {
+						fullPath = dirPath + "/" + name
+					}
+					var mode uint32
+					if de.IsDir() {
+						mode = 0755 | uint32(fuse.S_IFDIR)
+					} else if de.Type()&os.ModeSymlink != 0 {
+						mode = 0777 | uint32(fuse.S_IFLNK)
+					} else {
+						mode = 0644 | uint32(fuse.S_IFREG)
+					}
+					entries[name] = fuse.DirEntry{
+						Name: name,
+						Mode: mode,
+						Ino:  hashPathForNode(fullPath),
+					}
+				}
+			}
+		}
+	}
+
+	db := om.sessionMgr.GetOverlayDB()
+	if db == nil {
+		return om.toSlice(entries)
+	}
+
 	// At root level, add user-created directories
 	if dirPath == "" {
-		userDirs := om.sessionMgr.ListUserRootDirs()
+		userDirs := db.ListUserDirs()
 		for _, name := range userDirs {
 			entries[name] = fuse.DirEntry{
 				Name: name,
@@ -45,42 +90,29 @@ func (om *OverlayManager) MergeReadDir(backendEntries []fuse.DirEntry, dirPath s
 		}
 	}
 
-	// Check for local directory
-	localPath, err := om.sessionMgr.GetLocalPath(dirPath)
-	if err != nil {
-		return om.toSlice(entries)
-	}
-
-	// Read local directory entries
-	localEntries, err := os.ReadDir(localPath)
+	// Query overlay files under this directory from DB
+	overlayEntries, overlayNames, err := db.ListFilesUnderDir(dirPath)
 	if err == nil {
-		for _, de := range localEntries {
-			// Skip hidden session files
-			if strings.HasPrefix(de.Name(), ".") {
-				continue
-			}
+		for i, entry := range overlayEntries {
+			name := overlayNames[i]
 
-			info, err := de.Info()
-			if err != nil {
-				continue
-			}
-
-			mode := uint32(info.Mode() & 0777)
-			if de.IsDir() {
+			mode := entry.Mode & 0777
+			switch entry.Type {
+			case FileEntryDir:
 				mode |= uint32(fuse.S_IFDIR)
-			} else if info.Mode()&os.ModeSymlink != 0 {
+			case FileEntrySymlink:
 				mode |= uint32(fuse.S_IFLNK)
-			} else {
+			default:
 				mode |= uint32(fuse.S_IFREG)
 			}
 
-			fullPath := de.Name()
+			fullPath := name
 			if dirPath != "" {
-				fullPath = dirPath + "/" + de.Name()
+				fullPath = dirPath + "/" + name
 			}
 
-			entries[de.Name()] = fuse.DirEntry{
-				Name: de.Name(),
+			entries[name] = fuse.DirEntry{
+				Name: name,
 				Mode: mode,
 				Ino:  hashPathForNode(fullPath),
 			}
@@ -88,42 +120,30 @@ func (om *OverlayManager) MergeReadDir(backendEntries []fuse.DirEntry, dirPath s
 	}
 
 	// Remove deleted entries
-	session := om.sessionMgr.GetCurrentSession()
-	if session != nil {
-		session.mu.RLock()
-		for _, change := range session.Changes {
-			if change.Type == ChangeDelete || change.Type == ChangeRmdir || change.Type == ChangeRemoveUserRootDir {
-				// Check if this deletion is in the current directory
-				changeDir := filepath.Dir(change.Path)
-				if changeDir == "." {
-					changeDir = ""
-				}
-				if changeDir == dirPath {
-					changeName := filepath.Base(change.Path)
-					delete(entries, changeName)
-				}
-				// Handle root level deletions (path has no directory component)
-				if dirPath == "" && changeDir == "" {
-					delete(entries, change.Path)
-				}
-			}
+	deleted, err := db.ListDeletedUnderDir(dirPath)
+	if err == nil {
+		for _, name := range deleted {
+			delete(entries, name)
 		}
-		session.mu.RUnlock()
 	}
 
 	return om.toSlice(entries)
 }
 
-// toSlice converts entry map to slice
+// toSlice converts entry map to slice.
 func (om *OverlayManager) toSlice(entries map[string]fuse.DirEntry) []fuse.DirEntry {
 	result := make([]fuse.DirEntry, 0, len(entries))
 	for _, e := range entries {
 		result = append(result, e)
 	}
+	// Sort by name for deterministic ordering required by go mod verify
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 
-// ShouldUseLocalFile checks if a file should be read from local overlay
+// ShouldUseLocalFile checks if a file should be read from local overlay.
 func (om *OverlayManager) ShouldUseLocalFile(monofsPath string) bool {
 	if om.sessionMgr == nil {
 		return false
@@ -131,7 +151,7 @@ func (om *OverlayManager) ShouldUseLocalFile(monofsPath string) bool {
 	return om.sessionMgr.HasLocalOverride(monofsPath)
 }
 
-// GetLocalContent reads file content from local overlay
+// GetLocalContent reads file content from local overlay.
 func (om *OverlayManager) GetLocalContent(monofsPath string) ([]byte, error) {
 	localPath, err := om.sessionMgr.GetLocalPath(monofsPath)
 	if err != nil {
@@ -140,14 +160,16 @@ func (om *OverlayManager) GetLocalContent(monofsPath string) ([]byte, error) {
 	return os.ReadFile(localPath)
 }
 
-// GetLocalAttr gets file attributes from local overlay
+// GetLocalAttr gets file attributes from local overlay.
+// First checks OverlayDB, falls back to os.Stat for freshness.
 func (om *OverlayManager) GetLocalAttr(monofsPath string) (*LocalAttr, error) {
 	localPath, err := om.sessionMgr.GetLocalPath(monofsPath)
 	if err != nil {
 		return nil, err
 	}
 
-	info, err := os.Stat(localPath)
+	// Lstat the actual file for fresh size/mtime (Lstat to handle symlinks properly)
+	info, err := os.Lstat(localPath)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +181,9 @@ func (om *OverlayManager) GetLocalAttr(monofsPath string) (*LocalAttr, error) {
 		IsDir: info.IsDir(),
 	}
 
-	if attr.IsDir {
+	if info.Mode()&os.ModeSymlink != 0 {
+		attr.Mode |= uint32(syscall.S_IFLNK)
+	} else if attr.IsDir {
 		attr.Mode |= uint32(fuse.S_IFDIR)
 	} else {
 		attr.Mode |= uint32(fuse.S_IFREG)
@@ -168,7 +192,7 @@ func (om *OverlayManager) GetLocalAttr(monofsPath string) (*LocalAttr, error) {
 	return attr, nil
 }
 
-// IsPathDeleted checks if a path has been deleted in the current session
+// IsPathDeleted checks if a path has been deleted in the current session.
 func (om *OverlayManager) IsPathDeleted(monofsPath string) bool {
 	if om.sessionMgr == nil {
 		return false
@@ -176,7 +200,7 @@ func (om *OverlayManager) IsPathDeleted(monofsPath string) bool {
 	return om.sessionMgr.IsDeleted(monofsPath)
 }
 
-// LocalAttr represents file attributes from local overlay
+// LocalAttr represents file attributes from local overlay.
 type LocalAttr struct {
 	Size  uint64
 	Mode  uint32

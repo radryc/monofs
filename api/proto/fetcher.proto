@@ -26,24 +26,32 @@ service BlobFetcher {
     
     // Service health and statistics.
     rpc GetStats(FetcherStatsRequest) returns (FetcherStatsResponse);
+
+    // Store a single blob on the fetcher.
+    // Called by storage nodes during ingestion.
+    rpc StoreBlob(StoreBlobRequest) returns (StoreBlobResponse);
+
+    // Store multiple blobs as packed archives via client-streaming.
+    // The client streams StoreBlobEntry messages; the fetcher packs them
+    // into archive(s) splitting at ~512 MB. This avoids thousands of
+    // individual loose files and supports arbitrarily large pushes.
+    rpc StoreBlobBatchStream(stream StoreBlobEntry) returns (StoreBlobBatchResponse);
+
+    // Delete blobs from the fetcher's index and optionally clean up
+    // archives that become empty.
+    rpc DeleteBlobs(DeleteBlobsRequest) returns (DeleteBlobsResponse);
+
+    // Store a packager archive on the fetcher.
+    // Called by the router during ingestion to push pre-built archives.
+    rpc StoreArchive(stream StoreArchiveChunk) returns (StoreArchiveResponse);
 }
 
-// SourceType identifies the data source backend.
-enum SourceType {
-    SOURCE_TYPE_UNKNOWN = 0;
-    SOURCE_TYPE_GIT = 1;          // Git repository (GitHub, GitLab, etc.)
-    SOURCE_TYPE_GOMOD = 2;        // Go module proxy (proxy.golang.org)
-    SOURCE_TYPE_S3 = 3;           // S3-compatible object storage
-    SOURCE_TYPE_HTTP = 4;         // Generic HTTP/HTTPS URL
-    SOURCE_TYPE_OCI = 5;          // OCI registry (container images)
-}
+// SourceType is defined in monofs.proto (imported above)
 
 message FetchBlobRequest {
     // Content identifier (interpretation depends on source_type):
     // - GIT: blob SHA hash
-    // - GOMOD: module@version/path
-    // - S3: bucket/key
-    // - HTTP: full URL
+    // - BLOB: blob hash within packager archive
     string content_id = 1;
     
     // Source type determines which backend handles the request.
@@ -51,9 +59,7 @@ message FetchBlobRequest {
     
     // Source-specific configuration:
     // GIT: repo_url, branch, display_path
-    // GOMOD: module_path, version
-    // S3: endpoint, bucket, region
-    // HTTP: (none, content_id is the URL)
+    // BLOB: storage_id
     map<string, string> source_config = 3;
     
     // Request metadata for tracing/metrics.
@@ -191,6 +197,7 @@ message SourceStats {
     int64 bytes_fetched = 3;
     double avg_latency_ms = 4;
     int64 cached_items = 5;
+    int64 cache_bytes = 6;
 }
 
 // ============================================================
@@ -246,4 +253,104 @@ message PredictedFile {
     string content_id = 5;        // Blob hash for fetching
     SourceType source_type = 6;   // How to fetch
     map<string, string> source_config = 7;
+}
+
+// StoreBlob stores a single blob on the fetcher.
+message StoreBlobRequest {
+    // SHA-256 hash of the blob content (used as storage key).
+    string blob_hash = 1;
+    
+    // Raw blob content.
+    bytes content = 2;
+    
+    // Request ID for tracing.
+    string request_id = 3;
+}
+
+message StoreBlobResponse {
+    bool success = 1;
+    string error_message = 2;
+    // Size of stored blob in bytes.
+    int64 size = 3;
+}
+
+// StoreArchiveChunk streams a packager archive to the fetcher.
+// The first chunk must contain the header with storage_id.
+message StoreArchiveChunk {
+    // Storage ID this archive belongs to (set in first chunk).
+    string storage_id = 1;
+
+    // Archive chunk index (for split archives, 0-based).
+    int32 chunk_index = 2;
+    
+    // Raw archive data.
+    bytes data = 3;
+    
+    // True if this is the last chunk of this archive piece.
+    bool is_last = 4;
+}
+
+message StoreArchiveResponse {
+    bool success = 1;
+    string error_message = 2;
+    // Total bytes stored.
+    int64 total_bytes = 3;
+    // Number of files indexed from the archive.
+    int64 files_indexed = 4;
+}
+
+// StoreBlobEntry is a single blob (or chunk of a blob) sent in a
+// StoreBlobBatchStream.  Small blobs are sent as one message with
+// chunk_index=0 and is_last=true (the default).  Large blobs are
+// split across multiple messages sharing the same blob_hash;
+// chunk_index increments from 0 and the final chunk sets is_last=true.
+message StoreBlobEntry {
+    // SHA-256 hash of the full blob content (used as storage/index key).
+    string blob_hash = 1;
+    // Raw blob content (or a chunk of it for large blobs).
+    bytes content = 2;
+    // Chunk sequence number within this blob (0-based).
+    int32 chunk_index = 3;
+    // True when this is the last (or only) chunk for this blob_hash.
+    bool is_last = 4;
+    // Total uncompressed size of the complete blob in bytes.
+    // Only required on the first chunk (chunk_index == 0).
+    int64 total_size = 5;
+}
+
+// StoreBlobBatchResponse summarises the streaming batch storage operation.
+message StoreBlobBatchResponse {
+    bool success = 1;
+    string error_message = 2;
+    // Number of blobs written to archive(s).
+    int32 stored = 3;
+    // Number of blobs skipped (already indexed).
+    int32 skipped = 4;
+    // Number of blobs that failed.
+    int32 failed = 5;
+    // Total archive bytes written to disk.
+    int64 archive_bytes = 6;
+    // Number of archive files created.
+    int32 archives_created = 7;
+}
+
+// DeleteBlobsRequest asks the fetcher to remove blobs from its index.
+message DeleteBlobsRequest {
+    // SHA-256 hashes of blobs to delete.
+    repeated string blob_hashes = 1;
+    // When true, also remove archive files that become empty after
+    // deleting these entries (compaction). Default false.
+    bool compact = 2;
+}
+
+// DeleteBlobsResponse reports how many blobs were deleted.
+message DeleteBlobsResponse {
+    bool success = 1;
+    string error_message = 2;
+    // Number of blobs removed from the index.
+    int32 deleted = 3;
+    // Number of hashes not found in the index.
+    int32 not_found = 4;
+    // Number of archive files removed during compaction.
+    int32 archives_removed = 5;
 }

@@ -1,0 +1,13 @@
+{
+  "port": 9200,
+  "cache_dir": "/data/cache",
+  "max_cache_gb": 50,
+  "cache_age_hours": 2,
+  "prefetch_workers": 4,
+  "enable_git": false,
+  "log_level": "info",
+  "storage": {
+    "type": "local",
+    "local_path": ""
+  }
+}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,7 +18,6 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
@@ -59,6 +59,7 @@ type ShardedClient struct {
 	stopHeartbeat     chan struct{}
 	operationsCount   int64 // atomic counter
 	bytesRead         int64 // atomic counter
+	errorsCount       int64 // atomic counter
 }
 
 // ShardedClientConfig holds configuration for ShardedClient.
@@ -116,6 +117,10 @@ func NewShardedClient(ctx context.Context, cfg ShardedClientConfig) (*ShardedCli
 	// Connect to router
 	routerConn, err := grpc.NewClient(cfg.RouterAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(256*1024*1024),
+			grpc.MaxCallSendMsgSize(256*1024*1024),
+		),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connect to router: %w", err)
@@ -235,6 +240,10 @@ func (sc *ShardedClient) attemptConnection() {
 	// Try to connect to router
 	routerConn, err := grpc.NewClient(sc.routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(256*1024*1024),
+			grpc.MaxCallSendMsgSize(256*1024*1024),
+		),
 	)
 	if err != nil {
 		sc.mu.Lock()
@@ -357,13 +366,11 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 	sc.connected = true
 	sc.lastError = nil
 
-	// Always update node health from router - this fixes local health corruption
-	// caused by markNodeUnhealthy calls on transient RPC failures.
-	// The router is the authoritative source of node health.
+	// Node health state comes exclusively from the router via UpdateNodeHealthFromProto().
+	// The router is the single source of truth for node health.
 	if sc.hrw == nil {
 		sc.hrw = sharding.NewHRWFromProto(resp.Nodes)
 	} else {
-		// Always sync health state from router (authoritative source)
 		sc.hrw.UpdateNodeHealthFromProto(resp.Nodes)
 	}
 
@@ -420,6 +427,10 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 			}
 			conn, err := grpc.NewClient(node.Address,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithDefaultCallOptions(
+					grpc.MaxCallRecvMsgSize(256*1024*1024),
+					grpc.MaxCallSendMsgSize(256*1024*1024),
+				),
 			)
 			if err != nil {
 				// Log error but continue with other nodes
@@ -458,14 +469,19 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 // The full path format is: "host_domain/org/repo/path/to/file"
 // Standard repo IDs are 3 parts: "github_com/owner/repo"
 //
-// CRITICAL: The storageID is a SHA-256 hash of the displayPath (e.g. "github_com/owner/repo")
-// This MUST match the router's generateStorageID() function in ingest.go
+// The storageID is a SHA-256 hash of the displayPath (e.g. "github_com/owner/repo").
+// This is now guaranteed to match the router via the shared sharding package.
+//
+// For dependency paths ("dependency/tool/..."), the displayPath is always "dependency"
+// and the filePath is everything after "dependency/" (e.g. "go/mod/cache/download/...").
+// This matches IngestBlobs which uses displayPath="dependency".
 //
 // Examples:
 //
 //	"github.com/owner/repo/README.md" -> "sha256(github.com/owner/repo):README.md"
 //	"github.com/owner/repo/path/to/file.txt" -> "sha256(github.com/owner/repo):path/to/file.txt"
 //	"github.com/owner/repo" -> "sha256(github.com/owner/repo)" (repo dir itself)
+//	"dependency/go/mod/cache/download/..." -> "sha256(dependency):go/mod/cache/download/..."
 func buildShardKey(fullPath string) string {
 	if fullPath == "" || fullPath == "/" {
 		return fullPath
@@ -473,6 +489,17 @@ func buildShardKey(fullPath string) string {
 
 	// Split path into parts
 	parts := strings.Split(fullPath, "/")
+
+	// Dependency paths: "dependency/..." uses single-segment displayPath
+	// to match IngestBlobs which uses displayPath="dependency"
+	if parts[0] == "dependency" {
+		storageID := sharding.GenerateStorageID("dependency")
+		if len(parts) > 1 {
+			filePath := strings.Join(parts[1:], "/")
+			return sharding.BuildShardKey(storageID, filePath)
+		}
+		return storageID
+	}
 
 	// Standard repo structure: host_domain/org/repo (3 parts)
 	// If we have more than 3 parts, assume first 3 are the repo ID
@@ -482,8 +509,8 @@ func buildShardKey(fullPath string) string {
 		displayPath := strings.Join(parts[:3], "/")
 		filePath := strings.Join(parts[3:], "/")
 		// Generate storageID as SHA-256 hash of displayPath (matches router)
-		storageID := generateStorageID(displayPath)
-		return storageID + ":" + filePath
+		storageID := sharding.GenerateStorageID(displayPath)
+		return sharding.BuildShardKey(storageID, filePath)
 	}
 
 	// If path has 3 or fewer parts, it's either:
@@ -491,18 +518,11 @@ func buildShardKey(fullPath string) string {
 	// - An intermediate directory ("github.com" or "github.com/owner")
 	// For repo dirs, return the hashed storageID
 	if len(parts) == 3 {
-		return generateStorageID(fullPath)
+		return sharding.GenerateStorageID(fullPath)
 	}
 
 	// For intermediate dirs, return the raw path (they're handled specially)
 	return fullPath
-}
-
-// generateStorageID creates a SHA-256 hash of the display path.
-// This MUST match the router's generateStorageID() function in ingest.go
-func generateStorageID(displayPath string) string {
-	hash := sha256.Sum256([]byte(displayPath))
-	return hex.EncodeToString(hash[:])
 }
 
 // getNodeForFileFromRouter queries the router for the correct node to serve a file.
@@ -511,14 +531,21 @@ func generateStorageID(displayPath string) string {
 func (sc *ShardedClient) getNodeForFileFromRouter(ctx context.Context, fullPath string) (string, []string, error) {
 	// Extract storage ID and file path from full path
 	parts := strings.Split(fullPath, "/")
-	if len(parts) < 4 {
+
+	var displayPath, filePath string
+	// Dependency paths: "dependency/tool/..." uses single-segment displayPath
+	if len(parts) >= 2 && parts[0] == "dependency" {
+		displayPath = "dependency"
+		filePath = strings.Join(parts[1:], "/")
+	} else if len(parts) >= 4 {
+		displayPath = strings.Join(parts[:3], "/")
+		filePath = strings.Join(parts[3:], "/")
+	} else {
 		// Not a file path, can't query router
 		return "", nil, fmt.Errorf("not a file path: %s", fullPath)
 	}
 
-	displayPath := strings.Join(parts[:3], "/")
-	storageID := generateStorageID(displayPath) // Use hashed storageID to match router
-	filePath := strings.Join(parts[3:], "/")
+	storageID := sharding.GenerateStorageID(displayPath) // Use shared function to match router
 
 	sc.mu.RLock()
 	routerClient := sc.routerClient
@@ -627,8 +654,6 @@ func (sc *ShardedClient) Lookup(ctx context.Context, path string) (*pb.LookupRes
 		cancel()
 
 		if err != nil {
-			// Mark node unhealthy only for connectivity errors
-			sc.markNodeUnhealthyOnError(nodeID, err)
 			lastErr = err
 			if sc.logger != nil {
 				sc.logger.Debug("lookup RPC error, trying next node",
@@ -694,7 +719,6 @@ func (sc *ShardedClient) Lookup(ctx context.Context, path string) (*pb.LookupRes
 		cancel()
 
 		if err != nil {
-			sc.markNodeUnhealthyOnError(nodeID, err)
 			continue
 		}
 		if resp.Found {
@@ -746,7 +770,6 @@ func (sc *ShardedClient) Lookup(ctx context.Context, path string) (*pb.LookupRes
 				cancel()
 
 				if err != nil {
-					sc.markNodeUnhealthyOnError(nodeID, err)
 					continue
 				}
 				if resp.Found {
@@ -832,8 +855,6 @@ func (sc *ShardedClient) GetAttr(ctx context.Context, path string) (*pb.GetAttrR
 		cancel()
 
 		if err != nil {
-			// Mark node unhealthy only for connectivity errors
-			sc.markNodeUnhealthyOnError(nodeID, err)
 			lastErr = err
 			if sc.logger != nil {
 				sc.logger.Debug("getattr RPC error, trying next node",
@@ -891,7 +912,6 @@ func (sc *ShardedClient) GetAttr(ctx context.Context, path string) (*pb.GetAttrR
 		cancel()
 
 		if err != nil {
-			sc.markNodeUnhealthyOnError(nodeID, err)
 			continue
 		}
 		if resp.Found {
@@ -909,8 +929,15 @@ func (sc *ShardedClient) GetAttr(ctx context.Context, path string) (*pb.GetAttrR
 	return &pb.GetAttrResponse{Found: false}, nil
 }
 
-// ReadDir performs a readdir operation routed via HRW to a single node.
-// The directory path is used as the sharding key.
+// ReadDir performs a readdir operation across all healthy nodes in parallel.
+// Files are sharded across nodes, so every healthy node must be queried and
+// results merged to produce a complete directory listing.
+//
+// CORRECTNESS: This function never returns partial results. If any node
+// fails to respond fully, it retries that node once. If any node still
+// fails after retry, it returns an error so that callers (e.g. FUSE
+// readdir → filepath.Walk in go mod verify) see an error rather than
+// computing a hash over an incomplete file list.
 func (sc *ShardedClient) ReadDir(ctx context.Context, path string) ([]*pb.DirEntry, error) {
 	// Check if context is already canceled before starting
 	if ctx.Err() != nil {
@@ -946,85 +973,100 @@ func (sc *ShardedClient) ReadDir(ctx context.Context, path string) ([]*pb.DirEnt
 	}
 
 	if sc.logger != nil {
-		sc.logger.Debug("readdir: querying healthy nodes only", "path", path, "healthy_node_count", len(clients))
+		sc.logger.Debug("readdir: querying healthy nodes in parallel", "path", path, "healthy_node_count", len(clients))
 	}
 
-	// Collect entries from all nodes
-	allEntries := make(map[string]*pb.DirEntry) // deduplicate by name
-	queriedNodes := 0
-	errorNodes := 0
+	// Query all nodes in parallel. Each goroutine collects entries from
+	// one node and reports success/failure. This avoids the previous
+	// sequential approach where a slow node could starve later nodes of
+	// remaining context time, leading to incomplete results.
+	type nodeResult struct {
+		nodeID  string
+		entries []*pb.DirEntry
+		err     error // non-nil means this node's listing is incomplete
+	}
+
+	results := make([]nodeResult, len(clients))
+	var wg sync.WaitGroup
 
 	for i, client := range clients {
-		// Check context cancellation between node queries
-		if ctx.Err() != nil {
-			if sc.logger != nil {
-				sc.logger.Debug("readdir: context canceled, returning partial results",
-					"path", path,
-					"entries_so_far", len(allEntries),
-					"nodes_queried", queriedNodes)
-			}
-			break
-		}
+		wg.Add(1)
+		go func(idx int, c pb.MonoFSClient, nid string) {
+			defer wg.Done()
+			entries, err := sc.readDirFromNode(ctx, c, nid, path)
+			results[idx] = nodeResult{nodeID: nid, entries: entries, err: err}
+		}(i, client, nodeIDs[i])
+	}
+	wg.Wait()
 
-		// Add timeout per node to prevent hanging
-		nodeCtx, nodeCancel := context.WithTimeout(ctx, sc.rpcTimeout)
-		stream, err := client.ReadDir(nodeCtx, &pb.ReadDirRequest{
-			Path: path,
-		})
-		if err != nil {
-			if sc.logger != nil {
-				sc.logger.Debug("readdir: node error",
-					"path", path,
-					"node_id", nodeIDs[i],
-					"error", err)
-			}
-			// Mark node unhealthy only for connectivity errors
-			sc.markNodeUnhealthyOnError(nodeIDs[i], err)
-			errorNodes++
-			nodeCancel()
-			// Continue on error - node might not have this path
+	// Check parent context first — if it was cancelled, nothing we can do.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	// Collect results. If any node failed, retry it once before giving up.
+	// A failed node means we may be missing files that are sharded to it.
+	allEntries := make(map[string]*pb.DirEntry)
+	var failedNodes []int
+
+	for i, r := range results {
+		if r.err != nil {
+			failedNodes = append(failedNodes, i)
 			continue
 		}
-
-		nodeEntries := 0
-		for {
-			entry, err := stream.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				if sc.logger != nil {
-					sc.logger.Debug("readdir: stream error",
-						"path", path,
-						"node_id", nodeIDs[i],
-						"error", err)
-				}
-				// Mark node unhealthy only for connectivity errors
-				sc.markNodeUnhealthyOnError(nodeIDs[i], err)
-				break // Continue with other nodes
-			}
-			// Deduplicate by name (take first occurrence)
+		for _, entry := range r.entries {
 			if _, exists := allEntries[entry.Name]; !exists {
 				allEntries[entry.Name] = entry
-				nodeEntries++
 			}
 		}
-		queriedNodes++
+	}
+
+	// Retry failed nodes once (covers transient network blips).
+	if len(failedNodes) > 0 && ctx.Err() == nil {
 		if sc.logger != nil {
-			sc.logger.Debug("readdir: node completed",
+			sc.logger.Info("readdir: retrying failed nodes",
 				"path", path,
-				"node_id", nodeIDs[i],
-				"entries", nodeEntries)
+				"failed_count", len(failedNodes))
 		}
-		nodeCancel()
+
+		var retryWg sync.WaitGroup
+		for _, idx := range failedNodes {
+			retryWg.Add(1)
+			go func(i int) {
+				defer retryWg.Done()
+				entries, err := sc.readDirFromNode(ctx, clients[i], nodeIDs[i], path)
+				results[i] = nodeResult{nodeID: nodeIDs[i], entries: entries, err: err}
+			}(idx)
+		}
+		retryWg.Wait()
+
+		// Merge retry results
+		for _, idx := range failedNodes {
+			r := results[idx]
+			if r.err != nil {
+				// Node still failing after retry — return error to prevent
+				// callers from seeing a partial directory listing.
+				if sc.logger != nil {
+					sc.logger.Warn("readdir: node failed after retry, returning error to prevent partial results",
+						"path", path,
+						"node_id", r.nodeID,
+						"error", r.err)
+				}
+				return nil, fmt.Errorf("readdir incomplete: node %s failed: %w", r.nodeID, r.err)
+			}
+			for _, entry := range r.entries {
+				if _, exists := allEntries[entry.Name]; !exists {
+					allEntries[entry.Name] = entry
+				}
+			}
+		}
 	}
 
 	if sc.logger != nil {
 		sc.logger.Debug("readdir: all healthy nodes queried",
 			"path", path,
 			"total_entries", len(allEntries),
-			"queried_nodes", queriedNodes,
-			"error_nodes", errorNodes)
+			"total_nodes", len(clients))
 	}
 
 	// Convert map to slice
@@ -1033,6 +1075,59 @@ func (sc *ShardedClient) ReadDir(ctx context.Context, path string) ([]*pb.DirEnt
 		entries = append(entries, entry)
 	}
 
+	// Sort by name for deterministic ordering required by go mod verify
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name < entries[j].Name
+	})
+
+	return entries, nil
+}
+
+// readDirFromNode queries a single node for directory entries.
+// Returns (entries, nil) on success, or (partial, error) on failure.
+// A per-node timeout is applied so one slow node cannot block the caller.
+func (sc *ShardedClient) readDirFromNode(ctx context.Context, client pb.MonoFSClient, nodeID, path string) ([]*pb.DirEntry, error) {
+	nodeCtx, cancel := context.WithTimeout(ctx, sc.rpcTimeout)
+	defer cancel()
+
+	stream, err := client.ReadDir(nodeCtx, &pb.ReadDirRequest{
+		Path: path,
+	})
+	if err != nil {
+		if sc.logger != nil {
+			sc.logger.Debug("readdir: node RPC error",
+				"path", path,
+				"node_id", nodeID,
+				"error", err)
+		}
+		return nil, fmt.Errorf("readdir RPC to node %s: %w", nodeID, err)
+	}
+
+	var entries []*pb.DirEntry
+	for {
+		entry, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if sc.logger != nil {
+				sc.logger.Debug("readdir: node stream error",
+					"path", path,
+					"node_id", nodeID,
+					"entries_received", len(entries),
+					"error", err)
+			}
+			return entries, fmt.Errorf("readdir stream from node %s: %w", nodeID, err)
+		}
+		entries = append(entries, entry)
+	}
+
+	if sc.logger != nil {
+		sc.logger.Debug("readdir: node completed",
+			"path", path,
+			"node_id", nodeID,
+			"entries", len(entries))
+	}
 	return entries, nil
 }
 
@@ -1101,8 +1196,6 @@ func (sc *ShardedClient) Read(ctx context.Context, path string, offset, size int
 		})
 		if err != nil {
 			cancel()
-			// Mark node unhealthy only for connectivity errors
-			sc.markNodeUnhealthyOnError(nodeID, err)
 			lastErr = err
 			if sc.logger != nil {
 				sc.logger.Debug("read RPC error, trying next node",
@@ -1114,8 +1207,10 @@ func (sc *ShardedClient) Read(ctx context.Context, path string, offset, size int
 			continue // Try next node in HRW ranking
 		}
 
-		// Read stream
-		var data []byte
+		// Read stream.
+		// Initialise as non-nil empty slice so callers can distinguish
+		// "successfully read zero bytes" from "never loaded" (nil).
+		data := make([]byte, 0)
 		streamErr := false
 		for {
 			chunk, err := stream.Recv()
@@ -1124,8 +1219,6 @@ func (sc *ShardedClient) Read(ctx context.Context, path string, offset, size int
 			}
 			if err != nil {
 				cancel()
-				// Mark node unhealthy only for connectivity errors
-				sc.markNodeUnhealthyOnError(nodeID, err)
 				lastErr = err
 				streamErr = true
 				if sc.logger != nil {
@@ -1187,11 +1280,10 @@ func (sc *ShardedClient) Read(ctx context.Context, path string, offset, size int
 				})
 				if err != nil {
 					cancel()
-					sc.markNodeUnhealthyOnError(nodeID, err)
 					continue
 				}
 
-				var data []byte
+				data := make([]byte, 0)
 				streamErr := false
 				for {
 					chunk, err := stream.Recv()
@@ -1200,7 +1292,6 @@ func (sc *ShardedClient) Read(ctx context.Context, path string, offset, size int
 					}
 					if err != nil {
 						cancel()
-						sc.markNodeUnhealthyOnError(nodeID, err)
 						streamErr = true
 						break
 					}
@@ -1298,60 +1389,6 @@ func (sc *ShardedClient) GetHealthyNodes() []sharding.Node {
 		return nil
 	}
 	return sc.hrw.GetHealthyNodes()
-}
-
-// markNodeUnhealthyOnError marks a node unhealthy only if the connection is actually failing.
-// This checks the gRPC connection state rather than error codes, so we only mark
-// nodes unhealthy when the connection is in TransientFailure or Shutdown state.
-// Application-level errors (like "path not found") won't affect node health.
-func (sc *ShardedClient) markNodeUnhealthyOnError(nodeID string, err error) {
-	if err == nil {
-		return
-	}
-
-	// Check the actual connection state
-	sc.mu.RLock()
-	conn := sc.conns[nodeID]
-	sc.mu.RUnlock()
-
-	if conn == nil {
-		// No connection found - node might have been removed
-		return
-	}
-
-	// Get the connection state
-	state := conn.GetState()
-
-	// Only mark unhealthy if connection is actually failing
-	switch state {
-	case connectivity.TransientFailure, connectivity.Shutdown:
-		// Connection is truly failing - mark unhealthy
-		sc.doMarkNodeUnhealthy(nodeID, state.String())
-	default:
-		// Connection is Idle, Connecting, or Ready - error is application-level
-		if sc.logger != nil {
-			sc.logger.Debug("not marking node unhealthy - connection is healthy",
-				"node_id", nodeID,
-				"conn_state", state.String(),
-				"error", err)
-		}
-	}
-}
-
-// doMarkNodeUnhealthy actually marks the node unhealthy in HRW.
-func (sc *ShardedClient) doMarkNodeUnhealthy(nodeID string, reason string) {
-	sc.mu.RLock()
-	hrw := sc.hrw
-	sc.mu.RUnlock()
-
-	if hrw != nil {
-		hrw.SetNodeHealth(nodeID, false)
-		if sc.logger != nil {
-			sc.logger.Warn("marked node unhealthy due to connectivity error",
-				"node_id", nodeID,
-				"reason", reason)
-		}
-	}
 }
 
 // ============================================================================
@@ -1476,6 +1513,7 @@ func (sc *ShardedClient) sendHeartbeat() {
 		ClientId:        sc.clientID,
 		OperationsCount: atomic.LoadInt64(&sc.operationsCount),
 		BytesRead:       atomic.LoadInt64(&sc.bytesRead),
+		ErrorsCount:     atomic.LoadInt64(&sc.errorsCount),
 	})
 	if err != nil {
 		if sc.logger != nil {
@@ -1505,6 +1543,11 @@ func (sc *ShardedClient) RecordBytesRead(n int64) {
 	atomic.AddInt64(&sc.bytesRead, n)
 }
 
+// RecordError increments the error counter for metrics
+func (sc *ShardedClient) RecordError() {
+	atomic.AddInt64(&sc.errorsCount, 1)
+}
+
 // GetClientID returns the unique client identifier
 func (sc *ShardedClient) GetClientID() string {
 	return sc.clientID
@@ -1515,4 +1558,439 @@ func (sc *ShardedClient) SetMountPoint(mountPoint string) {
 	sc.mu.Lock()
 	sc.mountPoint = mountPoint
 	sc.mu.Unlock()
+}
+
+// BlobFileType mirrors packager.FileType values.
+type BlobFileType = uint8
+
+const (
+	BlobFileRegular BlobFileType = 0 // regular file
+	BlobFileDir     BlobFileType = 1 // directory
+	BlobFileSymlink BlobFileType = 2 // symlink (resolved to content)
+)
+
+// BlobFile describes a single file to be ingested into the cluster.
+type BlobFile struct {
+	// Path relative to the blob root, e.g. "go/mod/cache/download/..."
+	Path string
+	// Content is the raw file bytes.
+	Content []byte
+	// Mode is the file permission bits.
+	Mode uint32
+	// FileType: 0=regular, 1=directory, 2=symlink.
+	FileType BlobFileType
+}
+
+// IngestBlobsResult summarises a blob ingestion operation.
+type IngestBlobsResult struct {
+	FilesIngested int
+	FilesFailed   int
+	FailedFiles   []FailedBlobFile // per-file failure details
+}
+
+// FailedBlobFile describes a single file that failed to ingest and why.
+type FailedBlobFile struct {
+	Path   string
+	Reason string
+}
+
+// IngestBlobs ingests blob files into the backend cluster so they are
+// visible to every client under /mnt/monofs/dependency/...
+//
+// It performs the same sharded distribution that the router uses for regular
+// repository files: RegisterRepository on all nodes, IngestFileBatch with
+// HRW sharding, and BuildDirectoryIndexes.
+func (sc *ShardedClient) IngestBlobs(ctx context.Context, files []BlobFile) (*IngestBlobsResult, error) {
+	const displayPath = "dependency"
+	storageID := sharding.GenerateStorageID(displayPath)
+	result := &IngestBlobsResult{}
+
+	sc.mu.RLock()
+	hrw := sc.hrw
+	nodeClients := make(map[string]pb.MonoFSClient)
+	for id, c := range sc.clients {
+		nodeClients[id] = c
+	}
+	sc.mu.RUnlock()
+
+	if hrw == nil || len(nodeClients) == 0 {
+		return nil, fmt.Errorf("not connected to cluster")
+	}
+
+	healthyNodes := hrw.GetHealthyNodes()
+	if len(healthyNodes) == 0 {
+		return nil, fmt.Errorf("no healthy nodes available")
+	}
+
+	if sc.logger != nil {
+		sc.logger.Info("ingesting blobs into cluster",
+			"files", len(files),
+			"nodes", len(healthyNodes),
+			"display_path", displayPath,
+			"storage_id", storageID)
+	}
+
+	// Step 1: Register "dependency" repo on all nodes
+	for _, node := range healthyNodes {
+		client, ok := nodeClients[node.ID]
+		if !ok {
+			continue
+		}
+
+		regCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, err := client.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
+			StorageId:   storageID,
+			DisplayPath: displayPath,
+			Source:      "dependency-upload",
+		})
+		cancel()
+
+		if err != nil && sc.logger != nil {
+			sc.logger.Warn("failed to register blob repo on node",
+				"node_id", node.ID, "error", err)
+		}
+	}
+
+	// Step 2: Build FileMetadata for each file and group by target node
+	now := time.Now().Unix()
+	batches := make(map[string][]*pb.FileMetadata) // nodeID -> files
+
+	for _, f := range files {
+		// Compute content hash for the blob
+		blobHash := sha256.Sum256(f.Content)
+		blobHashStr := hex.EncodeToString(blobHash[:])
+
+		mode := f.Mode
+		if mode == 0 {
+			if f.FileType == BlobFileDir {
+				mode = 0555 // FIXED: Read-only directory for go mod verify
+			} else {
+				mode = 0444 // FIXED: Read-only file for go mod verify
+			}
+		}
+
+		meta := &pb.FileMetadata{
+			Path:          f.Path,
+			Size:          uint64(len(f.Content)),
+			Mtime:         now,
+			Mode:          mode,
+			BlobHash:      blobHashStr,
+			Source:        "dependency-upload",
+			StorageId:     storageID,
+			DisplayPath:   displayPath,
+			InlineContent: f.Content,
+		}
+		if f.FileType == BlobFileDir {
+			// Store directory marker: no inline content, no blob hash.
+			// The server stores it with IsDir=true so GetAttr returns S_IFDIR.
+			meta.BlobHash = ""
+			meta.InlineContent = nil
+		}
+		if f.FileType != BlobFileRegular {
+			if meta.BackendMetadata == nil {
+				meta.BackendMetadata = make(map[string]string)
+			}
+			meta.BackendMetadata["file_type"] = fmt.Sprintf("%d", f.FileType)
+		}
+
+		// HRW shard key: same scheme as router
+		shardKey := sharding.BuildShardKey(storageID, f.Path)
+		targetNodes := hrw.GetNodes(shardKey, 1) // primary only for deps
+		if len(targetNodes) == 0 {
+			result.FilesFailed++
+			result.FailedFiles = append(result.FailedFiles, FailedBlobFile{
+				Path:   f.Path,
+				Reason: "no target node from HRW (all nodes unhealthy?)",
+			})
+			continue
+		}
+
+		primaryNode := targetNodes[0]
+		if _, ok := nodeClients[primaryNode.ID]; !ok {
+			result.FilesFailed++
+			result.FailedFiles = append(result.FailedFiles, FailedBlobFile{
+				Path:   f.Path,
+				Reason: fmt.Sprintf("no gRPC client for node %s", primaryNode.ID),
+			})
+			continue
+		}
+
+		batches[primaryNode.ID] = append(batches[primaryNode.ID], meta)
+	}
+
+	// Step 3: Send batches to each node.
+	// Batch by total payload bytes (max ~64 MB per gRPC call) to avoid
+	// exceeding the server/client message size limit.
+	const maxBatchBytes = 64 * 1024 * 1024 // 64 MB
+	const maxBatchFiles = 2000             // hard cap on file count too
+
+	for nodeID, fileMetas := range batches {
+		client, ok := nodeClients[nodeID]
+		if !ok {
+			for _, fm := range fileMetas {
+				result.FailedFiles = append(result.FailedFiles, FailedBlobFile{
+					Path:   fm.Path,
+					Reason: fmt.Sprintf("no gRPC client for node %s", nodeID),
+				})
+			}
+			result.FilesFailed += len(fileMetas)
+			continue
+		}
+
+		// Build sub-batches respecting byte and count limits
+		var batch []*pb.FileMetadata
+		var batchBytes int64
+
+		sendBatch := func(b []*pb.FileMetadata) {
+			if len(b) == 0 {
+				return
+			}
+			batchCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+			resp, err := client.IngestFileBatch(batchCtx, &pb.IngestFileBatchRequest{
+				Files:       b,
+				StorageId:   storageID,
+				DisplayPath: displayPath,
+				Source:      "dependency-upload",
+			})
+			cancel()
+
+			if err != nil {
+				if sc.logger != nil {
+					sc.logger.Error("failed to ingest blob batch",
+						"node_id", nodeID, "batch_size", len(b), "error", err)
+				}
+				for _, fm := range b {
+					result.FailedFiles = append(result.FailedFiles, FailedBlobFile{
+						Path:   fm.Path,
+						Reason: fmt.Sprintf("IngestFileBatch on node %s: %v", nodeID, err),
+					})
+				}
+				result.FilesFailed += len(b)
+				return
+			}
+
+			result.FilesIngested += int(resp.FilesIngested)
+			result.FilesFailed += int(resp.FilesFailed)
+			// Note: server-side failures don't include per-file details yet,
+			// but we log the count so the user sees the total.
+		}
+
+		for _, meta := range fileMetas {
+			fileBytes := int64(len(meta.InlineContent)) + 512 // content + metadata overhead
+			if len(batch) > 0 && (batchBytes+fileBytes > maxBatchBytes || len(batch) >= maxBatchFiles) {
+				sendBatch(batch)
+				batch = nil
+				batchBytes = 0
+			}
+			batch = append(batch, meta)
+			batchBytes += fileBytes
+		}
+		sendBatch(batch)
+	}
+
+	// Step 3b: Send dir-hint entries so every node has a complete directory index.
+	// Each node only owns a subset of files (HRW sharding) but needs the full
+	// directory listing. Dir-hint entries update the dir index without storing
+	// metadata or ownership, keeping storage overhead minimal.
+	{
+		// Build lightweight dir-hint metadata for ALL files.
+		allHints := make([]*pb.FileMetadata, 0, len(files))
+		now := time.Now().Unix()
+		for _, f := range files {
+			mode := f.Mode
+			if mode == 0 {
+				if f.FileType == BlobFileDir {
+					mode = 0555
+				} else {
+					mode = 0444
+				}
+			}
+			hint := &pb.FileMetadata{
+				Path:  f.Path,
+				Size:  uint64(len(f.Content)),
+				Mtime: now,
+				Mode:  mode,
+				BackendMetadata: map[string]string{
+					"dir_hint": "true",
+				},
+			}
+			if f.FileType != BlobFileRegular {
+				hint.BackendMetadata["file_type"] = fmt.Sprintf("%d", f.FileType)
+			}
+			allHints = append(allHints, hint)
+		}
+
+		for _, node := range healthyNodes {
+			client, ok := nodeClients[node.ID]
+			if !ok {
+				continue
+			}
+			hintCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			_, err := client.IngestFileBatch(hintCtx, &pb.IngestFileBatchRequest{
+				Files:       allHints,
+				StorageId:   storageID,
+				DisplayPath: displayPath,
+				Source:      "dir-hint",
+			})
+			cancel()
+			if err != nil && sc.logger != nil {
+				sc.logger.Warn("failed to send dir hints",
+					"node_id", node.ID, "error", err)
+			}
+		}
+	}
+
+	// Step 4: Build directory indexes on all nodes
+	for _, node := range healthyNodes {
+		client, ok := nodeClients[node.ID]
+		if !ok {
+			continue
+		}
+
+		idxCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		_, err := client.BuildDirectoryIndexes(idxCtx, &pb.BuildDirectoryIndexesRequest{
+			StorageId: storageID,
+		})
+		cancel()
+
+		if err != nil && sc.logger != nil {
+			sc.logger.Warn("failed to build dir indexes for blobs",
+				"node_id", node.ID, "error", err)
+		}
+	}
+
+	// Step 5: Mark repo as onboarded on all nodes
+	for _, node := range healthyNodes {
+		client, ok := nodeClients[node.ID]
+		if !ok {
+			continue
+		}
+
+		obCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, _ = client.MarkRepositoryOnboarded(obCtx, &pb.MarkRepositoryOnboardedRequest{
+			StorageId: storageID,
+		})
+		cancel()
+	}
+
+	if sc.logger != nil {
+		sc.logger.Info("blob ingestion complete",
+			"ingested", result.FilesIngested,
+			"failed", result.FilesFailed)
+	}
+
+	return result, nil
+}
+
+// DeleteBlobsResult summarises a blob deletion operation.
+type DeleteBlobsResult struct {
+	FilesDeleted int
+	FilesFailed  int
+}
+
+// DeleteBlobs removes previously-ingested dependency files from the cluster
+// backend. Each path is relative to the dependency root (e.g.
+// "go/mod/cache/download/..."). The method routes per-file deletions via
+// HRW to the correct primary node, then rebuilds directory indexes so the
+// FUSE layer no longer sees the deleted files.
+func (sc *ShardedClient) DeleteBlobs(ctx context.Context, paths []string) (*DeleteBlobsResult, error) {
+	const displayPath = "dependency"
+	storageID := sharding.GenerateStorageID(displayPath)
+	result := &DeleteBlobsResult{}
+
+	sc.mu.RLock()
+	hrw := sc.hrw
+	nodeClients := make(map[string]pb.MonoFSClient)
+	for id, c := range sc.clients {
+		nodeClients[id] = c
+	}
+	sc.mu.RUnlock()
+
+	if hrw == nil || len(nodeClients) == 0 {
+		return nil, fmt.Errorf("not connected to cluster")
+	}
+
+	healthyNodes := hrw.GetHealthyNodes()
+	if len(healthyNodes) == 0 {
+		return nil, fmt.Errorf("no healthy nodes available")
+	}
+
+	if sc.logger != nil {
+		sc.logger.Info("deleting blobs from cluster",
+			"paths", len(paths),
+			"storage_id", storageID)
+	}
+
+	// Group deletion paths by target node using HRW (same scheme as IngestBlobs).
+	batches := make(map[string][]string) // nodeID -> file paths
+	for _, p := range paths {
+		shardKey := sharding.BuildShardKey(storageID, p)
+		targetNodes := hrw.GetNodes(shardKey, 1)
+		if len(targetNodes) == 0 {
+			result.FilesFailed++
+			continue
+		}
+		primaryNode := targetNodes[0]
+		if _, ok := nodeClients[primaryNode.ID]; !ok {
+			result.FilesFailed++
+			continue
+		}
+		batches[primaryNode.ID] = append(batches[primaryNode.ID], p)
+	}
+
+	// Send deletion requests to each node.
+	for nodeID, filePaths := range batches {
+		client, ok := nodeClients[nodeID]
+		if !ok {
+			result.FilesFailed += len(filePaths)
+			continue
+		}
+		for _, fp := range filePaths {
+			delCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			resp, err := client.DeleteFile(delCtx, &pb.DeleteFileRequest{
+				StorageId: storageID,
+				FilePath:  fp,
+			})
+			cancel()
+			if err != nil {
+				if sc.logger != nil {
+					sc.logger.Warn("failed to delete blob file",
+						"node_id", nodeID, "file_path", fp, "error", err)
+				}
+				result.FilesFailed++
+				continue
+			}
+			if resp.Success {
+				result.FilesDeleted++
+			} else {
+				result.FilesFailed++
+			}
+		}
+	}
+
+	// Rebuild directory indexes on all nodes so the deleted files
+	// disappear from readdir listings.
+	for _, node := range healthyNodes {
+		client, ok := nodeClients[node.ID]
+		if !ok {
+			continue
+		}
+		idxCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		_, err := client.BuildDirectoryIndexes(idxCtx, &pb.BuildDirectoryIndexesRequest{
+			StorageId: storageID,
+		})
+		cancel()
+		if err != nil && sc.logger != nil {
+			sc.logger.Warn("failed to rebuild dir indexes after blob deletion",
+				"node_id", node.ID, "error", err)
+		}
+	}
+
+	if sc.logger != nil {
+		sc.logger.Info("blob deletion complete",
+			"deleted", result.FilesDeleted,
+			"failed", result.FilesFailed)
+	}
+
+	return result, nil
 }

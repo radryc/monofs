@@ -93,8 +93,14 @@ service MonoFS {
     // Cleanup operations (called by router after rebalancing)
     rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
     
+    // Delete entire repository from this node (all buckets)
+    rpc DeleteRepository(DeleteRepositoryOnNodeRequest) returns (DeleteRepositoryOnNodeResponse);
+    
     // Build directory indexes in batch after ingestion (deferred for performance)
     rpc BuildDirectoryIndexes(BuildDirectoryIndexesRequest) returns (BuildDirectoryIndexesResponse);
+
+    // Predictor statistics (access pattern learning and prefetching)
+    rpc GetPredictorStats(PredictorStatsRequest) returns (PredictorStatsResponse);
 }
 
 // Cluster topology messages
@@ -234,16 +240,21 @@ message AuthResponse {
 // Backend type enumerations
 enum IngestionType {
     INGESTION_GIT = 0;   // Git repository
-    INGESTION_GO = 1;    // Go module cache
+    reserved 1;          // Was INGESTION_GO (removed)
     INGESTION_S3 = 2;    // S3 bucket
     INGESTION_FILE = 3;  // Local filesystem
 }
 
-enum FetchType {
-    FETCH_GIT = 0;    // Fetch from Git repository
-    FETCH_S3 = 1;     // Fetch from S3
-    FETCH_LOCAL = 2;  // Fetch from local cache
-    FETCH_GOMOD = 3;  // Fetch from Go module cache
+// SourceType identifies the data source backend.
+// Canonical type identifier used across the entire system.
+enum SourceType {
+    SOURCE_TYPE_UNKNOWN = 0;
+    SOURCE_TYPE_GIT = 1;          // Git repository (GitHub, GitLab, etc.)
+    reserved 2;                   // Was SOURCE_TYPE_GOMOD (removed)
+    SOURCE_TYPE_S3 = 3;           // S3-compatible object storage
+    SOURCE_TYPE_HTTP = 4;         // Generic HTTP/HTTPS URL
+    SOURCE_TYPE_OCI = 5;          // OCI registry (container images)
+    SOURCE_TYPE_BLOB = 6;         // Packager-based blob archive store
 }
 
 // Repository ingestion messages
@@ -254,7 +265,7 @@ message IngestRequest {
     
     // Backend configuration
     IngestionType ingestion_type = 4;  // Type of source (git, go, s3, etc.)
-    FetchType fetch_type = 5;          // Type of blob storage (git, s3, local)
+    SourceType fetch_type = 5;           // Where to fetch blob content
     map<string, string> ingestion_config = 6;  // Backend-specific config
     map<string, string> fetch_config = 7;      // Fetch backend config
     bool replicate_data = 8;           // If true, copy blobs to fetch backend during ingestion
@@ -282,7 +293,7 @@ message IngestProgress {
 
 message FileMetadata {
     string path = 1;
-    string repo_id = 2;        // DEPRECATED: kept for backwards compatibility
+    reserved 2;                // Was: repo_id (removed)
     string ref = 3;            // Reference: branch for Git, version for Go, prefix for S3
     uint64 size = 4;
     int64 mtime = 5;
@@ -294,8 +305,14 @@ message FileMetadata {
     
     // Backend information
     IngestionType source_type = 11;  // Where metadata came from
-    FetchType fetch_type = 12;       // Where to fetch blob content
+    SourceType fetch_type = 12;      // Where to fetch blob content
     map<string, string> backend_metadata = 13;  // Backend-specific metadata
+    
+    // Inline content for files that don't have an external fetch backend
+    // (e.g. dependency files uploaded by clients). When present, the server
+    // stores this alongside the metadata so that Read can serve it directly
+    // without going through a fetcher.
+    bytes inline_content = 14;
 }
 
 message IngestFileRequest {
@@ -347,9 +364,14 @@ message RegisterRepositoryRequest {
     
     // Backend configuration
     IngestionType ingestion_type = 4;
-    FetchType fetch_type = 5;
+    SourceType fetch_type = 5;
     map<string, string> ingestion_config = 6;
     map<string, string> fetch_config = 7;
+    
+    // Commit information (for Git repositories)
+    string commit_hash = 8;    // Git commit hash
+    int64 commit_time = 9;     // Commit timestamp (Unix)
+    string commit_message = 10; // Commit message
 }
 
 message RegisterRepositoryResponse {
@@ -404,6 +426,9 @@ message GetRepositoryInfoResponse {
     string display_path = 2;
     string source = 3;
     string ref = 4;
+    string commit_hash = 5;
+    int64 commit_time = 6;
+    string commit_message = 7;
 }
 
 // Onboarding status messages
@@ -479,6 +504,18 @@ message BuildDirectoryIndexesResponse {
     string message = 3;
 }
 
+// Node-level repository deletion (removes all data for a repository from one node)
+message DeleteRepositoryOnNodeRequest {
+    string storage_id = 1;
+}
+
+message DeleteRepositoryOnNodeResponse {
+    bool success = 1;
+    string message = 2;
+    int64 files_deleted = 3;
+    int64 dirs_deleted = 4;
+}
+
 // Client registration messages
 enum ClientState {
     CLIENT_UNKNOWN = 0;
@@ -515,6 +552,7 @@ message ClientHeartbeatRequest {
     string client_id = 1;
     int64 operations_count = 2;     // Total FUSE operations since mount
     int64 bytes_read = 3;           // Total bytes read
+    int64 errors_count = 4;         // Total I/O errors since mount
 }
 
 message ClientHeartbeatResponse {
@@ -540,6 +578,7 @@ message ClientInfo {
     int64 last_heartbeat = 8;       // Unix timestamp
     int64 operations_count = 9;     // Total FUSE operations
     int64 bytes_read = 10;          // Total bytes read
+    int64 errors_count = 11;        // Total I/O errors
 }
 
 // Graceful failover messages
@@ -621,4 +660,19 @@ message FileInfo {
     string storage_id = 1;
     string file_path = 2;
     string display_path = 3;
+}
+
+// Predictor statistics messages
+message PredictorStatsRequest {}
+
+message PredictorStatsResponse {
+    string node_id = 1;
+    int32 markov_chains = 2;        // Number of active Markov chain entries
+    int32 directory_maps = 3;       // Number of directory locality maps
+    int64 predictions = 4;          // Total predictions made
+    int64 prefetches = 5;           // Total prefetch operations triggered
+    int64 prefetch_hits = 6;        // Prefetches that were later accessed (cache hits)
+    int64 prefetch_misses = 7;      // Prefetch requests that missed (from server counters)
+    double hit_rate = 8;            // Prefetch hit rate (0.0 to 1.0)
+    bool enabled = 9;               // Whether predictor is active
 }

@@ -413,3 +413,114 @@ func TestVirtualDirectoryLookup(t *testing.T) {
 		t.Logf("✓ GetAttr found 'cmd/server' as directory")
 	}
 }
+
+// TestDirHintPopulatesIndex verifies that dir-hint entries in IngestFileBatch
+// update the directory index without storing metadata or ownership.
+func TestDirHintPopulatesIndex(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	gitCache := filepath.Join(tmpDir, "git")
+
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer s.Close()
+
+	storageID := "test-storage-dirhint"
+	displayPath := "dependency"
+
+	// Register repo first.
+	_, err = s.RegisterRepository(context.Background(), &pb.RegisterRepositoryRequest{
+		StorageId:   storageID,
+		DisplayPath: displayPath,
+		Source:      "test",
+	})
+	if err != nil {
+		t.Fatalf("RegisterRepository failed: %v", err)
+	}
+
+	// Ingest one real file that this node "owns".
+	_, err = s.IngestFileBatch(context.Background(), &pb.IngestFileBatchRequest{
+		StorageId:   storageID,
+		DisplayPath: displayPath,
+		Source:      "test",
+		Files: []*pb.FileMetadata{
+			{Path: "pkg/enry.go", Mode: 0444, Size: 100, Mtime: 1000, BlobHash: "aaa"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("IngestFileBatch (real file) failed: %v", err)
+	}
+
+	// Send dir-hint entries for files that OTHER nodes own (no content/blob).
+	_, err = s.IngestFileBatch(context.Background(), &pb.IngestFileBatchRequest{
+		StorageId:   storageID,
+		DisplayPath: displayPath,
+		Source:      "dir-hint",
+		Files: []*pb.FileMetadata{
+			{Path: "pkg/classifier.go", Mode: 0444, Size: 2777, Mtime: 1000,
+				BackendMetadata: map[string]string{"dir_hint": "true"}},
+			{Path: "pkg/common.go", Mode: 0444, Size: 500, Mtime: 1000,
+				BackendMetadata: map[string]string{"dir_hint": "true"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("IngestFileBatch (dir hints) failed: %v", err)
+	}
+
+	// Now build directory indexes (from locally-owned files only).
+	_, err = s.BuildDirectoryIndexes(context.Background(), &pb.BuildDirectoryIndexesRequest{
+		StorageId: storageID,
+	})
+	if err != nil {
+		t.Fatalf("BuildDirectoryIndexes failed: %v", err)
+	}
+
+	// The dir index for "pkg" should have ALL 3 entries:
+	// enry.go (local), classifier.go (dir-hint), common.go (dir-hint).
+	var dirIndex []dirIndexEntry
+	s.db.View(func(tx *nutsdb.Tx) error {
+		val, err := tx.Get(bucketDirIndex, makeDirIndexKey(storageID, "pkg"))
+		if err != nil {
+			t.Fatalf("dir index for 'pkg' not found: %v", err)
+		}
+		return json.Unmarshal(val, &dirIndex)
+	})
+
+	names := make(map[string]bool)
+	for _, e := range dirIndex {
+		names[e.Name] = true
+	}
+
+	if len(dirIndex) != 3 {
+		t.Errorf("expected 3 entries in pkg dir index, got %d: %v", len(dirIndex), names)
+	}
+	for _, want := range []string{"enry.go", "classifier.go", "common.go"} {
+		if !names[want] {
+			t.Errorf("dir index missing %q, got entries: %v", want, names)
+		}
+	}
+
+	// Dir-hint entries should NOT have created metadata or ownership.
+	key := makeStorageKey(storageID, "pkg/classifier.go")
+	var metadataExists bool
+	s.db.View(func(tx *nutsdb.Tx) error {
+		_, err := tx.Get(bucketMetadata, key)
+		metadataExists = (err == nil)
+		return nil
+	})
+	if metadataExists {
+		t.Error("dir-hint file should NOT have metadata stored")
+	}
+
+	var ownershipExists bool
+	s.db.View(func(tx *nutsdb.Tx) error {
+		_, err := tx.Get(bucketOwnedFiles, []byte(storageID+":pkg/classifier.go"))
+		ownershipExists = (err == nil)
+		return nil
+	})
+	if ownershipExists {
+		t.Error("dir-hint file should NOT have ownership stored")
+	}
+}
