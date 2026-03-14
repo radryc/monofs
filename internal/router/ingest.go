@@ -2,15 +2,17 @@
 package router
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/radryc/packager"
+	"github.com/radryc/packager/pipeline"
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
@@ -19,12 +21,11 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// generateStorageID creates a SHA-256 hash of the display path.
-// This provides a consistent, fixed-length internal identifier regardless of
-// the display path format (path-based or simple string).
-func generateStorageID(displayPath string) string {
-	hash := sha256.Sum256([]byte(displayPath))
-	return hex.EncodeToString(hash[:])
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // normalizeRepoID converts a repository URL to a normalized path format
@@ -83,29 +84,18 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 	}
 
 	// Step 2: Generate internal storage ID (SHA-256 hash)
-	storageID := generateStorageID(displayPath)
+	storageID := sharding.GenerateStorageID(displayPath)
 
 	// Determine backend types
 	ingestionType := storage.IngestionType(strings.ToLower(req.IngestionType.String()))
 	if ingestionType == "" || ingestionType == "ingestion_git" {
 		ingestionType = storage.IngestionTypeGit
-	} else if ingestionType == "ingestion_go" {
-		ingestionType = storage.IngestionTypeGo
 	} else if ingestionType == "ingestion_s3" {
 		ingestionType = storage.IngestionTypeS3
 	}
 
-	fetchType := storage.FetchType(strings.ToLower(req.FetchType.String()))
-	if fetchType == "" || fetchType == "fetch_git" {
-		// Auto-detect: if ingestion type is Go, use GoMod fetch type
-		if ingestionType == storage.IngestionTypeGo {
-			fetchType = storage.FetchTypeGoMod
-		} else {
-			fetchType = storage.FetchTypeGit
-		}
-	} else if fetchType == "fetch_gomod" {
-		fetchType = storage.FetchTypeGoMod
-	}
+	// All ingestion now produces blob archives by default
+	fetchType := storage.FetchTypeBlob
 
 	// Handle ref with type-specific defaults and validation
 	ref := req.Ref
@@ -116,21 +106,6 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 		// Git: ref is optional, defaults to "main"
 		if ref == "" {
 			ref = "main"
-		}
-	case pb.IngestionType_INGESTION_GO:
-		// Go modules: combine source@ref or expect source to contain version
-		if ref != "" && !strings.Contains(req.Source, "@") {
-			sourceURL = req.Source + "@" + ref
-			// Update displayPath to include version for Go modules
-			// This ensures the filesystem path matches what users expect (module@version/file)
-			if displayPath == normalizeRepoID(req.Source) {
-				displayPath = normalizeRepoID(sourceURL)
-				// Regenerate storage ID with updated displayPath
-				storageID = generateStorageID(displayPath)
-			}
-		}
-		if !strings.Contains(sourceURL, "@") {
-			return fmt.Errorf("Go module source must include version (e.g., module@v1.0.0)")
 		}
 	case pb.IngestionType_INGESTION_S3:
 		// S3: ref is optional and used as prefix
@@ -275,6 +250,16 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 	}
 
 initComplete:
+	// Extract commit info from backend config (Git backend populates this during Initialize)
+	commitHash := config["commit_hash"]
+	commitMessage := config["commit_message"]
+	var commitTime int64
+	if ct, ok := config["commit_time"]; ok {
+		if t, err := time.Parse(time.RFC3339, ct); err == nil {
+			commitTime = t.Unix()
+		}
+	}
+
 	sendProgress(pb.IngestProgress_REGISTERING, "Registering repository on nodes...", 0, 0, "")
 
 	// Get cluster nodes for sharding
@@ -344,6 +329,9 @@ initComplete:
 			FetchType:       req.FetchType,
 			IngestionConfig: req.IngestionConfig,
 			FetchConfig:     req.FetchConfig,
+			CommitHash:      commitHash,
+			CommitTime:      commitTime,
+			CommitMessage:   commitMessage,
 		})
 		regCancel()
 
@@ -422,10 +410,29 @@ initComplete:
 	primaryBatches := make(map[string][]*pb.FileMetadata)            // primaryNodeID -> files
 	replicaBatches := make(map[string]map[string][]*pb.FileMetadata) // replicaNodeID -> primaryNodeID -> files
 
+	// Collect file content for archive building
+	type archiveFile struct {
+		path    string
+		hash    string
+		content []byte
+	}
+	var collectedFiles []archiveFile
+	var collectedSize int64
+
 	// Walk files using backend and group by target nodes
 	var totalFiles int64
 	err = backend.WalkFiles(stream.Context(), func(meta storage.FileMetadata) error {
 		atomic.AddInt64(&totalFiles, 1)
+
+		// Collect content for archive building
+		if len(meta.Content) > 0 {
+			collectedFiles = append(collectedFiles, archiveFile{
+				path:    meta.Path,
+				hash:    meta.ContentHash,
+				content: meta.Content,
+			})
+			collectedSize += int64(len(meta.Content))
+		}
 
 		// Determine target nodes using HRW sharding with replication
 		// GetNodes returns top N nodes sorted by HRW score
@@ -467,7 +474,6 @@ initComplete:
 
 		fileMeta := &pb.FileMetadata{
 			Path:            meta.Path,
-			RepoId:          displayPath,
 			Ref:             ref,
 			Size:            meta.Size,
 			Mtime:           meta.ModTime,
@@ -494,8 +500,23 @@ initComplete:
 			if replicaBatches[replicaNode.ID] == nil {
 				replicaBatches[replicaNode.ID] = make(map[string][]*pb.FileMetadata)
 			}
+			// Create a clone for replica to avoid race conditions during gRPC serialization
+			replicaMeta := &pb.FileMetadata{
+				Path:            fileMeta.Path,
+				Ref:             fileMeta.Ref,
+				Size:            fileMeta.Size,
+				Mtime:           fileMeta.Mtime,
+				Mode:            fileMeta.Mode,
+				BlobHash:        fileMeta.BlobHash,
+				Source:          fileMeta.Source,
+				StorageId:       fileMeta.StorageId,
+				DisplayPath:     fileMeta.DisplayPath,
+				SourceType:      fileMeta.SourceType,
+				FetchType:       fileMeta.FetchType,
+				BackendMetadata: fileMeta.BackendMetadata,
+			}
 			replicaBatches[replicaNode.ID][primaryNode.ID] = append(
-				replicaBatches[replicaNode.ID][primaryNode.ID], fileMeta)
+				replicaBatches[replicaNode.ID][primaryNode.ID], replicaMeta)
 		}
 
 		// Send progress every 1000 files
@@ -512,6 +533,124 @@ initComplete:
 	if err != nil {
 		sendProgress(pb.IngestProgress_FAILED, fmt.Sprintf("failed to walk files: %v", err), 0, 0, "")
 		return fmt.Errorf("failed to walk files: %w", err)
+	}
+
+	// ===== ARCHIVE BUILDING PHASE =====
+	// Build packager archives from collected file content and stream to fetcher nodes.
+	// Archives are split at 2GB boundaries.
+	// Files are stored using content hash as key (content-addressed) so that
+	// fetcher blob lookups by hash work correctly.
+	if r.fetcherClient != nil && len(collectedFiles) > 0 {
+		// Deduplicate by content hash — same blob should only appear once in archives.
+		seenHashes := make(map[string]bool, len(collectedFiles))
+		dedupedFiles := make([]archiveFile, 0, len(collectedFiles))
+		for _, f := range collectedFiles {
+			if f.hash == "" {
+				continue
+			}
+			if seenHashes[f.hash] {
+				continue
+			}
+			seenHashes[f.hash] = true
+			dedupedFiles = append(dedupedFiles, f)
+		}
+
+		r.logger.Info("archive deduplication",
+			"storage_id", storageID,
+			"original_files", len(collectedFiles),
+			"unique_blobs", len(dedupedFiles))
+
+		sendProgress(pb.IngestProgress_INGESTING,
+			fmt.Sprintf("Building archives from %d files (%d unique blobs, %d MB)...", len(collectedFiles), len(dedupedFiles), collectedSize/(1024*1024)),
+			0, totalFiles, "")
+
+		const maxArchiveSize int64 = 2 * 1024 * 1024 * 1024 // 2GB split threshold
+		chunkIndex := 0
+		var currentSize int64
+		var currentFiles []archiveFile
+
+		// flushArchive builds a packager archive from currentFiles and streams it to fetcher
+		flushArchive := func() error {
+			if len(currentFiles) == 0 {
+				return nil
+			}
+
+			// Get encryption key from router config
+			encKey := r.config.EncryptionKey
+			if len(encKey) != 32 {
+				return fmt.Errorf("encryption key must be 32 bytes, got %d", len(encKey))
+			}
+
+			pipe, err := pipeline.NewPipeline(encKey)
+			if err != nil {
+				return fmt.Errorf("create pipeline: %w", err)
+			}
+
+			var buf bytes.Buffer
+			w := packager.NewArchiveWriter(&buf, pipe)
+
+			for _, f := range currentFiles {
+				// Use content hash as the archive entry key (content-addressed storage).
+				// This matches how FetchBlob looks up blobs: by ContentID (= hash).
+				if err := w.AddFile(f.hash, f.content, packager.DefaultAddFileOptions()); err != nil {
+					return fmt.Errorf("add blob %s to archive: %w", f.hash, err)
+				}
+			}
+
+			if err := w.Close(); err != nil {
+				return fmt.Errorf("close archive writer: %w", err)
+			}
+
+			archiveData := buf.Bytes()
+
+			r.logger.Info("streaming archive to fetcher",
+				"storage_id", storageID,
+				"chunk_index", chunkIndex,
+				"files_in_archive", len(currentFiles),
+				"archive_size_mb", len(archiveData)/(1024*1024))
+
+			if err := r.fetcherClient.StoreArchive(stream.Context(), storageID, chunkIndex, archiveData); err != nil {
+				return fmt.Errorf("store archive chunk %d: %w", chunkIndex, err)
+			}
+
+			chunkIndex++
+			return nil
+		}
+
+		for _, f := range dedupedFiles {
+			// If adding this file would exceed the split threshold, flush current archive
+			if currentSize > 0 && currentSize+int64(len(f.content)) > maxArchiveSize {
+				if err := flushArchive(); err != nil {
+					sendProgress(pb.IngestProgress_FAILED, fmt.Sprintf("failed to build archive: %v", err), 0, 0, "")
+					return fmt.Errorf("archive building failed: %w", err)
+				}
+				currentFiles = nil
+				currentSize = 0
+			}
+
+			currentFiles = append(currentFiles, f)
+			currentSize += int64(len(f.content))
+		}
+
+		// Flush remaining files
+		if err := flushArchive(); err != nil {
+			sendProgress(pb.IngestProgress_FAILED, fmt.Sprintf("failed to build archive: %v", err), 0, 0, "")
+			return fmt.Errorf("archive building failed: %w", err)
+		}
+
+		// Free collected content memory
+		collectedFiles = nil
+
+		r.logger.Info("archive building complete",
+			"storage_id", storageID,
+			"total_archives", chunkIndex,
+			"total_size_mb", collectedSize/(1024*1024))
+
+		sendProgress(pb.IngestProgress_INGESTING,
+			fmt.Sprintf("Archives built: %d chunks", chunkIndex),
+			0, totalFiles, "")
+	} else if r.fetcherClient == nil {
+		r.logger.Warn("no fetcher client configured, skipping archive building")
 	}
 
 	// Log distribution for debugging
@@ -609,6 +748,8 @@ initComplete:
 
 				// Update counter
 				atomic.AddInt64(&filesIngested, resp.FilesIngested)
+
+				// Debug logging for specific files
 				resultChan <- nil
 			}
 		}(i)

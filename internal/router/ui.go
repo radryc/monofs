@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
@@ -70,6 +71,7 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/search", r.handleSearchPage)
 	mux.HandleFunc("/indexer", r.handleIndexerPage)
 	mux.HandleFunc("/fetchers", r.handleFetchersPage)
+	mux.HandleFunc("/dependencies", r.handleDependenciesPage)
 
 	// API routes
 	mux.HandleFunc("/api/ingest", r.handleIngest)
@@ -79,6 +81,10 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/rebalance", r.handleRebalance)
 	mux.HandleFunc("/api/clients", r.handleClientsAPI)
 	mux.HandleFunc("/api/fetchers", r.handleFetchersAPI)
+	mux.HandleFunc("/api/dependencies", r.handleDependenciesAPI)
+
+	// Predictor API route
+	mux.HandleFunc("/api/predictor", r.handlePredictorAPI)
 
 	// Search API routes
 	mux.HandleFunc("/api/search", r.handleSearchAPI)
@@ -141,6 +147,10 @@ func (r *Router) handleIndexerPage(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) handleFetchersPage(w http.ResponseWriter, req *http.Request) {
 	r.renderPage(w, "fetchers", "Fetchers")
+}
+
+func (r *Router) handleDependenciesPage(w http.ResponseWriter, req *http.Request) {
+	r.renderPage(w, "dependencies", "Dependencies")
 }
 
 func (r *Router) renderPage(w http.ResponseWriter, page, title string) {
@@ -239,8 +249,6 @@ func parseIngestionTypeString(s string) pb.IngestionType {
 	switch s {
 	case "git":
 		return pb.IngestionType_INGESTION_GIT
-	case "go":
-		return pb.IngestionType_INGESTION_GO
 	case "s3":
 		return pb.IngestionType_INGESTION_S3
 	case "file":
@@ -250,19 +258,15 @@ func parseIngestionTypeString(s string) pb.IngestionType {
 	}
 }
 
-// parseFetchTypeString converts string to FetchType enum
-func parseFetchTypeString(s string) pb.FetchType {
+// parseFetchTypeString converts string to SourceType enum
+func parseFetchTypeString(s string) pb.SourceType {
 	switch s {
 	case "git":
-		return pb.FetchType_FETCH_GIT
-	case "gomod":
-		return pb.FetchType_FETCH_GOMOD
-	case "s3":
-		return pb.FetchType_FETCH_S3
-	case "local":
-		return pb.FetchType_FETCH_LOCAL
+		return pb.SourceType_SOURCE_TYPE_GIT
+	case "blob":
+		return pb.SourceType_SOURCE_TYPE_BLOB
 	default:
-		return pb.FetchType_FETCH_GIT
+		return pb.SourceType_SOURCE_TYPE_BLOB
 	}
 }
 
@@ -716,10 +720,8 @@ func (r *Router) handleFetchersAPI(w http.ResponseWriter, req *http.Request) {
 	ctx, cancel := context.WithTimeout(req.Context(), 10*time.Second)
 	defer cancel()
 
-	// Check for detailed stats query param
-	includeSourceStats := req.URL.Query().Get("detailed") == "true"
-
-	stats, err := r.GetFetcherClusterStats(ctx, includeSourceStats)
+	// Always request source stats so cluster-level blob_stats are populated.
+	stats, err := r.GetFetcherClusterStats(ctx, true)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -730,6 +732,141 @@ func (r *Router) handleFetchersAPI(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Strip per-fetcher source stats unless ?detailed=true to keep the response small.
+	if req.URL.Query().Get("detailed") != "true" {
+		for i := range stats.Fetchers {
+			stats.Fetchers[i].SourceStats = nil
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+func (r *Router) handleDependenciesAPI(w http.ResponseWriter, req *http.Request) {
+	data, err := r.sendUIRequest(UIRequestDependencies, 10*time.Second)
+	if err != nil {
+		r.logger.Error("failed to get dependencies", "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Service temporarily unavailable",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
+
+// handlePredictorAPI returns predictor statistics from all storage nodes.
+func (r *Router) handlePredictorAPI(w http.ResponseWriter, req *http.Request) {
+	r.mu.RLock()
+	nodesSnapshot := make(map[string]*nodeState, len(r.nodes))
+	for k, v := range r.nodes {
+		nodesSnapshot[k] = v
+	}
+	staleThreshold := r.config.UnhealthyThreshold
+	r.mu.RUnlock()
+
+	type nodePredictorStats struct {
+		NodeID         string  `json:"node_id"`
+		Address        string  `json:"address"`
+		Enabled        bool    `json:"enabled"`
+		MarkovChains   int32   `json:"markov_chains"`
+		DirectoryMaps  int32   `json:"directory_maps"`
+		Predictions    int64   `json:"predictions"`
+		Prefetches     int64   `json:"prefetches"`
+		PrefetchHits   int64   `json:"prefetch_hits"`
+		PrefetchMisses int64   `json:"prefetch_misses"`
+		HitRate        float64 `json:"hit_rate"`
+		Error          string  `json:"error,omitempty"`
+	}
+
+	var (
+		results []nodePredictorStats
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+	)
+
+	for _, state := range nodesSnapshot {
+		state := state
+		if state.client == nil || !state.info.Healthy {
+			continue
+		}
+		if staleThreshold > 0 && time.Since(state.lastSeen) > staleThreshold {
+			continue
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+
+			resp, err := state.client.GetPredictorStats(ctx, &pb.PredictorStatsRequest{})
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil {
+				results = append(results, nodePredictorStats{
+					NodeID:  state.info.NodeId,
+					Address: state.info.Address,
+					Error:   err.Error(),
+				})
+				return
+			}
+
+			results = append(results, nodePredictorStats{
+				NodeID:         resp.NodeId,
+				Address:        state.info.Address,
+				Enabled:        resp.Enabled,
+				MarkovChains:   resp.MarkovChains,
+				DirectoryMaps:  resp.DirectoryMaps,
+				Predictions:    resp.Predictions,
+				Prefetches:     resp.Prefetches,
+				PrefetchHits:   resp.PrefetchHits,
+				PrefetchMisses: resp.PrefetchMisses,
+				HitRate:        resp.HitRate,
+			})
+		}()
+	}
+
+	wg.Wait()
+
+	// Compute cluster totals
+	var totalPredictions, totalPrefetches, totalHits, totalMisses int64
+	var totalChains, totalDirs int32
+	enabledNodes := 0
+	for _, r := range results {
+		if r.Enabled {
+			enabledNodes++
+			totalChains += r.MarkovChains
+			totalDirs += r.DirectoryMaps
+			totalPredictions += r.Predictions
+			totalPrefetches += r.Prefetches
+			totalHits += r.PrefetchHits
+			totalMisses += r.PrefetchMisses
+		}
+	}
+
+	var clusterHitRate float64
+	if total := float64(totalHits + totalMisses); total > 0 {
+		clusterHitRate = float64(totalHits) / total
+	}
+
+	response := map[string]interface{}{
+		"nodes":             results,
+		"total_nodes":       len(results),
+		"enabled_nodes":     enabledNodes,
+		"total_predictions": totalPredictions,
+		"total_prefetches":  totalPrefetches,
+		"total_hits":        totalHits,
+		"total_misses":      totalMisses,
+		"cluster_hit_rate":  clusterHitRate,
+		"total_chains":      totalChains,
+		"total_dir_maps":    totalDirs,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }

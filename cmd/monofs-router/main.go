@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -18,7 +19,6 @@ import (
 	"github.com/radryc/monofs/internal/router"
 	"github.com/radryc/monofs/internal/storage"
 	gitstorage "github.com/radryc/monofs/internal/storage/git"
-	gomodstorage "github.com/radryc/monofs/internal/storage/gomod"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 )
@@ -39,16 +39,6 @@ func init() {
 	storage.DefaultRegistry.RegisterFetchBackend(
 		storage.FetchTypeGit,
 		gitstorage.NewGitFetchBackend,
-	)
-
-	// Register Go module backends
-	storage.DefaultRegistry.RegisterIngestionBackend(
-		storage.IngestionTypeGo,
-		gomodstorage.NewGoModIngestionBackend,
-	)
-	storage.DefaultRegistry.RegisterFetchBackend(
-		storage.FetchTypeGoMod,
-		gomodstorage.NewGoModFetchBackend,
 	)
 
 	// Future backends will be registered here:
@@ -75,6 +65,9 @@ func main() {
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
 		rebalanceDelay        = flag.Duration("rebalance-delay", 10*time.Minute, "Wait time before permanent rebalancing after node failure")
 		gracefulFailoverDelay = flag.Duration("graceful-failover-delay", 60*time.Second, "Wait time for graceful failover (planned restarts)")
+
+		// Packager encryption
+		encryptionKeyHex = flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
 	)
 	flag.Parse()
 
@@ -100,6 +93,21 @@ func main() {
 		"rebalance_delay", *rebalanceDelay,
 		"graceful_failover_delay", *gracefulFailoverDelay)
 
+	// Parse encryption key (flag > env var)
+	var encryptionKey []byte
+	encKeyStr := *encryptionKeyHex
+	if encKeyStr == "" {
+		encKeyStr = os.Getenv("MONOFS_ENCRYPTION_KEY")
+	}
+	if encKeyStr != "" {
+		var err error
+		encryptionKey, err = hex.DecodeString(encKeyStr)
+		if err != nil || len(encryptionKey) != 32 {
+			logger.Error("encryption key must be 32 bytes (64 hex chars)", "len", len(encryptionKey), "error", err)
+			os.Exit(1)
+		}
+	}
+
 	// Create router
 	cfg := router.RouterConfig{
 		ClusterID:             *clusterID,
@@ -107,6 +115,7 @@ func main() {
 		HealthCheckInterval:   *healthInt,
 		UnhealthyThreshold:    *unhealthyThr,
 		PeerRouters:           parsePeerRouters(*peerRouters),
+		EncryptionKey:         encryptionKey,
 		ReplicationFactor:     *replicationFactor,
 		RebalanceDelay:        *rebalanceDelay,
 		GracefulFailoverDelay: *gracefulFailoverDelay,

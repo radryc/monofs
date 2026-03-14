@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -528,20 +529,32 @@ func (n *WritableNode) ensureLocalCopyFor(ctx context.Context, monofsPath string
 	}
 
 	// Fetch from backend
-	content, err := n.client.Read(ctx, monofsPath, 0, 0)
-	if err != nil {
-		// File might be new, create empty
-		n.logger.Debug("backend read failed, creating empty file", "path", monofsPath, "error", err)
+	// For paths under user root directories (e.g. .deps/), the backend
+	// doesn't know about these files. Skip the backend fetch.
+	parts := strings.Split(monofsPath, "/")
+	isUnderUserDir := len(parts) > 1 && n.sessionMgr.IsUserRootDir(parts[0])
+
+	if isUnderUserDir {
+		n.logger.Debug("ensureLocalCopy: user root dir path, creating empty file", "path", monofsPath)
 		if err := os.WriteFile(localPath, []byte{}, 0644); err != nil {
 			return fmt.Errorf("create empty file: %w", err)
 		}
 	} else {
-		if err := os.WriteFile(localPath, content, 0644); err != nil {
-			return fmt.Errorf("write local copy: %w", err)
+		content, err := n.client.Read(ctx, monofsPath, 0, 0)
+		if err != nil {
+			// File might be new, create empty
+			n.logger.Debug("backend read failed, creating empty file", "path", monofsPath, "error", err)
+			if err := os.WriteFile(localPath, []byte{}, 0644); err != nil {
+				return fmt.Errorf("create empty file: %w", err)
+			}
+		} else {
+			if err := os.WriteFile(localPath, content, 0644); err != nil {
+				return fmt.Errorf("write local copy: %w", err)
+			}
+			n.mu.Lock()
+			n.origBlobHash = "" // TODO: get actual hash
+			n.mu.Unlock()
 		}
-		n.mu.Lock()
-		n.origBlobHash = "" // TODO: get actual hash
-		n.mu.Unlock()
 	}
 
 	return nil

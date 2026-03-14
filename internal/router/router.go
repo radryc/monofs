@@ -24,6 +24,7 @@ type RouterConfig struct {
 	UnhealthyThreshold  time.Duration
 	PeerRouters         []RouterPeer
 	FetcherAddresses    []string // Fetcher cluster addresses for monitoring
+	EncryptionKey       []byte   // 32-byte ChaCha20-Poly1305 key for packager archives
 
 	// Replication and failover configuration
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
@@ -1256,6 +1257,115 @@ func (r *Router) assignFailoverNodeLocked(failedNodeID string) {
 		"failed_node", failedNodeID,
 		"backup_node", bestNodeID,
 		"delay", r.config.RebalanceDelay)
+
+	// Populate failover cache on backup node asynchronously.
+	// The backup node already has replica data in bucketMetadata from IngestReplicaBatch,
+	// so reads will work immediately. This sync copies bucketReplicaFiles → bucketFailover
+	// as a defensive safety net for edge cases (e.g., files ingested after initial replication).
+	backupClient := bestNode.client
+	allRepos := make([]string, 0, len(r.ingestedRepos))
+	for storageID := range r.ingestedRepos {
+		allRepos = append(allRepos, storageID)
+	}
+	activeNodes := make([]sharding.Node, 0, len(r.nodes))
+	sourceClients := make(map[string]pb.MonoFSClient)
+	for nid, ns := range r.nodes {
+		if nid != failedNodeID && ns.info.Healthy && ns.status == NodeActive {
+			activeNodes = append(activeNodes, sharding.Node{
+				ID:      nid,
+				Address: ns.info.Address,
+				Weight:  ns.info.Weight,
+				Healthy: true,
+			})
+			if ns.client != nil {
+				sourceClients[nid] = ns.client
+			}
+		}
+	}
+
+	go r.syncFailoverCache(failedNodeID, bestNodeID, backupClient, allRepos, activeNodes, sourceClients)
+}
+
+// syncFailoverCache populates the failover cache on the backup node.
+// It queries healthy source nodes for file lists, determines which files were owned
+// by the failed node via HRW, and calls SyncMetadataFromNode on the backup.
+func (r *Router) syncFailoverCache(failedNodeID, backupNodeID string, backupClient pb.MonoFSClient,
+	allRepos []string, activeNodes []sharding.Node, sourceClients map[string]pb.MonoFSClient) {
+
+	if backupClient == nil || len(activeNodes) == 0 || len(allRepos) == 0 || len(sourceClients) == 0 {
+		return
+	}
+
+	// Build sharder including the failed node so HRW identifies its files correctly
+	nodesWithFailed := make([]sharding.Node, len(activeNodes), len(activeNodes)+1)
+	copy(nodesWithFailed, activeNodes)
+	nodesWithFailed = append(nodesWithFailed, sharding.Node{
+		ID:      failedNodeID,
+		Healthy: true, // Mark healthy so HRW includes it
+		Weight:  1,
+	})
+	sharder := sharding.NewHRW(nodesWithFailed)
+
+	totalSynced := int64(0)
+
+	for _, storageID := range allRepos {
+		// Collect files from all healthy source nodes for this repo
+		filesBySource := make(map[string][]*pb.FileInfo)
+
+		for sourceID, client := range sourceClients {
+			listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			filesResp, err := client.GetRepositoryFiles(listCtx, &pb.GetRepositoryFilesRequest{
+				StorageId: storageID,
+			})
+			listCancel()
+
+			if err != nil {
+				r.logger.Debug("failover sync: failed to get file list",
+					"source_node", sourceID,
+					"storage_id", storageID,
+					"error", err)
+				continue
+			}
+
+			// Filter: only files that HRW assigns to the failed node
+			for _, filePath := range filesResp.Files {
+				key := storageID + ":" + filePath
+				targetNode := sharder.GetNode(key)
+				if targetNode != nil && targetNode.ID == failedNodeID {
+					filesBySource[sourceID] = append(filesBySource[sourceID], &pb.FileInfo{
+						StorageId: storageID,
+						FilePath:  filePath,
+					})
+				}
+			}
+		}
+
+		// Sync filtered files to backup node
+		for sourceNodeID, files := range filesBySource {
+			syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			resp, err := backupClient.SyncMetadataFromNode(syncCtx, &pb.SyncMetadataFromNodeRequest{
+				SourceNodeId: sourceNodeID,
+				TargetNodeId: backupNodeID,
+				Files:        files,
+			})
+			syncCancel()
+
+			if err != nil {
+				r.logger.Warn("failover sync: failed to sync files",
+					"source_node", sourceNodeID,
+					"backup_node", backupNodeID,
+					"file_count", len(files),
+					"error", err)
+			} else {
+				totalSynced += resp.FilesSynced
+			}
+		}
+	}
+
+	r.logger.Info("failover cache sync completed",
+		"failed_node", failedNodeID,
+		"backup_node", backupNodeID,
+		"files_synced", totalSynced)
 }
 
 // triggerDelayedRebalance is called when the rebalance timer fires after RebalanceDelay.

@@ -269,3 +269,46 @@ func BenchmarkGetAttr(b *testing.B) {
 		server.GetAttr(ctx, req)
 	}
 }
+
+func TestHashPathNoCollision(t *testing.T) {
+	// dlaqr1.go and dlaqps.go collided under the old DJB2 hash
+	// because 'r'*33+'1' == 'p'*33+'s' == 3811
+	a := hashPath("gonum.org/v1/gonum/lapack/gonum/dlaqr1.go")
+	b := hashPath("gonum.org/v1/gonum/lapack/gonum/dlaqps.go")
+	if a == b {
+		t.Fatalf("hashPath collision: dlaqr1.go and dlaqps.go both produce %d", a)
+	}
+}
+
+func TestHashPathEmptyReturnsOne(t *testing.T) {
+	if hashPath("") != 1 {
+		t.Fatal("hashPath(\"\") should return 1")
+	}
+}
+
+func TestHashPathDeterministic(t *testing.T) {
+	path := "some/test/path.go"
+	h1 := hashPath(path)
+	h2 := hashPath(path)
+	if h1 != h2 {
+		t.Fatalf("hashPath not deterministic: %d != %d", h1, h2)
+	}
+}
+
+func TestHashPathSiblingFileUniqueness(t *testing.T) {
+	// Files that commonly appear in the same directory should not collide
+	dir := "gonum.org/v1/gonum/lapack/gonum/"
+	files := []string{
+		"dlaqr1.go", "dlaqps.go", "dlaqr5.go", "dlarfb.go",
+		"dgetf2.go", "dgetrf.go", "dgetrs.go", "dgeqr2.go",
+	}
+	seen := make(map[uint64]string)
+	for _, f := range files {
+		path := dir + f
+		h := hashPath(path)
+		if prev, ok := seen[h]; ok {
+			t.Fatalf("hashPath collision: %q and %q both produce %d", prev, path, h)
+		}
+		seen[h] = path
+	}
+}

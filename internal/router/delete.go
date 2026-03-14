@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
 )
 
-// DeleteRepository removes a repository from all nodes and memory.
-// This is async and best-effort - failed nodes don't prevent cleanup continuation.
+// DeleteRepository removes a repository from all nodes, search index, and router memory.
+// Performs synchronous cleanup of ALL references across the cluster.
 func (r *Router) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryRequest) (*pb.DeleteRepositoryResponse, error) {
 	storageID := req.StorageId
 
@@ -19,32 +20,46 @@ func (r *Router) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryR
 	// Step 1: Remove from router's ingested repos (memory)
 	r.mu.Lock()
 	repo, exists := r.ingestedRepos[storageID]
-	if !exists {
-		r.mu.Unlock()
-		return &pb.DeleteRepositoryResponse{
-			Success:      false,
-			Message:      "repository not found in router",
-			FilesDeleted: 0,
-		}, fmt.Errorf("repository not found: %s", storageID)
+	var filesCount int64
+	if exists {
+		filesCount = repo.filesCount
+		delete(r.ingestedRepos, storageID)
 	}
-	delete(r.ingestedRepos, storageID)
 	r.mu.Unlock()
 
-	r.logger.Info("removed repository from router memory", "storage_id", storageID)
+	if exists {
+		r.logger.Info("removed repository from router memory", "storage_id", storageID, "files_count", filesCount)
+	} else {
+		r.logger.Warn("repository not found in router memory, proceeding with node cleanup", "storage_id", storageID)
+	}
 
-	// Step 2: Async delete from all backend nodes (fire and forget)
-	var filesDeleted int64
-	go r.deleteRepositoryFromNodes(storageID, &filesDeleted)
+	// Step 2: Delete from all backend nodes (synchronous, parallel)
+	totalFilesDeleted, totalDirsDeleted, nodeErrors := r.deleteRepositoryFromAllNodes(ctx, storageID)
+
+	// Step 3: Delete search index
+	r.deleteSearchIndex(ctx, storageID)
+
+	message := fmt.Sprintf("repository deleted: %d files, %d dirs removed from nodes", totalFilesDeleted, totalDirsDeleted)
+	if nodeErrors > 0 {
+		message += fmt.Sprintf(" (%d node errors)", nodeErrors)
+	}
+
+	r.logger.Info("repository deletion complete",
+		"storage_id", storageID,
+		"files_deleted", totalFilesDeleted,
+		"dirs_deleted", totalDirsDeleted,
+		"node_errors", nodeErrors)
 
 	return &pb.DeleteRepositoryResponse{
 		Success:      true,
-		Message:      fmt.Sprintf("repository deletion started for %s (had %d files)", storageID, repo.filesCount),
-		FilesDeleted: int64(repo.filesCount),
+		Message:      message,
+		FilesDeleted: totalFilesDeleted,
 	}, nil
 }
 
-// deleteRepositoryFromNodes asynchronously deletes repository files from all backend nodes.
-func (r *Router) deleteRepositoryFromNodes(storageID string, filesDeletedPtr *int64) {
+// deleteRepositoryFromAllNodes calls the node-level DeleteRepository RPC on every node.
+// Returns total files deleted, total dirs deleted, and number of node errors.
+func (r *Router) deleteRepositoryFromAllNodes(ctx context.Context, storageID string) (int64, int64, int) {
 	r.mu.RLock()
 	nodesSnapshot := make(map[string]*nodeState)
 	for nodeID, state := range r.nodes {
@@ -53,7 +68,9 @@ func (r *Router) deleteRepositoryFromNodes(storageID string, filesDeletedPtr *in
 	r.mu.RUnlock()
 
 	var wg sync.WaitGroup
-	var totalDeleted int64
+	var totalFilesDeleted int64
+	var totalDirsDeleted int64
+	var nodeErrors int64
 
 	for nodeID, state := range nodesSnapshot {
 		wg.Add(1)
@@ -62,62 +79,72 @@ func (r *Router) deleteRepositoryFromNodes(storageID string, filesDeletedPtr *in
 
 			if s.client == nil {
 				r.logger.Warn("node client not available for deletion", "node_id", nID, "storage_id", storageID)
+				atomic.AddInt64(&nodeErrors, 1)
 				return
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), deleteTimeoutSeconds)
+			// Use parent context with timeout
+			deleteCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
 
-			// Get list of repository files from node
-			resp, err := s.client.GetRepositoryFiles(ctx, &pb.GetRepositoryFilesRequest{
+			resp, err := s.client.DeleteRepository(deleteCtx, &pb.DeleteRepositoryOnNodeRequest{
 				StorageId: storageID,
 			})
 			if err != nil {
-				r.logger.Warn("failed to get repository files from node for deletion",
+				r.logger.Warn("failed to delete repository from node",
 					"node_id", nID,
 					"storage_id", storageID,
 					"error", err)
+				atomic.AddInt64(&nodeErrors, 1)
 				return
 			}
 
-			// Delete each file
-			deleted := 0
-			for _, filePath := range resp.Files {
-				delCtx, delCancel := context.WithTimeout(context.Background(), deleteFileTimeoutSeconds)
-				_, delErr := s.client.DeleteFile(delCtx, &pb.DeleteFileRequest{
-					StorageId: storageID,
-					FilePath:  filePath,
-				})
-				delCancel()
-
-				if delErr != nil {
-					r.logger.Warn("failed to delete file from node",
-						"node_id", nID,
-						"storage_id", storageID,
-						"file_path", filePath,
-						"error", delErr)
-					continue
-				}
-				deleted++
-			}
-
-			if deleted > 0 {
-				atomic.AddInt64(&totalDeleted, int64(deleted))
-				r.logger.Info("deleted repository files from node",
+			if resp.Success {
+				atomic.AddInt64(&totalFilesDeleted, resp.FilesDeleted)
+				atomic.AddInt64(&totalDirsDeleted, resp.DirsDeleted)
+				r.logger.Info("deleted repository from node",
 					"node_id", nID,
 					"storage_id", storageID,
-					"files_deleted", deleted)
+					"files_deleted", resp.FilesDeleted,
+					"dirs_deleted", resp.DirsDeleted)
+			} else {
+				r.logger.Warn("node reported deletion failure",
+					"node_id", nID,
+					"storage_id", storageID,
+					"message", resp.Message)
+				atomic.AddInt64(&nodeErrors, 1)
 			}
 		}(nodeID, state)
 	}
 
 	wg.Wait()
-
-	*filesDeletedPtr = atomic.LoadInt64(&totalDeleted)
-	r.logger.Info("repository deletion complete", "storage_id", storageID, "total_files_deleted", *filesDeletedPtr)
+	return totalFilesDeleted, totalDirsDeleted, int(nodeErrors)
 }
 
-const (
-	deleteTimeoutSeconds     = 60
-	deleteFileTimeoutSeconds = 5
-)
+// deleteRepositoryFromNodes is a compatibility wrapper used by cleanupStalePartialRepos.
+func (r *Router) deleteRepositoryFromNodes(storageID string, filesDeletedPtr *int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	totalFiles, _, _ := r.deleteRepositoryFromAllNodes(ctx, storageID)
+	*filesDeletedPtr = totalFiles
+}
+
+// deleteSearchIndex removes the search index for the repository.
+func (r *Router) deleteSearchIndex(ctx context.Context, storageID string) {
+	if r.searchClient == nil {
+		return
+	}
+
+	deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := r.searchClient.DeleteIndex(deleteCtx, &pb.DeleteIndexRequest{
+		StorageId: storageID,
+	})
+	if err != nil {
+		r.logger.Warn("failed to delete search index", "storage_id", storageID, "error", err)
+		return
+	}
+
+	r.logger.Info("deleted search index", "storage_id", storageID, "success", resp.Success)
+}
