@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	grpcmd "google.golang.org/grpc/metadata"
 )
 
 func main() {
@@ -44,6 +45,7 @@ func main() {
 	ingestionType := ingestCmd.String("ingestion-type", "git", "Ingestion backend type (git, s3, file)")
 	fetchType := ingestCmd.String("fetch-type", "blob", "Fetch backend type (blob, git, s3, local)")
 	replicateData := ingestCmd.Bool("replicate-data", false, "Replicate blob data to fetch backend during ingestion")
+	ingestClientID := ingestCmd.String("client-id", "", "Client ID for whitelist authentication (optional)")
 
 	// Delete flags
 	deleteRouter := deleteCmd.String("router", "localhost:9090", "MonoFS router address")
@@ -99,6 +101,13 @@ func main() {
 	fetchersFormat := fetchersCmd.String("format", "table", "Output format: table or json")
 	fetchersDetailed := fetchersCmd.Bool("detailed", false, "Show per-source statistics")
 
+	// Whitelist command
+	whitelistCmd := flag.NewFlagSet("whitelist", flag.ExitOnError)
+	whitelistRouter := whitelistCmd.String("router", "localhost:9090", "MonoFS router gRPC address")
+	whitelistAction := whitelistCmd.String("action", "list", "Action: add, remove, list, enable, disable")
+	whitelistClientID := whitelistCmd.String("client-id", "", "Client ID to add/remove")
+	whitelistLabel := whitelistCmd.String("label", "", "Human-friendly label for the client (optional, used with add)")
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -113,7 +122,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := ingestRepository(*routerAddr, *source, *ref, *sourceID, *ingestionType, *fetchType, *replicateData); err != nil {
+		if err := ingestRepository(*routerAddr, *source, *ref, *sourceID, *ingestionType, *fetchType, *replicateData, *ingestClientID); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: ingestion failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -257,6 +266,14 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "whitelist":
+		whitelistCmd.Parse(os.Args[2:])
+
+		if err := manageWhitelist(*whitelistRouter, *whitelistAction, *whitelistClientID, *whitelistLabel); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: whitelist failed: %v\n", err)
+			os.Exit(1)
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -285,6 +302,7 @@ Commands:
   clear-failover   Clear failover state for a recovered node
   node-files       List files owned by a specific node
   fetchers         Show fetcher cluster status and statistics
+  whitelist        Manage ingestion whitelist (add, remove, list, enable, disable)
 
 Examples:
   # Ingest repository (auto-detect branch from URL)
@@ -373,6 +391,28 @@ Node Files Options:
   --node-id     Node ID to list files for (required)
   --storage-id  Storage ID to filter by (optional)
   --format      Output format: table or json (default: table)
+
+Whitelist Options:
+  --router      Router gRPC address (default: localhost:9090)
+  --action      Action: add, remove, list, enable, disable (default: list)
+  --client-id   Client ID to add/remove
+  --label       Human-friendly label (used with add)
+
+Whitelist Examples:
+  # List whitelisted clients
+  monofs-admin whitelist --action=list
+
+  # Enable whitelist enforcement
+  monofs-admin whitelist --action=enable
+
+  # Whitelist a specific client
+  monofs-admin whitelist --action=add --client-id=<uuid> --label="build server"
+
+  # Remove a client from whitelist
+  monofs-admin whitelist --action=remove --client-id=<uuid>
+
+  # Disable whitelist enforcement
+  monofs-admin whitelist --action=disable
 `)
 }
 
@@ -453,7 +493,7 @@ func validateIngestionParams(source, ref, ingestionType string) error {
 }
 
 // ingestRepository ingests a source via the router.
-func ingestRepository(routerAddr, rawSource, ref, customSourceID, ingestionType, fetchType string, replicateData bool) error {
+func ingestRepository(routerAddr, rawSource, ref, customSourceID, ingestionType, fetchType string, replicateData bool, clientID string) error {
 	// Validate parameters
 	if err := validateIngestionParams(rawSource, ref, ingestionType); err != nil {
 		return err
@@ -515,6 +555,12 @@ func ingestRepository(routerAddr, rawSource, ref, customSourceID, ingestionType,
 	// Start ingestion with extended timeout (30 minutes for large sources)
 	ingestCtx, ingestCancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer ingestCancel()
+
+	// Attach client ID as gRPC metadata for whitelist authentication
+	if clientID != "" {
+		md := grpcmd.Pairs("x-client-id", clientID)
+		ingestCtx = grpcmd.NewOutgoingContext(ingestCtx, md)
+	}
 
 	stream, err := client.IngestRepository(ingestCtx, &pb.IngestRequest{
 		Source:          source,

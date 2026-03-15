@@ -43,6 +43,13 @@ service MonoFSRouter {
     // Cluster maintenance
     rpc DrainCluster(DrainClusterRequest) returns (DrainClusterResponse);
     rpc UndrainCluster(UndrainClusterRequest) returns (UndrainClusterResponse);
+    
+    // Ingestion whitelist management
+    rpc AddWhitelistedClient(AddWhitelistedClientRequest) returns (AddWhitelistedClientResponse);
+    rpc RemoveWhitelistedClient(RemoveWhitelistedClientRequest) returns (RemoveWhitelistedClientResponse);
+    rpc ListWhitelistedClients(ListWhitelistedClientsRequest) returns (ListWhitelistedClientsResponse);
+    rpc SetWhitelistEnabled(SetWhitelistEnabledRequest) returns (SetWhitelistEnabledResponse);
+    rpc GetWhitelistStatus(GetWhitelistStatusRequest) returns (GetWhitelistStatusResponse);
 }
 
 // MonoFS is the backend node service for filesystem operations
@@ -675,4 +682,54 @@ message PredictorStatsResponse {
     int64 prefetch_misses = 7;      // Prefetch requests that missed (from server counters)
     double hit_rate = 8;            // Prefetch hit rate (0.0 to 1.0)
     bool enabled = 9;               // Whether predictor is active
+}
+
+// Ingestion whitelist messages
+message AddWhitelistedClientRequest {
+    string client_id = 1;           // Client UUID to whitelist
+    string label = 2;               // Human-friendly label (optional)
+}
+
+message AddWhitelistedClientResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message RemoveWhitelistedClientRequest {
+    string client_id = 1;
+}
+
+message RemoveWhitelistedClientResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message ListWhitelistedClientsRequest {}
+
+message ListWhitelistedClientsResponse {
+    repeated WhitelistedClient clients = 1;
+    bool whitelist_enabled = 2;     // Whether whitelist enforcement is active
+}
+
+message WhitelistedClient {
+    string client_id = 1;
+    string label = 2;
+    int64 added_at = 3;             // Unix timestamp
+}
+
+message SetWhitelistEnabledRequest {
+    bool enabled = 1;
+}
+
+message SetWhitelistEnabledResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message GetWhitelistStatusRequest {}
+
+message GetWhitelistStatusResponse {
+    bool enabled = 1;
+    int32 whitelisted_count = 2;
+    repeated WhitelistedClient clients = 3;
 }

@@ -70,6 +70,17 @@ func normalizeRepoID(repoURL string) string {
 
 // IngestRepository implements the IngestRepository RPC with streaming progress.
 func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_IngestRepositoryServer) error {
+	// Enforce ingestion whitelist
+	if r.whitelist.Enabled() {
+		clientID := extractClientID(stream.Context())
+		if !r.whitelist.IsAllowed(clientID) {
+			r.logger.Warn("ingestion denied by whitelist",
+				"client_id", clientID,
+				"source", req.Source)
+			return fmt.Errorf("client %q is not whitelisted for ingestion", clientID)
+		}
+	}
+
 	// Validate source
 	if req.Source == "" {
 		return fmt.Errorf("source must be specified")

@@ -56,6 +56,44 @@
     </div>
 </div>
 
+<!-- Ingestion Whitelist Management -->
+<div class="card" style="margin-top: 24px;">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 class="card-title">Ingestion Whitelist</h2>
+        <div style="display: flex; gap: 8px; align-items: center;">
+            <span id="whitelistStatus" style="font-weight: 600;"></span>
+            <button class="btn" id="whitelistToggleBtn" onclick="toggleWhitelist()">...</button>
+            <button class="btn btn-primary" onclick="loadWhitelist()">🔄 Refresh</button>
+        </div>
+    </div>
+    <p style="color: var(--text-secondary); margin-bottom: 16px;">
+        When enabled, only whitelisted clients can ingest data (push dependencies, import repositories).
+    </p>
+
+    <!-- Add client form -->
+    <div style="display: flex; gap: 8px; margin-bottom: 16px; align-items: flex-end;">
+        <div style="flex: 1;">
+            <label style="font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">Client ID</label>
+            <input type="text" id="wlClientId" placeholder="Client UUID (e.g. from connected clients above)"
+                   style="width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); font-family: monospace; font-size: 13px;">
+        </div>
+        <div style="flex: 0.5;">
+            <label style="font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">Label (optional)</label>
+            <input type="text" id="wlLabel" placeholder="e.g. build-server"
+                   style="width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); font-size: 13px;">
+        </div>
+        <button class="btn btn-primary" onclick="addToWhitelist()" style="white-space: nowrap;">
+            ➕ Add Client
+        </button>
+    </div>
+
+    <div id="whitelistTable">
+        <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
+            Loading whitelist...
+        </div>
+    </div>
+</div>
+
 <script>
     function formatBytes(bytes) {
         if (bytes === 0) return '0 B';
@@ -211,5 +249,148 @@
     // Initial load and auto-refresh
     loadClients();
     setInterval(loadClients, 10000); // Refresh every 10 seconds
+
+    // --- Whitelist management ---
+    let whitelistEnabled = false;
+
+    async function loadWhitelist() {
+        try {
+            const response = await fetch('/api/whitelist');
+            const data = await response.json();
+
+            whitelistEnabled = data.enabled;
+            const clients = data.clients || [];
+
+            // Update status badge
+            const statusEl = document.getElementById('whitelistStatus');
+            const toggleBtn = document.getElementById('whitelistToggleBtn');
+            if (whitelistEnabled) {
+                statusEl.innerHTML = '<span style="color: var(--warning);">🔒 Enabled</span>';
+                toggleBtn.textContent = '🔓 Disable';
+                toggleBtn.className = 'btn';
+            } else {
+                statusEl.innerHTML = '<span style="color: var(--text-secondary);">🔓 Disabled</span>';
+                toggleBtn.textContent = '🔒 Enable';
+                toggleBtn.className = 'btn btn-primary';
+            }
+
+            if (clients.length === 0) {
+                document.getElementById('whitelistTable').innerHTML = `
+                    <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
+                        <div style="font-size: 36px; margin-bottom: 12px;">📋</div>
+                        <div>No clients whitelisted yet. Add a client ID above to restrict ingestion.</div>
+                    </div>
+                `;
+                return;
+            }
+
+            document.getElementById('whitelistTable').innerHTML = `
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Client ID</th>
+                            <th>Label</th>
+                            <th>Added</th>
+                            <th style="width: 80px;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${clients.map(c => {
+                            const addedAt = new Date(c.added_at * 1000).toLocaleString();
+                            return `
+                                <tr>
+                                    <td>
+                                        <code style="font-size: 12px; background: rgba(109, 94, 252, 0.2); padding: 2px 6px; border-radius: 4px;">
+                                            ${c.client_id}
+                                        </code>
+                                    </td>
+                                    <td>${c.label || '<span style="color: var(--text-secondary);">-</span>'}</td>
+                                    <td>${addedAt}</td>
+                                    <td>
+                                        <button class="btn" style="padding: 4px 8px; font-size: 12px;" onclick="removeFromWhitelist('${c.client_id}')">
+                                            ❌ Remove
+                                        </button>
+                                    </td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+        } catch (error) {
+            console.error('Failed to load whitelist:', error);
+            document.getElementById('whitelistTable').innerHTML = `
+                <div style="text-align: center; padding: 20px; color: var(--danger);">
+                    Failed to load whitelist: ${error.message}
+                </div>
+            `;
+        }
+    }
+
+    async function toggleWhitelist() {
+        try {
+            const response = await fetch('/api/whitelist/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: !whitelistEnabled })
+            });
+            const data = await response.json();
+            if (data.success) {
+                loadWhitelist();
+            } else {
+                alert('Failed: ' + data.message);
+            }
+        } catch (error) {
+            alert('Error toggling whitelist: ' + error.message);
+        }
+    }
+
+    async function addToWhitelist() {
+        const clientId = document.getElementById('wlClientId').value.trim();
+        const label = document.getElementById('wlLabel').value.trim();
+        if (!clientId) {
+            alert('Client ID is required');
+            return;
+        }
+        try {
+            const response = await fetch('/api/whitelist', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ client_id: clientId, label: label })
+            });
+            const data = await response.json();
+            if (data.success) {
+                document.getElementById('wlClientId').value = '';
+                document.getElementById('wlLabel').value = '';
+                loadWhitelist();
+            } else {
+                alert('Failed: ' + data.message);
+            }
+        } catch (error) {
+            alert('Error adding to whitelist: ' + error.message);
+        }
+    }
+
+    async function removeFromWhitelist(clientId) {
+        if (!confirm('Remove client ' + clientId + ' from the whitelist?')) return;
+        try {
+            const response = await fetch('/api/whitelist', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ client_id: clientId })
+            });
+            const data = await response.json();
+            if (data.success) {
+                loadWhitelist();
+            } else {
+                alert('Failed: ' + data.message);
+            }
+        } catch (error) {
+            alert('Error removing from whitelist: ' + error.message);
+        }
+    }
+
+    // Load whitelist on page load
+    loadWhitelist();
 </script>
 {{end}}
