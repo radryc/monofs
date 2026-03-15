@@ -41,6 +41,12 @@ PROTOC_GEN_GO_GRPC := protoc-gen-go-grpc
 DOCKER := docker
 DOCKER_COMPOSE := docker compose
 
+# Load .env file if it exists (for MONOFS_ENCRYPTION_KEY and other env vars)
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
+
 # Router UI aggregation
 PEER_ROUTERS ?=
 ROUTER1_PEERS ?= router2=http://router2:8080
@@ -53,7 +59,7 @@ ROUTER2_PEERS ?= router1=http://router1:8080
 .PHONY: all build build-server build-client build-router build-admin build-session build-search build-fetcher build-loadtest build-modverify clean proto proto-check \
         test test-unit test-e2e test-e2e-sudo test-smoke test-race test-coverage vet fmt fmt-check tidy \
         install-tools run-server run-client run-router run-cluster help \
-        deploy deploy-stop deploy-clean deploy-restart deploy-local deploy-local-stop deploy-local-clean deploy-local-restart \
+        deploy deploy-s3 deploy-s3-external deploy-s3-clean deploy-stop deploy-clean deploy-restart deploy-local deploy-local-stop deploy-local-clean deploy-local-restart \
         mount mount-writable unmount \
         docker-build docker-up docker-down docker-logs docker-clean docker-restart
 
@@ -162,6 +168,20 @@ deploy: ## Rebuild and deploy Docker cluster (router + 3 nodes)
 	@echo "MonoFS Docker Deployment"
 	@echo "======================================"
 	@echo ""
+	@echo "Checking for encryption key..."
+	@if [ -z "$(MONOFS_ENCRYPTION_KEY)" ]; then \
+		echo "❌ ERROR: MONOFS_ENCRYPTION_KEY environment variable is not set!"; \
+		echo ""; \
+		echo "Generate a key with: openssl rand -hex 32"; \
+		echo ""; \
+		echo "Then either:"; \
+		echo "  1. Export it: export MONOFS_ENCRYPTION_KEY=\$$(openssl rand -hex 32)"; \
+		echo "  2. Add to .env file: echo MONOFS_ENCRYPTION_KEY=\$$(openssl rand -hex 32) >> .env"; \
+		echo ""; \
+		exit 1; \
+	fi
+	@echo "✅ Encryption key is set"
+	@echo ""
 	@echo "Version: $(VERSION) ($(COMMIT))"
 	@echo "Build Time: $(BUILD_TIME)"
 	@echo ""
@@ -171,7 +191,8 @@ deploy: ## Rebuild and deploy Docker cluster (router + 3 nodes)
 		$(DOCKER_COMPOSE) build
 	@echo ""
 	@echo "Starting services..."
-	@ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+	@GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
+		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
 		$(DOCKER_COMPOSE) up -d
 	@sleep 2
 	@echo ""
@@ -210,6 +231,121 @@ deploy: ## Rebuild and deploy Docker cluster (router + 3 nodes)
 	@echo "  make deploy-restart - Restart cluster"
 	@echo "  make deploy-stop    - Stop cluster"
 	@echo "  make deploy-clean   - Stop and remove all data"
+	@echo "======================================"
+
+deploy-s3: ## Deploy Docker cluster with MinIO S3 backend
+	@echo "======================================"
+	@echo "MonoFS Docker Deployment with MinIO S3"
+	@echo "======================================"
+	@echo ""
+	@echo "Checking for encryption key..."
+	@if [ -z "$(MONOFS_ENCRYPTION_KEY)" ]; then \
+		echo "❌ ERROR: MONOFS_ENCRYPTION_KEY environment variable is not set!"; \
+		echo ""; \
+		echo "Generate a key with: openssl rand -hex 32"; \
+		echo ""; \
+		echo "Then either:"; \
+		echo "  1. Export it: export MONOFS_ENCRYPTION_KEY=\$$(openssl rand -hex 32)"; \
+		echo "  2. Add to .env file: echo MONOFS_ENCRYPTION_KEY=\$$(openssl rand -hex 32) >> .env"; \
+		echo ""; \
+		exit 1; \
+	fi
+	@echo "✅ Encryption key is set"
+	@echo ""
+	@echo "Building Docker images..."
+	GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
+		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3.yml build
+	@echo ""
+	@echo "Starting services..."
+	@GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
+		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3.yml up -d
+	@sleep 2
+	@echo ""
+	@echo "======================================"
+	@echo "✅ Deployment Complete!"
+	@echo "======================================"
+	@echo ""
+	@echo "Architecture:"
+	@echo "  🔀 HAProxy:      localhost:9090 (gRPC) / localhost:8080 (HTTP)"
+	@echo "  📊 HAProxy Stats: http://localhost:8404/stats"
+	@echo "  🪣 MinIO S3:     localhost:19000 (API) / localhost:19001 (Console)"
+	@echo "  📡 Router 1-2:   Internal (load balanced)"
+	@echo "  💾 Backend 1-5:  Internal cluster nodes"
+	@echo "  🔍 Search:       Internal (Zoekt-based code search)"
+	@echo ""
+	@echo "Access Points:"
+	@echo "  🌐 Web UI:       http://localhost:8080"
+	@echo "  📡 gRPC API:     localhost:9090"
+	@echo "  🪣 MinIO Console: http://localhost:19001 (minioadmin/minioadmin)"
+	@echo "  🖥️  SSH Client:   ssh -p 2222 monofs@localhost (auto-mounted)"
+	@echo ""
+	@echo "Admin CLI:"
+	@echo "  ./bin/monofs-admin status --router=localhost:9090"
+	@echo "  ./bin/monofs-admin ingest --url=<repo-url>"
+	@echo ""
+	@echo "Logs & Management:"
+	@echo "  make docker-logs    - View container logs"
+	@echo "  make deploy-stop    - Stop cluster"
+	@echo "======================================"
+
+deploy-s3-external: ## Deploy Docker cluster using existing external MinIO
+	@echo "======================================"
+	@echo "MonoFS Docker Deployment (External MinIO)"
+	@echo "======================================"
+	@echo ""
+	@echo "Using external MinIO at: ${MONOFS_S3_ENDPOINT:-http://localhost:19000}"
+	@echo ""
+	@if [ -z "$(MONOFS_ENCRYPTION_KEY)" ]; then \
+		echo "❌ ERROR: MONOFS_ENCRYPTION_KEY environment variable is not set!"; \
+		echo ""; \
+		echo "Generate a key with: openssl rand -hex 32"; \
+		echo ""; \
+		echo "Then either:"; \
+		echo "  1. Export it: export MONOFS_ENCRYPTION_KEY=\$$(openssl rand -hex 32)"; \
+		echo "  2. Add to .env file: echo MONOFS_ENCRYPTION_KEY=\$$(openssl rand -hex 32) >> .env"; \
+		echo ""; \
+		exit 1; \
+	fi
+	@echo "✅ Encryption key is set"
+	@echo ""
+	@echo "Building Docker images..."
+	GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
+		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3-external.yml build
+	@echo ""
+	@echo "Starting services..."
+	@GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
+		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3-external.yml up -d
+	@sleep 2
+	@echo ""
+	@echo "======================================"
+	@echo "✅ Deployment Complete!"
+	@echo "======================================"
+	@echo ""
+	@echo "Architecture:"
+	@echo "  🔀 HAProxy:      localhost:9090 (gRPC) / localhost:8080 (HTTP)"
+	@echo "  📊 HAProxy Stats: http://localhost:8404/stats"
+	@echo "  🪣 External MinIO: ${MONOFS_S3_ENDPOINT:-http://localhost:19000}"
+	@echo "  📡 Router 1-2:   Internal (load balanced)"
+	@echo "  💾 Backend 1-5:  Internal cluster nodes"
+	@echo "  🔍 Search:       Internal (Zoekt-based code search)"
+	@echo ""
+	@echo "Access Points:"
+	@echo "  🌐 Web UI:       http://localhost:8080"
+	@echo "  📡 gRPC API:     localhost:9090"
+	@echo "  🪣 MinIO Console: http://localhost:19001 (minioadmin/minioadmin)"
+	@echo "  🖥️  SSH Client:   ssh -p 2222 monofs@localhost (auto-mounted)"
+	@echo ""
+	@echo "Admin CLI:"
+	@echo "  ./bin/monofs-admin status --router=localhost:9090"
+	@echo "  ./bin/monofs-admin ingest --url=<repo-url>"
+	@echo ""
+	@echo "Logs & Management:"
+	@echo "  make docker-logs    - View container logs"
+	@echo "  make deploy-stop    - Stop cluster"
 	@echo "======================================"
 
 deploy-local: build ## Deploy local dev cluster (router + 3 nodes with proper directories)
@@ -291,7 +427,9 @@ deploy-local: build ## Deploy local dev cluster (router + 3 nodes with proper di
 
 deploy-stop: ## Stop dev deployment
 	@echo "Stopping MonoFS deployment..."
-	@$(DOCKER_COMPOSE) down --remove-orphans || true
+	@$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3.yml down --remove-orphans 2>/dev/null || \
+		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3-external.yml down --remove-orphans 2>/dev/null || \
+		$(DOCKER_COMPOSE) down --remove-orphans || true
 	@if pgrep -x monofs-server > /dev/null; then echo "  - Stopping monofs-server"; pkill -9 -x monofs-server; fi
 	@if pgrep -x monofs-router > /dev/null; then echo "  - Stopping monofs-router"; pkill -9 -x monofs-router; fi
 	@if pgrep -x monofs-client > /dev/null; then echo "  - Stopping monofs-client"; pkill -9 -x monofs-client; fi
@@ -299,10 +437,55 @@ deploy-stop: ## Stop dev deployment
 
 deploy-clean: ## Stop deployment and remove all data
 	@echo "Cleaning deployment..."
-	@$(DOCKER_COMPOSE) down -v --remove-orphans || true
+	@$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3.yml down -v --remove-orphans 2>/dev/null || \
+		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3-external.yml down -v --remove-orphans 2>/dev/null || \
+		$(DOCKER_COMPOSE) down -v --remove-orphans || true
 	@docker ps -a --filter 'name=monofs-' -q | xargs -r docker rm -f 2>/dev/null || true
 	@rm -rf /tmp/monofs-dev || true
 	@echo "✅ Cleaned deployment data"
+
+deploy-s3-clean: ## Stop S3 deployment and remove all data (including MinIO)
+	@echo "======================================"
+	@echo "MonoFS S3 Deployment Cleanup"
+	@echo "======================================"
+	@echo ""
+	@echo "Stopping services and removing all data..."
+	@$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3.yml down -v --remove-orphans 2>/dev/null || \
+		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3-external.yml down -v --remove-orphans 2>/dev/null || true
+	@docker ps -a --filter 'name=monofs-' -q | xargs -r docker rm -f 2>/dev/null || true
+	@echo ""
+	@echo "✅ S3 deployment cleaned"
+	@echo ""
+	@echo "Removed:"
+	@echo "  - All MonoFS containers (router, nodes, fetchers, search)"
+	@echo "  - All volumes (node data, fetcher cache)"
+	@echo ""
+	@echo "Note: External MinIO data is preserved (not managed by this deployment)"
+	@echo ""
+	@echo "Kept:"
+	@echo "  - .env file (with your encryption key)"
+	@echo ""
+	@echo "To redeploy: make deploy-s3-external"
+	@echo "======================================"
+	@echo "MonoFS S3 Deployment Cleanup"
+	@echo "======================================"
+	@echo ""
+	@echo "Stopping services and removing all data..."
+	@$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3.yml down -v --remove-orphans
+	@docker ps -a --filter 'name=monofs-' -q | xargs -r docker rm -f 2>/dev/null || true
+	@echo ""
+	@echo "✅ S3 deployment cleaned"
+	@echo ""
+	@echo "Removed:"
+	@echo "  - All MonoFS containers (router, nodes, fetchers, search)"
+	@echo "  - All volumes (node data, fetcher cache, MinIO data)"
+	@echo "  - MinIO bucket data"
+	@echo ""
+	@echo "Kept:"
+	@echo "  - .env file (with your encryption key)"
+	@echo ""
+	@echo "To redeploy: make deploy-s3"
+	@echo "======================================"
 
 deploy-restart: deploy-stop deploy ## Restart deployment
 

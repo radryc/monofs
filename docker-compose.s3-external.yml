@@ -1,0 +1,51 @@
+# MonoFS with External MinIO S3 Backend
+#
+# Use this when you have an existing MinIO instance running.
+# Default: localhost:19000 (API) / localhost:19001 (Console)
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.s3-external.yml up -d
+#
+# Or use the make command:
+#   make deploy-s3-external
+
+services:
+  # Fetcher 1 with S3 backend (using external MinIO)
+  fetcher1:
+    command:
+      - "monofs-fetcher"
+      - "--port=9200"
+      - "--cache-dir=/data/cache"
+      - "--max-cache-gb=20"
+      - "--cache-age-hours=2"
+      - "--prefetch-workers=4"
+      - "--log-level=info"
+      - "--config=/etc/monofs/fetcher-s3.json"
+    environment:
+      - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
+      - MONOFS_S3_REGION=${MONOFS_S3_REGION:-us-east-1}
+      - MONOFS_S3_BUCKET=${MONOFS_S3_BUCKET:-monofs}
+      - MONOFS_S3_ENDPOINT=${MONOFS_S3_ENDPOINT:-http://host.docker.internal:19000}
+      - MONOFS_S3_ACCESS_KEY_ID=${MONOFS_S3_ACCESS_KEY_ID:-minioadmin}
+      - MONOFS_S3_SECRET_ACCESS_KEY=${MONOFS_S3_SECRET_ACCESS_KEY:-minioadmin}
+      - MONOFS_S3_USE_PATH_STYLE=${MONOFS_S3_USE_PATH_STYLE:-true}
+
+  # Fetcher 2 with S3 backend (using external MinIO)
+  fetcher2:
+    command:
+      - "monofs-fetcher"
+      - "--port=9200"
+      - "--cache-dir=/data/cache"
+      - "--max-cache-gb=20"
+      - "--cache-age-hours=2"
+      - "--prefetch-workers=4"
+      - "--log-level=info"
+      - "--config=/etc/monofs/fetcher-s3.json"
+    environment:
+      - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
+      - MONOFS_S3_REGION=${MONOFS_S3_REGION:-us-east-1}
+      - MONOFS_S3_BUCKET=${MONOFS_S3_BUCKET:-monofs}
+      - MONOFS_S3_ENDPOINT=${MONOFS_S3_ENDPOINT:-http://host.docker.internal:19000}
+      - MONOFS_S3_ACCESS_KEY_ID=${MONOFS_S3_ACCESS_KEY_ID:-minioadmin}
+      - MONOFS_S3_SECRET_ACCESS_KEY=${MONOFS_S3_SECRET_ACCESS_KEY:-minioadmin}
+      - MONOFS_S3_USE_PATH_STYLE=${MONOFS_S3_USE_PATH_STYLE:-true}
