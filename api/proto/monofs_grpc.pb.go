@@ -35,6 +35,11 @@ const (
 	MonoFSRouter_GetNodeStats_FullMethodName             = "/monofs.MonoFSRouter/GetNodeStats"
 	MonoFSRouter_DrainCluster_FullMethodName             = "/monofs.MonoFSRouter/DrainCluster"
 	MonoFSRouter_UndrainCluster_FullMethodName           = "/monofs.MonoFSRouter/UndrainCluster"
+	MonoFSRouter_AddWhitelistedClient_FullMethodName     = "/monofs.MonoFSRouter/AddWhitelistedClient"
+	MonoFSRouter_RemoveWhitelistedClient_FullMethodName  = "/monofs.MonoFSRouter/RemoveWhitelistedClient"
+	MonoFSRouter_ListWhitelistedClients_FullMethodName   = "/monofs.MonoFSRouter/ListWhitelistedClients"
+	MonoFSRouter_SetWhitelistEnabled_FullMethodName      = "/monofs.MonoFSRouter/SetWhitelistEnabled"
+	MonoFSRouter_GetWhitelistStatus_FullMethodName       = "/monofs.MonoFSRouter/GetWhitelistStatus"
 )
 
 // MonoFSRouterClient is the client API for MonoFSRouter service.
@@ -70,6 +75,12 @@ type MonoFSRouterClient interface {
 	// Cluster maintenance
 	DrainCluster(ctx context.Context, in *DrainClusterRequest, opts ...grpc.CallOption) (*DrainClusterResponse, error)
 	UndrainCluster(ctx context.Context, in *UndrainClusterRequest, opts ...grpc.CallOption) (*UndrainClusterResponse, error)
+	// Ingestion whitelist management
+	AddWhitelistedClient(ctx context.Context, in *AddWhitelistedClientRequest, opts ...grpc.CallOption) (*AddWhitelistedClientResponse, error)
+	RemoveWhitelistedClient(ctx context.Context, in *RemoveWhitelistedClientRequest, opts ...grpc.CallOption) (*RemoveWhitelistedClientResponse, error)
+	ListWhitelistedClients(ctx context.Context, in *ListWhitelistedClientsRequest, opts ...grpc.CallOption) (*ListWhitelistedClientsResponse, error)
+	SetWhitelistEnabled(ctx context.Context, in *SetWhitelistEnabledRequest, opts ...grpc.CallOption) (*SetWhitelistEnabledResponse, error)
+	GetWhitelistStatus(ctx context.Context, in *GetWhitelistStatusRequest, opts ...grpc.CallOption) (*GetWhitelistStatusResponse, error)
 }
 
 type monoFSRouterClient struct {
@@ -249,6 +260,56 @@ func (c *monoFSRouterClient) UndrainCluster(ctx context.Context, in *UndrainClus
 	return out, nil
 }
 
+func (c *monoFSRouterClient) AddWhitelistedClient(ctx context.Context, in *AddWhitelistedClientRequest, opts ...grpc.CallOption) (*AddWhitelistedClientResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddWhitelistedClientResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_AddWhitelistedClient_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) RemoveWhitelistedClient(ctx context.Context, in *RemoveWhitelistedClientRequest, opts ...grpc.CallOption) (*RemoveWhitelistedClientResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveWhitelistedClientResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_RemoveWhitelistedClient_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) ListWhitelistedClients(ctx context.Context, in *ListWhitelistedClientsRequest, opts ...grpc.CallOption) (*ListWhitelistedClientsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListWhitelistedClientsResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_ListWhitelistedClients_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) SetWhitelistEnabled(ctx context.Context, in *SetWhitelistEnabledRequest, opts ...grpc.CallOption) (*SetWhitelistEnabledResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetWhitelistEnabledResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_SetWhitelistEnabled_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) GetWhitelistStatus(ctx context.Context, in *GetWhitelistStatusRequest, opts ...grpc.CallOption) (*GetWhitelistStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetWhitelistStatusResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_GetWhitelistStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MonoFSRouterServer is the server API for MonoFSRouter service.
 // All implementations must embed UnimplementedMonoFSRouterServer
 // for forward compatibility.
@@ -282,6 +343,12 @@ type MonoFSRouterServer interface {
 	// Cluster maintenance
 	DrainCluster(context.Context, *DrainClusterRequest) (*DrainClusterResponse, error)
 	UndrainCluster(context.Context, *UndrainClusterRequest) (*UndrainClusterResponse, error)
+	// Ingestion whitelist management
+	AddWhitelistedClient(context.Context, *AddWhitelistedClientRequest) (*AddWhitelistedClientResponse, error)
+	RemoveWhitelistedClient(context.Context, *RemoveWhitelistedClientRequest) (*RemoveWhitelistedClientResponse, error)
+	ListWhitelistedClients(context.Context, *ListWhitelistedClientsRequest) (*ListWhitelistedClientsResponse, error)
+	SetWhitelistEnabled(context.Context, *SetWhitelistEnabledRequest) (*SetWhitelistEnabledResponse, error)
+	GetWhitelistStatus(context.Context, *GetWhitelistStatusRequest) (*GetWhitelistStatusResponse, error)
 	mustEmbedUnimplementedMonoFSRouterServer()
 }
 
@@ -339,6 +406,21 @@ func (UnimplementedMonoFSRouterServer) DrainCluster(context.Context, *DrainClust
 }
 func (UnimplementedMonoFSRouterServer) UndrainCluster(context.Context, *UndrainClusterRequest) (*UndrainClusterResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UndrainCluster not implemented")
+}
+func (UnimplementedMonoFSRouterServer) AddWhitelistedClient(context.Context, *AddWhitelistedClientRequest) (*AddWhitelistedClientResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddWhitelistedClient not implemented")
+}
+func (UnimplementedMonoFSRouterServer) RemoveWhitelistedClient(context.Context, *RemoveWhitelistedClientRequest) (*RemoveWhitelistedClientResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveWhitelistedClient not implemented")
+}
+func (UnimplementedMonoFSRouterServer) ListWhitelistedClients(context.Context, *ListWhitelistedClientsRequest) (*ListWhitelistedClientsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListWhitelistedClients not implemented")
+}
+func (UnimplementedMonoFSRouterServer) SetWhitelistEnabled(context.Context, *SetWhitelistEnabledRequest) (*SetWhitelistEnabledResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetWhitelistEnabled not implemented")
+}
+func (UnimplementedMonoFSRouterServer) GetWhitelistStatus(context.Context, *GetWhitelistStatusRequest) (*GetWhitelistStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetWhitelistStatus not implemented")
 }
 func (UnimplementedMonoFSRouterServer) mustEmbedUnimplementedMonoFSRouterServer() {}
 func (UnimplementedMonoFSRouterServer) testEmbeddedByValue()                      {}
@@ -642,6 +724,96 @@ func _MonoFSRouter_UndrainCluster_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFSRouter_AddWhitelistedClient_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddWhitelistedClientRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).AddWhitelistedClient(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_AddWhitelistedClient_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).AddWhitelistedClient(ctx, req.(*AddWhitelistedClientRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_RemoveWhitelistedClient_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveWhitelistedClientRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).RemoveWhitelistedClient(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_RemoveWhitelistedClient_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).RemoveWhitelistedClient(ctx, req.(*RemoveWhitelistedClientRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_ListWhitelistedClients_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWhitelistedClientsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).ListWhitelistedClients(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_ListWhitelistedClients_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).ListWhitelistedClients(ctx, req.(*ListWhitelistedClientsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_SetWhitelistEnabled_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetWhitelistEnabledRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).SetWhitelistEnabled(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_SetWhitelistEnabled_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).SetWhitelistEnabled(ctx, req.(*SetWhitelistEnabledRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_GetWhitelistStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetWhitelistStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).GetWhitelistStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_GetWhitelistStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).GetWhitelistStatus(ctx, req.(*GetWhitelistStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MonoFSRouter_ServiceDesc is the grpc.ServiceDesc for MonoFSRouter service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -708,6 +880,26 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UndrainCluster",
 			Handler:    _MonoFSRouter_UndrainCluster_Handler,
+		},
+		{
+			MethodName: "AddWhitelistedClient",
+			Handler:    _MonoFSRouter_AddWhitelistedClient_Handler,
+		},
+		{
+			MethodName: "RemoveWhitelistedClient",
+			Handler:    _MonoFSRouter_RemoveWhitelistedClient_Handler,
+		},
+		{
+			MethodName: "ListWhitelistedClients",
+			Handler:    _MonoFSRouter_ListWhitelistedClients_Handler,
+		},
+		{
+			MethodName: "SetWhitelistEnabled",
+			Handler:    _MonoFSRouter_SetWhitelistEnabled_Handler,
+		},
+		{
+			MethodName: "GetWhitelistStatus",
+			Handler:    _MonoFSRouter_GetWhitelistStatus_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -83,6 +83,10 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/fetchers", r.handleFetchersAPI)
 	mux.HandleFunc("/api/dependencies", r.handleDependenciesAPI)
 
+	// Whitelist API routes
+	mux.HandleFunc("/api/whitelist", r.handleWhitelistAPI)
+	mux.HandleFunc("/api/whitelist/toggle", r.handleWhitelistToggleAPI)
+
 	// Predictor API route
 	mux.HandleFunc("/api/predictor", r.handlePredictorAPI)
 
@@ -178,6 +182,23 @@ func (r *Router) handleIngest(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	// Enforce ingestion whitelist
+	if r.whitelist.Enabled() {
+		clientID := req.FormValue("client_id")
+		if clientID == "" {
+			clientID = req.Header.Get("X-Client-ID")
+		}
+		if !r.whitelist.IsAllowed(clientID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("client %q is not whitelisted for ingestion", clientID),
+			})
+			return
+		}
 	}
 
 	source := req.FormValue("source")
