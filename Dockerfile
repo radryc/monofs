@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
@@ -110,13 +110,15 @@ RUN mkdir -p /data/cache/git /data/cache/blob /etc/monofs && chown -R monofs:mon
 
 COPY --from=builder /bin/monofs-fetcher /usr/local/bin/monofs-fetcher
 COPY config/fetcher.json /etc/monofs/fetcher.json
+COPY docker/fetcher-entrypoint.sh /usr/local/bin/fetcher-entrypoint.sh
+RUN chmod +x /usr/local/bin/fetcher-entrypoint.sh
 
 USER monofs
 
 EXPOSE 9200
 
-ENTRYPOINT ["monofs-fetcher"]
-CMD ["--port=9200", "--cache-dir=/data/cache"]
+ENTRYPOINT ["/usr/local/bin/fetcher-entrypoint.sh"]
+CMD ["monofs-fetcher", "--port=9200", "--cache-dir=/data/cache"]
 
 # Client image (interactive with SSH)
 FROM alpine:3.19 AS client

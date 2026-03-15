@@ -1,4 +1,5 @@
 {
+  "_comment": "MonoFS Fetcher Configuration - See docs/S3_CONFIGURATION.md for S3/MinIO setup",
   "port": 9200,
   "cache_dir": "/data/cache",
   "max_cache_gb": 50,
@@ -7,7 +8,22 @@
   "enable_git": false,
   "log_level": "info",
   "storage": {
+    "_comment": "Storage backend: 'local' (default), 's3' (S3-compatible), or 'gcs' (Google Cloud Storage)",
     "type": "local",
-    "local_path": ""
+    "local_path": "",
+
+    "_comment_s3": "S3 configuration (used when type='s3') - See docs/S3_CONFIGURATION.md",
+    "s3_region": "",
+    "s3_bucket": "",
+    "s3_prefix": "",
+    "s3_endpoint": "",
+    "s3_access_key_id": "",
+    "s3_secret_access_key": "",
+    "s3_use_path_style": false,
+
+    "_comment_gcs": "GCS configuration (used when type='gcs')",
+    "gcs_bucket": "",
+    "gcs_prefix": "",
+    "gcs_credentials_file": ""
   }
 }
