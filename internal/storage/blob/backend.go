@@ -17,6 +17,9 @@ import (
 	"sync"
 	"time"
 
+	gcStorage "cloud.google.com/go/storage"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/radryc/monofs/internal/storage"
 	"github.com/radryc/packager"
 	"github.com/radryc/packager/pipeline"
@@ -24,7 +27,7 @@ import (
 )
 
 // maxOpenArchives limits concurrently open ArchiveReader handles.
-const maxOpenArchives = 128
+const maxOpenArchives = 256
 
 // archiveRef maps a blob hash to its location inside a packager archive.
 type archiveRef struct {
@@ -64,6 +67,10 @@ type BlobBackend struct {
 	archivePaths map[string]bool
 
 	stats *storage.AtomicStats
+
+	// Cloud storage clients (nil when StorageType == "local").
+	s3Client  *s3.Client
+	gcsClient *gcStorage.Client
 }
 
 // NewBlobBackend creates a new packager-based blob backend.
@@ -96,13 +103,50 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 	}
 	bb.pipeline = p
 
-	// Ensure archive directories exist
+	// Initialize cloud storage client when configured.
+	switch config.StorageType {
+	case storage.StorageTypeS3:
+		c := config.Cloud
+		if c.S3Bucket == "" {
+			return fmt.Errorf("blob backend: S3 bucket is required when storage_type=s3")
+		}
+		s3Cfg := pkgstorage.S3Config{
+			Region:          c.S3Region,
+			Endpoint:        c.S3Endpoint,
+			AccessKeyID:     c.S3AccessKeyID,
+			SecretAccessKey: c.S3SecretAccessKey,
+			SessionToken:    c.S3SessionToken,
+			UsePathStyle:    c.S3UsePathStyle,
+		}
+		client, err := pkgstorage.NewS3Client(ctx, s3Cfg)
+		if err != nil {
+			return fmt.Errorf("blob backend: create S3 client: %w", err)
+		}
+		bb.s3Client = client
+
+	case storage.StorageTypeGCS:
+		c := config.Cloud
+		if c.GCSBucket == "" {
+			return fmt.Errorf("blob backend: GCS bucket is required when storage_type=gcs")
+		}
+		gcsCfg := pkgstorage.GCSConfig{
+			CredentialsFile: c.GCSCredentialsFile,
+			CredentialsJSON: c.GCSCredentialsJSON,
+		}
+		client, err := pkgstorage.NewGCSClient(ctx, gcsCfg)
+		if err != nil {
+			return fmt.Errorf("blob backend: create GCS client: %w", err)
+		}
+		bb.gcsClient = client
+	}
+
+	// Ensure local archive cache directory exists (used for all storage types).
 	archiveDir := filepath.Join(config.CacheDir, "archives")
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		return fmt.Errorf("failed to create archive dir: %w", err)
 	}
 
-	// Scan existing archives and build blob index
+	// Scan locally-cached archives and build blob index.
 	if err := bb.scanArchives(archiveDir); err != nil {
 		return fmt.Errorf("failed to scan existing archives: %w", err)
 	}
@@ -204,7 +248,134 @@ func (bb *BlobBackend) indexArchive(archivePath string) (int, error) {
 	return indexed, nil
 }
 
-// StoreArchive writes a packager archive to disk and indexes its contents.
+// cloudKey returns the S3/GCS object key for a local archive path.
+// The key is: <prefix>/<storageID>/<filename.pack>
+func (bb *BlobBackend) cloudKey(archivePath string) string {
+	archiveDir := filepath.Join(bb.config.CacheDir, "archives")
+	rel, err := filepath.Rel(archiveDir, archivePath)
+	if err != nil {
+		// Shouldn't happen; fall back to basename.
+		rel = filepath.Base(archivePath)
+	}
+	// Normalise to forward slashes for cloud keys.
+	rel = strings.ReplaceAll(rel, string(filepath.Separator), "/")
+
+	prefix := bb.config.Cloud.S3Prefix
+	if bb.config.StorageType == storage.StorageTypeGCS {
+		prefix = bb.config.Cloud.GCSPrefix
+	}
+	if prefix != "" {
+		return strings.TrimRight(prefix, "/") + "/" + rel
+	}
+	return rel
+}
+
+// uploadToCloud uploads archiveData to the configured cloud bucket.
+// It is safe to call when StorageType is "local" (no-op).
+func (bb *BlobBackend) uploadToCloud(archivePath string, archiveData []byte) {
+	switch bb.config.StorageType {
+	case storage.StorageTypeS3:
+		bb.uploadToS3(archivePath, archiveData)
+	case storage.StorageTypeGCS:
+		bb.uploadToGCS(archivePath, archiveData)
+	}
+}
+
+func (bb *BlobBackend) uploadToS3(archivePath string, data []byte) {
+	key := bb.cloudKey(archivePath)
+	_, err := bb.s3Client.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(bb.config.Cloud.S3Bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(data),
+	})
+	if err != nil {
+		if bb.logger != nil {
+			bb.logger.Error("failed to upload archive to S3", "key", key, "error", err)
+		}
+	}
+}
+
+func (bb *BlobBackend) uploadToGCS(archivePath string, data []byte) {
+	key := bb.cloudKey(archivePath)
+	bucket := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket)
+	writer := bucket.Object(key).NewWriter(context.Background())
+	if _, err := writer.Write(data); err != nil {
+		writer.Close()
+		if bb.logger != nil {
+			bb.logger.Error("failed to upload archive to GCS", "key", key, "error", err)
+		}
+		return
+	}
+	if err := writer.Close(); err != nil {
+		if bb.logger != nil {
+			bb.logger.Error("failed to close GCS writer", "key", key, "error", err)
+		}
+	}
+}
+
+// downloadFromCloud fetches an archive from the cloud and caches it locally.
+// Returns the local path on success.
+func (bb *BlobBackend) downloadFromCloud(archivePath string) error {
+	key := bb.cloudKey(archivePath)
+
+	var data []byte
+	var err error
+
+	switch bb.config.StorageType {
+	case storage.StorageTypeS3:
+		data, err = bb.downloadFromS3(key)
+	case storage.StorageTypeGCS:
+		data, err = bb.downloadFromGCS(key)
+	default:
+		return fmt.Errorf("cloud download not available for storage type %q", bb.config.StorageType)
+	}
+	if err != nil {
+		return err
+	}
+
+	// Cache locally.
+	if err := os.MkdirAll(filepath.Dir(archivePath), 0755); err != nil {
+		return fmt.Errorf("create local cache dir: %w", err)
+	}
+	tmpPath := archivePath + ".dl.tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("write local cache: %w", err)
+	}
+	if err := os.Rename(tmpPath, archivePath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename local cache: %w", err)
+	}
+	return nil
+}
+
+func (bb *BlobBackend) downloadFromS3(key string) ([]byte, error) {
+	resp, err := bb.s3Client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(bb.config.Cloud.S3Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("s3 GetObject %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+func (bb *BlobBackend) downloadFromGCS(key string) ([]byte, error) {
+	rc, err := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket).Object(key).NewReader(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("gcs NewReader %s: %w", key, err)
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+// isCloudConfigured returns true when archives should be replicated to cloud.
+func (bb *BlobBackend) isCloudConfigured() bool {
+	return bb.config.StorageType == storage.StorageTypeS3 || bb.config.StorageType == storage.StorageTypeGCS
+}
+
+// StoreArchive writes a packager archive to local disk (cache), optionally
+// uploads it to cloud storage, and indexes its contents.
 // Called during ingestion when the router pushes pre-built archives.
 func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Reader) (int64, int, error) {
 	archiveDir := filepath.Join(bb.config.CacheDir, "archives", storageID)
@@ -215,25 +386,26 @@ func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Re
 	archivePath := filepath.Join(archiveDir, fmt.Sprintf("chunk-%04d.pack", chunkIndex))
 	tmpPath := archivePath + ".tmp"
 
-	f, err := os.Create(tmpPath)
+	// Buffer data in memory so we can write locally and upload to cloud.
+	var rawBuf bytes.Buffer
+	written, err := io.Copy(&rawBuf, data)
 	if err != nil {
-		return 0, 0, fmt.Errorf("create temp archive: %w", err)
+		return 0, 0, fmt.Errorf("buffer archive: %w", err)
 	}
+	archiveData := rawBuf.Bytes()
 
-	written, err := io.Copy(f, data)
-	if err != nil {
-		f.Close()
-		os.Remove(tmpPath)
-		return 0, 0, fmt.Errorf("write archive: %w", err)
+	// Write to local cache.
+	if err := os.WriteFile(tmpPath, archiveData, 0644); err != nil {
+		return 0, 0, fmt.Errorf("write temp archive: %w", err)
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmpPath)
-		return 0, 0, fmt.Errorf("close archive: %w", err)
-	}
-
 	if err := os.Rename(tmpPath, archivePath); err != nil {
 		os.Remove(tmpPath)
 		return 0, 0, fmt.Errorf("rename archive: %w", err)
+	}
+
+	// Upload to cloud (non-blocking log on error, local is authoritative).
+	if bb.isCloudConfigured() {
+		bb.uploadToCloud(archivePath, archiveData)
 	}
 
 	bb.evictArchiveReader(archivePath)
@@ -294,6 +466,11 @@ func (bb *BlobBackend) StoreBlob(blobHash string, content []byte) error {
 	if err := os.Rename(tmpPath, archivePath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename loose archive: %w", err)
+	}
+
+	// Upload to cloud.
+	if bb.isCloudConfigured() {
+		bb.uploadToCloud(archivePath, buf.Bytes())
 	}
 
 	bb.mu.Lock()
@@ -421,6 +598,11 @@ func (w *StoreBlobBatchWriter) sealCurrentArchive() error {
 		return fmt.Errorf("rename batch archive: %w", err)
 	}
 
+	// Upload to cloud.
+	if w.bb.isCloudConfigured() {
+		w.bb.uploadToCloud(w.archivePath, archiveData)
+	}
+
 	archivePath := w.archivePath
 	w.bb.mu.Lock()
 	for _, hash := range w.curHashes {
@@ -544,6 +726,8 @@ func (bb *BlobBackend) DeleteBlobs(hashes []string, compact bool) *DeleteBlobsRe
 }
 
 // getArchiveReader returns a cached or freshly opened ArchiveReader.
+// If the local file is missing but cloud storage is configured, the archive
+// is downloaded from the cloud and cached locally before opening.
 func (bb *BlobBackend) getArchiveReader(archivePath string) (*packager.ArchiveReader, error) {
 	bb.archiveMu.Lock()
 	defer bb.archiveMu.Unlock()
@@ -557,7 +741,15 @@ func (bb *BlobBackend) getArchiveReader(archivePath string) (*packager.ArchiveRe
 		bb.evictOldestLocked()
 	}
 
+	// Try opening the local file first.
 	store, err := pkgstorage.NewLocalFileReader(archivePath)
+	if err != nil && bb.isCloudConfigured() {
+		// Local cache miss — download from cloud and retry.
+		if dlErr := bb.downloadFromCloud(archivePath); dlErr != nil {
+			return nil, fmt.Errorf("open archive file (cloud fallback failed: %v): %w", dlErr, err)
+		}
+		store, err = pkgstorage.NewLocalFileReader(archivePath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open archive file: %w", err)
 	}
@@ -706,7 +898,7 @@ func (bb *BlobBackend) Cleanup(ctx context.Context, sourceKey string) error {
 	return nil
 }
 
-// Close shuts down the backend, closing all open archive readers.
+// Close shuts down the backend, closing all open archive readers and cloud clients.
 func (bb *BlobBackend) Close() error {
 	bb.archiveMu.Lock()
 	defer bb.archiveMu.Unlock()
@@ -716,6 +908,12 @@ func (bb *BlobBackend) Close() error {
 		cached.store.Close()
 	}
 	bb.archiveCache = nil
+
+	if bb.gcsClient != nil {
+		bb.gcsClient.Close()
+		bb.gcsClient = nil
+	}
+	// S3 client has no Close method.
 
 	return nil
 }
