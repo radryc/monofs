@@ -98,6 +98,9 @@ type Router struct {
 	searchClient pb.MonoFSSearchClient
 	searchConn   *grpc.ClientConn
 
+	// Ingestion whitelist
+	whitelist *whitelistStore
+
 	// Fetcher cluster integration (for monitoring)
 	fetcherClient *fetcher.Client
 
@@ -246,6 +249,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		uiRequests:           make(chan UIRequest, 100), // Buffered to prevent UI blocking
 		stopUI:               make(chan struct{}),
 		logger:               logger,
+		whitelist:            newWhitelistStore(),
 	}
 	r.version.Store(1)
 
