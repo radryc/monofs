@@ -992,8 +992,10 @@ func (c *Client) StoreBlobBatch(ctx context.Context, blobs map[string][]byte) (s
 			return stored, failed, fmt.Errorf("StoreBlobBatchStream failed (%w), fallback had %d/%d failures, first error: %w",
 				streamErr, failed, len(blobs), firstErr)
 		}
-		return stored, 0, fmt.Errorf("StoreBlobBatchStream failed (%w), fallback succeeded for all %d blobs",
-			streamErr, len(blobs))
+		c.logger.Warn("StoreBlobBatchStream unavailable; fallback StoreBlob succeeded",
+			"blobs", len(blobs),
+			"error", streamErr)
+		return stored, 0, nil
 	}
 
 	// Stream each blob, chunking if needed
@@ -1010,7 +1012,26 @@ func (c *Client) StoreBlobBatch(ctx context.Context, blobs map[string][]byte) (s
 	resp, err := stream.CloseAndRecv()
 	if err != nil {
 		fetcher.recordError()
-		return 0, len(blobs), fmt.Errorf("close blob batch stream: %w", err)
+		c.logger.Warn("close blob batch stream failed, falling back to individual StoreBlob",
+			"blobs", len(blobs),
+			"error", err)
+		// Fallback to individual calls
+		var firstErr error
+		for hash, content := range blobs {
+			if fallbackErr := c.StoreBlob(ctx, hash, content); fallbackErr != nil {
+				failed++
+				if firstErr == nil {
+					firstErr = fallbackErr
+				}
+			} else {
+				stored++
+			}
+		}
+		if failed > 0 {
+			return stored, failed, fmt.Errorf("close blob batch stream failed (%w), fallback had %d/%d failures, first error: %w",
+				err, failed, len(blobs), firstErr)
+		}
+		return stored, 0, nil
 	}
 
 	fetcher.healthy.Store(true)

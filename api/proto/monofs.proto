@@ -841,6 +841,7 @@ message InjectGuardianPartitionRequest {
     string guardian_token = 1;   // auth token of a registered guardian client
     string partition_name = 2;   // partition name (no slashes)
     repeated InjectGuardianFile files = 3;
+    string guardian_ui_url = 4;  // externally accessible URL of the guardian topology page for this partition (e.g. "http://guardian.example.com/topology?partition=foo")
 }
 
 // InjectGuardianPartitionResponse reports the result of an inline injection.

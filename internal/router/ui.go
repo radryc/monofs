@@ -24,14 +24,13 @@ var templates embed.FS
 //go:embed static/*
 var staticFiles embed.FS
 
-// mockIngestStream implements MonoFSRouter_IngestRepositoryServer for HTTP ingestion
+// mockIngestStream implements MonoFSRouter_IngestRepositoryServer for HTTP ingestion.
+// Progress messages are discarded — callers use fire-and-forget goroutines.
 type mockIngestStream struct {
-	progress []*pb.IngestProgress
-	ctx      context.Context
+	ctx context.Context
 }
 
-func (s *mockIngestStream) Send(p *pb.IngestProgress) error {
-	s.progress = append(s.progress, p)
+func (s *mockIngestStream) Send(_ *pb.IngestProgress) error {
 	return nil
 }
 
@@ -254,10 +253,7 @@ func (r *Router) handleIngest(w http.ResponseWriter, req *http.Request) {
 
 	// Start ingestion asynchronously to avoid blocking HTTP request
 	go func() {
-		stream := &mockIngestStream{
-			ctx:      context.Background(), // Use background context for async operation
-			progress: make([]*pb.IngestProgress, 0),
-		}
+		stream := &mockIngestStream{ctx: context.Background()}
 
 		err := r.IngestRepository(&pb.IngestRequest{
 			Source:          source,
@@ -1067,10 +1063,7 @@ func (r *Router) handleGuardianInject(w http.ResponseWriter, req *http.Request) 
 	ingestionConfig := map[string]string{"guardian_token": token}
 
 	go func() {
-		stream := &mockIngestStream{
-			ctx:      context.Background(),
-			progress: make([]*pb.IngestProgress, 0),
-		}
+		stream := &mockIngestStream{ctx: context.Background()}
 		err := r.IngestRepository(&pb.IngestRequest{
 			Source:          source,
 			Ref:             ref,
