@@ -126,6 +126,7 @@ func (r *Router) InjectGuardianPartition(ctx context.Context, req *pb.InjectGuar
 				Source:        "guardian-inject",
 				IngestionType: pb.IngestionType_INGESTION_GUARDIAN,
 				FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
+				GuardianUrl:   req.GuardianUiUrl,
 			})
 			if err != nil {
 				r.logger.Warn("RegisterRepository failed on node", "node", n.id, "error", err)
@@ -163,18 +164,32 @@ func (r *Router) InjectGuardianPartition(ctx context.Context, req *pb.InjectGuar
 	wg.Wait()
 
 	if len(nodeErrors) > 0 {
+		errorDetails := make([]string, 0, len(nodeErrors))
+		for _, err := range nodeErrors {
+			errorDetails = append(errorDetails, err.Error())
+		}
 		r.logger.Warn("some nodes failed during guardian inject",
 			"partition", req.PartitionName,
 			"errors", len(nodeErrors),
+			"details", errorDetails,
 		)
 	}
 
 	// Register the partition in the router's in-memory repository index so
 	// discovery / UI picks it up.
 	r.mu.Lock()
+	repoURL := req.GuardianUiUrl
+	if repoURL == "" {
+		if existing, ok := r.ingestedRepos[storageID]; ok && existing != nil && existing.repoURL != "" {
+			repoURL = existing.repoURL
+		}
+	}
+	if repoURL == "" {
+		repoURL = "guardian-inject"
+	}
 	r.ingestedRepos[storageID] = &ingestedRepo{
 		repoID:     displayPath,
-		repoURL:    "guardian-inject",
+		repoURL:    repoURL,
 		filesCount: int64(len(req.Files)),
 		ingestedAt: time.Now(),
 	}

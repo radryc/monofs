@@ -13,7 +13,7 @@ ARG BUILD_TIME=unknown
 
 # Copy go mod files
 COPY go.mod go.sum ./
-RUN go mod download
+RUN GONOSUMDB='*' GODEBUG=http2client=0 go mod download
 
 # Copy source
 COPY . .

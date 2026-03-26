@@ -2,6 +2,7 @@ package fetcher
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -15,10 +16,12 @@ import (
 // mockBlobFetcherServer implements a minimal fetcher server for testing
 type mockBlobFetcherServer struct {
 	pb.UnimplementedBlobFetcherServer
-	fetchCalls    int
-	prefetchCalls int
-	cacheCalls    int
-	cache         map[string]bool
+	fetchCalls     int
+	prefetchCalls  int
+	cacheCalls     int
+	storeCalls     int
+	forceStreamErr bool
+	cache          map[string]bool
 }
 
 func (m *mockBlobFetcherServer) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_FetchBlobServer) error {
@@ -68,6 +71,34 @@ func (m *mockBlobFetcherServer) GetStats(ctx context.Context, req *pb.FetcherSta
 		CacheHits:     0,
 		CacheMisses:   int64(m.fetchCalls),
 	}, nil
+}
+
+func (m *mockBlobFetcherServer) StoreBlob(ctx context.Context, req *pb.StoreBlobRequest) (*pb.StoreBlobResponse, error) {
+	m.storeCalls++
+	if m.cache == nil {
+		m.cache = make(map[string]bool)
+	}
+	m.cache[req.BlobHash] = true
+	return &pb.StoreBlobResponse{Success: true}, nil
+}
+
+func (m *mockBlobFetcherServer) StoreBlobBatchStream(stream pb.BlobFetcher_StoreBlobBatchStreamServer) error {
+	if m.forceStreamErr {
+		return context.DeadlineExceeded
+	}
+	stored := int32(0)
+	for {
+		entry, err := stream.Recv()
+		if err == io.EOF {
+			return stream.SendAndClose(&pb.StoreBlobBatchResponse{Stored: stored})
+		}
+		if err != nil {
+			return err
+		}
+		if entry.GetBlobHash() != "" {
+			stored++
+		}
+	}
 }
 
 func startMockServer(t *testing.T) (string, *mockBlobFetcherServer, func()) {
@@ -414,6 +445,39 @@ func TestClient_NoHealthyFetchers(t *testing.T) {
 	_, err := NewClient(config, logger)
 	if err == nil {
 		t.Error("expected error connecting to invalid address")
+	}
+}
+
+func TestClient_StoreBlobBatch_StreamFails_FallbackSucceeds(t *testing.T) {
+	addr, server, cleanup := startMockServer(t)
+	defer cleanup()
+	server.forceStreamErr = true
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	config := DefaultClientConfig()
+	config.FetcherAddresses = []string{addr}
+
+	client, err := NewClient(config, logger)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer client.Close()
+
+	blobs := map[string][]byte{
+		"h1": []byte("blob-one"),
+		"h2": []byte("blob-two"),
+	}
+
+	stored, failed, err := client.StoreBlobBatch(context.Background(), blobs)
+	if err != nil {
+		t.Fatalf("StoreBlobBatch should succeed when fallback stores all blobs: %v", err)
+	}
+	if stored != 2 || failed != 0 {
+		t.Fatalf("unexpected StoreBlobBatch result: stored=%d failed=%d", stored, failed)
+	}
+	if server.storeCalls != 2 {
+		t.Fatalf("expected fallback StoreBlob to be called twice, got %d", server.storeCalls)
 	}
 }
 

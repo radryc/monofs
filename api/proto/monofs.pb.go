@@ -6618,6 +6618,7 @@ type InjectGuardianPartitionRequest struct {
 	GuardianToken string                 `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"` // auth token of a registered guardian client
 	PartitionName string                 `protobuf:"bytes,2,opt,name=partition_name,json=partitionName,proto3" json:"partition_name,omitempty"` // partition name (no slashes)
 	Files         []*InjectGuardianFile  `protobuf:"bytes,3,rep,name=files,proto3" json:"files,omitempty"`
+	GuardianUiUrl string                 `protobuf:"bytes,4,opt,name=guardian_ui_url,json=guardianUiUrl,proto3" json:"guardian_ui_url,omitempty"` // externally accessible URL of the guardian topology page for this partition (e.g. "http://guardian.example.com/topology?partition=foo")
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6671,6 +6672,13 @@ func (x *InjectGuardianPartitionRequest) GetFiles() []*InjectGuardianFile {
 		return x.Files
 	}
 	return nil
+}
+
+func (x *InjectGuardianPartitionRequest) GetGuardianUiUrl() string {
+	if x != nil {
+		return x.GuardianUiUrl
+	}
+	return ""
 }
 
 // InjectGuardianPartitionResponse reports the result of an inline injection.
@@ -7253,11 +7261,12 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x0einline_content\x18\x06 \x01(\fR\rinlineContent\"B\n" +
 	"\x12InjectGuardianFile\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x18\n" +
-	"\acontent\x18\x02 \x01(\fR\acontent\"\xa0\x01\n" +
+	"\acontent\x18\x02 \x01(\fR\acontent\"\xc8\x01\n" +
 	"\x1eInjectGuardianPartitionRequest\x12%\n" +
 	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x12%\n" +
 	"\x0epartition_name\x18\x02 \x01(\tR\rpartitionName\x120\n" +
-	"\x05files\x18\x03 \x03(\v2\x1a.monofs.InjectGuardianFileR\x05files\"\x9b\x01\n" +
+	"\x05files\x18\x03 \x03(\v2\x1a.monofs.InjectGuardianFileR\x05files\x12&\n" +
+	"\x0fguardian_ui_url\x18\x04 \x01(\tR\rguardianUiUrl\"\x9b\x01\n" +
 	"\x1fInjectGuardianPartitionResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x1d\n" +
 	"\n" +
