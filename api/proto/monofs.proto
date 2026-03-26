@@ -44,12 +44,24 @@ service MonoFSRouter {
     rpc DrainCluster(DrainClusterRequest) returns (DrainClusterResponse);
     rpc UndrainCluster(UndrainClusterRequest) returns (UndrainClusterResponse);
     
+    // Guardian partition management
+    rpc DeleteGuardianFile(DeleteGuardianFileRequest) returns (DeleteGuardianFileResponse);
+    rpc DeleteGuardianDirectory(DeleteGuardianDirectoryRequest) returns (DeleteGuardianDirectoryResponse);
+    // InjectGuardianPartition directly writes inline YAML files into the cluster
+    // for a guardian partition. The caller must supply a valid guardian_token.
+    // Files become immediately visible on all FUSE mounts at guardian/<partition>/.
+    rpc InjectGuardianPartition(InjectGuardianPartitionRequest) returns (InjectGuardianPartitionResponse);
+    
     // Ingestion whitelist management
     rpc AddWhitelistedClient(AddWhitelistedClientRequest) returns (AddWhitelistedClientResponse);
     rpc RemoveWhitelistedClient(RemoveWhitelistedClientRequest) returns (RemoveWhitelistedClientResponse);
     rpc ListWhitelistedClients(ListWhitelistedClientsRequest) returns (ListWhitelistedClientsResponse);
     rpc SetWhitelistEnabled(SetWhitelistEnabledRequest) returns (SetWhitelistEnabledResponse);
     rpc GetWhitelistStatus(GetWhitelistStatusRequest) returns (GetWhitelistStatusResponse);
+
+    // SubscribeToChanges streams file-change events for a storage ID.
+    // Used by Guardian to watch for intent and partition YAML mutations.
+    rpc SubscribeToChanges(SubscribeChangesRequest) returns (stream ChangeEvent);
 }
 
 // MonoFS is the backend node service for filesystem operations
@@ -103,6 +115,9 @@ service MonoFS {
     // Delete entire repository from this node (all buckets)
     rpc DeleteRepository(DeleteRepositoryOnNodeRequest) returns (DeleteRepositoryOnNodeResponse);
     
+    // Delete a directory and all files within it recursively
+    rpc DeleteDirectoryRecursive(DeleteDirectoryRecursiveRequest) returns (DeleteDirectoryRecursiveResponse);
+    
     // Build directory indexes in batch after ingestion (deferred for performance)
     rpc BuildDirectoryIndexes(BuildDirectoryIndexesRequest) returns (BuildDirectoryIndexesResponse);
 
@@ -120,6 +135,7 @@ message ClusterInfoResponse {
     repeated NodeInfo nodes = 1;
     string cluster_id = 2;
     int64 version = 3;        // Cluster config version for cache invalidation
+    bool guardian_visible = 4; // True if at least one guardian client is connected
 }
 
 message NodeInfo {
@@ -250,6 +266,7 @@ enum IngestionType {
     reserved 1;          // Was INGESTION_GO (removed)
     INGESTION_S3 = 2;    // S3 bucket
     INGESTION_FILE = 3;  // Local filesystem
+    INGESTION_GUARDIAN = 4; // Guardian partition
 }
 
 // SourceType identifies the data source backend.
@@ -379,6 +396,9 @@ message RegisterRepositoryRequest {
     string commit_hash = 8;    // Git commit hash
     int64 commit_time = 9;     // Commit timestamp (Unix)
     string commit_message = 10; // Commit message
+    
+    // Guardian metadata
+    string guardian_url = 11;   // Guardian partition URL (set for guardian repos)
 }
 
 message RegisterRepositoryResponse {
@@ -436,6 +456,7 @@ message GetRepositoryInfoResponse {
     string commit_hash = 5;
     int64 commit_time = 6;
     string commit_message = 7;
+    string guardian_url = 8;   // Guardian partition URL (set for guardian repos)
 }
 
 // Onboarding status messages
@@ -537,6 +558,13 @@ message RegisterClientRequest {
     string hostname = 3;            // Client hostname
     bool writable = 4;              // Write mode enabled
     string version = 5;             // Client version
+    GuardianConfig guardian_config = 6; // Required for guardian-* client IDs
+}
+
+// GuardianConfig holds configuration for a guardian client.
+message GuardianConfig {
+    string base_url = 1;    // Base URL of the guardian service
+    string auth_token = 2;  // Authentication token for guardian operations
 }
 
 message RegisterClientResponse {
@@ -733,3 +761,93 @@ message GetWhitelistStatusResponse {
     int32 whitelisted_count = 2;
     repeated WhitelistedClient clients = 3;
 }
+
+// Delete a directory and all contents recursively on a single node
+message DeleteDirectoryRecursiveRequest {
+    string storage_id = 1;
+    string dir_path = 2;
+}
+
+message DeleteDirectoryRecursiveResponse {
+    bool success = 1;
+    string message = 2;
+    int64 files_deleted = 3;
+    int64 dirs_deleted = 4;
+}
+
+// Guardian file/directory deletion (router-level, fan-out to all nodes)
+message DeleteGuardianFileRequest {
+    string storage_id = 1;
+    string file_path = 2;
+    string token = 3;
+}
+
+message DeleteGuardianFileResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message DeleteGuardianDirectoryRequest {
+    string storage_id = 1;
+    string dir_path = 2;
+    string token = 3;
+}
+
+message DeleteGuardianDirectoryResponse {
+    bool success = 1;
+    string message = 2;
+    int64 files_deleted = 3;
+    int64 dirs_deleted = 4;
+}
+
+// ─── Guardian change-watch messages ──────────────────────────────────────────
+
+// ChangeType enumerates the kinds of file changes emitted by SubscribeToChanges.
+enum ChangeType {
+    CHANGE_TYPE_UNSPECIFIED = 0;
+    ADDED = 1;
+    MODIFIED = 2;
+    DELETED = 3;
+}
+
+// SubscribeChangesRequest configures a SubscribeToChanges stream.
+message SubscribeChangesRequest {
+    string storage_id = 1;
+    // Path prefixes to filter events (empty = all files under the storage ID).
+    repeated string path_prefixes = 2;
+    string client_id = 3;
+}
+
+// ChangeEvent is emitted on every file mutation within a watched storage ID.
+message ChangeEvent {
+    string storage_id = 1;
+    string file_path = 2;
+    ChangeType type = 3;
+    string new_blob_hash = 4;
+    string old_blob_hash = 5;
+    // inline_content carries raw file bytes for small files (< 64 KiB) so
+    // consumers can act on YAML content without an extra Read round-trip.
+    bytes inline_content = 6;
+}
+
+// InjectGuardianFile is a single file to be injected into a guardian partition.
+message InjectGuardianFile {
+    string path = 1;    // relative path within the partition (e.g. "partition.yaml", "intents/foo.yaml")
+    bytes content = 2;  // raw file content
+}
+
+// InjectGuardianPartitionRequest carries inline file content for a partition.
+message InjectGuardianPartitionRequest {
+    string guardian_token = 1;   // auth token of a registered guardian client
+    string partition_name = 2;   // partition name (no slashes)
+    repeated InjectGuardianFile files = 3;
+}
+
+// InjectGuardianPartitionResponse reports the result of an inline injection.
+message InjectGuardianPartitionResponse {
+    bool success = 1;
+    string storage_id = 2;   // SHA-256 of "guardian/<partition_name>"
+    string message = 3;
+    int32 files_ingested = 4;
+}
+

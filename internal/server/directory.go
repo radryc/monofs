@@ -819,3 +819,153 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 		Message:            fmt.Sprintf("Successfully indexed %d directories", dirsIndexed),
 	}, nil
 }
+
+// removeFromDirectoryIndex removes a single entry (file or subdirectory) from a parent
+// directory's index. Must be called within a NutsDB transaction.
+func (s *Server) removeFromDirectoryIndex(tx *nutsdb.Tx, storageID, parentDir, entryName string) error {
+	dirIndexKey := makeDirIndexKey(storageID, parentDir)
+
+	value, err := tx.Get(bucketDirIndex, dirIndexKey)
+	if err != nil {
+		// Parent dir index doesn't exist — nothing to remove
+		return nil
+	}
+
+	var dirIndex []dirIndexEntry
+	if err := json.Unmarshal(value, &dirIndex); err != nil {
+		return fmt.Errorf("unmarshal dir index for %q: %w", parentDir, err)
+	}
+
+	// Filter out the target entry
+	filtered := dirIndex[:0]
+	for _, entry := range dirIndex {
+		if entry.Name != entryName {
+			filtered = append(filtered, entry)
+		}
+	}
+
+	if len(filtered) == len(dirIndex) {
+		// Entry not found — nothing to remove
+		return nil
+	}
+
+	if len(filtered) == 0 {
+		// Directory is now empty — remove the index entry entirely
+		return tx.Delete(bucketDirIndex, dirIndexKey)
+	}
+
+	dirIndexValue, err := json.Marshal(filtered)
+	if err != nil {
+		return fmt.Errorf("marshal dir index for %q: %w", parentDir, err)
+	}
+	return tx.Put(bucketDirIndex, dirIndexKey, dirIndexValue, 0)
+}
+
+// DeleteDirectoryRecursive removes a directory and all its contents from the node.
+func (s *Server) DeleteDirectoryRecursive(ctx context.Context, req *pb.DeleteDirectoryRecursiveRequest) (*pb.DeleteDirectoryRecursiveResponse, error) {
+	storageID := req.StorageId
+	dirPath := req.DirPath
+
+	s.logger.Info("deleting directory recursively",
+		"storage_id", storageID,
+		"dir_path", dirPath)
+
+	// Collect all paths to delete by walking the directory index tree (read-only pass)
+	var filePaths []string
+	var dirPaths []string
+
+	err := s.db.View(func(tx *nutsdb.Tx) error {
+		var walkDir func(path string) error
+		walkDir = func(path string) error {
+			dirIndexKey := makeDirIndexKey(storageID, path)
+			value, err := tx.Get(bucketDirIndex, dirIndexKey)
+			if err != nil {
+				return nil // Directory not indexed — skip
+			}
+
+			var dirIndex []dirIndexEntry
+			if err := json.Unmarshal(value, &dirIndex); err != nil {
+				return fmt.Errorf("unmarshal dir index for %q: %w", path, err)
+			}
+
+			for _, entry := range dirIndex {
+				childPath := entry.Name
+				if path != "" {
+					childPath = path + "/" + entry.Name
+				}
+				if entry.IsDir {
+					dirPaths = append(dirPaths, childPath)
+					if err := walkDir(childPath); err != nil {
+						return err
+					}
+				} else {
+					filePaths = append(filePaths, childPath)
+				}
+			}
+			return nil
+		}
+
+		// Add the target directory itself
+		dirPaths = append(dirPaths, dirPath)
+		return walkDir(dirPath)
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("walking directory tree: %w", err)
+	}
+
+	var filesDeleted, dirsDeleted int64
+
+	// Delete all collected entries in an update transaction
+	err = s.db.Update(func(tx *nutsdb.Tx) error {
+		// Delete all files
+		for _, fp := range filePaths {
+			fullPath := storageID + ":" + fp
+			pathKey := []byte(fullPath)
+			metaKey := makeStorageKey(storageID, fp)
+
+			// Delete from metadata (uses SHA-256 hash key)
+			_ = tx.Delete(bucketMetadata, metaKey)
+			// Delete from path index
+			_ = tx.Delete(bucketPathIndex, pathKey)
+			// Delete from owned files
+			_ = tx.Delete(bucketOwnedFiles, pathKey)
+			// Delete from replica files
+			_ = tx.Delete(bucketReplicaFiles, pathKey)
+			filesDeleted++
+		}
+
+		// Delete all directory indexes
+		for _, dp := range dirPaths {
+			dirIndexKey := makeDirIndexKey(storageID, dp)
+			_ = tx.Delete(bucketDirIndex, dirIndexKey)
+			dirsDeleted++
+		}
+
+		// Remove target directory from its parent's index
+		parentDir := extractDirPath(dirPath)
+		entryName := extractFileName(dirPath)
+		if err := s.removeFromDirectoryIndex(tx, storageID, parentDir, entryName); err != nil {
+			s.logger.Warn("failed to remove dir from parent index", "dir_path", dirPath, "error", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("delete directory recursive: %w", err)
+	}
+
+	s.logger.Info("directory deleted recursively",
+		"storage_id", storageID,
+		"dir_path", dirPath,
+		"files_deleted", filesDeleted,
+		"dirs_deleted", dirsDeleted)
+
+	return &pb.DeleteDirectoryRecursiveResponse{
+		Success:      true,
+		Message:      fmt.Sprintf("Deleted %d files and %d directories", filesDeleted, dirsDeleted),
+		FilesDeleted: filesDeleted,
+		DirsDeleted:  dirsDeleted,
+	}, nil
+}
