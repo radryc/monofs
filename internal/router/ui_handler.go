@@ -132,12 +132,16 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 				var ingestedAt time.Time
 				var rebalanceState string = "Stable"
 				var rebalanceProgress float64 = 1.0
+				guardianURL := repoInfo.GuardianUrl
 				if tracked, ok := ingestedSnapshot[storageID]; ok {
 					tracked.mu.RLock()
 					filesCount = tracked.filesCount
 					ingestedAt = tracked.ingestedAt
 					rebalanceState = tracked.rebalanceState.String()
 					rebalanceProgress = tracked.rebalanceProgress
+					if guardianURL == "" && (strings.HasPrefix(tracked.repoURL, "http://") || strings.HasPrefix(tracked.repoURL, "https://")) {
+						guardianURL = tracked.repoURL
+					}
 					tracked.mu.RUnlock()
 				}
 				if ingestedAt.IsZero() {
@@ -158,8 +162,8 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 					"topology_version":   currentVersion,
 					"rebalance_state":    rebalanceState,
 					"rebalance_progress": rebalanceProgress,
-					"guardian_url":       repoInfo.GuardianUrl,
-					"is_guardian":        repoInfo.GuardianUrl != "",
+					"guardian_url":       guardianURL,
+					"is_guardian":        guardianURL != "",
 				}
 				repoMu.Unlock()
 			}

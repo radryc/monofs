@@ -513,6 +513,25 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 	err := s.db.Update(func(tx *nutsdb.Tx) error {
 		// Check if already registered
 		if s.repoExistsByStorageIDTx(tx, req.StorageId) {
+			// Repository already exists — update GuardianURL if a new one is provided.
+			if req.GuardianUrl != "" {
+				value, err := tx.Get(bucketRepos, []byte(req.StorageId))
+				if err != nil {
+					return nil // can't read, skip update
+				}
+				var existing repoInfo
+				if err := json.Unmarshal(value, &existing); err != nil {
+					return nil
+				}
+				if existing.GuardianURL != req.GuardianUrl {
+					existing.GuardianURL = req.GuardianUrl
+					updated, err := json.Marshal(existing)
+					if err != nil {
+						return nil
+					}
+					_ = tx.Put(bucketRepos, []byte(req.StorageId), updated, 0)
+				}
+			}
 			s.logger.Debug("repository already registered", "storage_id", req.StorageId)
 			return nil
 		}
