@@ -170,11 +170,10 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		}, nil
 	}
 
-
 	// NEW: Forward to correct node if not handling locally (and not already forwarded)
 	if s.enableForwarding && !isAlreadyForwarded(ctx) {
 		targetNode := s.getTargetNode(storageID, filePath)
-		
+
 		// Try primary node first if healthy
 		if targetNode != nil && targetNode.ID != s.nodeID && s.isNodeHealthy(targetNode.ID) {
 			s.logger.Debug("lookup forwarding to primary node",
@@ -184,7 +183,7 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 				"target_node", targetNode.ID)
 			return s.forwardLookup(ctx, req, targetNode)
 		}
-		
+
 		// Primary is unhealthy, try backup nodes
 		if targetNode != nil && !s.isNodeHealthy(targetNode.ID) {
 			backupNodes := s.getBackupNodes(storageID, filePath)
@@ -384,11 +383,10 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 		}, nil
 	}
 
-
 	// NEW: Forward to correct node if not handling locally (and not already forwarded)
 	if s.enableForwarding && !isAlreadyForwarded(ctx) {
 		targetNode := s.getTargetNode(storageID, filePath)
-		
+
 		// Try primary node first if healthy
 		if targetNode != nil && targetNode.ID != s.nodeID && s.isNodeHealthy(targetNode.ID) {
 			s.logger.Debug("getattr forwarding to primary node",
@@ -398,7 +396,7 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 				"target_node", targetNode.ID)
 			return s.forwardGetAttr(ctx, req, targetNode)
 		}
-		
+
 		// Primary is unhealthy, try backup nodes
 		if targetNode != nil && !s.isNodeHealthy(targetNode.ID) {
 			backupNodes := s.getBackupNodes(storageID, filePath)
@@ -433,7 +431,6 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		s.logger.Error("read: path resolution failed", "path", path, "ok", ok, "storage_id", storageID, "file_path", filePath)
 		return status.Errorf(codes.NotFound, "path resolution failed: %s", path)
 	}
-
 
 	// Try local metadata first (covers both owned files AND replicas from IngestReplicaBatch)
 	var blobHash, repoURL, branch, displayPath string
@@ -654,6 +651,13 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 		pathIndexKey := []byte(req.StorageId + ":" + req.FilePath)
 		if err := tx.Delete(bucketPathIndex, pathIndexKey); err != nil && err != nutsdb.ErrKeyNotFound {
 			return fmt.Errorf("failed to delete path index: %w", err)
+		}
+
+		// Remove from parent directory index
+		parentDir := extractDirPath(req.FilePath)
+		entryName := extractFileName(req.FilePath)
+		if err := s.removeFromDirectoryIndex(tx, req.StorageId, parentDir, entryName); err != nil {
+			s.logger.Warn("failed to remove file from dir index", "file_path", req.FilePath, "error", err)
 		}
 
 		return nil

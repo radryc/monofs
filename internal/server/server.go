@@ -78,6 +78,7 @@ type repoInfo struct {
 	CommitTime    int64  `json:"commit_time,omitempty"`
 	CommitMessage string `json:"commit_message,omitempty"`
 	FetchType     string `json:"fetch_type,omitempty"`
+	GuardianURL   string `json:"guardian_url,omitempty"`
 }
 
 type storedMetadata struct {
@@ -526,6 +527,7 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 			CommitTime:    req.CommitTime,
 			CommitMessage: req.CommitMessage,
 			FetchType:     req.FetchType.String(),
+			GuardianURL:   req.GuardianUrl,
 		}
 		repoKey := []byte(req.StorageId)
 		repoValue, err := json.Marshal(info)
@@ -1393,6 +1395,7 @@ func (s *Server) GetRepositoryInfo(ctx context.Context, req *pb.GetRepositoryInf
 		CommitHash:    repoInfoData.CommitHash,
 		CommitTime:    repoInfoData.CommitTime,
 		CommitMessage: repoInfoData.CommitMessage,
+		GuardianUrl:   repoInfoData.GuardianURL,
 	}, nil
 }
 

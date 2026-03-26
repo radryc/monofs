@@ -180,6 +180,20 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		}
 	}
 
+	// Filter out guardian directory at root if no guardian-* client is connected
+	if n.path == "" && !n.client.IsGuardianVisible() {
+		filtered := dirEntries[:0]
+		filteredCache := cacheEntries[:0]
+		for i, e := range dirEntries {
+			if e.Name != "guardian" {
+				filtered = append(filtered, e)
+				filteredCache = append(filteredCache, cacheEntries[i])
+			}
+		}
+		dirEntries = filtered
+		cacheEntries = filteredCache
+	}
+
 	// Add FS_ERROR.txt if this is root and there's a catastrophic error or backend error
 	if n.path == "" {
 		showErrorFile := false

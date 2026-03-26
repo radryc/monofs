@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -109,6 +110,10 @@ type Router struct {
 	clientsMu   sync.RWMutex
 	stopClients chan struct{}
 
+	// Guardian clients (guardian-* prefixed clients with special config)
+	guardianClients   map[string]*guardianClientState // clientID -> guardian state
+	guardianClientsMu sync.RWMutex
+
 	// Drain mode for planned maintenance
 	drainMode   atomic.Bool
 	drainedAt   time.Time
@@ -131,6 +136,14 @@ type clientState struct {
 	operationsCount int64 // Total FUSE operations
 	bytesRead       int64 // Total bytes read
 	mu              sync.RWMutex
+}
+
+// guardianClientState tracks a connected guardian-* client.
+type guardianClientState struct {
+	clientID      string
+	baseURL       string
+	authToken     string
+	lastHeartbeat time.Time
 }
 
 // nodeState tracks a backend node's state.
@@ -239,6 +252,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		ingestedRepos:        make(map[string]*ingestedRepo),
 		inProgressIngestions: make(map[string]*inProgressIngestion),
 		clients:              make(map[string]*clientState),
+		guardianClients:      make(map[string]*guardianClientState),
 		topologySnapshots:    make(map[int64][]sharding.Node),
 		pendingIndexRebuilds: make(map[string]map[string]bool),
 		failoverTimers:       make(map[string]*time.Timer),
@@ -571,9 +585,10 @@ func (r *Router) GetClusterInfo(ctx context.Context, req *pb.ClusterInfoRequest)
 	}
 
 	return &pb.ClusterInfoResponse{
-		Nodes:     nodes,
-		ClusterId: r.config.ClusterID,
-		Version:   r.version.Load(),
+		Nodes:           nodes,
+		ClusterId:       r.config.ClusterID,
+		Version:         r.version.Load(),
+		GuardianVisible: r.isGuardianVisible(),
 	}, nil
 }
 
@@ -2675,6 +2690,27 @@ func (r *Router) RegisterClient(ctx context.Context, req *pb.RegisterClientReque
 	r.clientsMu.Lock()
 	defer r.clientsMu.Unlock()
 
+	// Handle guardian-* client registration
+	if strings.HasPrefix(req.ClientId, "guardian-") {
+		if req.GuardianConfig == nil || req.GuardianConfig.BaseUrl == "" || req.GuardianConfig.AuthToken == "" {
+			return &pb.RegisterClientResponse{
+				Success: false,
+				Message: "guardian_config with base_url and auth_token required for guardian-* clients",
+			}, nil
+		}
+		r.guardianClientsMu.Lock()
+		r.guardianClients[req.ClientId] = &guardianClientState{
+			clientID:      req.ClientId,
+			baseURL:       req.GuardianConfig.BaseUrl,
+			authToken:     req.GuardianConfig.AuthToken,
+			lastHeartbeat: time.Now(),
+		}
+		r.guardianClientsMu.Unlock()
+		r.logger.Info("guardian client registered",
+			"client_id", req.ClientId,
+			"base_url", req.GuardianConfig.BaseUrl)
+	}
+
 	// Check if client already exists (reconnection)
 	if existing, ok := r.clients[req.ClientId]; ok {
 		existing.mu.Lock()
@@ -2765,6 +2801,14 @@ func (r *Router) UnregisterClient(ctx context.Context, req *pb.UnregisterClientR
 	duration := time.Since(connectedAt)
 
 	delete(r.clients, req.ClientId)
+
+	// Remove from guardian clients if applicable
+	if strings.HasPrefix(req.ClientId, "guardian-") {
+		r.guardianClientsMu.Lock()
+		delete(r.guardianClients, req.ClientId)
+		r.guardianClientsMu.Unlock()
+		r.logger.Info("guardian client unregistered", "client_id", req.ClientId)
+	}
 
 	r.logger.Info("client unregistered",
 		"client_id", req.ClientId,
@@ -2916,6 +2960,15 @@ func (r *Router) cleanupStaleClientsOnce(staleThreshold, removeThreshold time.Du
 				state.mu.RUnlock()
 				delete(r.clients, clientID)
 			}
+			// Also remove from guardian clients if applicable
+			if strings.HasPrefix(clientID, "guardian-") {
+				r.guardianClientsMu.Lock()
+				if _, ok := r.guardianClients[clientID]; ok {
+					delete(r.guardianClients, clientID)
+					r.logger.Info("removed stale guardian client", "client_id", clientID)
+				}
+				r.guardianClientsMu.Unlock()
+			}
 		}
 		r.clientsMu.Unlock()
 	}
@@ -2932,6 +2985,41 @@ func (r *Router) GetClientCount() int {
 	r.clientsMu.RLock()
 	defer r.clientsMu.RUnlock()
 	return len(r.clients)
+}
+
+// isGuardianVisible returns true if at least one guardian-* client is connected.
+func (r *Router) isGuardianVisible() bool {
+	r.guardianClientsMu.RLock()
+	defer r.guardianClientsMu.RUnlock()
+	return len(r.guardianClients) > 0
+}
+
+// validateGuardianToken checks if the given token matches any connected guardian client.
+// Returns the matching client ID and true if valid, or empty string and false if not.
+func (r *Router) validateGuardianToken(token string) (string, bool) {
+	r.guardianClientsMu.RLock()
+	defer r.guardianClientsMu.RUnlock()
+	for clientID, state := range r.guardianClients {
+		if state.authToken == token {
+			return clientID, true
+		}
+	}
+	return "", false
+}
+
+// getGuardianBaseURL returns the base URL for a guardian client.
+func (r *Router) getGuardianBaseURL(clientID string) string {
+	r.guardianClientsMu.RLock()
+	defer r.guardianClientsMu.RUnlock()
+	if state, ok := r.guardianClients[clientID]; ok {
+		return state.baseURL
+	}
+	return ""
+}
+
+// isGuardianRepo returns true if the given display path is a guardian partition.
+func (r *Router) isGuardianRepo(displayPath string) bool {
+	return strings.HasPrefix(displayPath, "guardian/")
 }
 
 // GetClientStats returns aggregated client statistics for the performance page
