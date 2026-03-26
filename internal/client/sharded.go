@@ -60,6 +60,9 @@ type ShardedClient struct {
 	operationsCount   int64 // atomic counter
 	bytesRead         int64 // atomic counter
 	errorsCount       int64 // atomic counter
+
+	// Guardian visibility
+	guardianVisible bool
 }
 
 // ShardedClientConfig holds configuration for ShardedClient.
@@ -365,6 +368,7 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 	// Mark connected since we successfully talked to router
 	sc.connected = true
 	sc.lastError = nil
+	sc.guardianVisible = resp.GuardianVisible
 
 	// Node health state comes exclusively from the router via UpdateNodeHealthFromProto().
 	// The router is the single source of truth for node health.
@@ -1546,6 +1550,13 @@ func (sc *ShardedClient) RecordBytesRead(n int64) {
 // RecordError increments the error counter for metrics
 func (sc *ShardedClient) RecordError() {
 	atomic.AddInt64(&sc.errorsCount, 1)
+}
+
+// IsGuardianVisible returns whether any guardian-* client is connected
+func (sc *ShardedClient) IsGuardianVisible() bool {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+	return sc.guardianVisible
 }
 
 // GetClientID returns the unique client identifier

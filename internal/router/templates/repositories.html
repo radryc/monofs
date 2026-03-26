@@ -315,9 +315,11 @@
                         
                         return `
                             <tr style="cursor: pointer;" onclick="toggleRepoDetails('repo-${idx}')" title="Click for details">
-                                <td><strong>${repo.repo_id}</strong></td>
+                                <td><strong>${repo.repo_id}</strong>${repo.is_guardian ? ' <span class="badge badge-info" style="font-size: 10px;">guardian</span>' : ''}</td>
                                 <td>
-                                    ${repo.repo_url === 'dir-hint'
+                                    ${repo.is_guardian && repo.guardian_url
+                                        ? `<a href="${repo.guardian_url}" target="_blank" style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">${repo.guardian_url.length > 50 ? repo.guardian_url.substring(0, 47) + '...' : repo.guardian_url}</a>`
+                                        : repo.repo_url === 'dir-hint'
                                         ? `<a href="/dependencies" style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">📦 Dependencies</a>`
                                         : `<a href="${repo.repo_url}" target="_blank" style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">${repo.repo_url.length > 50 ? repo.repo_url.substring(0, 47) + '...' : repo.repo_url}</a>`
                                     }

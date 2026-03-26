@@ -91,6 +91,10 @@ func (m *mockClient) RecordError() {
 	// No-op for mock
 }
 
+func (m *mockClient) IsGuardianVisible() bool {
+	return false
+}
+
 // TestErrorFile tests that FS_ERROR.txt appears when backend fails
 func TestErrorFileAppearsOnBackendFailure(t *testing.T) {
 	// Create mock client that fails

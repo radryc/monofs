@@ -56,6 +56,37 @@
     </div>
 </div>
 
+<!-- Guardian Clients -->
+<div class="card" style="margin-top: 24px;">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 class="card-title">🛡️ Guardian Clients</h2>
+        <button class="btn btn-primary" onclick="refreshGuardianClients()">
+            🔄 Refresh
+        </button>
+    </div>
+    <div id="guardianClientStats" class="grid grid-cols-2" style="margin-bottom: 16px;">
+        <div class="stat-card">
+            <div class="stat-icon">🛡️</div>
+            <div class="stat-info">
+                <div class="stat-value" id="guardianCount">-</div>
+                <div class="stat-label">Guardian Clients</div>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">✅</div>
+            <div class="stat-info">
+                <div class="stat-value" id="guardianConnected">-</div>
+                <div class="stat-label">Connected</div>
+            </div>
+        </div>
+    </div>
+    <div id="guardianClientTable">
+        <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+            <div class="loader"></div> Loading guardian clients...
+        </div>
+    </div>
+</div>
+
 <!-- Ingestion Whitelist Management -->
 <div class="card" style="margin-top: 24px;">
     <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
@@ -249,6 +280,91 @@
     // Initial load and auto-refresh
     loadClients();
     setInterval(loadClients, 10000); // Refresh every 10 seconds
+
+    // --- Guardian Clients ---
+    async function loadGuardianClients() {
+        try {
+            const response = await fetch('/api/guardian/clients');
+            const data = await response.json();
+
+            const clients = data.guardian_clients || [];
+            let connected = 0;
+            clients.forEach(c => { if (c.state === 'connected') connected++; });
+
+            document.getElementById('guardianCount').textContent = clients.length;
+            document.getElementById('guardianConnected').textContent = connected;
+
+            if (clients.length === 0) {
+                document.getElementById('guardianClientTable').innerHTML = `
+                    <div style="text-align: center; padding: 60px; color: var(--text-secondary);">
+                        <div style="font-size: 48px; margin-bottom: 16px;">🛡️</div>
+                        <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">No Guardian Clients Connected</div>
+                        <div>Guardian partitions will appear under <code>/guardian/</code> when a guardian client connects</div>
+                    </div>
+                `;
+                return;
+            }
+
+            document.getElementById('guardianClientTable').innerHTML = `
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Client ID</th>
+                            <th>Base URL</th>
+                            <th>Status</th>
+                            <th>Last Heartbeat</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${clients.map(gc => {
+                            const lastHB = new Date(gc.last_heartbeat * 1000);
+                            const now = new Date();
+                            const hbAgo = Math.floor((now - lastHB) / 1000);
+                            const isConnected = gc.state === 'connected';
+
+                            return `
+                                <tr>
+                                    <td>
+                                        <code style="font-size: 11px; background: rgba(109, 94, 252, 0.2); padding: 2px 6px; border-radius: 4px;">
+                                            ${gc.client_id}
+                                        </code>
+                                    </td>
+                                    <td>
+                                        ${gc.base_url ? `<a href="${gc.base_url}" target="_blank" style="color: var(--primary);">${gc.base_url}</a>` : '<span style="color: var(--text-secondary);">-</span>'}
+                                    </td>
+                                    <td>
+                                        <span style="display: inline-flex; align-items: center; gap: 4px; color: ${isConnected ? 'var(--success)' : 'var(--warning)'};">
+                                            ${isConnected ? '✅ Connected' : '⚠️ Stale'}
+                                        </span>
+                                    </td>
+                                    <td>${hbAgo}s ago</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+        } catch (error) {
+            console.error('Failed to load guardian clients:', error);
+            document.getElementById('guardianClientTable').innerHTML = `
+                <div style="text-align: center; padding: 40px; color: var(--danger);">
+                    Failed to load guardian clients: ${error.message}
+                </div>
+            `;
+        }
+    }
+
+    function refreshGuardianClients() {
+        document.getElementById('guardianClientTable').innerHTML = `
+            <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                <div class="loader"></div> Refreshing...
+            </div>
+        `;
+        loadGuardianClients();
+    }
+
+    loadGuardianClients();
+    setInterval(loadGuardianClients, 10000);
 
     // --- Whitelist management ---
     let whitelistEnabled = false;

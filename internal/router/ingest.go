@@ -86,12 +86,37 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 		return fmt.Errorf("source must be specified")
 	}
 
+	// Guardian partition validation
+	var guardianURL string
+	if req.IngestionType == pb.IngestionType_INGESTION_GUARDIAN {
+		if req.SourceId == "" {
+			return fmt.Errorf("source_id (partition name) is required for guardian ingestion")
+		}
+		if strings.Contains(req.SourceId, "/") {
+			return fmt.Errorf("guardian partition name must not contain '/'")
+		}
+		token := req.IngestionConfig["guardian_token"]
+		if token == "" {
+			return fmt.Errorf("guardian_token is required in ingestion_config for guardian ingestion")
+		}
+		clientID, ok := r.validateGuardianToken(token)
+		if !ok {
+			return fmt.Errorf("invalid guardian token: no matching connected guardian client")
+		}
+		baseURL := r.getGuardianBaseURL(clientID)
+		guardianURL = strings.TrimRight(baseURL, "/") + "/" + req.SourceId
+	}
+
 	// Step 1: Determine display path (what users see in filesystem)
 	// If req.SourceId is set: use custom path (e.g., "my/custom/path" or "myrepo")
 	// If req.SourceId is empty: auto-generate from source (e.g., "github_com/owner/repo")
 	displayPath := req.SourceId
 	if displayPath == "" {
 		displayPath = normalizeRepoID(req.Source)
+	}
+	// Guardian partitions always live under guardian/ prefix
+	if req.IngestionType == pb.IngestionType_INGESTION_GUARDIAN {
+		displayPath = "guardian/" + req.SourceId
 	}
 
 	// Step 2: Generate internal storage ID (SHA-256 hash)
@@ -103,6 +128,9 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 		ingestionType = storage.IngestionTypeGit
 	} else if ingestionType == "ingestion_s3" {
 		ingestionType = storage.IngestionTypeS3
+	} else if ingestionType == "ingestion_guardian" {
+		// Guardian uses standard git backend for ingestion
+		ingestionType = storage.IngestionTypeGit
 	}
 
 	// All ingestion now produces blob archives by default
@@ -343,6 +371,7 @@ initComplete:
 			CommitHash:      commitHash,
 			CommitTime:      commitTime,
 			CommitMessage:   commitMessage,
+			GuardianUrl:     guardianURL,
 		})
 		regCancel()
 

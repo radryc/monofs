@@ -158,6 +158,8 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 					"topology_version":   currentVersion,
 					"rebalance_state":    rebalanceState,
 					"rebalance_progress": rebalanceProgress,
+					"guardian_url":       repoInfo.GuardianUrl,
+					"is_guardian":        repoInfo.GuardianUrl != "",
 				}
 				repoMu.Unlock()
 			}

@@ -52,6 +52,11 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		return nil, syscall.ENOENT
 	}
 
+	// Hide guardian directory at root if no guardian-* client is connected
+	if name == "guardian" && n.path == "" && !n.client.IsGuardianVisible() {
+		return nil, syscall.ENOENT
+	}
+
 	childPath := name
 	if n.path != "" {
 		childPath = n.path + "/" + name
