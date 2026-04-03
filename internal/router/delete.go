@@ -261,52 +261,68 @@ func (r *Router) deleteGuardianDirFromAllNodes(storageID, dirPath string) (map[s
 
 // DeleteGuardianFile is the gRPC handler for deleting a file from a guardian partition.
 func (r *Router) DeleteGuardianFile(ctx context.Context, req *pb.DeleteGuardianFileRequest) (*pb.DeleteGuardianFileResponse, error) {
-	if _, ok := r.validateGuardianToken(req.Token); !ok {
-		return &pb.DeleteGuardianFileResponse{
-			Success: false,
-			Message: "invalid guardian token",
-		}, fmt.Errorf("invalid guardian token")
+	r.mu.RLock()
+	repo := r.ingestedRepos[req.StorageId]
+	r.mu.RUnlock()
+	if repo == nil || !r.isGuardianRepo(repo.repoID) {
+		return &pb.DeleteGuardianFileResponse{Success: false, Message: "unknown guardian storage id"}, fmt.Errorf("unknown guardian storage id %q", req.StorageId)
 	}
 
-	result, err := r.deleteGuardianFileFromAllNodes(req.StorageId, req.FilePath)
+	logicalPath, err := guardianLogicalPathFromPhysical(repo.repoID, req.FilePath)
 	if err != nil {
 		return &pb.DeleteGuardianFileResponse{Success: false, Message: err.Error()}, err
 	}
-	r.publishGuardianChange(&pb.ChangeEvent{
-		StorageId: req.StorageId,
-		FilePath:  cleanGuardianRelativePath(req.FilePath),
-		Type:      pb.ChangeType_DELETED,
+	resp, err := r.DeleteGuardianPaths(ctx, &pb.DeleteGuardianPathsRequest{
+		GuardianToken: req.Token,
+		Deletes: []*pb.GuardianPathDelete{{
+			LogicalPath: logicalPath,
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "legacy guardian file delete",
+			CorrelationId: fmt.Sprintf("legacy-file-delete-%d", time.Now().UnixNano()),
+		},
 	})
+	if err != nil {
+		return &pb.DeleteGuardianFileResponse{Success: false, Message: err.Error()}, err
+	}
 
 	return &pb.DeleteGuardianFileResponse{
-		Success: true,
-		Message: result["message"].(string),
+		Success: resp.GetSuccess(),
+		Message: resp.GetMessage(),
 	}, nil
 }
 
 // DeleteGuardianDirectory is the gRPC handler for deleting a directory from a guardian partition.
 func (r *Router) DeleteGuardianDirectory(ctx context.Context, req *pb.DeleteGuardianDirectoryRequest) (*pb.DeleteGuardianDirectoryResponse, error) {
-	if _, ok := r.validateGuardianToken(req.Token); !ok {
-		return &pb.DeleteGuardianDirectoryResponse{
-			Success: false,
-			Message: "invalid guardian token",
-		}, fmt.Errorf("invalid guardian token")
+	r.mu.RLock()
+	repo := r.ingestedRepos[req.StorageId]
+	r.mu.RUnlock()
+	if repo == nil || !r.isGuardianRepo(repo.repoID) {
+		return &pb.DeleteGuardianDirectoryResponse{Success: false, Message: "unknown guardian storage id"}, fmt.Errorf("unknown guardian storage id %q", req.StorageId)
 	}
 
-	result, err := r.deleteGuardianDirFromAllNodes(req.StorageId, req.DirPath)
+	logicalPath, err := guardianLogicalPathFromPhysical(repo.repoID, req.DirPath)
 	if err != nil {
 		return &pb.DeleteGuardianDirectoryResponse{Success: false, Message: err.Error()}, err
 	}
-	r.publishGuardianChange(&pb.ChangeEvent{
-		StorageId: req.StorageId,
-		FilePath:  cleanGuardianRelativePath(req.DirPath),
-		Type:      pb.ChangeType_DELETED,
+	resp, err := r.DeleteGuardianPaths(ctx, &pb.DeleteGuardianPathsRequest{
+		GuardianToken: req.Token,
+		Deletes: []*pb.GuardianPathDelete{{
+			LogicalPath: logicalPath,
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "legacy guardian directory delete",
+			CorrelationId: fmt.Sprintf("legacy-dir-delete-%d", time.Now().UnixNano()),
+		},
 	})
+	if err != nil {
+		return &pb.DeleteGuardianDirectoryResponse{Success: false, Message: err.Error()}, err
+	}
 
 	return &pb.DeleteGuardianDirectoryResponse{
-		Success:      true,
-		Message:      result["message"].(string),
-		FilesDeleted: result["files_deleted"].(int64),
-		DirsDeleted:  result["dirs_deleted"].(int64),
+		Success:      resp.GetSuccess(),
+		Message:      resp.GetMessage(),
+		FilesDeleted: int64(len(resp.GetTombstones())),
+		DirsDeleted:  0,
 	}, nil
 }

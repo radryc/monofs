@@ -26,6 +26,7 @@ type RouterConfig struct {
 	PeerRouters         []RouterPeer
 	FetcherAddresses    []string // Fetcher cluster addresses for monitoring
 	EncryptionKey       []byte   // 32-byte ChaCha20-Poly1305 key for packager archives
+	GuardianStateDir    string   // Optional directory for persistent Guardian router state
 
 	// Replication and failover configuration
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
@@ -46,6 +47,7 @@ func DefaultRouterConfig() RouterConfig {
 		HealthCheckInterval:   5 * time.Second,  // Check every 5 seconds (reduced frequency to avoid lock contention)
 		UnhealthyThreshold:    15 * time.Second, // Mark unhealthy after 15 seconds (3 missed checks)
 		PeerRouters:           nil,
+		GuardianStateDir:      "",
 		ReplicationFactor:     2,                // Primary + 1 backup (protects against 1 node failure)
 		RebalanceDelay:        10 * time.Minute, // Wait 10 minutes before permanent rebalancing
 		GracefulFailoverDelay: 60 * time.Second, // 60 seconds for planned restarts
@@ -114,10 +116,18 @@ type Router struct {
 	guardianClients   map[string]*guardianClientState // clientID -> guardian state
 	guardianClientsMu sync.RWMutex
 
+	// Guardian persistence
+	guardianPrincipals *guardianPrincipalStore
+	guardianVersions   *guardianVersionStore
+
 	// Guardian change subscriptions
 	guardianChangeSubs   map[uint64]*guardianChangeSubscriber
 	guardianChangeSubsMu sync.RWMutex
 	guardianChangeSeq    atomic.Uint64
+
+	guardianLogicalChangeSubs   map[uint64]*guardianLogicalChangeSubscriber
+	guardianLogicalChangeSubsMu sync.RWMutex
+	guardianLogicalChangeSeq    atomic.Uint64
 
 	// Drain mode for planned maintenance
 	drainMode   atomic.Bool
@@ -252,24 +262,37 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		logger = slog.Default()
 	}
 	logger = logger.With("component", "router")
+	guardianPrincipals, err := newGuardianPrincipalStore(cfg.GuardianStateDir)
+	if err != nil {
+		logger.Error("failed to initialize guardian principal store", "state_dir", cfg.GuardianStateDir, "error", err)
+		guardianPrincipals, _ = newGuardianPrincipalStore("")
+	}
+	guardianVersions, err := newGuardianVersionStore(cfg.GuardianStateDir)
+	if err != nil {
+		logger.Error("failed to initialize guardian version store", "state_dir", cfg.GuardianStateDir, "error", err)
+		guardianVersions, _ = newGuardianVersionStore("")
+	}
 	r := &Router{
-		nodes:                make(map[string]*nodeState),
-		ingestedRepos:        make(map[string]*ingestedRepo),
-		inProgressIngestions: make(map[string]*inProgressIngestion),
-		clients:              make(map[string]*clientState),
-		guardianClients:      make(map[string]*guardianClientState),
-		guardianChangeSubs:   make(map[uint64]*guardianChangeSubscriber),
-		topologySnapshots:    make(map[int64][]sharding.Node),
-		pendingIndexRebuilds: make(map[string]map[string]bool),
-		failoverTimers:       make(map[string]*time.Timer),
-		failoverStartTimes:   make(map[string]time.Time),
-		config:               cfg,
-		stopHealth:           make(chan struct{}),
-		stopClients:          make(chan struct{}),
-		uiRequests:           make(chan UIRequest, 100), // Buffered to prevent UI blocking
-		stopUI:               make(chan struct{}),
-		logger:               logger,
-		whitelist:            newWhitelistStore(),
+		nodes:                     make(map[string]*nodeState),
+		ingestedRepos:             make(map[string]*ingestedRepo),
+		inProgressIngestions:      make(map[string]*inProgressIngestion),
+		clients:                   make(map[string]*clientState),
+		guardianClients:           make(map[string]*guardianClientState),
+		guardianPrincipals:        guardianPrincipals,
+		guardianVersions:          guardianVersions,
+		guardianChangeSubs:        make(map[uint64]*guardianChangeSubscriber),
+		guardianLogicalChangeSubs: make(map[uint64]*guardianLogicalChangeSubscriber),
+		topologySnapshots:         make(map[int64][]sharding.Node),
+		pendingIndexRebuilds:      make(map[string]map[string]bool),
+		failoverTimers:            make(map[string]*time.Timer),
+		failoverStartTimes:        make(map[string]time.Time),
+		config:                    cfg,
+		stopHealth:                make(chan struct{}),
+		stopClients:               make(chan struct{}),
+		uiRequests:                make(chan UIRequest, 100), // Buffered to prevent UI blocking
+		stopUI:                    make(chan struct{}),
+		logger:                    logger,
+		whitelist:                 newWhitelistStore(),
 	}
 	r.version.Store(1)
 
@@ -2715,6 +2738,11 @@ func (r *Router) RegisterClient(ctx context.Context, req *pb.RegisterClientReque
 		r.logger.Info("guardian client registered",
 			"client_id", req.ClientId,
 			"base_url", req.GuardianConfig.BaseUrl)
+		if _, err := r.guardianPrincipals.upsertConnectedClient(req.ClientId, req.GuardianConfig.AuthToken, req.GuardianConfig.BaseUrl); err != nil {
+			r.logger.Warn("failed to persist guardian principal",
+				"client_id", req.ClientId,
+				"error", err)
+		}
 	}
 
 	// Check if client already exists (reconnection)
@@ -2993,24 +3021,41 @@ func (r *Router) GetClientCount() int {
 	return len(r.clients)
 }
 
-// isGuardianVisible returns true if at least one guardian-* client is connected.
+// isGuardianVisible reports whether Guardian namespaces should be exposed to clients.
+// Guardian visibility is no longer gated on a connected guardian-* UI client.
 func (r *Router) isGuardianVisible() bool {
-	r.guardianClientsMu.RLock()
-	defer r.guardianClientsMu.RUnlock()
-	return len(r.guardianClients) > 0
+	return true
 }
 
-// validateGuardianToken checks if the given token matches any connected guardian client.
+// validateGuardianToken checks if the given token matches a persistent or connected guardian principal.
 // Returns the matching client ID and true if valid, or empty string and false if not.
 func (r *Router) validateGuardianToken(token string) (string, bool) {
+	if principal, ok := r.authenticateGuardianToken(token); ok {
+		return principal.PrincipalID, true
+	}
+	return "", false
+}
+
+func (r *Router) authenticateGuardianToken(token string) (*guardianPrincipal, bool) {
+	if r.guardianPrincipals != nil {
+		if principal, ok := r.guardianPrincipals.validateToken(token); ok {
+			return principal, true
+		}
+	}
+
 	r.guardianClientsMu.RLock()
 	defer r.guardianClientsMu.RUnlock()
 	for clientID, state := range r.guardianClients {
 		if state.authToken == token {
-			return clientID, true
+			return &guardianPrincipal{
+				PrincipalID: clientID,
+				Role:        inferGuardianPrincipalRole(clientID),
+				DisplayName: clientID,
+				BaseURL:     state.baseURL,
+			}, true
 		}
 	}
-	return "", false
+	return nil, false
 }
 
 // getGuardianBaseURL returns the base URL for a guardian client.
@@ -3025,7 +3070,7 @@ func (r *Router) getGuardianBaseURL(clientID string) string {
 
 // isGuardianRepo returns true if the given display path is a guardian partition.
 func (r *Router) isGuardianRepo(displayPath string) bool {
-	return strings.HasPrefix(displayPath, "guardian/")
+	return displayPath == "guardian-system" || strings.HasPrefix(displayPath, "guardian/")
 }
 
 // GetClientStats returns aggregated client statistics for the performance page
