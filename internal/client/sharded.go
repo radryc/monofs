@@ -368,7 +368,7 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 	// Mark connected since we successfully talked to router
 	sc.connected = true
 	sc.lastError = nil
-	sc.guardianVisible = resp.GuardianVisible
+	sc.guardianVisible = true
 
 	// Node health state comes exclusively from the router via UpdateNodeHealthFromProto().
 	// The router is the single source of truth for node health.
@@ -1552,7 +1552,7 @@ func (sc *ShardedClient) RecordError() {
 	atomic.AddInt64(&sc.errorsCount, 1)
 }
 
-// IsGuardianVisible returns whether any guardian-* client is connected
+// IsGuardianVisible reports whether Guardian namespaces should be exposed.
 func (sc *ShardedClient) IsGuardianVisible() bool {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()

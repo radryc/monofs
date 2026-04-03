@@ -353,7 +353,7 @@ type ClusterInfoResponse struct {
 	Nodes           []*NodeInfo            `protobuf:"bytes,1,rep,name=nodes,proto3" json:"nodes,omitempty"`
 	ClusterId       string                 `protobuf:"bytes,2,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
 	Version         int64                  `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`                                        // Cluster config version for cache invalidation
-	GuardianVisible bool                   `protobuf:"varint,4,opt,name=guardian_visible,json=guardianVisible,proto3" json:"guardian_visible,omitempty"` // True if at least one guardian client is connected
+	GuardianVisible bool                   `protobuf:"varint,4,opt,name=guardian_visible,json=guardianVisible,proto3" json:"guardian_visible,omitempty"` // True if Guardian namespaces should be shown to clients
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -4001,11 +4001,14 @@ func (x *RegisterClientRequest) GetGuardianConfig() *GuardianConfig {
 	return nil
 }
 
-// GuardianConfig holds configuration for a guardian client.
+// GuardianConfig holds configuration for a guardian-capable client.
 type GuardianConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	BaseUrl       string                 `protobuf:"bytes,1,opt,name=base_url,json=baseUrl,proto3" json:"base_url,omitempty"`       // Base URL of the guardian service
-	AuthToken     string                 `protobuf:"bytes,2,opt,name=auth_token,json=authToken,proto3" json:"auth_token,omitempty"` // Authentication token for guardian operations
+	BaseUrl       string                 `protobuf:"bytes,1,opt,name=base_url,json=baseUrl,proto3" json:"base_url,omitempty"`             // Optional base URL of the guardian service/UI
+	AuthToken     string                 `protobuf:"bytes,2,opt,name=auth_token,json=authToken,proto3" json:"auth_token,omitempty"`       // Authentication token for guardian operations
+	PrincipalId   string                 `protobuf:"bytes,3,opt,name=principal_id,json=principalId,proto3" json:"principal_id,omitempty"` // Optional persistent principal ID (defaults to client_id)
+	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`                                  // Optional role: control-plane, cli, pusher
+	DisplayName   string                 `protobuf:"bytes,5,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"` // Optional human-friendly label
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4050,6 +4053,27 @@ func (x *GuardianConfig) GetBaseUrl() string {
 func (x *GuardianConfig) GetAuthToken() string {
 	if x != nil {
 		return x.AuthToken
+	}
+	return ""
+}
+
+func (x *GuardianConfig) GetPrincipalId() string {
+	if x != nil {
+		return x.PrincipalId
+	}
+	return ""
+}
+
+func (x *GuardianConfig) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *GuardianConfig) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
 	}
 	return ""
 }
@@ -6750,6 +6774,974 @@ func (x *InjectGuardianPartitionResponse) GetFilesIngested() int32 {
 	return 0
 }
 
+type GuardianMutationContext struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PrincipalId   string                 `protobuf:"bytes,1,opt,name=principal_id,json=principalId,proto3" json:"principal_id,omitempty"`
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	CorrelationId string                 `protobuf:"bytes,3,opt,name=correlation_id,json=correlationId,proto3" json:"correlation_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GuardianMutationContext) Reset() {
+	*x = GuardianMutationContext{}
+	mi := &file_api_proto_monofs_proto_msgTypes[106]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianMutationContext) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianMutationContext) ProtoMessage() {}
+
+func (x *GuardianMutationContext) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[106]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianMutationContext.ProtoReflect.Descriptor instead.
+func (*GuardianMutationContext) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{106}
+}
+
+func (x *GuardianMutationContext) GetPrincipalId() string {
+	if x != nil {
+		return x.PrincipalId
+	}
+	return ""
+}
+
+func (x *GuardianMutationContext) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *GuardianMutationContext) GetCorrelationId() string {
+	if x != nil {
+		return x.CorrelationId
+	}
+	return ""
+}
+
+type GuardianPathWrite struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	LogicalPath       string                 `protobuf:"bytes,1,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	Content           []byte                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	ExpectedVersionId string                 `protobuf:"bytes,3,opt,name=expected_version_id,json=expectedVersionId,proto3" json:"expected_version_id,omitempty"` // empty = blind write, "absent" = create only
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *GuardianPathWrite) Reset() {
+	*x = GuardianPathWrite{}
+	mi := &file_api_proto_monofs_proto_msgTypes[107]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianPathWrite) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianPathWrite) ProtoMessage() {}
+
+func (x *GuardianPathWrite) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[107]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianPathWrite.ProtoReflect.Descriptor instead.
+func (*GuardianPathWrite) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{107}
+}
+
+func (x *GuardianPathWrite) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *GuardianPathWrite) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+func (x *GuardianPathWrite) GetExpectedVersionId() string {
+	if x != nil {
+		return x.ExpectedVersionId
+	}
+	return ""
+}
+
+type GuardianPathDelete struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	LogicalPath       string                 `protobuf:"bytes,1,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	ExpectedVersionId string                 `protobuf:"bytes,2,opt,name=expected_version_id,json=expectedVersionId,proto3" json:"expected_version_id,omitempty"` // optional CAS guard
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *GuardianPathDelete) Reset() {
+	*x = GuardianPathDelete{}
+	mi := &file_api_proto_monofs_proto_msgTypes[108]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianPathDelete) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianPathDelete) ProtoMessage() {}
+
+func (x *GuardianPathDelete) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[108]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianPathDelete.ProtoReflect.Descriptor instead.
+func (*GuardianPathDelete) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{108}
+}
+
+func (x *GuardianPathDelete) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *GuardianPathDelete) GetExpectedVersionId() string {
+	if x != nil {
+		return x.ExpectedVersionId
+	}
+	return ""
+}
+
+type GuardianFileVersion struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	LogicalPath     string                 `protobuf:"bytes,1,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	DisplayPath     string                 `protobuf:"bytes,2,opt,name=display_path,json=displayPath,proto3" json:"display_path,omitempty"`
+	StorageId       string                 `protobuf:"bytes,3,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	VersionId       string                 `protobuf:"bytes,4,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	BatchRevisionId string                 `protobuf:"bytes,5,opt,name=batch_revision_id,json=batchRevisionId,proto3" json:"batch_revision_id,omitempty"`
+	ContentSha256   string                 `protobuf:"bytes,6,opt,name=content_sha256,json=contentSha256,proto3" json:"content_sha256,omitempty"`
+	CommittedAt     int64                  `protobuf:"varint,7,opt,name=committed_at,json=committedAt,proto3" json:"committed_at,omitempty"`
+	Tombstone       bool                   `protobuf:"varint,8,opt,name=tombstone,proto3" json:"tombstone,omitempty"`
+	PrincipalId     string                 `protobuf:"bytes,9,opt,name=principal_id,json=principalId,proto3" json:"principal_id,omitempty"`
+	Reason          string                 `protobuf:"bytes,10,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GuardianFileVersion) Reset() {
+	*x = GuardianFileVersion{}
+	mi := &file_api_proto_monofs_proto_msgTypes[109]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianFileVersion) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianFileVersion) ProtoMessage() {}
+
+func (x *GuardianFileVersion) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[109]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianFileVersion.ProtoReflect.Descriptor instead.
+func (*GuardianFileVersion) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{109}
+}
+
+func (x *GuardianFileVersion) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetDisplayPath() string {
+	if x != nil {
+		return x.DisplayPath
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetVersionId() string {
+	if x != nil {
+		return x.VersionId
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetBatchRevisionId() string {
+	if x != nil {
+		return x.BatchRevisionId
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetContentSha256() string {
+	if x != nil {
+		return x.ContentSha256
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetCommittedAt() int64 {
+	if x != nil {
+		return x.CommittedAt
+	}
+	return 0
+}
+
+func (x *GuardianFileVersion) GetTombstone() bool {
+	if x != nil {
+		return x.Tombstone
+	}
+	return false
+}
+
+func (x *GuardianFileVersion) GetPrincipalId() string {
+	if x != nil {
+		return x.PrincipalId
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+type UpsertGuardianPathsRequest struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	GuardianToken string                   `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"`
+	Writes        []*GuardianPathWrite     `protobuf:"bytes,2,rep,name=writes,proto3" json:"writes,omitempty"`
+	Context       *GuardianMutationContext `protobuf:"bytes,3,opt,name=context,proto3" json:"context,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpsertGuardianPathsRequest) Reset() {
+	*x = UpsertGuardianPathsRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[110]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpsertGuardianPathsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpsertGuardianPathsRequest) ProtoMessage() {}
+
+func (x *UpsertGuardianPathsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[110]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpsertGuardianPathsRequest.ProtoReflect.Descriptor instead.
+func (*UpsertGuardianPathsRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{110}
+}
+
+func (x *UpsertGuardianPathsRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *UpsertGuardianPathsRequest) GetWrites() []*GuardianPathWrite {
+	if x != nil {
+		return x.Writes
+	}
+	return nil
+}
+
+func (x *UpsertGuardianPathsRequest) GetContext() *GuardianMutationContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+type UpsertGuardianPathsResponse struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Success         bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	BatchRevisionId string                 `protobuf:"bytes,2,opt,name=batch_revision_id,json=batchRevisionId,proto3" json:"batch_revision_id,omitempty"`
+	Versions        []*GuardianFileVersion `protobuf:"bytes,3,rep,name=versions,proto3" json:"versions,omitempty"`
+	Message         string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *UpsertGuardianPathsResponse) Reset() {
+	*x = UpsertGuardianPathsResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[111]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpsertGuardianPathsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpsertGuardianPathsResponse) ProtoMessage() {}
+
+func (x *UpsertGuardianPathsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[111]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpsertGuardianPathsResponse.ProtoReflect.Descriptor instead.
+func (*UpsertGuardianPathsResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{111}
+}
+
+func (x *UpsertGuardianPathsResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *UpsertGuardianPathsResponse) GetBatchRevisionId() string {
+	if x != nil {
+		return x.BatchRevisionId
+	}
+	return ""
+}
+
+func (x *UpsertGuardianPathsResponse) GetVersions() []*GuardianFileVersion {
+	if x != nil {
+		return x.Versions
+	}
+	return nil
+}
+
+func (x *UpsertGuardianPathsResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type DeleteGuardianPathsRequest struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	GuardianToken string                   `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"`
+	Deletes       []*GuardianPathDelete    `protobuf:"bytes,2,rep,name=deletes,proto3" json:"deletes,omitempty"`
+	Context       *GuardianMutationContext `protobuf:"bytes,3,opt,name=context,proto3" json:"context,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteGuardianPathsRequest) Reset() {
+	*x = DeleteGuardianPathsRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[112]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteGuardianPathsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteGuardianPathsRequest) ProtoMessage() {}
+
+func (x *DeleteGuardianPathsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[112]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteGuardianPathsRequest.ProtoReflect.Descriptor instead.
+func (*DeleteGuardianPathsRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{112}
+}
+
+func (x *DeleteGuardianPathsRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *DeleteGuardianPathsRequest) GetDeletes() []*GuardianPathDelete {
+	if x != nil {
+		return x.Deletes
+	}
+	return nil
+}
+
+func (x *DeleteGuardianPathsRequest) GetContext() *GuardianMutationContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+type DeleteGuardianPathsResponse struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Success         bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	BatchRevisionId string                 `protobuf:"bytes,2,opt,name=batch_revision_id,json=batchRevisionId,proto3" json:"batch_revision_id,omitempty"`
+	Tombstones      []*GuardianFileVersion `protobuf:"bytes,3,rep,name=tombstones,proto3" json:"tombstones,omitempty"`
+	Message         string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *DeleteGuardianPathsResponse) Reset() {
+	*x = DeleteGuardianPathsResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[113]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteGuardianPathsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteGuardianPathsResponse) ProtoMessage() {}
+
+func (x *DeleteGuardianPathsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[113]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteGuardianPathsResponse.ProtoReflect.Descriptor instead.
+func (*DeleteGuardianPathsResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{113}
+}
+
+func (x *DeleteGuardianPathsResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *DeleteGuardianPathsResponse) GetBatchRevisionId() string {
+	if x != nil {
+		return x.BatchRevisionId
+	}
+	return ""
+}
+
+func (x *DeleteGuardianPathsResponse) GetTombstones() []*GuardianFileVersion {
+	if x != nil {
+		return x.Tombstones
+	}
+	return nil
+}
+
+func (x *DeleteGuardianPathsResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type ListGuardianVersionsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GuardianToken string                 `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"`
+	LogicalPath   string                 `protobuf:"bytes,2,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	PageSize      int32                  `protobuf:"varint,3,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	PageToken     string                 `protobuf:"bytes,4,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListGuardianVersionsRequest) Reset() {
+	*x = ListGuardianVersionsRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[114]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListGuardianVersionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListGuardianVersionsRequest) ProtoMessage() {}
+
+func (x *ListGuardianVersionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[114]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListGuardianVersionsRequest.ProtoReflect.Descriptor instead.
+func (*ListGuardianVersionsRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{114}
+}
+
+func (x *ListGuardianVersionsRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *ListGuardianVersionsRequest) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *ListGuardianVersionsRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ListGuardianVersionsRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+type ListGuardianVersionsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Versions      []*GuardianFileVersion `protobuf:"bytes,1,rep,name=versions,proto3" json:"versions,omitempty"`
+	NextPageToken string                 `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListGuardianVersionsResponse) Reset() {
+	*x = ListGuardianVersionsResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[115]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListGuardianVersionsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListGuardianVersionsResponse) ProtoMessage() {}
+
+func (x *ListGuardianVersionsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[115]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListGuardianVersionsResponse.ProtoReflect.Descriptor instead.
+func (*ListGuardianVersionsResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{115}
+}
+
+func (x *ListGuardianVersionsResponse) GetVersions() []*GuardianFileVersion {
+	if x != nil {
+		return x.Versions
+	}
+	return nil
+}
+
+func (x *ListGuardianVersionsResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
+type GetGuardianVersionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GuardianToken string                 `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"`
+	LogicalPath   string                 `protobuf:"bytes,2,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	VersionId     string                 `protobuf:"bytes,3,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetGuardianVersionRequest) Reset() {
+	*x = GetGuardianVersionRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[116]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetGuardianVersionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetGuardianVersionRequest) ProtoMessage() {}
+
+func (x *GetGuardianVersionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[116]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetGuardianVersionRequest.ProtoReflect.Descriptor instead.
+func (*GetGuardianVersionRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{116}
+}
+
+func (x *GetGuardianVersionRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *GetGuardianVersionRequest) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *GetGuardianVersionRequest) GetVersionId() string {
+	if x != nil {
+		return x.VersionId
+	}
+	return ""
+}
+
+type GetGuardianVersionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Version       *GuardianFileVersion   `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
+	Content       []byte                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetGuardianVersionResponse) Reset() {
+	*x = GetGuardianVersionResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[117]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetGuardianVersionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetGuardianVersionResponse) ProtoMessage() {}
+
+func (x *GetGuardianVersionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[117]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetGuardianVersionResponse.ProtoReflect.Descriptor instead.
+func (*GetGuardianVersionResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{117}
+}
+
+func (x *GetGuardianVersionResponse) GetVersion() *GuardianFileVersion {
+	if x != nil {
+		return x.Version
+	}
+	return nil
+}
+
+func (x *GetGuardianVersionResponse) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+type SubscribeGuardianChangesRequest struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	GuardianToken        string                 `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"`
+	LogicalPrefixes      []string               `protobuf:"bytes,2,rep,name=logical_prefixes,json=logicalPrefixes,proto3" json:"logical_prefixes,omitempty"`
+	IncludeInlineContent bool                   `protobuf:"varint,3,opt,name=include_inline_content,json=includeInlineContent,proto3" json:"include_inline_content,omitempty"`
+	Cursor               string                 `protobuf:"bytes,4,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *SubscribeGuardianChangesRequest) Reset() {
+	*x = SubscribeGuardianChangesRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[118]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubscribeGuardianChangesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubscribeGuardianChangesRequest) ProtoMessage() {}
+
+func (x *SubscribeGuardianChangesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[118]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubscribeGuardianChangesRequest.ProtoReflect.Descriptor instead.
+func (*SubscribeGuardianChangesRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{118}
+}
+
+func (x *SubscribeGuardianChangesRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *SubscribeGuardianChangesRequest) GetLogicalPrefixes() []string {
+	if x != nil {
+		return x.LogicalPrefixes
+	}
+	return nil
+}
+
+func (x *SubscribeGuardianChangesRequest) GetIncludeInlineContent() bool {
+	if x != nil {
+		return x.IncludeInlineContent
+	}
+	return false
+}
+
+func (x *SubscribeGuardianChangesRequest) GetCursor() string {
+	if x != nil {
+		return x.Cursor
+	}
+	return ""
+}
+
+type GuardianChangeEvent struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	LogicalPath     string                 `protobuf:"bytes,1,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	DisplayPath     string                 `protobuf:"bytes,2,opt,name=display_path,json=displayPath,proto3" json:"display_path,omitempty"`
+	StorageId       string                 `protobuf:"bytes,3,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	Type            ChangeType             `protobuf:"varint,4,opt,name=type,proto3,enum=monofs.ChangeType" json:"type,omitempty"`
+	VersionId       string                 `protobuf:"bytes,5,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	BatchRevisionId string                 `protobuf:"bytes,6,opt,name=batch_revision_id,json=batchRevisionId,proto3" json:"batch_revision_id,omitempty"`
+	ContentSha256   string                 `protobuf:"bytes,7,opt,name=content_sha256,json=contentSha256,proto3" json:"content_sha256,omitempty"`
+	PrincipalId     string                 `protobuf:"bytes,8,opt,name=principal_id,json=principalId,proto3" json:"principal_id,omitempty"`
+	CorrelationId   string                 `protobuf:"bytes,9,opt,name=correlation_id,json=correlationId,proto3" json:"correlation_id,omitempty"`
+	CommittedAt     int64                  `protobuf:"varint,10,opt,name=committed_at,json=committedAt,proto3" json:"committed_at,omitempty"`
+	InlineContent   []byte                 `protobuf:"bytes,11,opt,name=inline_content,json=inlineContent,proto3" json:"inline_content,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GuardianChangeEvent) Reset() {
+	*x = GuardianChangeEvent{}
+	mi := &file_api_proto_monofs_proto_msgTypes[119]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianChangeEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianChangeEvent) ProtoMessage() {}
+
+func (x *GuardianChangeEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[119]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianChangeEvent.ProtoReflect.Descriptor instead.
+func (*GuardianChangeEvent) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{119}
+}
+
+func (x *GuardianChangeEvent) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetDisplayPath() string {
+	if x != nil {
+		return x.DisplayPath
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetType() ChangeType {
+	if x != nil {
+		return x.Type
+	}
+	return ChangeType_CHANGE_TYPE_UNSPECIFIED
+}
+
+func (x *GuardianChangeEvent) GetVersionId() string {
+	if x != nil {
+		return x.VersionId
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetBatchRevisionId() string {
+	if x != nil {
+		return x.BatchRevisionId
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetContentSha256() string {
+	if x != nil {
+		return x.ContentSha256
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetPrincipalId() string {
+	if x != nil {
+		return x.PrincipalId
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetCorrelationId() string {
+	if x != nil {
+		return x.CorrelationId
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetCommittedAt() int64 {
+	if x != nil {
+		return x.CommittedAt
+	}
+	return 0
+}
+
+func (x *GuardianChangeEvent) GetInlineContent() []byte {
+	if x != nil {
+		return x.InlineContent
+	}
+	return nil
+}
+
 var File_api_proto_monofs_proto protoreflect.FileDescriptor
 
 const file_api_proto_monofs_proto_rawDesc = "" +
@@ -7072,11 +8064,14 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\bhostname\x18\x03 \x01(\tR\bhostname\x12\x1a\n" +
 	"\bwritable\x18\x04 \x01(\bR\bwritable\x12\x18\n" +
 	"\aversion\x18\x05 \x01(\tR\aversion\x12?\n" +
-	"\x0fguardian_config\x18\x06 \x01(\v2\x16.monofs.GuardianConfigR\x0eguardianConfig\"J\n" +
+	"\x0fguardian_config\x18\x06 \x01(\v2\x16.monofs.GuardianConfigR\x0eguardianConfig\"\xa4\x01\n" +
 	"\x0eGuardianConfig\x12\x19\n" +
 	"\bbase_url\x18\x01 \x01(\tR\abaseUrl\x12\x1d\n" +
 	"\n" +
-	"auth_token\x18\x02 \x01(\tR\tauthToken\"\x80\x01\n" +
+	"auth_token\x18\x02 \x01(\tR\tauthToken\x12!\n" +
+	"\fprincipal_id\x18\x03 \x01(\tR\vprincipalId\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role\x12!\n" +
+	"\fdisplay_name\x18\x05 \x01(\tR\vdisplayName\"\x80\x01\n" +
 	"\x16RegisterClientResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x122\n" +
@@ -7272,7 +8267,89 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\n" +
 	"storage_id\x18\x02 \x01(\tR\tstorageId\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\x12%\n" +
-	"\x0efiles_ingested\x18\x04 \x01(\x05R\rfilesIngested*f\n" +
+	"\x0efiles_ingested\x18\x04 \x01(\x05R\rfilesIngested\"{\n" +
+	"\x17GuardianMutationContext\x12!\n" +
+	"\fprincipal_id\x18\x01 \x01(\tR\vprincipalId\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\x12%\n" +
+	"\x0ecorrelation_id\x18\x03 \x01(\tR\rcorrelationId\"\x80\x01\n" +
+	"\x11GuardianPathWrite\x12!\n" +
+	"\flogical_path\x18\x01 \x01(\tR\vlogicalPath\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\fR\acontent\x12.\n" +
+	"\x13expected_version_id\x18\x03 \x01(\tR\x11expectedVersionId\"g\n" +
+	"\x12GuardianPathDelete\x12!\n" +
+	"\flogical_path\x18\x01 \x01(\tR\vlogicalPath\x12.\n" +
+	"\x13expected_version_id\x18\x02 \x01(\tR\x11expectedVersionId\"\xe8\x02\n" +
+	"\x13GuardianFileVersion\x12!\n" +
+	"\flogical_path\x18\x01 \x01(\tR\vlogicalPath\x12!\n" +
+	"\fdisplay_path\x18\x02 \x01(\tR\vdisplayPath\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x03 \x01(\tR\tstorageId\x12\x1d\n" +
+	"\n" +
+	"version_id\x18\x04 \x01(\tR\tversionId\x12*\n" +
+	"\x11batch_revision_id\x18\x05 \x01(\tR\x0fbatchRevisionId\x12%\n" +
+	"\x0econtent_sha256\x18\x06 \x01(\tR\rcontentSha256\x12!\n" +
+	"\fcommitted_at\x18\a \x01(\x03R\vcommittedAt\x12\x1c\n" +
+	"\ttombstone\x18\b \x01(\bR\ttombstone\x12!\n" +
+	"\fprincipal_id\x18\t \x01(\tR\vprincipalId\x12\x16\n" +
+	"\x06reason\x18\n" +
+	" \x01(\tR\x06reason\"\xb1\x01\n" +
+	"\x1aUpsertGuardianPathsRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x121\n" +
+	"\x06writes\x18\x02 \x03(\v2\x19.monofs.GuardianPathWriteR\x06writes\x129\n" +
+	"\acontext\x18\x03 \x01(\v2\x1f.monofs.GuardianMutationContextR\acontext\"\xb6\x01\n" +
+	"\x1bUpsertGuardianPathsResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12*\n" +
+	"\x11batch_revision_id\x18\x02 \x01(\tR\x0fbatchRevisionId\x127\n" +
+	"\bversions\x18\x03 \x03(\v2\x1b.monofs.GuardianFileVersionR\bversions\x12\x18\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\"\xb4\x01\n" +
+	"\x1aDeleteGuardianPathsRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x124\n" +
+	"\adeletes\x18\x02 \x03(\v2\x1a.monofs.GuardianPathDeleteR\adeletes\x129\n" +
+	"\acontext\x18\x03 \x01(\v2\x1f.monofs.GuardianMutationContextR\acontext\"\xba\x01\n" +
+	"\x1bDeleteGuardianPathsResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12*\n" +
+	"\x11batch_revision_id\x18\x02 \x01(\tR\x0fbatchRevisionId\x12;\n" +
+	"\n" +
+	"tombstones\x18\x03 \x03(\v2\x1b.monofs.GuardianFileVersionR\n" +
+	"tombstones\x12\x18\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\"\xa3\x01\n" +
+	"\x1bListGuardianVersionsRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x12!\n" +
+	"\flogical_path\x18\x02 \x01(\tR\vlogicalPath\x12\x1b\n" +
+	"\tpage_size\x18\x03 \x01(\x05R\bpageSize\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x04 \x01(\tR\tpageToken\"\x7f\n" +
+	"\x1cListGuardianVersionsResponse\x127\n" +
+	"\bversions\x18\x01 \x03(\v2\x1b.monofs.GuardianFileVersionR\bversions\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x84\x01\n" +
+	"\x19GetGuardianVersionRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x12!\n" +
+	"\flogical_path\x18\x02 \x01(\tR\vlogicalPath\x12\x1d\n" +
+	"\n" +
+	"version_id\x18\x03 \x01(\tR\tversionId\"m\n" +
+	"\x1aGetGuardianVersionResponse\x125\n" +
+	"\aversion\x18\x01 \x01(\v2\x1b.monofs.GuardianFileVersionR\aversion\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\fR\acontent\"\xc1\x01\n" +
+	"\x1fSubscribeGuardianChangesRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x12)\n" +
+	"\x10logical_prefixes\x18\x02 \x03(\tR\x0flogicalPrefixes\x124\n" +
+	"\x16include_inline_content\x18\x03 \x01(\bR\x14includeInlineContent\x12\x16\n" +
+	"\x06cursor\x18\x04 \x01(\tR\x06cursor\"\xa8\x03\n" +
+	"\x13GuardianChangeEvent\x12!\n" +
+	"\flogical_path\x18\x01 \x01(\tR\vlogicalPath\x12!\n" +
+	"\fdisplay_path\x18\x02 \x01(\tR\vdisplayPath\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x03 \x01(\tR\tstorageId\x12&\n" +
+	"\x04type\x18\x04 \x01(\x0e2\x12.monofs.ChangeTypeR\x04type\x12\x1d\n" +
+	"\n" +
+	"version_id\x18\x05 \x01(\tR\tversionId\x12*\n" +
+	"\x11batch_revision_id\x18\x06 \x01(\tR\x0fbatchRevisionId\x12%\n" +
+	"\x0econtent_sha256\x18\a \x01(\tR\rcontentSha256\x12!\n" +
+	"\fprincipal_id\x18\b \x01(\tR\vprincipalId\x12%\n" +
+	"\x0ecorrelation_id\x18\t \x01(\tR\rcorrelationId\x12!\n" +
+	"\fcommitted_at\x18\n" +
+	" \x01(\x03R\vcommittedAt\x12%\n" +
+	"\x0einline_content\x18\v \x01(\fR\rinlineContent*f\n" +
 	"\rIngestionType\x12\x11\n" +
 	"\rINGESTION_GIT\x10\x00\x12\x10\n" +
 	"\fINGESTION_S3\x10\x02\x12\x12\n" +
@@ -7296,7 +8373,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x17CHANGE_TYPE_UNSPECIFIED\x10\x00\x12\t\n" +
 	"\x05ADDED\x10\x01\x12\f\n" +
 	"\bMODIFIED\x10\x02\x12\v\n" +
-	"\aDELETED\x10\x032\xf3\x10\n" +
+	"\aDELETED\x10\x032\xd7\x14\n" +
 	"\fMonoFSRouter\x12I\n" +
 	"\x0eGetClusterInfo\x12\x1a.monofs.ClusterInfoRequest\x1a\x1b.monofs.ClusterInfoResponse\x12@\n" +
 	"\tHeartbeat\x12\x18.monofs.HeartbeatRequest\x1a\x19.monofs.HeartbeatResponse\x12C\n" +
@@ -7316,7 +8393,12 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x0eUndrainCluster\x12\x1d.monofs.UndrainClusterRequest\x1a\x1e.monofs.UndrainClusterResponse\x12[\n" +
 	"\x12DeleteGuardianFile\x12!.monofs.DeleteGuardianFileRequest\x1a\".monofs.DeleteGuardianFileResponse\x12j\n" +
 	"\x17DeleteGuardianDirectory\x12&.monofs.DeleteGuardianDirectoryRequest\x1a'.monofs.DeleteGuardianDirectoryResponse\x12j\n" +
-	"\x17InjectGuardianPartition\x12&.monofs.InjectGuardianPartitionRequest\x1a'.monofs.InjectGuardianPartitionResponse\x12a\n" +
+	"\x17InjectGuardianPartition\x12&.monofs.InjectGuardianPartitionRequest\x1a'.monofs.InjectGuardianPartitionResponse\x12^\n" +
+	"\x13UpsertGuardianPaths\x12\".monofs.UpsertGuardianPathsRequest\x1a#.monofs.UpsertGuardianPathsResponse\x12^\n" +
+	"\x13DeleteGuardianPaths\x12\".monofs.DeleteGuardianPathsRequest\x1a#.monofs.DeleteGuardianPathsResponse\x12a\n" +
+	"\x14ListGuardianVersions\x12#.monofs.ListGuardianVersionsRequest\x1a$.monofs.ListGuardianVersionsResponse\x12[\n" +
+	"\x12GetGuardianVersion\x12!.monofs.GetGuardianVersionRequest\x1a\".monofs.GetGuardianVersionResponse\x12b\n" +
+	"\x18SubscribeGuardianChanges\x12'.monofs.SubscribeGuardianChangesRequest\x1a\x1b.monofs.GuardianChangeEvent0\x01\x12a\n" +
 	"\x14AddWhitelistedClient\x12#.monofs.AddWhitelistedClientRequest\x1a$.monofs.AddWhitelistedClientResponse\x12j\n" +
 	"\x17RemoveWhitelistedClient\x12&.monofs.RemoveWhitelistedClientRequest\x1a'.monofs.RemoveWhitelistedClientResponse\x12g\n" +
 	"\x16ListWhitelistedClients\x12%.monofs.ListWhitelistedClientsRequest\x1a&.monofs.ListWhitelistedClientsResponse\x12^\n" +
@@ -7364,7 +8446,7 @@ func file_api_proto_monofs_proto_rawDescGZIP() []byte {
 }
 
 var file_api_proto_monofs_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_api_proto_monofs_proto_msgTypes = make([]protoimpl.MessageInfo, 114)
+var file_api_proto_monofs_proto_msgTypes = make([]protoimpl.MessageInfo, 128)
 var file_api_proto_monofs_proto_goTypes = []any{
 	(IngestionType)(0),                       // 0: monofs.IngestionType
 	(SourceType)(0),                          // 1: monofs.SourceType
@@ -7477,148 +8559,181 @@ var file_api_proto_monofs_proto_goTypes = []any{
 	(*InjectGuardianFile)(nil),               // 108: monofs.InjectGuardianFile
 	(*InjectGuardianPartitionRequest)(nil),   // 109: monofs.InjectGuardianPartitionRequest
 	(*InjectGuardianPartitionResponse)(nil),  // 110: monofs.InjectGuardianPartitionResponse
-	nil,                                      // 111: monofs.NodeInfo.MetadataEntry
-	nil,                                      // 112: monofs.IngestRequest.IngestionConfigEntry
-	nil,                                      // 113: monofs.IngestRequest.FetchConfigEntry
-	nil,                                      // 114: monofs.FileMetadata.BackendMetadataEntry
-	nil,                                      // 115: monofs.RegisterRepositoryRequest.IngestionConfigEntry
-	nil,                                      // 116: monofs.RegisterRepositoryRequest.FetchConfigEntry
-	nil,                                      // 117: monofs.OnboardingStatusResponse.RepositoriesEntry
-	nil,                                      // 118: monofs.ClusterStatsResponse.FailoversEntry
+	(*GuardianMutationContext)(nil),          // 111: monofs.GuardianMutationContext
+	(*GuardianPathWrite)(nil),                // 112: monofs.GuardianPathWrite
+	(*GuardianPathDelete)(nil),               // 113: monofs.GuardianPathDelete
+	(*GuardianFileVersion)(nil),              // 114: monofs.GuardianFileVersion
+	(*UpsertGuardianPathsRequest)(nil),       // 115: monofs.UpsertGuardianPathsRequest
+	(*UpsertGuardianPathsResponse)(nil),      // 116: monofs.UpsertGuardianPathsResponse
+	(*DeleteGuardianPathsRequest)(nil),       // 117: monofs.DeleteGuardianPathsRequest
+	(*DeleteGuardianPathsResponse)(nil),      // 118: monofs.DeleteGuardianPathsResponse
+	(*ListGuardianVersionsRequest)(nil),      // 119: monofs.ListGuardianVersionsRequest
+	(*ListGuardianVersionsResponse)(nil),     // 120: monofs.ListGuardianVersionsResponse
+	(*GetGuardianVersionRequest)(nil),        // 121: monofs.GetGuardianVersionRequest
+	(*GetGuardianVersionResponse)(nil),       // 122: monofs.GetGuardianVersionResponse
+	(*SubscribeGuardianChangesRequest)(nil),  // 123: monofs.SubscribeGuardianChangesRequest
+	(*GuardianChangeEvent)(nil),              // 124: monofs.GuardianChangeEvent
+	nil,                                      // 125: monofs.NodeInfo.MetadataEntry
+	nil,                                      // 126: monofs.IngestRequest.IngestionConfigEntry
+	nil,                                      // 127: monofs.IngestRequest.FetchConfigEntry
+	nil,                                      // 128: monofs.FileMetadata.BackendMetadataEntry
+	nil,                                      // 129: monofs.RegisterRepositoryRequest.IngestionConfigEntry
+	nil,                                      // 130: monofs.RegisterRepositoryRequest.FetchConfigEntry
+	nil,                                      // 131: monofs.OnboardingStatusResponse.RepositoriesEntry
+	nil,                                      // 132: monofs.ClusterStatsResponse.FailoversEntry
 }
 var file_api_proto_monofs_proto_depIdxs = []int32{
 	7,   // 0: monofs.ClusterInfoResponse.nodes:type_name -> monofs.NodeInfo
-	111, // 1: monofs.NodeInfo.metadata:type_name -> monofs.NodeInfo.MetadataEntry
+	125, // 1: monofs.NodeInfo.metadata:type_name -> monofs.NodeInfo.MetadataEntry
 	0,   // 2: monofs.IngestRequest.ingestion_type:type_name -> monofs.IngestionType
 	1,   // 3: monofs.IngestRequest.fetch_type:type_name -> monofs.SourceType
-	112, // 4: monofs.IngestRequest.ingestion_config:type_name -> monofs.IngestRequest.IngestionConfigEntry
-	113, // 5: monofs.IngestRequest.fetch_config:type_name -> monofs.IngestRequest.FetchConfigEntry
+	126, // 4: monofs.IngestRequest.ingestion_config:type_name -> monofs.IngestRequest.IngestionConfigEntry
+	127, // 5: monofs.IngestRequest.fetch_config:type_name -> monofs.IngestRequest.FetchConfigEntry
 	4,   // 6: monofs.IngestProgress.stage:type_name -> monofs.IngestProgress.Stage
 	0,   // 7: monofs.FileMetadata.source_type:type_name -> monofs.IngestionType
 	1,   // 8: monofs.FileMetadata.fetch_type:type_name -> monofs.SourceType
-	114, // 9: monofs.FileMetadata.backend_metadata:type_name -> monofs.FileMetadata.BackendMetadataEntry
+	128, // 9: monofs.FileMetadata.backend_metadata:type_name -> monofs.FileMetadata.BackendMetadataEntry
 	28,  // 10: monofs.IngestFileRequest.metadata:type_name -> monofs.FileMetadata
 	28,  // 11: monofs.IngestFileBatchRequest.files:type_name -> monofs.FileMetadata
 	28,  // 12: monofs.IngestReplicaBatchRequest.files:type_name -> monofs.FileMetadata
 	0,   // 13: monofs.RegisterRepositoryRequest.ingestion_type:type_name -> monofs.IngestionType
 	1,   // 14: monofs.RegisterRepositoryRequest.fetch_type:type_name -> monofs.SourceType
-	115, // 15: monofs.RegisterRepositoryRequest.ingestion_config:type_name -> monofs.RegisterRepositoryRequest.IngestionConfigEntry
-	116, // 16: monofs.RegisterRepositoryRequest.fetch_config:type_name -> monofs.RegisterRepositoryRequest.FetchConfigEntry
+	129, // 15: monofs.RegisterRepositoryRequest.ingestion_config:type_name -> monofs.RegisterRepositoryRequest.IngestionConfigEntry
+	130, // 16: monofs.RegisterRepositoryRequest.fetch_config:type_name -> monofs.RegisterRepositoryRequest.FetchConfigEntry
 	86,  // 17: monofs.SyncMetadataFromNodeRequest.files:type_name -> monofs.FileInfo
-	117, // 18: monofs.OnboardingStatusResponse.repositories:type_name -> monofs.OnboardingStatusResponse.RepositoriesEntry
+	131, // 18: monofs.OnboardingStatusResponse.repositories:type_name -> monofs.OnboardingStatusResponse.RepositoriesEntry
 	64,  // 19: monofs.RegisterClientRequest.guardian_config:type_name -> monofs.GuardianConfig
 	72,  // 20: monofs.ListClientsResponse.clients:type_name -> monofs.ClientInfo
 	2,   // 21: monofs.ClientInfo.state:type_name -> monofs.ClientState
-	118, // 22: monofs.ClusterStatsResponse.failovers:type_name -> monofs.ClusterStatsResponse.FailoversEntry
+	132, // 22: monofs.ClusterStatsResponse.failovers:type_name -> monofs.ClusterStatsResponse.FailoversEntry
 	79,  // 23: monofs.NodeStatsResponse.nodes:type_name -> monofs.NodeStatInfo
 	86,  // 24: monofs.GetNodeFilesResponse.files:type_name -> monofs.FileInfo
 	95,  // 25: monofs.ListWhitelistedClientsResponse.clients:type_name -> monofs.WhitelistedClient
 	95,  // 26: monofs.GetWhitelistStatusResponse.clients:type_name -> monofs.WhitelistedClient
 	3,   // 27: monofs.ChangeEvent.type:type_name -> monofs.ChangeType
 	108, // 28: monofs.InjectGuardianPartitionRequest.files:type_name -> monofs.InjectGuardianFile
-	5,   // 29: monofs.MonoFSRouter.GetClusterInfo:input_type -> monofs.ClusterInfoRequest
-	8,   // 30: monofs.MonoFSRouter.Heartbeat:input_type -> monofs.HeartbeatRequest
-	26,  // 31: monofs.MonoFSRouter.IngestRepository:input_type -> monofs.IngestRequest
-	51,  // 32: monofs.MonoFSRouter.NotifyRepositoryIngested:input_type -> monofs.NotifyRepositoryIngestedRequest
-	53,  // 33: monofs.MonoFSRouter.DeleteRepository:input_type -> monofs.DeleteRepositoryRequest
-	55,  // 34: monofs.MonoFSRouter.GetNodeForFile:input_type -> monofs.GetNodeForFileRequest
-	63,  // 35: monofs.MonoFSRouter.RegisterClient:input_type -> monofs.RegisterClientRequest
-	66,  // 36: monofs.MonoFSRouter.UnregisterClient:input_type -> monofs.UnregisterClientRequest
-	68,  // 37: monofs.MonoFSRouter.ClientHeartbeat:input_type -> monofs.ClientHeartbeatRequest
-	70,  // 38: monofs.MonoFSRouter.ListClients:input_type -> monofs.ListClientsRequest
-	73,  // 39: monofs.MonoFSRouter.RequestFailover:input_type -> monofs.FailoverRequest
-	84,  // 40: monofs.MonoFSRouter.GetNodeFiles:input_type -> monofs.GetNodeFilesRequest
-	75,  // 41: monofs.MonoFSRouter.GetClusterStats:input_type -> monofs.ClusterStatsRequest
-	77,  // 42: monofs.MonoFSRouter.GetNodeStats:input_type -> monofs.NodeStatsRequest
-	80,  // 43: monofs.MonoFSRouter.DrainCluster:input_type -> monofs.DrainClusterRequest
-	82,  // 44: monofs.MonoFSRouter.UndrainCluster:input_type -> monofs.UndrainClusterRequest
-	102, // 45: monofs.MonoFSRouter.DeleteGuardianFile:input_type -> monofs.DeleteGuardianFileRequest
-	104, // 46: monofs.MonoFSRouter.DeleteGuardianDirectory:input_type -> monofs.DeleteGuardianDirectoryRequest
-	109, // 47: monofs.MonoFSRouter.InjectGuardianPartition:input_type -> monofs.InjectGuardianPartitionRequest
-	89,  // 48: monofs.MonoFSRouter.AddWhitelistedClient:input_type -> monofs.AddWhitelistedClientRequest
-	91,  // 49: monofs.MonoFSRouter.RemoveWhitelistedClient:input_type -> monofs.RemoveWhitelistedClientRequest
-	93,  // 50: monofs.MonoFSRouter.ListWhitelistedClients:input_type -> monofs.ListWhitelistedClientsRequest
-	96,  // 51: monofs.MonoFSRouter.SetWhitelistEnabled:input_type -> monofs.SetWhitelistEnabledRequest
-	98,  // 52: monofs.MonoFSRouter.GetWhitelistStatus:input_type -> monofs.GetWhitelistStatusRequest
-	106, // 53: monofs.MonoFSRouter.SubscribeToChanges:input_type -> monofs.SubscribeChangesRequest
-	12,  // 54: monofs.MonoFS.Lookup:input_type -> monofs.LookupRequest
-	14,  // 55: monofs.MonoFS.GetAttr:input_type -> monofs.GetAttrRequest
-	16,  // 56: monofs.MonoFS.ReadDir:input_type -> monofs.ReadDirRequest
-	18,  // 57: monofs.MonoFS.Read:input_type -> monofs.ReadRequest
-	20,  // 58: monofs.MonoFS.Create:input_type -> monofs.CreateRequest
-	22,  // 59: monofs.MonoFS.Write:input_type -> monofs.WriteRequest
-	24,  // 60: monofs.MonoFS.Authenticate:input_type -> monofs.AuthRequest
-	10,  // 61: monofs.MonoFS.GetNodeInfo:input_type -> monofs.NodeInfoRequest
-	29,  // 62: monofs.MonoFS.IngestFile:input_type -> monofs.IngestFileRequest
-	31,  // 63: monofs.MonoFS.IngestFileBatch:input_type -> monofs.IngestFileBatchRequest
-	33,  // 64: monofs.MonoFS.IngestReplicaBatch:input_type -> monofs.IngestReplicaBatchRequest
-	35,  // 65: monofs.MonoFS.RegisterRepository:input_type -> monofs.RegisterRepositoryRequest
-	37,  // 66: monofs.MonoFS.GetRepositoryFiles:input_type -> monofs.GetRepositoryFilesRequest
-	39,  // 67: monofs.MonoFS.SyncMetadataFromNode:input_type -> monofs.SyncMetadataFromNodeRequest
-	41,  // 68: monofs.MonoFS.ClearFailoverCache:input_type -> monofs.ClearFailoverCacheRequest
-	43,  // 69: monofs.MonoFS.ListRepositories:input_type -> monofs.ListRepositoriesRequest
-	45,  // 70: monofs.MonoFS.GetRepositoryInfo:input_type -> monofs.GetRepositoryInfoRequest
-	47,  // 71: monofs.MonoFS.GetOnboardingStatus:input_type -> monofs.OnboardingStatusRequest
-	49,  // 72: monofs.MonoFS.MarkRepositoryOnboarded:input_type -> monofs.MarkRepositoryOnboardedRequest
-	57,  // 73: monofs.MonoFS.DeleteFile:input_type -> monofs.DeleteFileRequest
-	61,  // 74: monofs.MonoFS.DeleteRepository:input_type -> monofs.DeleteRepositoryOnNodeRequest
-	100, // 75: monofs.MonoFS.DeleteDirectoryRecursive:input_type -> monofs.DeleteDirectoryRecursiveRequest
-	59,  // 76: monofs.MonoFS.BuildDirectoryIndexes:input_type -> monofs.BuildDirectoryIndexesRequest
-	87,  // 77: monofs.MonoFS.GetPredictorStats:input_type -> monofs.PredictorStatsRequest
-	6,   // 78: monofs.MonoFSRouter.GetClusterInfo:output_type -> monofs.ClusterInfoResponse
-	9,   // 79: monofs.MonoFSRouter.Heartbeat:output_type -> monofs.HeartbeatResponse
-	27,  // 80: monofs.MonoFSRouter.IngestRepository:output_type -> monofs.IngestProgress
-	52,  // 81: monofs.MonoFSRouter.NotifyRepositoryIngested:output_type -> monofs.NotifyRepositoryIngestedResponse
-	54,  // 82: monofs.MonoFSRouter.DeleteRepository:output_type -> monofs.DeleteRepositoryResponse
-	56,  // 83: monofs.MonoFSRouter.GetNodeForFile:output_type -> monofs.GetNodeForFileResponse
-	65,  // 84: monofs.MonoFSRouter.RegisterClient:output_type -> monofs.RegisterClientResponse
-	67,  // 85: monofs.MonoFSRouter.UnregisterClient:output_type -> monofs.UnregisterClientResponse
-	69,  // 86: monofs.MonoFSRouter.ClientHeartbeat:output_type -> monofs.ClientHeartbeatResponse
-	71,  // 87: monofs.MonoFSRouter.ListClients:output_type -> monofs.ListClientsResponse
-	74,  // 88: monofs.MonoFSRouter.RequestFailover:output_type -> monofs.FailoverResponse
-	85,  // 89: monofs.MonoFSRouter.GetNodeFiles:output_type -> monofs.GetNodeFilesResponse
-	76,  // 90: monofs.MonoFSRouter.GetClusterStats:output_type -> monofs.ClusterStatsResponse
-	78,  // 91: monofs.MonoFSRouter.GetNodeStats:output_type -> monofs.NodeStatsResponse
-	81,  // 92: monofs.MonoFSRouter.DrainCluster:output_type -> monofs.DrainClusterResponse
-	83,  // 93: monofs.MonoFSRouter.UndrainCluster:output_type -> monofs.UndrainClusterResponse
-	103, // 94: monofs.MonoFSRouter.DeleteGuardianFile:output_type -> monofs.DeleteGuardianFileResponse
-	105, // 95: monofs.MonoFSRouter.DeleteGuardianDirectory:output_type -> monofs.DeleteGuardianDirectoryResponse
-	110, // 96: monofs.MonoFSRouter.InjectGuardianPartition:output_type -> monofs.InjectGuardianPartitionResponse
-	90,  // 97: monofs.MonoFSRouter.AddWhitelistedClient:output_type -> monofs.AddWhitelistedClientResponse
-	92,  // 98: monofs.MonoFSRouter.RemoveWhitelistedClient:output_type -> monofs.RemoveWhitelistedClientResponse
-	94,  // 99: monofs.MonoFSRouter.ListWhitelistedClients:output_type -> monofs.ListWhitelistedClientsResponse
-	97,  // 100: monofs.MonoFSRouter.SetWhitelistEnabled:output_type -> monofs.SetWhitelistEnabledResponse
-	99,  // 101: monofs.MonoFSRouter.GetWhitelistStatus:output_type -> monofs.GetWhitelistStatusResponse
-	107, // 102: monofs.MonoFSRouter.SubscribeToChanges:output_type -> monofs.ChangeEvent
-	13,  // 103: monofs.MonoFS.Lookup:output_type -> monofs.LookupResponse
-	15,  // 104: monofs.MonoFS.GetAttr:output_type -> monofs.GetAttrResponse
-	17,  // 105: monofs.MonoFS.ReadDir:output_type -> monofs.DirEntry
-	19,  // 106: monofs.MonoFS.Read:output_type -> monofs.DataChunk
-	21,  // 107: monofs.MonoFS.Create:output_type -> monofs.CreateResponse
-	23,  // 108: monofs.MonoFS.Write:output_type -> monofs.WriteResponse
-	25,  // 109: monofs.MonoFS.Authenticate:output_type -> monofs.AuthResponse
-	11,  // 110: monofs.MonoFS.GetNodeInfo:output_type -> monofs.NodeInfoResponse
-	30,  // 111: monofs.MonoFS.IngestFile:output_type -> monofs.IngestFileResponse
-	32,  // 112: monofs.MonoFS.IngestFileBatch:output_type -> monofs.IngestFileBatchResponse
-	34,  // 113: monofs.MonoFS.IngestReplicaBatch:output_type -> monofs.IngestReplicaBatchResponse
-	36,  // 114: monofs.MonoFS.RegisterRepository:output_type -> monofs.RegisterRepositoryResponse
-	38,  // 115: monofs.MonoFS.GetRepositoryFiles:output_type -> monofs.GetRepositoryFilesResponse
-	40,  // 116: monofs.MonoFS.SyncMetadataFromNode:output_type -> monofs.SyncMetadataFromNodeResponse
-	42,  // 117: monofs.MonoFS.ClearFailoverCache:output_type -> monofs.ClearFailoverCacheResponse
-	44,  // 118: monofs.MonoFS.ListRepositories:output_type -> monofs.ListRepositoriesResponse
-	46,  // 119: monofs.MonoFS.GetRepositoryInfo:output_type -> monofs.GetRepositoryInfoResponse
-	48,  // 120: monofs.MonoFS.GetOnboardingStatus:output_type -> monofs.OnboardingStatusResponse
-	50,  // 121: monofs.MonoFS.MarkRepositoryOnboarded:output_type -> monofs.MarkRepositoryOnboardedResponse
-	58,  // 122: monofs.MonoFS.DeleteFile:output_type -> monofs.DeleteFileResponse
-	62,  // 123: monofs.MonoFS.DeleteRepository:output_type -> monofs.DeleteRepositoryOnNodeResponse
-	101, // 124: monofs.MonoFS.DeleteDirectoryRecursive:output_type -> monofs.DeleteDirectoryRecursiveResponse
-	60,  // 125: monofs.MonoFS.BuildDirectoryIndexes:output_type -> monofs.BuildDirectoryIndexesResponse
-	88,  // 126: monofs.MonoFS.GetPredictorStats:output_type -> monofs.PredictorStatsResponse
-	78,  // [78:127] is the sub-list for method output_type
-	29,  // [29:78] is the sub-list for method input_type
-	29,  // [29:29] is the sub-list for extension type_name
-	29,  // [29:29] is the sub-list for extension extendee
-	0,   // [0:29] is the sub-list for field type_name
+	112, // 29: monofs.UpsertGuardianPathsRequest.writes:type_name -> monofs.GuardianPathWrite
+	111, // 30: monofs.UpsertGuardianPathsRequest.context:type_name -> monofs.GuardianMutationContext
+	114, // 31: monofs.UpsertGuardianPathsResponse.versions:type_name -> monofs.GuardianFileVersion
+	113, // 32: monofs.DeleteGuardianPathsRequest.deletes:type_name -> monofs.GuardianPathDelete
+	111, // 33: monofs.DeleteGuardianPathsRequest.context:type_name -> monofs.GuardianMutationContext
+	114, // 34: monofs.DeleteGuardianPathsResponse.tombstones:type_name -> monofs.GuardianFileVersion
+	114, // 35: monofs.ListGuardianVersionsResponse.versions:type_name -> monofs.GuardianFileVersion
+	114, // 36: monofs.GetGuardianVersionResponse.version:type_name -> monofs.GuardianFileVersion
+	3,   // 37: monofs.GuardianChangeEvent.type:type_name -> monofs.ChangeType
+	5,   // 38: monofs.MonoFSRouter.GetClusterInfo:input_type -> monofs.ClusterInfoRequest
+	8,   // 39: monofs.MonoFSRouter.Heartbeat:input_type -> monofs.HeartbeatRequest
+	26,  // 40: monofs.MonoFSRouter.IngestRepository:input_type -> monofs.IngestRequest
+	51,  // 41: monofs.MonoFSRouter.NotifyRepositoryIngested:input_type -> monofs.NotifyRepositoryIngestedRequest
+	53,  // 42: monofs.MonoFSRouter.DeleteRepository:input_type -> monofs.DeleteRepositoryRequest
+	55,  // 43: monofs.MonoFSRouter.GetNodeForFile:input_type -> monofs.GetNodeForFileRequest
+	63,  // 44: monofs.MonoFSRouter.RegisterClient:input_type -> monofs.RegisterClientRequest
+	66,  // 45: monofs.MonoFSRouter.UnregisterClient:input_type -> monofs.UnregisterClientRequest
+	68,  // 46: monofs.MonoFSRouter.ClientHeartbeat:input_type -> monofs.ClientHeartbeatRequest
+	70,  // 47: monofs.MonoFSRouter.ListClients:input_type -> monofs.ListClientsRequest
+	73,  // 48: monofs.MonoFSRouter.RequestFailover:input_type -> monofs.FailoverRequest
+	84,  // 49: monofs.MonoFSRouter.GetNodeFiles:input_type -> monofs.GetNodeFilesRequest
+	75,  // 50: monofs.MonoFSRouter.GetClusterStats:input_type -> monofs.ClusterStatsRequest
+	77,  // 51: monofs.MonoFSRouter.GetNodeStats:input_type -> monofs.NodeStatsRequest
+	80,  // 52: monofs.MonoFSRouter.DrainCluster:input_type -> monofs.DrainClusterRequest
+	82,  // 53: monofs.MonoFSRouter.UndrainCluster:input_type -> monofs.UndrainClusterRequest
+	102, // 54: monofs.MonoFSRouter.DeleteGuardianFile:input_type -> monofs.DeleteGuardianFileRequest
+	104, // 55: monofs.MonoFSRouter.DeleteGuardianDirectory:input_type -> monofs.DeleteGuardianDirectoryRequest
+	109, // 56: monofs.MonoFSRouter.InjectGuardianPartition:input_type -> monofs.InjectGuardianPartitionRequest
+	115, // 57: monofs.MonoFSRouter.UpsertGuardianPaths:input_type -> monofs.UpsertGuardianPathsRequest
+	117, // 58: monofs.MonoFSRouter.DeleteGuardianPaths:input_type -> monofs.DeleteGuardianPathsRequest
+	119, // 59: monofs.MonoFSRouter.ListGuardianVersions:input_type -> monofs.ListGuardianVersionsRequest
+	121, // 60: monofs.MonoFSRouter.GetGuardianVersion:input_type -> monofs.GetGuardianVersionRequest
+	123, // 61: monofs.MonoFSRouter.SubscribeGuardianChanges:input_type -> monofs.SubscribeGuardianChangesRequest
+	89,  // 62: monofs.MonoFSRouter.AddWhitelistedClient:input_type -> monofs.AddWhitelistedClientRequest
+	91,  // 63: monofs.MonoFSRouter.RemoveWhitelistedClient:input_type -> monofs.RemoveWhitelistedClientRequest
+	93,  // 64: monofs.MonoFSRouter.ListWhitelistedClients:input_type -> monofs.ListWhitelistedClientsRequest
+	96,  // 65: monofs.MonoFSRouter.SetWhitelistEnabled:input_type -> monofs.SetWhitelistEnabledRequest
+	98,  // 66: monofs.MonoFSRouter.GetWhitelistStatus:input_type -> monofs.GetWhitelistStatusRequest
+	106, // 67: monofs.MonoFSRouter.SubscribeToChanges:input_type -> monofs.SubscribeChangesRequest
+	12,  // 68: monofs.MonoFS.Lookup:input_type -> monofs.LookupRequest
+	14,  // 69: monofs.MonoFS.GetAttr:input_type -> monofs.GetAttrRequest
+	16,  // 70: monofs.MonoFS.ReadDir:input_type -> monofs.ReadDirRequest
+	18,  // 71: monofs.MonoFS.Read:input_type -> monofs.ReadRequest
+	20,  // 72: monofs.MonoFS.Create:input_type -> monofs.CreateRequest
+	22,  // 73: monofs.MonoFS.Write:input_type -> monofs.WriteRequest
+	24,  // 74: monofs.MonoFS.Authenticate:input_type -> monofs.AuthRequest
+	10,  // 75: monofs.MonoFS.GetNodeInfo:input_type -> monofs.NodeInfoRequest
+	29,  // 76: monofs.MonoFS.IngestFile:input_type -> monofs.IngestFileRequest
+	31,  // 77: monofs.MonoFS.IngestFileBatch:input_type -> monofs.IngestFileBatchRequest
+	33,  // 78: monofs.MonoFS.IngestReplicaBatch:input_type -> monofs.IngestReplicaBatchRequest
+	35,  // 79: monofs.MonoFS.RegisterRepository:input_type -> monofs.RegisterRepositoryRequest
+	37,  // 80: monofs.MonoFS.GetRepositoryFiles:input_type -> monofs.GetRepositoryFilesRequest
+	39,  // 81: monofs.MonoFS.SyncMetadataFromNode:input_type -> monofs.SyncMetadataFromNodeRequest
+	41,  // 82: monofs.MonoFS.ClearFailoverCache:input_type -> monofs.ClearFailoverCacheRequest
+	43,  // 83: monofs.MonoFS.ListRepositories:input_type -> monofs.ListRepositoriesRequest
+	45,  // 84: monofs.MonoFS.GetRepositoryInfo:input_type -> monofs.GetRepositoryInfoRequest
+	47,  // 85: monofs.MonoFS.GetOnboardingStatus:input_type -> monofs.OnboardingStatusRequest
+	49,  // 86: monofs.MonoFS.MarkRepositoryOnboarded:input_type -> monofs.MarkRepositoryOnboardedRequest
+	57,  // 87: monofs.MonoFS.DeleteFile:input_type -> monofs.DeleteFileRequest
+	61,  // 88: monofs.MonoFS.DeleteRepository:input_type -> monofs.DeleteRepositoryOnNodeRequest
+	100, // 89: monofs.MonoFS.DeleteDirectoryRecursive:input_type -> monofs.DeleteDirectoryRecursiveRequest
+	59,  // 90: monofs.MonoFS.BuildDirectoryIndexes:input_type -> monofs.BuildDirectoryIndexesRequest
+	87,  // 91: monofs.MonoFS.GetPredictorStats:input_type -> monofs.PredictorStatsRequest
+	6,   // 92: monofs.MonoFSRouter.GetClusterInfo:output_type -> monofs.ClusterInfoResponse
+	9,   // 93: monofs.MonoFSRouter.Heartbeat:output_type -> monofs.HeartbeatResponse
+	27,  // 94: monofs.MonoFSRouter.IngestRepository:output_type -> monofs.IngestProgress
+	52,  // 95: monofs.MonoFSRouter.NotifyRepositoryIngested:output_type -> monofs.NotifyRepositoryIngestedResponse
+	54,  // 96: monofs.MonoFSRouter.DeleteRepository:output_type -> monofs.DeleteRepositoryResponse
+	56,  // 97: monofs.MonoFSRouter.GetNodeForFile:output_type -> monofs.GetNodeForFileResponse
+	65,  // 98: monofs.MonoFSRouter.RegisterClient:output_type -> monofs.RegisterClientResponse
+	67,  // 99: monofs.MonoFSRouter.UnregisterClient:output_type -> monofs.UnregisterClientResponse
+	69,  // 100: monofs.MonoFSRouter.ClientHeartbeat:output_type -> monofs.ClientHeartbeatResponse
+	71,  // 101: monofs.MonoFSRouter.ListClients:output_type -> monofs.ListClientsResponse
+	74,  // 102: monofs.MonoFSRouter.RequestFailover:output_type -> monofs.FailoverResponse
+	85,  // 103: monofs.MonoFSRouter.GetNodeFiles:output_type -> monofs.GetNodeFilesResponse
+	76,  // 104: monofs.MonoFSRouter.GetClusterStats:output_type -> monofs.ClusterStatsResponse
+	78,  // 105: monofs.MonoFSRouter.GetNodeStats:output_type -> monofs.NodeStatsResponse
+	81,  // 106: monofs.MonoFSRouter.DrainCluster:output_type -> monofs.DrainClusterResponse
+	83,  // 107: monofs.MonoFSRouter.UndrainCluster:output_type -> monofs.UndrainClusterResponse
+	103, // 108: monofs.MonoFSRouter.DeleteGuardianFile:output_type -> monofs.DeleteGuardianFileResponse
+	105, // 109: monofs.MonoFSRouter.DeleteGuardianDirectory:output_type -> monofs.DeleteGuardianDirectoryResponse
+	110, // 110: monofs.MonoFSRouter.InjectGuardianPartition:output_type -> monofs.InjectGuardianPartitionResponse
+	116, // 111: monofs.MonoFSRouter.UpsertGuardianPaths:output_type -> monofs.UpsertGuardianPathsResponse
+	118, // 112: monofs.MonoFSRouter.DeleteGuardianPaths:output_type -> monofs.DeleteGuardianPathsResponse
+	120, // 113: monofs.MonoFSRouter.ListGuardianVersions:output_type -> monofs.ListGuardianVersionsResponse
+	122, // 114: monofs.MonoFSRouter.GetGuardianVersion:output_type -> monofs.GetGuardianVersionResponse
+	124, // 115: monofs.MonoFSRouter.SubscribeGuardianChanges:output_type -> monofs.GuardianChangeEvent
+	90,  // 116: monofs.MonoFSRouter.AddWhitelistedClient:output_type -> monofs.AddWhitelistedClientResponse
+	92,  // 117: monofs.MonoFSRouter.RemoveWhitelistedClient:output_type -> monofs.RemoveWhitelistedClientResponse
+	94,  // 118: monofs.MonoFSRouter.ListWhitelistedClients:output_type -> monofs.ListWhitelistedClientsResponse
+	97,  // 119: monofs.MonoFSRouter.SetWhitelistEnabled:output_type -> monofs.SetWhitelistEnabledResponse
+	99,  // 120: monofs.MonoFSRouter.GetWhitelistStatus:output_type -> monofs.GetWhitelistStatusResponse
+	107, // 121: monofs.MonoFSRouter.SubscribeToChanges:output_type -> monofs.ChangeEvent
+	13,  // 122: monofs.MonoFS.Lookup:output_type -> monofs.LookupResponse
+	15,  // 123: monofs.MonoFS.GetAttr:output_type -> monofs.GetAttrResponse
+	17,  // 124: monofs.MonoFS.ReadDir:output_type -> monofs.DirEntry
+	19,  // 125: monofs.MonoFS.Read:output_type -> monofs.DataChunk
+	21,  // 126: monofs.MonoFS.Create:output_type -> monofs.CreateResponse
+	23,  // 127: monofs.MonoFS.Write:output_type -> monofs.WriteResponse
+	25,  // 128: monofs.MonoFS.Authenticate:output_type -> monofs.AuthResponse
+	11,  // 129: monofs.MonoFS.GetNodeInfo:output_type -> monofs.NodeInfoResponse
+	30,  // 130: monofs.MonoFS.IngestFile:output_type -> monofs.IngestFileResponse
+	32,  // 131: monofs.MonoFS.IngestFileBatch:output_type -> monofs.IngestFileBatchResponse
+	34,  // 132: monofs.MonoFS.IngestReplicaBatch:output_type -> monofs.IngestReplicaBatchResponse
+	36,  // 133: monofs.MonoFS.RegisterRepository:output_type -> monofs.RegisterRepositoryResponse
+	38,  // 134: monofs.MonoFS.GetRepositoryFiles:output_type -> monofs.GetRepositoryFilesResponse
+	40,  // 135: monofs.MonoFS.SyncMetadataFromNode:output_type -> monofs.SyncMetadataFromNodeResponse
+	42,  // 136: monofs.MonoFS.ClearFailoverCache:output_type -> monofs.ClearFailoverCacheResponse
+	44,  // 137: monofs.MonoFS.ListRepositories:output_type -> monofs.ListRepositoriesResponse
+	46,  // 138: monofs.MonoFS.GetRepositoryInfo:output_type -> monofs.GetRepositoryInfoResponse
+	48,  // 139: monofs.MonoFS.GetOnboardingStatus:output_type -> monofs.OnboardingStatusResponse
+	50,  // 140: monofs.MonoFS.MarkRepositoryOnboarded:output_type -> monofs.MarkRepositoryOnboardedResponse
+	58,  // 141: monofs.MonoFS.DeleteFile:output_type -> monofs.DeleteFileResponse
+	62,  // 142: monofs.MonoFS.DeleteRepository:output_type -> monofs.DeleteRepositoryOnNodeResponse
+	101, // 143: monofs.MonoFS.DeleteDirectoryRecursive:output_type -> monofs.DeleteDirectoryRecursiveResponse
+	60,  // 144: monofs.MonoFS.BuildDirectoryIndexes:output_type -> monofs.BuildDirectoryIndexesResponse
+	88,  // 145: monofs.MonoFS.GetPredictorStats:output_type -> monofs.PredictorStatsResponse
+	92,  // [92:146] is the sub-list for method output_type
+	38,  // [38:92] is the sub-list for method input_type
+	38,  // [38:38] is the sub-list for extension type_name
+	38,  // [38:38] is the sub-list for extension extendee
+	0,   // [0:38] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_monofs_proto_init() }
@@ -7632,7 +8747,7 @@ func file_api_proto_monofs_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_monofs_proto_rawDesc), len(file_api_proto_monofs_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   114,
+			NumMessages:   128,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

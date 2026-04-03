@@ -38,6 +38,11 @@ const (
 	MonoFSRouter_DeleteGuardianFile_FullMethodName       = "/monofs.MonoFSRouter/DeleteGuardianFile"
 	MonoFSRouter_DeleteGuardianDirectory_FullMethodName  = "/monofs.MonoFSRouter/DeleteGuardianDirectory"
 	MonoFSRouter_InjectGuardianPartition_FullMethodName  = "/monofs.MonoFSRouter/InjectGuardianPartition"
+	MonoFSRouter_UpsertGuardianPaths_FullMethodName      = "/monofs.MonoFSRouter/UpsertGuardianPaths"
+	MonoFSRouter_DeleteGuardianPaths_FullMethodName      = "/monofs.MonoFSRouter/DeleteGuardianPaths"
+	MonoFSRouter_ListGuardianVersions_FullMethodName     = "/monofs.MonoFSRouter/ListGuardianVersions"
+	MonoFSRouter_GetGuardianVersion_FullMethodName       = "/monofs.MonoFSRouter/GetGuardianVersion"
+	MonoFSRouter_SubscribeGuardianChanges_FullMethodName = "/monofs.MonoFSRouter/SubscribeGuardianChanges"
 	MonoFSRouter_AddWhitelistedClient_FullMethodName     = "/monofs.MonoFSRouter/AddWhitelistedClient"
 	MonoFSRouter_RemoveWhitelistedClient_FullMethodName  = "/monofs.MonoFSRouter/RemoveWhitelistedClient"
 	MonoFSRouter_ListWhitelistedClients_FullMethodName   = "/monofs.MonoFSRouter/ListWhitelistedClients"
@@ -86,6 +91,11 @@ type MonoFSRouterClient interface {
 	// for a guardian partition. The caller must supply a valid guardian_token.
 	// Files become immediately visible on all FUSE mounts at guardian/<partition>/.
 	InjectGuardianPartition(ctx context.Context, in *InjectGuardianPartitionRequest, opts ...grpc.CallOption) (*InjectGuardianPartitionResponse, error)
+	UpsertGuardianPaths(ctx context.Context, in *UpsertGuardianPathsRequest, opts ...grpc.CallOption) (*UpsertGuardianPathsResponse, error)
+	DeleteGuardianPaths(ctx context.Context, in *DeleteGuardianPathsRequest, opts ...grpc.CallOption) (*DeleteGuardianPathsResponse, error)
+	ListGuardianVersions(ctx context.Context, in *ListGuardianVersionsRequest, opts ...grpc.CallOption) (*ListGuardianVersionsResponse, error)
+	GetGuardianVersion(ctx context.Context, in *GetGuardianVersionRequest, opts ...grpc.CallOption) (*GetGuardianVersionResponse, error)
+	SubscribeGuardianChanges(ctx context.Context, in *SubscribeGuardianChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GuardianChangeEvent], error)
 	// Ingestion whitelist management
 	AddWhitelistedClient(ctx context.Context, in *AddWhitelistedClientRequest, opts ...grpc.CallOption) (*AddWhitelistedClientResponse, error)
 	RemoveWhitelistedClient(ctx context.Context, in *RemoveWhitelistedClientRequest, opts ...grpc.CallOption) (*RemoveWhitelistedClientResponse, error)
@@ -304,6 +314,65 @@ func (c *monoFSRouterClient) InjectGuardianPartition(ctx context.Context, in *In
 	return out, nil
 }
 
+func (c *monoFSRouterClient) UpsertGuardianPaths(ctx context.Context, in *UpsertGuardianPathsRequest, opts ...grpc.CallOption) (*UpsertGuardianPathsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpsertGuardianPathsResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_UpsertGuardianPaths_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) DeleteGuardianPaths(ctx context.Context, in *DeleteGuardianPathsRequest, opts ...grpc.CallOption) (*DeleteGuardianPathsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteGuardianPathsResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_DeleteGuardianPaths_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) ListGuardianVersions(ctx context.Context, in *ListGuardianVersionsRequest, opts ...grpc.CallOption) (*ListGuardianVersionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListGuardianVersionsResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_ListGuardianVersions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) GetGuardianVersion(ctx context.Context, in *GetGuardianVersionRequest, opts ...grpc.CallOption) (*GetGuardianVersionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetGuardianVersionResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_GetGuardianVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) SubscribeGuardianChanges(ctx context.Context, in *SubscribeGuardianChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GuardianChangeEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[1], MonoFSRouter_SubscribeGuardianChanges_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SubscribeGuardianChangesRequest, GuardianChangeEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_SubscribeGuardianChangesClient = grpc.ServerStreamingClient[GuardianChangeEvent]
+
 func (c *monoFSRouterClient) AddWhitelistedClient(ctx context.Context, in *AddWhitelistedClientRequest, opts ...grpc.CallOption) (*AddWhitelistedClientResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AddWhitelistedClientResponse)
@@ -356,7 +425,7 @@ func (c *monoFSRouterClient) GetWhitelistStatus(ctx context.Context, in *GetWhit
 
 func (c *monoFSRouterClient) SubscribeToChanges(ctx context.Context, in *SubscribeChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ChangeEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[1], MonoFSRouter_SubscribeToChanges_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[2], MonoFSRouter_SubscribeToChanges_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -413,6 +482,11 @@ type MonoFSRouterServer interface {
 	// for a guardian partition. The caller must supply a valid guardian_token.
 	// Files become immediately visible on all FUSE mounts at guardian/<partition>/.
 	InjectGuardianPartition(context.Context, *InjectGuardianPartitionRequest) (*InjectGuardianPartitionResponse, error)
+	UpsertGuardianPaths(context.Context, *UpsertGuardianPathsRequest) (*UpsertGuardianPathsResponse, error)
+	DeleteGuardianPaths(context.Context, *DeleteGuardianPathsRequest) (*DeleteGuardianPathsResponse, error)
+	ListGuardianVersions(context.Context, *ListGuardianVersionsRequest) (*ListGuardianVersionsResponse, error)
+	GetGuardianVersion(context.Context, *GetGuardianVersionRequest) (*GetGuardianVersionResponse, error)
+	SubscribeGuardianChanges(*SubscribeGuardianChangesRequest, grpc.ServerStreamingServer[GuardianChangeEvent]) error
 	// Ingestion whitelist management
 	AddWhitelistedClient(context.Context, *AddWhitelistedClientRequest) (*AddWhitelistedClientResponse, error)
 	RemoveWhitelistedClient(context.Context, *RemoveWhitelistedClientRequest) (*RemoveWhitelistedClientResponse, error)
@@ -488,6 +562,21 @@ func (UnimplementedMonoFSRouterServer) DeleteGuardianDirectory(context.Context, 
 }
 func (UnimplementedMonoFSRouterServer) InjectGuardianPartition(context.Context, *InjectGuardianPartitionRequest) (*InjectGuardianPartitionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method InjectGuardianPartition not implemented")
+}
+func (UnimplementedMonoFSRouterServer) UpsertGuardianPaths(context.Context, *UpsertGuardianPathsRequest) (*UpsertGuardianPathsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpsertGuardianPaths not implemented")
+}
+func (UnimplementedMonoFSRouterServer) DeleteGuardianPaths(context.Context, *DeleteGuardianPathsRequest) (*DeleteGuardianPathsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteGuardianPaths not implemented")
+}
+func (UnimplementedMonoFSRouterServer) ListGuardianVersions(context.Context, *ListGuardianVersionsRequest) (*ListGuardianVersionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListGuardianVersions not implemented")
+}
+func (UnimplementedMonoFSRouterServer) GetGuardianVersion(context.Context, *GetGuardianVersionRequest) (*GetGuardianVersionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetGuardianVersion not implemented")
+}
+func (UnimplementedMonoFSRouterServer) SubscribeGuardianChanges(*SubscribeGuardianChangesRequest, grpc.ServerStreamingServer[GuardianChangeEvent]) error {
+	return status.Error(codes.Unimplemented, "method SubscribeGuardianChanges not implemented")
 }
 func (UnimplementedMonoFSRouterServer) AddWhitelistedClient(context.Context, *AddWhitelistedClientRequest) (*AddWhitelistedClientResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddWhitelistedClient not implemented")
@@ -863,6 +952,89 @@ func _MonoFSRouter_InjectGuardianPartition_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFSRouter_UpsertGuardianPaths_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpsertGuardianPathsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).UpsertGuardianPaths(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_UpsertGuardianPaths_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).UpsertGuardianPaths(ctx, req.(*UpsertGuardianPathsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_DeleteGuardianPaths_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteGuardianPathsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).DeleteGuardianPaths(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_DeleteGuardianPaths_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).DeleteGuardianPaths(ctx, req.(*DeleteGuardianPathsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_ListGuardianVersions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListGuardianVersionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).ListGuardianVersions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_ListGuardianVersions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).ListGuardianVersions(ctx, req.(*ListGuardianVersionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_GetGuardianVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetGuardianVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).GetGuardianVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_GetGuardianVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).GetGuardianVersion(ctx, req.(*GetGuardianVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_SubscribeGuardianChanges_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SubscribeGuardianChangesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(MonoFSRouterServer).SubscribeGuardianChanges(m, &grpc.GenericServerStream[SubscribeGuardianChangesRequest, GuardianChangeEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_SubscribeGuardianChangesServer = grpc.ServerStreamingServer[GuardianChangeEvent]
+
 func _MonoFSRouter_AddWhitelistedClient_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AddWhitelistedClientRequest)
 	if err := dec(in); err != nil {
@@ -1044,6 +1216,22 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _MonoFSRouter_InjectGuardianPartition_Handler,
 		},
 		{
+			MethodName: "UpsertGuardianPaths",
+			Handler:    _MonoFSRouter_UpsertGuardianPaths_Handler,
+		},
+		{
+			MethodName: "DeleteGuardianPaths",
+			Handler:    _MonoFSRouter_DeleteGuardianPaths_Handler,
+		},
+		{
+			MethodName: "ListGuardianVersions",
+			Handler:    _MonoFSRouter_ListGuardianVersions_Handler,
+		},
+		{
+			MethodName: "GetGuardianVersion",
+			Handler:    _MonoFSRouter_GetGuardianVersion_Handler,
+		},
+		{
 			MethodName: "AddWhitelistedClient",
 			Handler:    _MonoFSRouter_AddWhitelistedClient_Handler,
 		},
@@ -1068,6 +1256,11 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "IngestRepository",
 			Handler:       _MonoFSRouter_IngestRepository_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "SubscribeGuardianChanges",
+			Handler:       _MonoFSRouter_SubscribeGuardianChanges_Handler,
 			ServerStreams: true,
 		},
 		{
