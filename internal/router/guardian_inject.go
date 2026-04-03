@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +14,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+type guardianNodeTarget struct {
+	id      string
+	address string
+	client  pb.MonoFSClient
+}
 
 // InjectGuardianPartition stores inline YAML files for a guardian partition
 // directly on all cluster nodes, bypassing the git/S3 ingestion pipeline.
@@ -41,29 +49,11 @@ func (r *Router) InjectGuardianPartition(ctx context.Context, req *pb.InjectGuar
 		"files", len(req.Files),
 	)
 
-	// Collect healthy nodes.
-	r.mu.RLock()
-	type nodeEntry struct {
-		id      string
-		address string
-		client  pb.MonoFSClient
-		conn    *grpc.ClientConn
-	}
-	nodes := make([]nodeEntry, 0, len(r.nodes))
-	for id, state := range r.nodes {
-		if state.info.Healthy {
-			nodes = append(nodes, nodeEntry{
-				id:      id,
-				address: state.info.Address,
-				client:  state.client,
-			})
-		}
-	}
-	r.mu.RUnlock()
-
+	nodes := r.collectHealthyGuardianNodes()
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no healthy nodes available")
 	}
+	existingFiles := r.lookupGuardianExistingFiles(ctx, nodes, displayPath, req.Files)
 
 	// Build FileMetadata slice — inline content for all files.
 	now := time.Now().Unix()
@@ -100,27 +90,20 @@ func (r *Router) InjectGuardianPartition(ctx context.Context, req *pb.InjectGuar
 		go func() {
 			defer wg.Done()
 
-			// Ensure we have a live gRPC connection.
-			nodeClient := n.client
-			if nodeClient == nil {
-				conn, err := grpc.NewClient(n.address,
-					grpc.WithTransportCredentials(insecure.NewCredentials()),
-				)
-				if err != nil {
-					mu.Lock()
-					nodeErrors = append(nodeErrors, fmt.Errorf("node %s connect: %w", n.id, err))
-					mu.Unlock()
-					return
-				}
-				defer conn.Close()
-				nodeClient = pb.NewMonoFSClient(conn)
+			nodeClient, closeConn, err := r.guardianNodeClient(n)
+			if err != nil {
+				mu.Lock()
+				nodeErrors = append(nodeErrors, fmt.Errorf("node %s connect: %w", n.id, err))
+				mu.Unlock()
+				return
 			}
+			defer closeConn()
 
 			regCtx, regCancel := context.WithTimeout(ctx, 10*time.Second)
 			defer regCancel()
 
 			// Register the repository so FUSE lookup can resolve the display path.
-			_, err := nodeClient.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
+			_, err = nodeClient.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
 				StorageId:     storageID,
 				DisplayPath:   displayPath,
 				Source:        "guardian-inject",
@@ -205,6 +188,7 @@ func (r *Router) InjectGuardianPartition(ctx context.Context, req *pb.InjectGuar
 		"files", filesStored,
 		"node_errors", len(nodeErrors),
 	)
+	r.publishGuardianInjectedFiles(storageID, req.Files, existingFiles)
 
 	return &pb.InjectGuardianPartitionResponse{
 		Success:       true,
@@ -212,4 +196,113 @@ func (r *Router) InjectGuardianPartition(ctx context.Context, req *pb.InjectGuar
 		Message:       fmt.Sprintf("partition %q injected: %d files on %d nodes", req.PartitionName, filesStored, len(nodes)),
 		FilesIngested: filesStored,
 	}, nil
+}
+
+func (r *Router) collectHealthyGuardianNodes() []guardianNodeTarget {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	nodes := make([]guardianNodeTarget, 0, len(r.nodes))
+	for id, state := range r.nodes {
+		if state.info.Healthy {
+			nodes = append(nodes, guardianNodeTarget{
+				id:      id,
+				address: state.info.Address,
+				client:  state.client,
+			})
+		}
+	}
+
+	return nodes
+}
+
+func (r *Router) guardianNodeClient(target guardianNodeTarget) (pb.MonoFSClient, func(), error) {
+	if target.client != nil {
+		return target.client, func() {}, nil
+	}
+
+	conn, err := grpc.NewClient(target.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return pb.NewMonoFSClient(conn), func() {
+		_ = conn.Close()
+	}, nil
+}
+
+func (r *Router) lookupGuardianExistingFiles(ctx context.Context, nodes []guardianNodeTarget, displayPath string, files []*pb.InjectGuardianFile) map[string]bool {
+	existing := make(map[string]bool, len(files))
+	if len(nodes) == 0 || len(files) == 0 {
+		return existing
+	}
+
+	nodeClient, closeConn, err := r.guardianNodeClient(nodes[0])
+	if err != nil {
+		r.logger.Warn("failed to initialize guardian lookup client", "node", nodes[0].id, "error", err)
+		return existing
+	}
+	defer closeConn()
+
+	for _, file := range files {
+		relPath := cleanGuardianRelativePath(file.Path)
+		if relPath == "" {
+			continue
+		}
+
+		attrCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		resp, err := nodeClient.GetAttr(attrCtx, &pb.GetAttrRequest{
+			Path: displayPath + "/" + relPath,
+		})
+		cancel()
+		if err == nil && resp != nil && resp.Found {
+			existing[relPath] = true
+		}
+	}
+
+	return existing
+}
+
+func (r *Router) publishGuardianInjectedFiles(storageID string, files []*pb.InjectGuardianFile, existing map[string]bool) {
+	for _, file := range files {
+		relPath := cleanGuardianRelativePath(file.Path)
+		if relPath == "" {
+			continue
+		}
+
+		changeType := pb.ChangeType_ADDED
+		if existing[relPath] {
+			changeType = pb.ChangeType_MODIFIED
+		}
+
+		event := &pb.ChangeEvent{
+			StorageId:   storageID,
+			FilePath:    relPath,
+			Type:        changeType,
+			NewBlobHash: guardianContentHash(file.Content),
+		}
+		if len(file.Content) < 64*1024 {
+			event.InlineContent = append([]byte(nil), file.Content...)
+		}
+
+		r.publishGuardianChange(event)
+	}
+}
+
+func cleanGuardianRelativePath(input string) string {
+	cleaned := strings.TrimSpace(input)
+	if cleaned == "" {
+		return ""
+	}
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	cleaned = path.Clean(cleaned)
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
+}
+
+func guardianContentHash(content []byte) string {
+	hash := sha256.Sum256(content)
+	return fmt.Sprintf("%x", hash)
 }

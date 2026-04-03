@@ -114,6 +114,11 @@ type Router struct {
 	guardianClients   map[string]*guardianClientState // clientID -> guardian state
 	guardianClientsMu sync.RWMutex
 
+	// Guardian change subscriptions
+	guardianChangeSubs   map[uint64]*guardianChangeSubscriber
+	guardianChangeSubsMu sync.RWMutex
+	guardianChangeSeq    atomic.Uint64
+
 	// Drain mode for planned maintenance
 	drainMode   atomic.Bool
 	drainedAt   time.Time
@@ -253,6 +258,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		inProgressIngestions: make(map[string]*inProgressIngestion),
 		clients:              make(map[string]*clientState),
 		guardianClients:      make(map[string]*guardianClientState),
+		guardianChangeSubs:   make(map[uint64]*guardianChangeSubscriber),
 		topologySnapshots:    make(map[int64][]sharding.Node),
 		pendingIndexRebuilds: make(map[string]map[string]bool),
 		failoverTimers:       make(map[string]*time.Timer),
