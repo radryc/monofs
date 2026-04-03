@@ -39,6 +39,13 @@ func (r *Router) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryR
 	// Step 3: Delete search index
 	r.deleteSearchIndex(ctx, storageID)
 
+	if exists && r.isGuardianRepo(repo.repoID) {
+		r.publishGuardianChange(&pb.ChangeEvent{
+			StorageId: storageID,
+			Type:      pb.ChangeType_DELETED,
+		})
+	}
+
 	message := fmt.Sprintf("repository deleted: %d files, %d dirs removed from nodes", totalFilesDeleted, totalDirsDeleted)
 	if nodeErrors > 0 {
 		message += fmt.Sprintf(" (%d node errors)", nodeErrors)
@@ -265,6 +272,11 @@ func (r *Router) DeleteGuardianFile(ctx context.Context, req *pb.DeleteGuardianF
 	if err != nil {
 		return &pb.DeleteGuardianFileResponse{Success: false, Message: err.Error()}, err
 	}
+	r.publishGuardianChange(&pb.ChangeEvent{
+		StorageId: req.StorageId,
+		FilePath:  cleanGuardianRelativePath(req.FilePath),
+		Type:      pb.ChangeType_DELETED,
+	})
 
 	return &pb.DeleteGuardianFileResponse{
 		Success: true,
@@ -285,6 +297,11 @@ func (r *Router) DeleteGuardianDirectory(ctx context.Context, req *pb.DeleteGuar
 	if err != nil {
 		return &pb.DeleteGuardianDirectoryResponse{Success: false, Message: err.Error()}, err
 	}
+	r.publishGuardianChange(&pb.ChangeEvent{
+		StorageId: req.StorageId,
+		FilePath:  cleanGuardianRelativePath(req.DirPath),
+		Type:      pb.ChangeType_DELETED,
+	})
 
 	return &pb.DeleteGuardianDirectoryResponse{
 		Success:      true,

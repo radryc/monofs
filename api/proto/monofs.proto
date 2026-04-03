@@ -51,6 +51,11 @@ service MonoFSRouter {
     // for a guardian partition. The caller must supply a valid guardian_token.
     // Files become immediately visible on all FUSE mounts at guardian/<partition>/.
     rpc InjectGuardianPartition(InjectGuardianPartitionRequest) returns (InjectGuardianPartitionResponse);
+    rpc UpsertGuardianPaths(UpsertGuardianPathsRequest) returns (UpsertGuardianPathsResponse);
+    rpc DeleteGuardianPaths(DeleteGuardianPathsRequest) returns (DeleteGuardianPathsResponse);
+    rpc ListGuardianVersions(ListGuardianVersionsRequest) returns (ListGuardianVersionsResponse);
+    rpc GetGuardianVersion(GetGuardianVersionRequest) returns (GetGuardianVersionResponse);
+    rpc SubscribeGuardianChanges(SubscribeGuardianChangesRequest) returns (stream GuardianChangeEvent);
     
     // Ingestion whitelist management
     rpc AddWhitelistedClient(AddWhitelistedClientRequest) returns (AddWhitelistedClientResponse);
@@ -135,7 +140,7 @@ message ClusterInfoResponse {
     repeated NodeInfo nodes = 1;
     string cluster_id = 2;
     int64 version = 3;        // Cluster config version for cache invalidation
-    bool guardian_visible = 4; // True if at least one guardian client is connected
+    bool guardian_visible = 4; // True if Guardian namespaces should be shown to clients
 }
 
 message NodeInfo {
@@ -561,10 +566,13 @@ message RegisterClientRequest {
     GuardianConfig guardian_config = 6; // Required for guardian-* client IDs
 }
 
-// GuardianConfig holds configuration for a guardian client.
+// GuardianConfig holds configuration for a guardian-capable client.
 message GuardianConfig {
-    string base_url = 1;    // Base URL of the guardian service
-    string auth_token = 2;  // Authentication token for guardian operations
+    string base_url = 1;       // Optional base URL of the guardian service/UI
+    string auth_token = 2;     // Authentication token for guardian operations
+    string principal_id = 3;   // Optional persistent principal ID (defaults to client_id)
+    string role = 4;           // Optional role: control-plane, cli, pusher
+    string display_name = 5;   // Optional human-friendly label
 }
 
 message RegisterClientResponse {
@@ -852,3 +860,102 @@ message InjectGuardianPartitionResponse {
     int32 files_ingested = 4;
 }
 
+message GuardianMutationContext {
+    string principal_id = 1;
+    string reason = 2;
+    string correlation_id = 3;
+}
+
+message GuardianPathWrite {
+    string logical_path = 1;
+    bytes content = 2;
+    string expected_version_id = 3; // empty = blind write, "absent" = create only
+}
+
+message GuardianPathDelete {
+    string logical_path = 1;
+    string expected_version_id = 2; // optional CAS guard
+}
+
+message GuardianFileVersion {
+    string logical_path = 1;
+    string display_path = 2;
+    string storage_id = 3;
+    string version_id = 4;
+    string batch_revision_id = 5;
+    string content_sha256 = 6;
+    int64 committed_at = 7;
+    bool tombstone = 8;
+    string principal_id = 9;
+    string reason = 10;
+}
+
+message UpsertGuardianPathsRequest {
+    string guardian_token = 1;
+    repeated GuardianPathWrite writes = 2;
+    GuardianMutationContext context = 3;
+}
+
+message UpsertGuardianPathsResponse {
+    bool success = 1;
+    string batch_revision_id = 2;
+    repeated GuardianFileVersion versions = 3;
+    string message = 4;
+}
+
+message DeleteGuardianPathsRequest {
+    string guardian_token = 1;
+    repeated GuardianPathDelete deletes = 2;
+    GuardianMutationContext context = 3;
+}
+
+message DeleteGuardianPathsResponse {
+    bool success = 1;
+    string batch_revision_id = 2;
+    repeated GuardianFileVersion tombstones = 3;
+    string message = 4;
+}
+
+message ListGuardianVersionsRequest {
+    string guardian_token = 1;
+    string logical_path = 2;
+    int32 page_size = 3;
+    string page_token = 4;
+}
+
+message ListGuardianVersionsResponse {
+    repeated GuardianFileVersion versions = 1;
+    string next_page_token = 2;
+}
+
+message GetGuardianVersionRequest {
+    string guardian_token = 1;
+    string logical_path = 2;
+    string version_id = 3;
+}
+
+message GetGuardianVersionResponse {
+    GuardianFileVersion version = 1;
+    bytes content = 2;
+}
+
+message SubscribeGuardianChangesRequest {
+    string guardian_token = 1;
+    repeated string logical_prefixes = 2;
+    bool include_inline_content = 3;
+    string cursor = 4;
+}
+
+message GuardianChangeEvent {
+    string logical_path = 1;
+    string display_path = 2;
+    string storage_id = 3;
+    ChangeType type = 4;
+    string version_id = 5;
+    string batch_revision_id = 6;
+    string content_sha256 = 7;
+    string principal_id = 8;
+    string correlation_id = 9;
+    int64 committed_at = 10;
+    bytes inline_content = 11;
+}
