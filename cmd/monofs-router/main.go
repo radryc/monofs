@@ -47,19 +47,20 @@ func init() {
 
 func main() {
 	var (
-		port          = flag.Int("port", 9090, "Router service port")
-		httpPort      = flag.Int("http-port", 8080, "HTTP UI port")
-		clusterID     = flag.String("cluster-id", "monofs-cluster", "Cluster identifier")
-		routerName    = flag.String("router-name", "local", "Router instance name for UI identification")
-		nodes         = flag.String("nodes", "", "Initial nodes: node1=host1:port1,node2=host2:port2,...")
-		weights       = flag.String("weights", "", "Node weights: node1=100,node2=100,...")
-		externalAddrs = flag.String("external-addrs", "", "External addresses for host clients: node1=localhost:9001,node2=localhost:9002,...")
-		peerRouters   = flag.String("peer-routers", "", "Peer routers for UI aggregation: name=http://host:port or host:port,...")
-		searchAddr    = flag.String("search-addr", "", "Search service address (e.g., search:9100)")
-		fetcherAddrs  = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
-		healthInt     = flag.Duration("health-interval", 2*time.Second, "Health check interval")
-		unhealthyThr  = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
-		debug         = flag.Bool("debug", false, "Enable debug logging")
+		port             = flag.Int("port", 9090, "Router service port")
+		httpPort         = flag.Int("http-port", 8080, "HTTP UI port")
+		clusterID        = flag.String("cluster-id", "monofs-cluster", "Cluster identifier")
+		routerName       = flag.String("router-name", "local", "Router instance name for UI identification")
+		nodes            = flag.String("nodes", "", "Initial nodes: node1=host1:port1,node2=host2:port2,...")
+		weights          = flag.String("weights", "", "Node weights: node1=100,node2=100,...")
+		externalAddrs    = flag.String("external-addrs", "", "External addresses for host clients: node1=localhost:9001,node2=localhost:9002,...")
+		peerRouters      = flag.String("peer-routers", "", "Peer routers for UI aggregation: name=http://host:port or host:port,...")
+		searchAddr       = flag.String("search-addr", "", "Search service address (e.g., search:9100)")
+		fetcherAddrs     = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
+		healthInt        = flag.Duration("health-interval", 2*time.Second, "Health check interval")
+		unhealthyThr     = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
+		debug            = flag.Bool("debug", false, "Enable debug logging")
+		guardianStateDir = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
 
 		// Replication and failover configuration
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
@@ -115,6 +116,7 @@ func main() {
 		HealthCheckInterval:   *healthInt,
 		UnhealthyThreshold:    *unhealthyThr,
 		PeerRouters:           parsePeerRouters(*peerRouters),
+		GuardianStateDir:      *guardianStateDir,
 		EncryptionKey:         encryptionKey,
 		ReplicationFactor:     *replicationFactor,
 		RebalanceDelay:        *rebalanceDelay,
