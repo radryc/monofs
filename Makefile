@@ -477,25 +477,6 @@ deploy-s3-clean: ## Stop S3 deployment and remove all data (including MinIO)
 	@echo ""
 	@echo "To redeploy: make deploy-s3-external"
 	@echo "======================================"
-	@echo "MonoFS S3 Deployment Cleanup"
-	@echo "======================================"
-	@echo ""
-	@echo "Stopping services and removing all data..."
-	@$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3.yml down -v --remove-orphans
-	@docker ps -a --filter 'name=monofs-' -q | xargs -r docker rm -f 2>/dev/null || true
-	@echo ""
-	@echo "✅ S3 deployment cleaned"
-	@echo ""
-	@echo "Removed:"
-	@echo "  - All MonoFS containers (router, nodes, fetchers, search)"
-	@echo "  - All volumes (node data, fetcher cache, MinIO data)"
-	@echo "  - MinIO bucket data"
-	@echo ""
-	@echo "Kept:"
-	@echo "  - .env file (with your encryption key)"
-	@echo ""
-	@echo "To redeploy: make deploy-s3"
-	@echo "======================================"
 
 deploy-restart: deploy-stop deploy ## Restart deployment
 
