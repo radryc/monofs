@@ -61,6 +61,24 @@ func TestClientRouterShardingMatch(t *testing.T) {
 			displayPath: "github_com/owner/repo",
 			filePath:    "a/b/c/d/file.go",
 		},
+		{
+			name:        "guardian partition file",
+			fullPath:    "guardian/monofs-local/intents/storage-core.yaml",
+			displayPath: "guardian/monofs-local",
+			filePath:    "intents/storage-core.yaml",
+		},
+		{
+			name:        "guardian system archive file",
+			fullPath:    "guardian-system/.archive/monofs-local/storage-core/rev-1/state.json",
+			displayPath: "guardian-system",
+			filePath:    ".archive/monofs-local/storage-core/rev-1/state.json",
+		},
+		{
+			name:        "doctor catalog manifest",
+			fullPath:    "doctor/v1/catalog/manifests/traces/default/2026-04-09/15/trace-1.json",
+			displayPath: "doctor/v1",
+			filePath:    "catalog/manifests/traces/default/2026-04-09/15/trace-1.json",
+		},
 	}
 
 	for _, tt := range tests {
@@ -144,6 +162,77 @@ func TestDirectoryShardKey(t *testing.T) {
 			description: "subdirs become sha256hash:relativePath",
 		},
 		{
+			name: "guardian namespace root",
+			path: "guardian",
+			checkFormat: func(key string) bool {
+				return key == "guardian"
+			},
+			wantSame:    true,
+			description: "guardian namespace root passes through unchanged",
+		},
+		{
+			name: "guardian repo root",
+			path: "guardian/monofs-local",
+			checkFormat: func(key string) bool {
+				return len(key) == 64 && isHexString(key)
+			},
+			wantSame:    false,
+			description: "guardian repo root should become SHA-256 hashed storageID",
+		},
+		{
+			name: "guardian repo subdirectory",
+			path: "guardian/monofs-local/intents",
+			checkFormat: func(key string) bool {
+				parts := strings.Split(key, ":")
+				if len(parts) != 2 {
+					return false
+				}
+				return len(parts[0]) == 64 && isHexString(parts[0]) && parts[1] == "intents"
+			},
+			wantSame:    false,
+			description: "guardian subdirs become sha256hash:relativePath",
+		},
+		{
+			name: "guardian-system repo root",
+			path: "guardian-system",
+			checkFormat: func(key string) bool {
+				return len(key) == 64 && isHexString(key)
+			},
+			wantSame:    false,
+			description: "guardian-system repo root should become SHA-256 hashed storageID",
+		},
+		{
+			name: "doctor namespace root",
+			path: "doctor",
+			checkFormat: func(key string) bool {
+				return key == "doctor"
+			},
+			wantSame:    true,
+			description: "doctor namespace root passes through unchanged",
+		},
+		{
+			name: "doctor repo root",
+			path: "doctor/v1",
+			checkFormat: func(key string) bool {
+				return len(key) == 64 && isHexString(key)
+			},
+			wantSame:    false,
+			description: "doctor repo root should become SHA-256 hashed storageID",
+		},
+		{
+			name: "doctor repo subdirectory",
+			path: "doctor/v1/catalog",
+			checkFormat: func(key string) bool {
+				parts := strings.Split(key, ":")
+				if len(parts) != 2 {
+					return false
+				}
+				return len(parts[0]) == 64 && isHexString(parts[0]) && parts[1] == "catalog"
+			},
+			wantSame:    false,
+			description: "doctor subdirs become sha256hash:relativePath",
+		},
+		{
 			name: "root",
 			path: "/",
 			checkFormat: func(key string) bool {
@@ -176,6 +265,99 @@ func TestDirectoryShardKey(t *testing.T) {
 			}
 
 			t.Logf("buildShardKey(%q) = %q ✓", tt.path, key)
+		})
+	}
+}
+
+func TestSplitDisplayPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		fullPath    string
+		displayPath string
+		filePath    string
+		ok          bool
+	}{
+		{
+			name:        "standard repo file",
+			fullPath:    "github_com/owner/repo/README.md",
+			displayPath: "github_com/owner/repo",
+			filePath:    "README.md",
+			ok:          true,
+		},
+		{
+			name:        "guardian repo file",
+			fullPath:    "guardian/monofs-local/intents/storage-core.yaml",
+			displayPath: "guardian/monofs-local",
+			filePath:    "intents/storage-core.yaml",
+			ok:          true,
+		},
+		{
+			name:        "guardian repo root",
+			fullPath:    "guardian/monofs-local",
+			displayPath: "guardian/monofs-local",
+			filePath:    "",
+			ok:          true,
+		},
+		{
+			name:        "guardian-system file",
+			fullPath:    "guardian-system/.archive/demo/api/rev-1/state.json",
+			displayPath: "guardian-system",
+			filePath:    ".archive/demo/api/rev-1/state.json",
+			ok:          true,
+		},
+		{
+			name:        "dependency file",
+			fullPath:    "dependency/go/mod/cache/download/example.com/mod/@v/list",
+			displayPath: "dependency",
+			filePath:    "go/mod/cache/download/example.com/mod/@v/list",
+			ok:          true,
+		},
+		{
+			name:        "doctor catalog file",
+			fullPath:    "doctor/v1/catalog/manifests/traces/default/2026-04-09/15/trace-1.json",
+			displayPath: "doctor/v1",
+			filePath:    "catalog/manifests/traces/default/2026-04-09/15/trace-1.json",
+			ok:          true,
+		},
+		{
+			name:        "doctor namespace root",
+			fullPath:    "doctor/v1",
+			displayPath: "doctor/v1",
+			filePath:    "",
+			ok:          true,
+		},
+		{
+			name:     "guardian namespace root",
+			fullPath: "guardian",
+			ok:       false,
+		},
+		{
+			name:     "doctor top-level namespace",
+			fullPath: "doctor",
+			ok:       false,
+		},
+		{
+			name:     "empty path",
+			fullPath: "",
+			ok:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			displayPath, filePath, ok := splitDisplayPath(tt.fullPath)
+			if ok != tt.ok {
+				t.Fatalf("splitDisplayPath(%q) ok = %v, want %v", tt.fullPath, ok, tt.ok)
+			}
+			if !ok {
+				return
+			}
+			if displayPath != tt.displayPath {
+				t.Fatalf("splitDisplayPath(%q) displayPath = %q, want %q", tt.fullPath, displayPath, tt.displayPath)
+			}
+			if filePath != tt.filePath {
+				t.Fatalf("splitDisplayPath(%q) filePath = %q, want %q", tt.fullPath, filePath, tt.filePath)
+			}
 		})
 	}
 }

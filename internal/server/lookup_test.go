@@ -322,6 +322,83 @@ func TestIntermediateDirCache(t *testing.T) {
 	}
 }
 
+func TestDoctorNamespaceVisibleWithoutRepo(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "monofs-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "db")
+	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer server.Close()
+
+	ctx := context.Background()
+
+	rootStream := &testReadDirStream{}
+	if err := server.ReadDir(&pb.ReadDirRequest{Path: ""}, rootStream); err != nil {
+		t.Fatalf("ReadDir root failed: %v", err)
+	}
+	foundDoctor := false
+	for _, entry := range rootStream.entries {
+		if entry.Name == "doctor" {
+			foundDoctor = true
+			break
+		}
+	}
+	if !foundDoctor {
+		t.Fatal("doctor not found in root ReadDir")
+	}
+
+	doctorStream := &testReadDirStream{}
+	if err := server.ReadDir(&pb.ReadDirRequest{Path: "doctor"}, doctorStream); err != nil {
+		t.Fatalf("ReadDir doctor failed: %v", err)
+	}
+	foundV1 := false
+	for _, entry := range doctorStream.entries {
+		if entry.Name == "v1" {
+			foundV1 = true
+			break
+		}
+	}
+	if !foundV1 {
+		t.Fatal("doctor/v1 not found in doctor ReadDir")
+	}
+
+	lookupDoctor, err := server.Lookup(ctx, &pb.LookupRequest{
+		ParentPath: "",
+		Name:       "doctor",
+	})
+	if err != nil {
+		t.Fatalf("lookup doctor failed: %v", err)
+	}
+	if !lookupDoctor.Found {
+		t.Fatal("doctor should be found")
+	}
+
+	lookupVersion, err := server.Lookup(ctx, &pb.LookupRequest{
+		ParentPath: "doctor",
+		Name:       "v1",
+	})
+	if err != nil {
+		t.Fatalf("lookup doctor/v1 failed: %v", err)
+	}
+	if !lookupVersion.Found {
+		t.Fatal("doctor/v1 should be found")
+	}
+
+	attr, err := server.GetAttr(ctx, &pb.GetAttrRequest{Path: "doctor/v1"})
+	if err != nil {
+		t.Fatalf("getattr doctor/v1 failed: %v", err)
+	}
+	if !attr.Found {
+		t.Fatal("doctor/v1 should be found by getattr")
+	}
+}
+
 // testReadDirStream implements grpc.ServerStreamingServer for testing ReadDir
 type testReadDirStream struct {
 	grpc.ServerStream

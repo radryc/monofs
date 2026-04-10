@@ -7,6 +7,7 @@ package blob
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	"github.com/radryc/packager"
 	"github.com/radryc/packager/pipeline"
 	pkgstorage "github.com/radryc/packager/storage"
+	"golang.org/x/sync/singleflight"
 )
 
 // maxOpenArchives limits concurrently open ArchiveReader handles.
@@ -67,6 +69,8 @@ type BlobBackend struct {
 	archivePaths map[string]bool
 
 	stats *storage.AtomicStats
+
+	storeGroup singleflight.Group
 
 	// Cloud storage clients (nil when StorageType == "local").
 	s3Client  *s3.Client
@@ -438,57 +442,80 @@ func (bb *BlobBackend) StoreBlob(blobHash string, content []byte) error {
 		return nil
 	}
 
-	archiveDir := filepath.Join(bb.config.CacheDir, "archives", "_loose")
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
-		return fmt.Errorf("create loose archive dir: %w", err)
-	}
+	_, err, _ := bb.storeGroup.Do(blobHash, func() (any, error) {
+		bb.mu.RLock()
+		_, exists := bb.blobIndex[blobHash]
+		bb.mu.RUnlock()
+		if exists {
+			return nil, nil
+		}
 
-	archivePath := filepath.Join(archiveDir, blobHash+".pack")
-	tmpPath := archivePath + ".tmp"
+		archiveDir := filepath.Join(bb.config.CacheDir, "archives", "_loose")
+		if err := os.MkdirAll(archiveDir, 0755); err != nil {
+			return nil, fmt.Errorf("create loose archive dir: %w", err)
+		}
 
-	var buf bytes.Buffer
-	w := packager.NewArchiveWriter(&buf, bb.pipeline)
+		archivePath := filepath.Join(archiveDir, blobHash+".pack")
 
-	if err := w.AddFile(blobHash, content, packager.AddFileOptions{
-		Permission: 0644,
-		OwnerUID:   0,
-		Encrypt:    true,
-	}); err != nil {
-		return fmt.Errorf("add blob to archive: %w", err)
-	}
-	if err := w.Close(); err != nil {
-		return fmt.Errorf("close archive writer: %w", err)
-	}
+		var buf bytes.Buffer
+		w := packager.NewArchiveWriter(&buf, bb.pipeline)
 
-	if err := os.WriteFile(tmpPath, buf.Bytes(), 0644); err != nil {
-		return fmt.Errorf("write loose archive: %w", err)
-	}
-	if err := os.Rename(tmpPath, archivePath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename loose archive: %w", err)
-	}
+		if err := w.AddFile(blobHash, content, packager.AddFileOptions{
+			Permission: 0644,
+			OwnerUID:   0,
+			Encrypt:    true,
+		}); err != nil {
+			return nil, fmt.Errorf("add blob to archive: %w", err)
+		}
+		if err := w.Close(); err != nil {
+			return nil, fmt.Errorf("close archive writer: %w", err)
+		}
 
-	// Upload to cloud.
-	if bb.isCloudConfigured() {
-		bb.uploadToCloud(archivePath, buf.Bytes())
-	}
+		tmpFile, err := os.CreateTemp(archiveDir, blobHash+".*.pack.tmp")
+		if err != nil {
+			return nil, fmt.Errorf("create loose archive temp file: %w", err)
+		}
+		tmpPath := tmpFile.Name()
+		if _, err := tmpFile.Write(buf.Bytes()); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+			return nil, fmt.Errorf("write loose archive: %w", err)
+		}
+		if err := tmpFile.Close(); err != nil {
+			os.Remove(tmpPath)
+			return nil, fmt.Errorf("close loose archive temp file: %w", err)
+		}
+		if err := os.Rename(tmpPath, archivePath); err != nil {
+			os.Remove(tmpPath)
+			if errors.Is(err, os.ErrExist) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("rename loose archive: %w", err)
+		}
 
-	bb.mu.Lock()
-	bb.blobIndex[blobHash] = archiveRef{
-		archivePath: archivePath,
-		entryPath:   blobHash,
-	}
-	bb.storageIDs["_loose"] = true
-	bb.storageBlobCounts["_loose"]++
-	bb.archivePaths[archivePath] = true
-	bb.mu.Unlock()
+		// Upload to cloud.
+		if bb.isCloudConfigured() {
+			bb.uploadToCloud(archivePath, buf.Bytes())
+		}
 
-	stats := *bb.stats.Load()
-	stats.CachedItems++
-	stats.CacheBytes += int64(len(content))
-	bb.stats.Store(&stats)
+		bb.mu.Lock()
+		bb.blobIndex[blobHash] = archiveRef{
+			archivePath: archivePath,
+			entryPath:   blobHash,
+		}
+		bb.storageIDs["_loose"] = true
+		bb.storageBlobCounts["_loose"]++
+		bb.archivePaths[archivePath] = true
+		bb.mu.Unlock()
 
-	return nil
+		stats := *bb.stats.Load()
+		stats.CachedItems++
+		stats.CacheBytes += int64(len(content))
+		bb.stats.Store(&stats)
+
+		return nil, nil
+	})
+	return err
 }
 
 // StoreBlobBatchResult holds the outcome of a batched blob write.
@@ -811,6 +838,31 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 	bb.mu.RUnlock()
 
 	if !ok {
+		recoveredRef, recovered, err := bb.findBlobOnDisk(req.ContentID)
+		if err != nil && bb.logger != nil {
+			bb.logger.Warn("blob miss rescan failed", "content_id", req.ContentID, "error", err)
+		}
+		if recovered {
+			bb.mu.Lock()
+			if existing, exists := bb.blobIndex[req.ContentID]; exists {
+				ref = existing
+			} else {
+				bb.blobIndex[req.ContentID] = recoveredRef
+				bb.archivePaths[recoveredRef.archivePath] = true
+				if storageID := filepath.Base(filepath.Dir(recoveredRef.archivePath)); storageID != "" {
+					bb.storageIDs[storageID] = true
+				}
+				ref = recoveredRef
+			}
+			bb.mu.Unlock()
+			ok = true
+			if bb.logger != nil {
+				bb.logger.Info("recovered blob from disk", "content_id", req.ContentID, "archive_path", ref.archivePath)
+			}
+		}
+	}
+
+	if !ok {
 		newStats.CacheMisses++
 		newStats.Errors++
 		bb.stats.Store(&newStats)
@@ -841,6 +893,59 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 		FromCache:      true,
 		FetchLatencyMs: time.Since(start).Milliseconds(),
 	}, nil
+}
+
+func (bb *BlobBackend) findBlobOnDisk(blobHash string) (archiveRef, bool, error) {
+	archiveDir := filepath.Join(bb.config.CacheDir, "archives")
+	entries, err := os.ReadDir(archiveDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return archiveRef{}, false, nil
+		}
+		return archiveRef{}, false, err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		storageDir := filepath.Join(archiveDir, entry.Name())
+		packs, err := filepath.Glob(filepath.Join(storageDir, "*.pack"))
+		if err != nil {
+			continue
+		}
+		for _, packPath := range packs {
+			store, err := pkgstorage.NewLocalFileReader(packPath)
+			if err != nil {
+				continue
+			}
+
+			ar, err := packager.OpenArchive(store, bb.pipeline)
+			if err != nil {
+				store.Close()
+				continue
+			}
+
+			found := false
+			for _, entryPath := range ar.ListFiles() {
+				if entryPath == blobHash {
+					found = true
+					break
+				}
+			}
+			ar.Close()
+			store.Close()
+
+			if found {
+				return archiveRef{
+					archivePath: packPath,
+					entryPath:   blobHash,
+				}, true, nil
+			}
+		}
+	}
+
+	return archiveRef{}, false, nil
 }
 
 // FetchBlobStream returns a reader for the blob content.

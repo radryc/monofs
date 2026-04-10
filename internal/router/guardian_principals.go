@@ -104,31 +104,37 @@ func (s *guardianPrincipalStore) saveLocked() error {
 	return nil
 }
 
-func (s *guardianPrincipalStore) upsertConnectedClient(clientID, token, baseURL string) (*guardianPrincipal, error) {
-	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(token) == "" {
-		return nil, fmt.Errorf("guardian principal requires client id and token")
+func (s *guardianPrincipalStore) upsertConnectedClient(principalID, token, role, displayName, baseURL string) (*guardianPrincipal, error) {
+	if strings.TrimSpace(principalID) == "" || strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("guardian principal requires principal id and token")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now().Unix()
-	principal := s.principals[clientID]
+	principal := s.principals[principalID]
 	if principal == nil {
 		principal = &guardianPrincipal{
-			PrincipalID: clientID,
+			PrincipalID: principalID,
 			CreatedAt:   now,
 		}
 	}
 	principal.TokenHash = guardianTokenHash(token)
-	principal.Role = inferGuardianPrincipalRole(clientID)
-	principal.DisplayName = clientID
+	if strings.TrimSpace(role) == "" {
+		role = inferGuardianPrincipalRole(principalID)
+	}
+	if strings.TrimSpace(displayName) == "" {
+		displayName = principalID
+	}
+	principal.Role = role
+	principal.DisplayName = displayName
 	principal.BaseURL = baseURL
 	principal.Disabled = false
 	if principal.CreatedAt == 0 {
 		principal.CreatedAt = now
 	}
-	s.principals[clientID] = principal
+	s.principals[principalID] = principal
 
 	if err := s.saveLocked(); err != nil {
 		return nil, err
@@ -156,6 +162,24 @@ func (s *guardianPrincipalStore) validateToken(token string) (*guardianPrincipal
 		}
 	}
 	return nil, false
+}
+
+func (s *guardianPrincipalStore) validateTokenForPrincipal(token, principalID string) (*guardianPrincipal, bool) {
+	if strings.TrimSpace(token) == "" || strings.TrimSpace(principalID) == "" {
+		return nil, false
+	}
+
+	tokenHash := guardianTokenHash(token)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	principal, ok := s.principals[principalID]
+	if !ok || principal == nil || principal.Disabled || principal.TokenHash != tokenHash {
+		return nil, false
+	}
+	cloned := *principal
+	return &cloned, true
 }
 
 func guardianTokenHash(token string) string {
