@@ -33,6 +33,18 @@ func TestGuardianPathMappingRoundTrip(t *testing.T) {
 			displayPath: "guardian-system",
 			relative:    ".archive/genomics/core/deploy-1/state.json",
 		},
+		{
+			name:        "doctor catalog file",
+			logicalPath: "/doctor/v1/catalog/manifests/traces/default/2026-04-09/15/trace-1.json",
+			displayPath: "doctor/v1",
+			relative:    "catalog/manifests/traces/default/2026-04-09/15/trace-1.json",
+		},
+		{
+			name:        "doctor namespace root",
+			logicalPath: "/doctor/v1",
+			displayPath: "doctor/v1",
+			relative:    "",
+		},
 	}
 
 	for _, tc := range tests {

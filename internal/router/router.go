@@ -156,6 +156,9 @@ type clientState struct {
 // guardianClientState tracks a connected guardian-* client.
 type guardianClientState struct {
 	clientID      string
+	principalID   string
+	role          string
+	displayName   string
 	baseURL       string
 	authToken     string
 	lastHeartbeat time.Time
@@ -2719,30 +2722,54 @@ func (r *Router) RegisterClient(ctx context.Context, req *pb.RegisterClientReque
 	r.clientsMu.Lock()
 	defer r.clientsMu.Unlock()
 
-	// Handle guardian-* client registration
-	if strings.HasPrefix(req.ClientId, "guardian-") {
-		if req.GuardianConfig == nil || req.GuardianConfig.BaseUrl == "" || req.GuardianConfig.AuthToken == "" {
+	// Handle clients that participate in managed-path auth.
+	if req.GuardianConfig != nil {
+		if req.GuardianConfig.AuthToken == "" {
 			return &pb.RegisterClientResponse{
 				Success: false,
-				Message: "guardian_config with base_url and auth_token required for guardian-* clients",
+				Message: "guardian_config with auth_token is required",
 			}, nil
 		}
-		r.guardianClientsMu.Lock()
-		r.guardianClients[req.ClientId] = &guardianClientState{
-			clientID:      req.ClientId,
-			baseURL:       req.GuardianConfig.BaseUrl,
-			authToken:     req.GuardianConfig.AuthToken,
-			lastHeartbeat: time.Now(),
+		principalID := strings.TrimSpace(req.GuardianConfig.GetPrincipalId())
+		if principalID == "" {
+			principalID = req.ClientId
 		}
-		r.guardianClientsMu.Unlock()
-		r.logger.Info("guardian client registered",
-			"client_id", req.ClientId,
-			"base_url", req.GuardianConfig.BaseUrl)
-		if _, err := r.guardianPrincipals.upsertConnectedClient(req.ClientId, req.GuardianConfig.AuthToken, req.GuardianConfig.BaseUrl); err != nil {
+		role := strings.TrimSpace(req.GuardianConfig.GetRole())
+		if role == "" {
+			role = inferGuardianPrincipalRole(principalID)
+		}
+		displayName := strings.TrimSpace(req.GuardianConfig.GetDisplayName())
+		if displayName == "" {
+			displayName = principalID
+		}
+		if strings.HasPrefix(req.ClientId, "guardian-") {
+			r.guardianClientsMu.Lock()
+			r.guardianClients[req.ClientId] = &guardianClientState{
+				clientID:      req.ClientId,
+				principalID:   principalID,
+				role:          role,
+				displayName:   displayName,
+				baseURL:       req.GuardianConfig.BaseUrl,
+				authToken:     req.GuardianConfig.AuthToken,
+				lastHeartbeat: time.Now(),
+			}
+			r.guardianClientsMu.Unlock()
+			r.logger.Info("guardian client registered",
+				"client_id", req.ClientId,
+				"principal_id", principalID,
+				"base_url", req.GuardianConfig.BaseUrl)
+		}
+		if _, err := r.guardianPrincipals.upsertConnectedClient(principalID, req.GuardianConfig.AuthToken, role, displayName, req.GuardianConfig.BaseUrl); err != nil {
 			r.logger.Warn("failed to persist guardian principal",
 				"client_id", req.ClientId,
+				"principal_id", principalID,
 				"error", err)
 		}
+	} else if strings.HasPrefix(req.ClientId, "guardian-") {
+		return &pb.RegisterClientResponse{
+			Success: false,
+			Message: "guardian_config with auth_token required for guardian-* clients",
+		}, nil
 	}
 
 	// Check if client already exists (reconnection)
@@ -2892,6 +2919,14 @@ func (r *Router) ClientHeartbeat(ctx context.Context, req *pb.ClientHeartbeatReq
 	state.info.State = pb.ClientState_CLIENT_CONNECTED
 	state.mu.Unlock()
 
+	if strings.HasPrefix(req.ClientId, "guardian-") {
+		r.guardianClientsMu.Lock()
+		if guardianState, ok := r.guardianClients[req.ClientId]; ok {
+			guardianState.lastHeartbeat = now
+		}
+		r.guardianClientsMu.Unlock()
+	}
+
 	return &pb.ClientHeartbeatResponse{
 		Success: true,
 		Message: "heartbeat received",
@@ -3028,7 +3063,7 @@ func (r *Router) isGuardianVisible() bool {
 }
 
 // validateGuardianToken checks if the given token matches a persistent or connected guardian principal.
-// Returns the matching client ID and true if valid, or empty string and false if not.
+// Returns the matching principal ID and true if valid, or empty string and false if not.
 func (r *Router) validateGuardianToken(token string) (string, bool) {
 	if principal, ok := r.authenticateGuardianToken(token); ok {
 		return principal.PrincipalID, true
@@ -3047,15 +3082,73 @@ func (r *Router) authenticateGuardianToken(token string) (*guardianPrincipal, bo
 	defer r.guardianClientsMu.RUnlock()
 	for clientID, state := range r.guardianClients {
 		if state.authToken == token {
+			principalID := state.principalID
+			if principalID == "" {
+				principalID = clientID
+			}
+			role := state.role
+			if role == "" {
+				role = inferGuardianPrincipalRole(principalID)
+			}
+			displayName := state.displayName
+			if displayName == "" {
+				displayName = principalID
+			}
 			return &guardianPrincipal{
-				PrincipalID: clientID,
-				Role:        inferGuardianPrincipalRole(clientID),
-				DisplayName: clientID,
+				PrincipalID: principalID,
+				Role:        role,
+				DisplayName: displayName,
 				BaseURL:     state.baseURL,
 			}, true
 		}
 	}
 	return nil, false
+}
+
+func (r *Router) authenticateGuardianMutation(token string, mutationCtx *pb.GuardianMutationContext) (*guardianPrincipal, bool) {
+	if mutationCtx != nil {
+		requestedPrincipalID := strings.TrimSpace(mutationCtx.GetPrincipalId())
+		if requestedPrincipalID != "" {
+			if r.guardianPrincipals != nil {
+				if principal, ok := r.guardianPrincipals.validateTokenForPrincipal(token, requestedPrincipalID); ok {
+					return principal, true
+				}
+			}
+
+			r.guardianClientsMu.RLock()
+			for clientID, state := range r.guardianClients {
+				if state.authToken != token {
+					continue
+				}
+				principalID := state.principalID
+				if principalID == "" {
+					principalID = clientID
+				}
+				if principalID != requestedPrincipalID {
+					continue
+				}
+				role := state.role
+				if role == "" {
+					role = inferGuardianPrincipalRole(principalID)
+				}
+				displayName := state.displayName
+				if displayName == "" {
+					displayName = principalID
+				}
+				r.guardianClientsMu.RUnlock()
+				return &guardianPrincipal{
+					PrincipalID: principalID,
+					Role:        role,
+					DisplayName: displayName,
+					BaseURL:     state.baseURL,
+				}, true
+			}
+			r.guardianClientsMu.RUnlock()
+			return nil, false
+		}
+	}
+
+	return r.authenticateGuardianToken(token)
 }
 
 // getGuardianBaseURL returns the base URL for a guardian client.
