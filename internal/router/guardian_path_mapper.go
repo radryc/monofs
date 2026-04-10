@@ -25,7 +25,7 @@ func normalizeGuardianLogicalPath(input string) (string, error) {
 	}
 	cleaned = path.Clean(cleaned)
 	if cleaned == "." || cleaned == "/" {
-		return "", fmt.Errorf("logical_path must target a Guardian path")
+		return "", fmt.Errorf("logical_path must target a managed path")
 	}
 	if strings.Contains(cleaned, "..") {
 		return "", fmt.Errorf("logical_path %q must not contain '..'", input)
@@ -58,6 +58,18 @@ func mapGuardianLogicalPath(logicalPath string) (guardianPhysicalPath, error) {
 			RelativePath: relativePath,
 			StorageID:    sharding.GenerateStorageID(displayPath),
 		}, nil
+	case "doctor":
+		if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+			return guardianPhysicalPath{}, fmt.Errorf("doctor logical_path %q is missing version", logicalPath)
+		}
+		displayPath := strings.Join(parts[:2], "/")
+		relativePath := cleanGuardianRelativePath(strings.Join(parts[2:], "/"))
+		return guardianPhysicalPath{
+			LogicalPath:  cleaned,
+			DisplayPath:  displayPath,
+			RelativePath: relativePath,
+			StorageID:    sharding.GenerateStorageID(displayPath),
+		}, nil
 	case ".queues", ".archive":
 		displayPath := "guardian-system"
 		relativePath := cleanGuardianRelativePath(trimmed)
@@ -68,7 +80,7 @@ func mapGuardianLogicalPath(logicalPath string) (guardianPhysicalPath, error) {
 			StorageID:    sharding.GenerateStorageID(displayPath),
 		}, nil
 	default:
-		return guardianPhysicalPath{}, fmt.Errorf("logical_path %q is outside the Guardian namespace", logicalPath)
+		return guardianPhysicalPath{}, fmt.Errorf("logical_path %q is outside the managed namespace", logicalPath)
 	}
 }
 
@@ -84,6 +96,16 @@ func guardianLogicalPathFromPhysical(displayPath, relativePath string) (string, 
 		if strings.HasPrefix(relativePath, ".queues/") || strings.HasPrefix(relativePath, ".archive/") {
 			return "/" + relativePath, nil
 		}
+	case strings.HasPrefix(displayPath, "doctor/"):
+		version := strings.TrimPrefix(displayPath, "doctor/")
+		if version == "" || strings.Contains(version, "/") {
+			return "", fmt.Errorf("invalid display_path %q", displayPath)
+		}
+		base := "/doctor/" + version
+		if relativePath == "" {
+			return base, nil
+		}
+		return base + "/" + relativePath, nil
 	case strings.HasPrefix(displayPath, "guardian/"):
 		partition := strings.TrimPrefix(displayPath, "guardian/")
 		if partition == "" {
@@ -96,7 +118,7 @@ func guardianLogicalPathFromPhysical(displayPath, relativePath string) (string, 
 		return base + "/" + relativePath, nil
 	}
 
-	return "", fmt.Errorf("display_path %q is not a Guardian path", displayPath)
+	return "", fmt.Errorf("display_path %q is not a managed path", displayPath)
 }
 
 func guardianDisplayPathJoin(displayPath, relativePath string) string {

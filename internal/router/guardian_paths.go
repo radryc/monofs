@@ -48,7 +48,7 @@ type guardianDeletePlan struct {
 }
 
 func (r *Router) UpsertGuardianPaths(ctx context.Context, req *pb.UpsertGuardianPathsRequest) (*pb.UpsertGuardianPathsResponse, error) {
-	principal, ok := r.authenticateGuardianToken(req.GetGuardianToken())
+	principal, ok := r.authenticateGuardianMutation(req.GetGuardianToken(), req.GetContext())
 	if !ok {
 		return nil, status.Error(codes.PermissionDenied, "invalid guardian token")
 	}
@@ -162,7 +162,7 @@ func (r *Router) UpsertGuardianPaths(ctx context.Context, req *pb.UpsertGuardian
 }
 
 func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardianPathsRequest) (*pb.DeleteGuardianPathsResponse, error) {
-	principal, ok := r.authenticateGuardianToken(req.GetGuardianToken())
+	principal, ok := r.authenticateGuardianMutation(req.GetGuardianToken(), req.GetContext())
 	if !ok {
 		return nil, status.Error(codes.PermissionDenied, "invalid guardian token")
 	}
@@ -396,6 +396,7 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 	if principal != nil && strings.TrimSpace(principal.BaseURL) != "" {
 		repoURL = principal.BaseURL
 	}
+	batchFiles := appendGuardianDirHints(group.files)
 
 	for _, node := range nodes {
 		node := node
@@ -428,7 +429,7 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 
 			batchCtx, batchCancel := context.WithTimeout(ctx, 30*time.Second)
 			resp, err := nodeClient.IngestFileBatch(batchCtx, &pb.IngestFileBatchRequest{
-				Files:       group.files,
+				Files:       batchFiles,
 				StorageId:   group.storageID,
 				DisplayPath: group.displayPath,
 				Source:      "guardian-path-api",
@@ -470,6 +471,33 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 	r.mu.Unlock()
 
 	return nil
+}
+
+func appendGuardianDirHints(files []*pb.FileMetadata) []*pb.FileMetadata {
+	out := make([]*pb.FileMetadata, 0, len(files)*2)
+	for _, file := range files {
+		if file == nil {
+			continue
+		}
+		out = append(out, file)
+		hint := *file
+		hint.InlineContent = nil
+		hint.BlobHash = ""
+		if len(file.GetBackendMetadata()) > 0 {
+			hint.BackendMetadata = make(map[string]string, len(file.GetBackendMetadata())+1)
+			for key, value := range file.GetBackendMetadata() {
+				hint.BackendMetadata[key] = value
+			}
+		} else {
+			hint.BackendMetadata = make(map[string]string, 1)
+		}
+		hint.BackendMetadata["dir_hint"] = "true"
+		if _, ok := hint.BackendMetadata["file_type"]; !ok && file.GetMode()&uint32(syscall.S_IFDIR) != 0 {
+			hint.BackendMetadata["file_type"] = "1"
+		}
+		out = append(out, &hint)
+	}
+	return out
 }
 
 func readGuardianFileContent(ctx context.Context, client pb.MonoFSClient, fullPath string) ([]byte, error) {
@@ -550,7 +578,7 @@ func (r *Router) publishLegacyGuardianChange(event *pb.GuardianChangeEvent) {
 	}
 	mapped, err := mapGuardianLogicalPath(event.GetLogicalPath())
 	if err != nil {
-		r.logger.Warn("failed to map guardian logical path for legacy event", "logical_path", event.GetLogicalPath(), "error", err)
+		r.logger.Warn("failed to map logical path for legacy event", "logical_path", event.GetLogicalPath(), "error", err)
 		return
 	}
 	r.publishGuardianChange(&pb.ChangeEvent{
@@ -617,6 +645,14 @@ func authorizeGuardianMutation(principal *guardianPrincipal, logicalPath string,
 	switch principal.Role {
 	case "control-plane", "cli":
 		return nil
+	case "doctor":
+		if logicalPath == "/doctor" || strings.HasPrefix(logicalPath, "/doctor/") {
+			return nil
+		}
+		if logicalPath == "/partitions/doctor-system" || strings.HasPrefix(logicalPath, "/partitions/doctor-system/") {
+			return nil
+		}
+		return fmt.Errorf("doctor principal %q may only mutate Doctor namespace paths", principal.PrincipalID)
 	case "pusher":
 		if strings.Contains(logicalPath, "/.state/") {
 			return nil

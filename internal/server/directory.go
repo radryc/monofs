@@ -341,6 +341,9 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 	// Handle root directory - list all top-level directories (e.g., "github.com")
 	if path == "" {
 		topLevelDirs := make(map[string]bool)
+		for _, dir := range managedNamespaceEntries(path) {
+			topLevelDirs[dir] = true
+		}
 		repoCount := 0
 
 		s.db.View(func(tx *nutsdb.Tx) error {
@@ -387,7 +390,7 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 			return nil
 		})
 
-		if repoCount == 0 {
+		if repoCount == 0 && len(topLevelDirs) == 0 {
 			elapsed := time.Since(startTime)
 			s.logger.Debug("readdir completed (root, empty)",
 				"path", path,
@@ -427,6 +430,9 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 	if !ok {
 		pathPrefix := path + "/"
 		intermediateDirs := make(map[string]bool)
+		for _, dir := range managedNamespaceEntries(path) {
+			intermediateDirs[dir] = true
+		}
 
 		s.db.View(func(tx *nutsdb.Tx) error {
 			// Use GetKeys first, then batch Get values
