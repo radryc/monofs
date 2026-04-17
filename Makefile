@@ -22,6 +22,7 @@ FETCHER_BINARY := monofs-fetcher
 BIN_DIR := bin
 CMD_DIR := cmd
 PROTO_DIR := api/proto
+KMOD_DIR := monofs-kmod
 
 # Version information
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -49,18 +50,18 @@ endif
 
 # Router UI aggregation
 PEER_ROUTERS ?=
-ROUTER1_PEERS ?= router2=http://router2:8080
-ROUTER2_PEERS ?= router1=http://router1:8080
+ROUTER_A_PEERS ?= router-b=http://router-b:8080
+ROUTER_B_PEERS ?= router-a=http://router-a:8080
 
 # Default target
 .DEFAULT_GOAL := build
 
 # Phony targets
-.PHONY: all build build-server build-client build-router build-admin build-session build-search build-fetcher build-loadtest build-modverify clean proto proto-check \
+.PHONY: all build build-server build-client build-router build-admin build-session build-search build-fetcher build-loadtest build-modverify build-kmod clean clean-kmod proto proto-check \
         test test-unit test-e2e test-e2e-sudo test-smoke test-race test-coverage vet fmt fmt-check tidy \
         install-tools run-server run-client run-router run-cluster help \
         deploy deploy-s3 deploy-s3-external deploy-s3-clean deploy-stop deploy-clean deploy-restart deploy-local deploy-local-stop deploy-local-clean deploy-local-restart \
-        mount mount-writable unmount \
+        mount mount-writable unmount mount-kmod umount-kmod \
         docker-build docker-up docker-down docker-logs docker-clean docker-restart
 
 ##@ General
@@ -110,13 +111,22 @@ build-modverify: $(BIN_DIR) ## Build the module verification tool
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/modverify ./$(CMD_DIR)/modverify
 	@echo "Built $(BIN_DIR)/modverify"
 
+build-kmod: ## Build the out-of-tree kernel module scaffold
+	@$(MAKE) -C $(KMOD_DIR) all
+	@echo "Built $(KMOD_DIR)/monofs.ko"
+
 $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
 
 clean: ## Remove build artifacts
 	@rm -rf $(BIN_DIR)
 	@rm -f coverage.out coverage.html
+	@$(MAKE) -C $(KMOD_DIR) clean >/dev/null 2>&1 || true
 	@echo "Cleaned build artifacts"
+
+clean-kmod: ## Remove kernel module build artifacts
+	@$(MAKE) -C $(KMOD_DIR) clean
+	@echo "Cleaned $(KMOD_DIR) build artifacts"
 
 ##@ Proto
 
@@ -187,12 +197,12 @@ deploy: ## Rebuild and deploy Docker cluster (router + 3 nodes)
 	@echo ""
 	@echo "Building Docker images..."
 	GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
-		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+		ROUTER_A_PEERS=$(ROUTER_A_PEERS) ROUTER_B_PEERS=$(ROUTER_B_PEERS) \
 		$(DOCKER_COMPOSE) build
 	@echo ""
 	@echo "Starting services..."
 	@GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
-		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+		ROUTER_A_PEERS=$(ROUTER_A_PEERS) ROUTER_B_PEERS=$(ROUTER_B_PEERS) \
 		$(DOCKER_COMPOSE) up -d
 	@sleep 2
 	@echo ""
@@ -254,12 +264,12 @@ deploy-s3: ## Deploy Docker cluster with MinIO S3 backend
 	@echo ""
 	@echo "Building Docker images..."
 	GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
-		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+		ROUTER_A_PEERS=$(ROUTER_A_PEERS) ROUTER_B_PEERS=$(ROUTER_B_PEERS) \
 		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3.yml build
 	@echo ""
 	@echo "Starting services..."
 	@GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
-		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+		ROUTER_A_PEERS=$(ROUTER_A_PEERS) ROUTER_B_PEERS=$(ROUTER_B_PEERS) \
 		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3.yml up -d
 	@sleep 2
 	@echo ""
@@ -312,12 +322,12 @@ deploy-s3-external: ## Deploy Docker cluster using existing external MinIO
 	@echo ""
 	@echo "Building Docker images..."
 	GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
-		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+		ROUTER_A_PEERS=$(ROUTER_A_PEERS) ROUTER_B_PEERS=$(ROUTER_B_PEERS) \
 		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3-external.yml build
 	@echo ""
 	@echo "Starting services..."
 	@GIT_VERSION=$(VERSION) GIT_COMMIT=$(COMMIT) BUILD_TIME=$(BUILD_TIME) \
-		ROUTER1_PEERS=$(ROUTER1_PEERS) ROUTER2_PEERS=$(ROUTER2_PEERS) \
+		ROUTER_A_PEERS=$(ROUTER_A_PEERS) ROUTER_B_PEERS=$(ROUTER_B_PEERS) \
 		$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.s3-external.yml up -d
 	@sleep 2
 	@echo ""
@@ -604,6 +614,26 @@ unmount: ## Unmount FUSE client (requires MOUNT_POINT)
 		exit 1; \
 	fi
 	@fusermount -u $(MOUNT_POINT) || fusermount3 -u $(MOUNT_POINT) || true
+	@echo "✅ Unmounted $(MOUNT_POINT)"
+
+mount-kmod: ## Mount the kernel-module lower filesystem (requires MOUNT_POINT, optional GATEWAY)
+	@if [ -z "$(MOUNT_POINT)" ]; then \
+		echo "Usage: make mount-kmod MOUNT_POINT=/mnt/monofs-kmod [GATEWAY=host:port] [SEED_PATHS=a/b,c/d] [CLUSTER_VERSION=n] [DEBUG=1]"; \
+		exit 1; \
+	fi
+	@bash ./scripts/mount-monofs-kmod.sh \
+		--mount="$(MOUNT_POINT)" \
+		$(if $(GATEWAY),--gateway="$(GATEWAY)",) \
+		$(if $(SEED_PATHS),--seed-paths="$(SEED_PATHS)",) \
+		$(if $(CLUSTER_VERSION),--cluster-version="$(CLUSTER_VERSION)",) \
+		$(if $(DEBUG),--debug,)
+
+umount-kmod: ## Unmount the kernel-module lower filesystem (requires MOUNT_POINT)
+	@if [ -z "$(MOUNT_POINT)" ]; then \
+		echo "Usage: make umount-kmod MOUNT_POINT=/mnt/monofs-kmod"; \
+		exit 1; \
+	fi
+	@umount "$(MOUNT_POINT)"
 	@echo "✅ Unmounted $(MOUNT_POINT)"
 
 ##@ Testing

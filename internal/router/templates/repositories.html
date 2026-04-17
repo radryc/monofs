@@ -326,15 +326,33 @@
                             ? `${repo.files_count.toLocaleString()} / ${repo.total_files.toLocaleString()}`
                             : (repo.files_count || 0).toLocaleString();
                         
+                        const productBadge = repo.product_kind
+                            ? ` <span class="badge badge-${repo.product_kind === 'doctor' ? 'warning' : 'info'}" style="font-size: 10px;">${repo.product_kind}</span>`
+                            : '';
+                        const sourceHref = repo.product_ui_url ||
+                            (repo.repo_url === 'dir-hint' ? '/dependencies' : repo.repo_url);
+                        const sourceText = repo.product_ui_url
+                            ? (repo.product_ui_label || repo.product_ui_url)
+                            : repo.repo_url === 'dir-hint'
+                            ? '📦 Dependencies'
+                            : (repo.repo_url.length > 50 ? repo.repo_url.substring(0, 47) + '...' : repo.repo_url);
+                        const clickableSource = Boolean(sourceHref) && (
+                            sourceHref.startsWith('http://') ||
+                            sourceHref.startsWith('https://') ||
+                            sourceHref.startsWith('/')
+                        );
+
                         return `
                             <tr data-repo-index="${idx}" style="cursor: pointer;" onclick="toggleRepoDetails(this, ${idx})" title="Click for details">
-                                <td><strong>${repo.repo_id}</strong>${repo.is_guardian ? ' <span class="badge badge-info" style="font-size: 10px;">guardian</span>' : ''}</td>
+                                <td><strong>${repo.repo_id}</strong>${productBadge}</td>
                                 <td>
-                                    ${repo.is_guardian && repo.guardian_url
-                                        ? `<a href="${repo.guardian_url}" target="_blank" style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">${repo.guardian_url.length > 50 ? repo.guardian_url.substring(0, 47) + '...' : repo.guardian_url}</a>`
-                                        : repo.repo_url === 'dir-hint'
-                                        ? `<a href="/dependencies" style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">📦 Dependencies</a>`
-                                        : `<a href="${repo.repo_url}" target="_blank" style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">${repo.repo_url.length > 50 ? repo.repo_url.substring(0, 47) + '...' : repo.repo_url}</a>`
+                                    ${clickableSource
+                                        ? `<a href="${sourceHref}" ${repo.repo_url === 'dir-hint' ? '' : 'target="_blank"'} style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">${sourceText}</a>`
+                                        : `<span style="color: var(--text-primary);">${sourceText}</span>`
+                                    }
+                                    ${repo.product_ui_url && repo.repo_url && repo.repo_url !== 'dir-hint'
+                                        ? `<div style="font-size: 11px; margin-top: 4px; color: var(--text-secondary);" title="${repo.repo_url}">${repo.repo_url.length > 56 ? repo.repo_url.substring(0, 53) + '...' : repo.repo_url}</div>`
+                                        : ''
                                     }
                                 </td>
                                 <td>${statusBadge}</td>

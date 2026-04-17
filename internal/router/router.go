@@ -64,6 +64,7 @@ type Router struct {
 	ingestedRepos        map[string]*ingestedRepo        // repoID -> repo info
 	inProgressIngestions map[string]*inProgressIngestion // storageID -> ingestion progress
 	version              atomic.Int64
+	namespaceGeneration  atomic.Uint64
 	config               RouterConfig
 	stopHealth           chan struct{}
 	logger               *slog.Logger
@@ -298,6 +299,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		whitelist:                 newWhitelistStore(),
 	}
 	r.version.Store(1)
+	r.namespaceGeneration.Store(1)
 
 	// Start UI request handler goroutine
 	go r.handleUIRequests()
@@ -337,10 +339,17 @@ func (r *Router) markForIndexRebuild(nodeID, storageID string) {
 func (r *Router) triggerIndexRebuild(nodeID, storageID string) error {
 	r.mu.RLock()
 	state := r.nodes[nodeID]
+	var client pb.MonoFSClient
+	if state != nil {
+		client = state.client
+	}
 	r.mu.RUnlock()
 
 	if state == nil {
 		return fmt.Errorf("node not found: %s", nodeID)
+	}
+	if client == nil {
+		return fmt.Errorf("node %s has no active client connection", nodeID)
 	}
 
 	r.logger.Info("triggering directory index rebuild",
@@ -350,7 +359,7 @@ func (r *Router) triggerIndexRebuild(nodeID, storageID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	resp, err := state.client.BuildDirectoryIndexes(ctx, &pb.BuildDirectoryIndexesRequest{
+	resp, err := client.BuildDirectoryIndexes(ctx, &pb.BuildDirectoryIndexesRequest{
 		StorageId: storageID,
 	})
 
@@ -973,6 +982,9 @@ func (r *Router) discoverClusterRepositories() {
 		}
 	}
 	r.mu.Unlock()
+	if newCount > 0 {
+		r.bumpNativeNamespaceGeneration("repository discovery")
+	}
 
 	r.logger.Info("cluster repository discovery complete",
 		"discovered", len(discoveredRepos),

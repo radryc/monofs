@@ -11,7 +11,7 @@
 
 services:
   # Fetcher 1 with S3 backend (using external MinIO)
-  fetcher1:
+  fetcher-a:
     command:
       - "monofs-fetcher"
       - "--port=9200"
@@ -31,7 +31,7 @@ services:
       - MONOFS_S3_USE_PATH_STYLE=${MONOFS_S3_USE_PATH_STYLE:-true}
 
   # Fetcher 2 with S3 backend (using external MinIO)
-  fetcher2:
+  fetcher-b:
     command:
       - "monofs-fetcher"
       - "--port=9200"
