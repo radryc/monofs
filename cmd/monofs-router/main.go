@@ -49,6 +49,7 @@ func main() {
 	var (
 		port             = flag.Int("port", 9090, "Router service port")
 		httpPort         = flag.Int("http-port", 8080, "HTTP UI port")
+		nativeAddr       = flag.String("native-addr", "", "Native protocol listen address (disabled when empty)")
 		clusterID        = flag.String("cluster-id", "monofs-cluster", "Cluster identifier")
 		routerName       = flag.String("router-name", "local", "Router instance name for UI identification")
 		nodes            = flag.String("nodes", "", "Initial nodes: node1=host1:port1,node2=host2:port2,...")
@@ -212,6 +213,23 @@ func main() {
 		Handler: r.ServeHTTP(),
 	}
 
+	var nativeListener net.Listener
+	var nativeServer *router.NativeGateway
+	if *nativeAddr != "" {
+		nativeListener, err = net.Listen("tcp", *nativeAddr)
+		if err != nil {
+			log.Fatalf("Failed to listen for native protocol: %v", err)
+		}
+		nativeServer = router.NewNativeGateway(r, logger)
+		go func() {
+			logger.Info("monofs router native listener", "addr", *nativeAddr)
+			if err := nativeServer.Serve(nativeListener); err != nil {
+				logger.Error("failed to serve native protocol", "error", err)
+				os.Exit(1)
+			}
+		}()
+	}
+
 	go func() {
 		logger.Info("monofs router http ui listening", "port", *httpPort)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -226,6 +244,9 @@ func main() {
 	<-sigCh
 	logger.Info("shutting down router...")
 	httpServer.Close()
+	if nativeListener != nil {
+		nativeListener.Close()
+	}
 	grpcServer.GracefulStop()
 	r.Close()
 }

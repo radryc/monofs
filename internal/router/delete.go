@@ -38,6 +38,9 @@ func (r *Router) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryR
 
 	// Step 3: Delete search index
 	r.deleteSearchIndex(ctx, storageID)
+	if exists || totalFilesDeleted > 0 || totalDirsDeleted > 0 {
+		r.bumpNativeNamespaceGeneration("repository delete")
+	}
 
 	if exists && r.isGuardianRepo(repo.repoID) {
 		r.publishGuardianChange(&pb.ChangeEvent{
@@ -201,6 +204,9 @@ func (r *Router) deleteGuardianFileFromAllNodes(storageID, filePath string) (map
 	}
 
 	wg.Wait()
+	if successCount > 0 {
+		r.bumpNativeNamespaceGeneration("guardian file delete")
+	}
 	return map[string]interface{}{
 		"success":       true,
 		"message":       fmt.Sprintf("file deleted from %d nodes", successCount),
@@ -250,6 +256,9 @@ func (r *Router) deleteGuardianDirFromAllNodes(storageID, dirPath string) (map[s
 	}
 
 	wg.Wait()
+	if totalFilesDeleted > 0 || totalDirsDeleted > 0 {
+		r.bumpNativeNamespaceGeneration("guardian dir delete")
+	}
 	return map[string]interface{}{
 		"success":       true,
 		"message":       fmt.Sprintf("deleted %d files and %d dirs", totalFilesDeleted, totalDirsDeleted),

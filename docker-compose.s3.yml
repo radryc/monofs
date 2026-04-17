@@ -47,7 +47,7 @@ services:
       - monofs-net
 
   # Fetcher 1 with S3 backend
-  fetcher1:
+  fetcher-a:
     command:
       - "monofs-fetcher"
       - "--port=9200"
@@ -72,7 +72,7 @@ services:
         condition: service_completed_successfully
 
   # Fetcher 2 with S3 backend
-  fetcher2:
+  fetcher-b:
     command:
       - "monofs-fetcher"
       - "--port=9200"

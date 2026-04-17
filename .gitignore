@@ -97,6 +97,17 @@ cmd/*/monofs-*
 cmd/monofs-admin/a
 cmd/monofs-admin/b
 
+# Kernel module build artifacts
+monofs-kmod/*.o
+monofs-kmod/*.ko
+monofs-kmod/*.mod
+monofs-kmod/*.mod.c
+monofs-kmod/*.symvers
+monofs-kmod/modules.order
+monofs-kmod/Module.symvers
+monofs-kmod/.*.cmd
+monofs-kmod/.tmp_versions/
+
 # OS specific
 Thumbs.DB
 Desktop.ini

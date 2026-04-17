@@ -144,6 +144,14 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		return found, nil
 	}
 
+	if canonicalDir := s.lookupCanonicalDirectory(storageID, filePath); canonicalDir != nil {
+		return canonicalDir, nil
+	}
+
+	if summaryFile := s.lookupDirectorySummaryFile(storageID, filePath); summaryFile != nil {
+		return summaryFile, nil
+	}
+
 	// NEW: Check if it's a virtual directory in the directory index
 	// This handles directories that don't have explicit metadata entries
 	if virtualDir := s.checkVirtualDirectory(storageID, filePath); virtualDir != nil {
@@ -374,6 +382,36 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 
 	if err == nil && found != nil {
 		return found, nil
+	}
+
+	if canonicalDir := s.lookupCanonicalDirectory(storageID, filePath); canonicalDir != nil {
+		return &pb.GetAttrResponse{
+			Ino:   canonicalDir.Ino,
+			Mode:  canonicalDir.Mode,
+			Size:  canonicalDir.Size,
+			Mtime: canonicalDir.Mtime,
+			Atime: canonicalDir.Mtime,
+			Ctime: canonicalDir.Mtime,
+			Nlink: 2,
+			Uid:   uint32(1000),
+			Gid:   uint32(1000),
+			Found: true,
+		}, nil
+	}
+
+	if summaryFile := s.lookupDirectorySummaryFile(storageID, filePath); summaryFile != nil {
+		return &pb.GetAttrResponse{
+			Ino:   summaryFile.Ino,
+			Mode:  summaryFile.Mode,
+			Size:  summaryFile.Size,
+			Mtime: summaryFile.Mtime,
+			Atime: summaryFile.Mtime,
+			Ctime: summaryFile.Mtime,
+			Nlink: 1,
+			Uid:   uint32(1000),
+			Gid:   uint32(1000),
+			Found: true,
+		}, nil
 	}
 
 	// NEW: Check if it's a virtual directory in the directory index
@@ -675,6 +713,15 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 		if err := s.removeFromDirectoryIndex(tx, req.StorageId, parentDir, entryName); err != nil {
 			s.logger.Warn("failed to remove file from dir index", "file_path", req.FilePath, "error", err)
 		}
+		if err := s.removeFromDirectorySummary(tx, req.StorageId, parentDir, entryName); err != nil {
+			return fmt.Errorf("failed to remove file from dir summary: %w", err)
+		}
+		if err := tx.Delete(bucketDirMeta, makeDirMetaKey(req.StorageId, req.FilePath)); err != nil && err != nutsdb.ErrKeyNotFound {
+			return fmt.Errorf("failed to delete dir metadata: %w", err)
+		}
+		if err := s.pruneImplicitDirectories(tx, req.StorageId, parentDir); err != nil {
+			return fmt.Errorf("failed to prune directories: %w", err)
+		}
 
 		return nil
 	})
@@ -790,8 +837,37 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 			}
 		}
 
-		// 6. Delete all directory indexes for this repo
-		dirPrefix := storageID + "/"
+		// 6. Delete all canonical directory metadata for this repo
+		dirMetaPrefix := storageID + ":"
+		dirMetaKeys, err := tx.GetKeys(bucketDirMeta)
+		if err == nil {
+			for _, key := range dirMetaKeys {
+				keyStr := string(key)
+				if !strings.HasPrefix(keyStr, dirMetaPrefix) {
+					continue
+				}
+				if err := tx.Delete(bucketDirMeta, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Warn("failed to delete dir metadata", "key", keyStr)
+				}
+			}
+		}
+
+		// 7. Delete all directory summaries for this repo
+		dirSummaryKeys, err := tx.GetKeys(bucketDirSummary)
+		if err == nil {
+			for _, key := range dirSummaryKeys {
+				keyStr := string(key)
+				if !strings.HasPrefix(keyStr, dirMetaPrefix) {
+					continue
+				}
+				if err := tx.Delete(bucketDirSummary, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Warn("failed to delete dir summary", "key", keyStr)
+				}
+			}
+		}
+
+		// 8. Delete all directory indexes for this repo
+		dirPrefix := storageID + ":"
 		dirKeys, err := tx.GetKeys(bucketDirIndex)
 		if err == nil {
 			for _, key := range dirKeys {

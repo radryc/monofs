@@ -104,7 +104,9 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 			return fmt.Errorf("invalid guardian token: no matching connected guardian client")
 		}
 		baseURL := r.getGuardianBaseURL(clientID)
-		guardianURL = strings.TrimRight(baseURL, "/") + "/" + req.SourceId
+		if strings.TrimSpace(baseURL) != "" {
+			guardianURL = strings.TrimRight(baseURL, "/")
+		}
 	}
 
 	// Step 1: Determine display path (what users see in filesystem)
@@ -1006,6 +1008,7 @@ initComplete:
 		rebalanceProgress: 1.0,
 	}
 	r.mu.Unlock()
+	r.bumpNativeNamespaceGeneration("repository ingest")
 
 	// If this is a re-ingestion of an existing repository, trigger rebalancing
 	if isReingestion {
