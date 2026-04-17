@@ -106,6 +106,10 @@ func (r *Router) UpsertGuardianPaths(ctx context.Context, req *pb.UpsertGuardian
 			}
 			groups[mapped.DisplayPath] = group
 		}
+		groupSource := principal.BaseURL
+		if strings.TrimSpace(groupSource) == "" {
+			groupSource = "guardian-path-api"
+		}
 		group.files = append(group.files, &pb.FileMetadata{
 			Path:          mapped.RelativePath,
 			StorageId:     mapped.StorageID,
@@ -114,7 +118,7 @@ func (r *Router) UpsertGuardianPaths(ctx context.Context, req *pb.UpsertGuardian
 			Mtime:         committedAt,
 			Mode:          0o644,
 			BlobHash:      guardianContentHash(write.GetContent()),
-			Source:        "guardian-path-api",
+			Source:        groupSource,
 			InlineContent: append([]byte(nil), write.GetContent()...),
 			SourceType:    pb.IngestionType_INGESTION_GUARDIAN,
 			FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
@@ -391,10 +395,10 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 		wg      sync.WaitGroup
 		errMu   sync.Mutex
 		errs    []error
-		repoURL = group.displayPath
+		repoURL string
 	)
 	if principal != nil && strings.TrimSpace(principal.BaseURL) != "" {
-		repoURL = principal.BaseURL
+		repoURL = strings.TrimRight(strings.TrimSpace(principal.BaseURL), "/")
 	}
 	batchFiles := appendGuardianDirHints(group.files)
 
@@ -414,10 +418,14 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 			defer closeConn()
 
 			regCtx, regCancel := context.WithTimeout(ctx, 10*time.Second)
+			regSource := repoURL
+			if regSource == "" {
+				regSource = "guardian-path-api"
+			}
 			_, regErr := nodeClient.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
 				StorageId:     group.storageID,
 				DisplayPath:   group.displayPath,
-				Source:        "guardian-path-api",
+				Source:        regSource,
 				IngestionType: pb.IngestionType_INGESTION_GUARDIAN,
 				FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
 				GuardianUrl:   repoURL,
@@ -428,11 +436,15 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 			}
 
 			batchCtx, batchCancel := context.WithTimeout(ctx, 30*time.Second)
+			batchSource := repoURL
+			if batchSource == "" {
+				batchSource = "guardian-path-api"
+			}
 			resp, err := nodeClient.IngestFileBatch(batchCtx, &pb.IngestFileBatchRequest{
 				Files:       batchFiles,
 				StorageId:   group.storageID,
 				DisplayPath: group.displayPath,
-				Source:      "guardian-path-api",
+				Source:      batchSource,
 			})
 			batchCancel()
 			if err != nil {
@@ -469,6 +481,7 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 		ingestedAt: time.Now(),
 	}
 	r.mu.Unlock()
+	r.bumpNativeNamespaceGeneration("guardian upsert")
 
 	return nil
 }
@@ -665,15 +678,19 @@ func authorizeGuardianMutation(principal *guardianPrincipal, logicalPath string,
 		if len(parts) < 2 {
 			return fmt.Errorf("pusher principal %q cannot mutate queue root %q", principal.PrincipalID, logicalPath)
 		}
-		if deleteOp {
-			return fmt.Errorf("pusher principal %q may not delete queue paths", principal.PrincipalID)
-		}
-		if parts[1] != ".claims" && parts[1] != ".results" {
-			return fmt.Errorf("pusher principal %q may only write claim or result paths", principal.PrincipalID)
-		}
 		pusherName := strings.TrimPrefix(principal.PrincipalID, "guardian-pusher-")
 		if pusherName != principal.PrincipalID && pusherName != "" && parts[0] != pusherName {
 			return fmt.Errorf("pusher principal %q may only mutate its own queue", principal.PrincipalID)
+		}
+		if deleteOp {
+			// Pushers may only delete their own expired claim files, not results or task files.
+			if parts[1] != ".claims" {
+				return fmt.Errorf("pusher principal %q may not delete non-claim queue paths", principal.PrincipalID)
+			}
+			return nil
+		}
+		if parts[1] != ".claims" && parts[1] != ".results" {
+			return fmt.Errorf("pusher principal %q may only write claim or result paths", principal.PrincipalID)
 		}
 		return nil
 	default:

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/monopath"
 	"github.com/radryc/monofs/internal/sharding"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -469,61 +470,13 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 }
 
 func splitDisplayPath(fullPath string) (displayPath, filePath string, ok bool) {
-	if fullPath == "" || fullPath == "/" {
-		return "", "", false
-	}
-
-	trimmed := strings.Trim(fullPath, "/")
-	if trimmed == "" {
-		return "", "", false
-	}
-
-	parts := strings.Split(trimmed, "/")
-	switch parts[0] {
-	case "dependency", "guardian-system":
-		displayPath = parts[0]
-		if len(parts) > 1 {
-			filePath = strings.Join(parts[1:], "/")
-		}
-		return displayPath, filePath, true
-	case "guardian", "doctor":
-		if len(parts) < 2 {
-			return "", "", false
-		}
-		displayPath = strings.Join(parts[:2], "/")
-		if len(parts) > 2 {
-			filePath = strings.Join(parts[2:], "/")
-		}
-		return displayPath, filePath, true
-	default:
-		if len(parts) < 3 {
-			return "", "", false
-		}
-		displayPath = strings.Join(parts[:3], "/")
-		if len(parts) > 3 {
-			filePath = strings.Join(parts[3:], "/")
-		}
-		return displayPath, filePath, true
-	}
+	return monopath.SplitDisplayPath(fullPath)
 }
 
 // buildShardKey builds the sharding key in the format "storageID:filePath"
 // to match the router's sharding algorithm used during ingestion.
 func buildShardKey(fullPath string) string {
-	if fullPath == "" || fullPath == "/" {
-		return fullPath
-	}
-
-	displayPath, filePath, ok := splitDisplayPath(fullPath)
-	if !ok {
-		return fullPath
-	}
-
-	storageID := sharding.GenerateStorageID(displayPath)
-	if filePath == "" {
-		return storageID
-	}
-	return sharding.BuildShardKey(storageID, filePath)
+	return monopath.BuildShardKey(fullPath)
 }
 
 // getNodeForFileFromRouter queries the router for the correct node to serve a file.

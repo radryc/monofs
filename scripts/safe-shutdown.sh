@@ -34,7 +34,7 @@ echo ""
 
 # Step 2: Stop only storage node containers
 echo -e "${YELLOW}[2/3] Stopping storage node containers...${NC}"
-docker-compose stop node1 node2 node3 node4 node5
+docker-compose stop node-a node-b node-c node-d node-e
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}✗ Failed to stop storage node containers${NC}"
@@ -51,6 +51,6 @@ echo "Storage nodes are now in drain mode and stopped."
 echo "Routers, search service, and HAProxy remain running."
 echo ""
 echo "To restart storage nodes:"
-echo "  1. Start storage nodes:  docker-compose start node1 node2 node3 node4 node5"
+echo "  1. Start storage nodes:  docker-compose start node-a node-b node-c node-d node-e"
 echo "  2. Exit drain mode:      ./bin/monofs-admin undrain --router $ROUTER_ADDR"
 echo ""
