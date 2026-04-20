@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/storage"
 	"github.com/radryc/monofs/internal/storage/blob"
 	storagegit "github.com/radryc/monofs/internal/storage/git"
 	"google.golang.org/grpc"
@@ -58,8 +59,23 @@ type fetcherConfig struct {
 }
 
 type storageConfig struct {
-	Type      string `json:"type"`       // "local" (default)
-	LocalPath string `json:"local_path"` // path on disk for blob archives
+	Type      string `json:"type"`       // "local" (default), "s3", or "gcs"
+	LocalPath string `json:"local_path"` // path on disk for blob archives (also used as local cache for cloud)
+
+	// S3 settings (used when type == "s3")
+	S3Region          string `json:"s3_region"`
+	S3Bucket          string `json:"s3_bucket"`
+	S3Prefix          string `json:"s3_prefix"`
+	S3Endpoint        string `json:"s3_endpoint"`      // for MinIO / S3-compatible
+	S3AccessKeyID     string `json:"s3_access_key_id"` // empty = use default AWS credential chain
+	S3SecretAccessKey string `json:"s3_secret_access_key"`
+	S3SessionToken    string `json:"s3_session_token"`
+	S3UsePathStyle    bool   `json:"s3_use_path_style"`
+
+	// GCS settings (used when type == "gcs")
+	GCSBucket          string `json:"gcs_bucket"`
+	GCSPrefix          string `json:"gcs_prefix"`
+	GCSCredentialsFile string `json:"gcs_credentials_file"` // empty = use ADC
 }
 
 // defaultConfig returns built-in defaults.
@@ -132,6 +148,29 @@ func main() {
 	}
 	if v := os.Getenv("MONOFS_FETCHER_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
+	}
+
+	// Apply S3 configuration from environment variables
+	if v := os.Getenv("MONOFS_S3_REGION"); v != "" {
+		cfg.Storage.S3Region = v
+	}
+	if v := os.Getenv("MONOFS_S3_BUCKET"); v != "" {
+		cfg.Storage.S3Bucket = v
+	}
+	if v := os.Getenv("MONOFS_S3_PREFIX"); v != "" {
+		cfg.Storage.S3Prefix = v
+	}
+	if v := os.Getenv("MONOFS_S3_ENDPOINT"); v != "" {
+		cfg.Storage.S3Endpoint = v
+	}
+	if v := os.Getenv("MONOFS_S3_ACCESS_KEY_ID"); v != "" {
+		cfg.Storage.S3AccessKeyID = v
+	}
+	if v := os.Getenv("MONOFS_S3_SECRET_ACCESS_KEY"); v != "" {
+		cfg.Storage.S3SecretAccessKey = v
+	}
+	if v := os.Getenv("MONOFS_S3_USE_PATH_STYLE"); v != "" {
+		cfg.Storage.S3UsePathStyle = v == "true" || v == "1"
 	}
 
 	// Apply CLI flags (highest precedence)
@@ -227,6 +266,20 @@ func main() {
 		MaxCacheSize:  int64(cfg.MaxCacheGB) * 1024 * 1024 * 1024,
 		Concurrency:   10,
 		EncryptionKey: encryptionKey,
+		StorageType:   storage.StorageType(cfg.Storage.Type),
+		Cloud: storage.CloudStorageConfig{
+			S3Region:           cfg.Storage.S3Region,
+			S3Bucket:           cfg.Storage.S3Bucket,
+			S3Prefix:           cfg.Storage.S3Prefix,
+			S3Endpoint:         cfg.Storage.S3Endpoint,
+			S3AccessKeyID:      cfg.Storage.S3AccessKeyID,
+			S3SecretAccessKey:  cfg.Storage.S3SecretAccessKey,
+			S3SessionToken:     cfg.Storage.S3SessionToken,
+			S3UsePathStyle:     cfg.Storage.S3UsePathStyle,
+			GCSBucket:          cfg.Storage.GCSBucket,
+			GCSPrefix:          cfg.Storage.GCSPrefix,
+			GCSCredentialsFile: cfg.Storage.GCSCredentialsFile,
+		},
 	}); err != nil {
 		logger.Error("failed to initialize blob backend", "error", err)
 		os.Exit(1)

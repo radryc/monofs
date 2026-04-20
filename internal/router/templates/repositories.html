@@ -79,11 +79,24 @@
             resultsSpan.style.display = 'none';
         }
     }
-    
-    function toggleRepoDetails(detailsId) {
-        const detailsRow = document.getElementById(detailsId);
+
+    function toggleRepoDetails(row, idx) {
+        const existing = document.querySelector(`tr[data-details-for="${idx}"]`);
+        if (existing) {
+            existing.remove();
+            return;
+        }
+        const template = document.getElementById(`repo-template-${idx}`);
+        if (!template) {
+            return;
+        }
+        row.insertAdjacentHTML('afterend', template.innerHTML.trim());
+    }
+
+    function closeRepoDetails(idx) {
+        const detailsRow = document.querySelector(`tr[data-details-for="${idx}"]`);
         if (detailsRow) {
-            detailsRow.style.display = detailsRow.style.display === 'none' ? 'table-row' : 'none';
+            detailsRow.remove();
         }
     }
     
@@ -313,57 +326,79 @@
                             ? `${repo.files_count.toLocaleString()} / ${repo.total_files.toLocaleString()}`
                             : (repo.files_count || 0).toLocaleString();
                         
+                        const productBadge = repo.product_kind
+                            ? ` <span class="badge badge-${repo.product_kind === 'doctor' ? 'warning' : 'info'}" style="font-size: 10px;">${repo.product_kind}</span>`
+                            : '';
+                        const sourceHref = repo.product_ui_url ||
+                            (repo.repo_url === 'dir-hint' ? '/dependencies' : repo.repo_url);
+                        const sourceText = repo.product_ui_url
+                            ? (repo.product_ui_label || repo.product_ui_url)
+                            : repo.repo_url === 'dir-hint'
+                            ? '📦 Dependencies'
+                            : (repo.repo_url.length > 50 ? repo.repo_url.substring(0, 47) + '...' : repo.repo_url);
+                        const clickableSource = Boolean(sourceHref) && (
+                            sourceHref.startsWith('http://') ||
+                            sourceHref.startsWith('https://') ||
+                            sourceHref.startsWith('/')
+                        );
+
                         return `
-                            <tr style="cursor: pointer;" onclick="toggleRepoDetails('repo-${idx}')" title="Click for details">
-                                <td><strong>${repo.repo_id}</strong></td>
+                            <tr data-repo-index="${idx}" style="cursor: pointer;" onclick="toggleRepoDetails(this, ${idx})" title="Click for details">
+                                <td><strong>${repo.repo_id}</strong>${productBadge}</td>
                                 <td>
-                                    ${repo.repo_url === 'dir-hint'
-                                        ? `<a href="/dependencies" style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">📦 Dependencies</a>`
-                                        : `<a href="${repo.repo_url}" target="_blank" style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">${repo.repo_url.length > 50 ? repo.repo_url.substring(0, 47) + '...' : repo.repo_url}</a>`
+                                    ${clickableSource
+                                        ? `<a href="${sourceHref}" ${repo.repo_url === 'dir-hint' ? '' : 'target="_blank"'} style="color: var(--primary); text-decoration: none;" onclick="event.stopPropagation();">${sourceText}</a>`
+                                        : `<span style="color: var(--text-primary);">${sourceText}</span>`
+                                    }
+                                    ${repo.product_ui_url && repo.repo_url && repo.repo_url !== 'dir-hint'
+                                        ? `<div style="font-size: 11px; margin-top: 4px; color: var(--text-secondary);" title="${repo.repo_url}">${repo.repo_url.length > 56 ? repo.repo_url.substring(0, 53) + '...' : repo.repo_url}</div>`
+                                        : ''
                                     }
                                 </td>
                                 <td>${statusBadge}</td>
                                 <td style="text-align: right;">${filesDisplay}</td>
                                 <td style="white-space: nowrap; font-size: 12px;">${inProgress ? 'In Progress...' : date.toLocaleString()}</td>
                             </tr>
-                            <tr id="repo-${idx}" style="display: none;">
-                                <td colspan="5" style="background: var(--bg-secondary); padding: 16px; border-left: 3px solid var(--primary);">
-                                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
-                                        <div>
-                                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">ROUTER</div>
-                                            <div><span class="pill">${(repo._routers || [repo._router || 'local']).join(', ')}</span></div>
-                                        </div>
-                                        <div>
-                                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">REF / VERSION</div>
-                                            <div><span class="badge badge-info">${repo.branch || 'N/A'}</span></div>
-                                        </div>
-                                        ${repo.commit_hash ? `
-                                        <div>
-                                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">COMMIT</div>
-                                            <div style="font-family: monospace; font-size: 12px;">
-                                                <span class="badge badge-secondary" title="${repo.commit_message || 'No message'}">${repo.commit_hash.substring(0, 7)}</span>
+                            <template id="repo-template-${idx}">
+                                <tr data-details-for="${idx}">
+                                    <td colspan="5" style="background: var(--bg-secondary); padding: 16px; border-left: 3px solid var(--primary);">
+                                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                                            <div>
+                                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">ROUTER</div>
+                                                <div><span class="pill">${(repo._routers || [repo._router || 'local']).join(', ')}</span></div>
                                             </div>
-                                            ${repo.commit_time ? `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">${new Date(repo.commit_time * 1000).toLocaleString()}</div>` : ''}
+                                            <div>
+                                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">REF / VERSION</div>
+                                                <div><span class="badge badge-info">${repo.branch || 'N/A'}</span></div>
+                                            </div>
+                                            ${repo.commit_hash ? `
+                                            <div>
+                                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">COMMIT</div>
+                                                <div style="font-family: monospace; font-size: 12px;">
+                                                    <span class="badge badge-secondary" title="${repo.commit_message || 'No message'}">${repo.commit_hash.substring(0, 7)}</span>
+                                                </div>
+                                                ${repo.commit_time ? `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">${new Date(repo.commit_time * 1000).toLocaleString()}</div>` : ''}
+                                            </div>
+                                            ` : ''}
+                                            <div>
+                                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">TOPOLOGY</div>
+                                                <div>${topologyInfo}</div>
+                                            </div>
+                                            <div>
+                                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">STORAGE ID</div>
+                                                <div style="font-size: 12px; font-family: monospace; color: var(--text-primary); word-break: break-all;" title="${repo.storage_id || 'N/A'}">${repo.storage_id ? repo.storage_id.substring(0, 12) + '...' : 'N/A'}</div>
+                                            </div>
                                         </div>
-                                        ` : ''}
-                                        <div>
-                                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">TOPOLOGY</div>
-                                            <div>${topologyInfo}</div>
+                                        <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+                                            ${inProgress || repo.rebalance_state === 'Rebalancing' || repo.rebalance_state === 'DualActive'
+                                                ? '<span class="badge badge-secondary" style="opacity: 0.5;">⏳ Rebalancing in Progress</span>'
+                                                : `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); triggerRebalance('${repo.storage_id}')" style="padding: 6px 12px; font-size: 12px;">🔄 Trigger Rebalance</button>`
+                                            }
+                                            <button class="btn btn-sm" onclick="event.stopPropagation(); closeRepoDetails(${idx})" style="padding: 6px 12px; font-size: 12px; margin-left: 8px;">✕ Close</button>
                                         </div>
-                                        <div>
-                                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">STORAGE ID</div>
-                                            <div style="font-size: 12px; font-family: monospace; color: var(--text-primary); word-break: break-all;" title="${repo.storage_id || 'N/A'}">${repo.storage_id ? repo.storage_id.substring(0, 12) + '...' : 'N/A'}</div>
-                                        </div>
-                                    </div>
-                                    <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
-                                        ${inProgress || repo.rebalance_state === 'Rebalancing' || repo.rebalance_state === 'DualActive'
-                                            ? '<span class="badge badge-secondary" style="opacity: 0.5;">⏳ Rebalancing in Progress</span>'
-                                            : `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); triggerRebalance('${repo.storage_id}')" style="padding: 6px 12px; font-size: 12px;">🔄 Trigger Rebalance</button>`
-                                        }
-                                        <button class="btn btn-sm" onclick="event.stopPropagation(); toggleRepoDetails('repo-${idx}')" style="padding: 6px 12px; font-size: 12px; margin-left: 8px;">✕ Close</button>
-                                    </div>
-                                </td>
-                            </tr>
+                                    </td>
+                                </tr>
+                            </template>
                         `;
                     }).join('')}
                 </tbody>

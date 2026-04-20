@@ -16,6 +16,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/monopath"
 	"github.com/radryc/monofs/internal/sharding"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -60,6 +61,9 @@ type ShardedClient struct {
 	operationsCount   int64 // atomic counter
 	bytesRead         int64 // atomic counter
 	errorsCount       int64 // atomic counter
+
+	// Guardian visibility
+	guardianVisible bool
 }
 
 // ShardedClientConfig holds configuration for ShardedClient.
@@ -365,6 +369,7 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 	// Mark connected since we successfully talked to router
 	sc.connected = true
 	sc.lastError = nil
+	sc.guardianVisible = true
 
 	// Node health state comes exclusively from the router via UpdateNodeHealthFromProto().
 	// The router is the single source of truth for node health.
@@ -464,84 +469,22 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 	return nil
 }
 
+func splitDisplayPath(fullPath string) (displayPath, filePath string, ok bool) {
+	return monopath.SplitDisplayPath(fullPath)
+}
+
 // buildShardKey builds the sharding key in the format "storageID:filePath"
 // to match the router's sharding algorithm used during ingestion.
-// The full path format is: "host_domain/org/repo/path/to/file"
-// Standard repo IDs are 3 parts: "github_com/owner/repo"
-//
-// The storageID is a SHA-256 hash of the displayPath (e.g. "github_com/owner/repo").
-// This is now guaranteed to match the router via the shared sharding package.
-//
-// For dependency paths ("dependency/tool/..."), the displayPath is always "dependency"
-// and the filePath is everything after "dependency/" (e.g. "go/mod/cache/download/...").
-// This matches IngestBlobs which uses displayPath="dependency".
-//
-// Examples:
-//
-//	"github.com/owner/repo/README.md" -> "sha256(github.com/owner/repo):README.md"
-//	"github.com/owner/repo/path/to/file.txt" -> "sha256(github.com/owner/repo):path/to/file.txt"
-//	"github.com/owner/repo" -> "sha256(github.com/owner/repo)" (repo dir itself)
-//	"dependency/go/mod/cache/download/..." -> "sha256(dependency):go/mod/cache/download/..."
 func buildShardKey(fullPath string) string {
-	if fullPath == "" || fullPath == "/" {
-		return fullPath
-	}
-
-	// Split path into parts
-	parts := strings.Split(fullPath, "/")
-
-	// Dependency paths: "dependency/..." uses single-segment displayPath
-	// to match IngestBlobs which uses displayPath="dependency"
-	if parts[0] == "dependency" {
-		storageID := sharding.GenerateStorageID("dependency")
-		if len(parts) > 1 {
-			filePath := strings.Join(parts[1:], "/")
-			return sharding.BuildShardKey(storageID, filePath)
-		}
-		return storageID
-	}
-
-	// Standard repo structure: host_domain/org/repo (3 parts)
-	// If we have more than 3 parts, assume first 3 are the repo ID
-	// and the rest is the file path within the repo
-	if len(parts) > 3 {
-		// Build shard key: "storageID:filePath" (matches router)
-		displayPath := strings.Join(parts[:3], "/")
-		filePath := strings.Join(parts[3:], "/")
-		// Generate storageID as SHA-256 hash of displayPath (matches router)
-		storageID := sharding.GenerateStorageID(displayPath)
-		return sharding.BuildShardKey(storageID, filePath)
-	}
-
-	// If path has 3 or fewer parts, it's either:
-	// - A repo directory itself ("github.com/owner/repo")
-	// - An intermediate directory ("github.com" or "github.com/owner")
-	// For repo dirs, return the hashed storageID
-	if len(parts) == 3 {
-		return sharding.GenerateStorageID(fullPath)
-	}
-
-	// For intermediate dirs, return the raw path (they're handled specially)
-	return fullPath
+	return monopath.BuildShardKey(fullPath)
 }
 
 // getNodeForFileFromRouter queries the router for the correct node to serve a file.
 // This is used during failover scenarios when the HRW primary is unavailable.
 // Returns the primary node ID and a list of fallback node IDs.
 func (sc *ShardedClient) getNodeForFileFromRouter(ctx context.Context, fullPath string) (string, []string, error) {
-	// Extract storage ID and file path from full path
-	parts := strings.Split(fullPath, "/")
-
-	var displayPath, filePath string
-	// Dependency paths: "dependency/tool/..." uses single-segment displayPath
-	if len(parts) >= 2 && parts[0] == "dependency" {
-		displayPath = "dependency"
-		filePath = strings.Join(parts[1:], "/")
-	} else if len(parts) >= 4 {
-		displayPath = strings.Join(parts[:3], "/")
-		filePath = strings.Join(parts[3:], "/")
-	} else {
-		// Not a file path, can't query router
+	displayPath, filePath, ok := splitDisplayPath(fullPath)
+	if !ok || filePath == "" {
 		return "", nil, fmt.Errorf("not a file path: %s", fullPath)
 	}
 
@@ -1546,6 +1489,13 @@ func (sc *ShardedClient) RecordBytesRead(n int64) {
 // RecordError increments the error counter for metrics
 func (sc *ShardedClient) RecordError() {
 	atomic.AddInt64(&sc.errorsCount, 1)
+}
+
+// IsGuardianVisible reports whether Guardian namespaces should be exposed.
+func (sc *ShardedClient) IsGuardianVisible() bool {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+	return sc.guardianVisible
 }
 
 // GetClientID returns the unique client identifier

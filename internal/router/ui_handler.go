@@ -74,6 +74,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 	currentVersion := r.version.Load()
 	staleThreshold := r.config.UnhealthyThreshold
 	r.mu.RUnlock()
+	uiBases := r.repositoryUIBases()
 
 	// Query all nodes for their repositories
 	repoMap := make(map[string]map[string]interface{}) // storageID -> repo info
@@ -132,6 +133,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 				var ingestedAt time.Time
 				var rebalanceState string = "Stable"
 				var rebalanceProgress float64 = 1.0
+				guardianURL := repoInfo.GuardianUrl
 				if tracked, ok := ingestedSnapshot[storageID]; ok {
 					tracked.mu.RLock()
 					filesCount = tracked.filesCount
@@ -143,6 +145,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 				if ingestedAt.IsZero() {
 					ingestedAt = time.Now()
 				}
+				productLink := buildRepositoryProductLink(repoInfo.DisplayPath, guardianURL, uiBases)
 
 				repoMu.Lock()
 				repoMap[storageID] = map[string]interface{}{
@@ -158,6 +161,12 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 					"topology_version":   currentVersion,
 					"rebalance_state":    rebalanceState,
 					"rebalance_progress": rebalanceProgress,
+					"guardian_url":       guardianURL,
+					"product_kind":       productLink.Kind,
+					"product_ui_url":     productLink.URL,
+					"product_ui_label":   productLink.Label,
+					"is_guardian":        productLink.Kind == "guardian",
+					"is_doctor":          productLink.Kind == "doctor",
 				}
 				repoMu.Unlock()
 			}
@@ -171,6 +180,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 	// Add in-progress ingestions first
 	for storageID, progress := range inProgressSnapshot {
 		progress.mu.RLock()
+		productLink := buildRepositoryProductLink(progress.repoID, "", uiBases)
 		repoInfo := map[string]interface{}{
 			"storage_id":         storageID,
 			"repo_id":            progress.repoID,
@@ -185,6 +195,11 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 			"stage":              progress.stage.String(),
 			"message":            progress.message,
 			"in_progress":        true,
+			"product_kind":       productLink.Kind,
+			"product_ui_url":     productLink.URL,
+			"product_ui_label":   productLink.Label,
+			"is_guardian":        productLink.Kind == "guardian",
+			"is_doctor":          productLink.Kind == "doctor",
 		}
 		repos = append(repos, repoInfo)
 		progress.mu.RUnlock()

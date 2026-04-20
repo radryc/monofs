@@ -42,6 +42,16 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		}, nil
 	}
 
+	if isManagedNamespaceDir(path) {
+		return &pb.LookupResponse{
+			Ino:   hashPath(path),
+			Mode:  0755 | uint32(syscall.S_IFDIR),
+			Size:  0,
+			Mtime: time.Now().Unix(),
+			Found: true,
+		}, nil
+	}
+
 	// Check if path is a full repo ID or an intermediate directory
 	// First check if it's a complete repo ID (display path)
 	if s.repoExists(path) {
@@ -134,6 +144,14 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		return found, nil
 	}
 
+	if canonicalDir := s.lookupCanonicalDirectory(storageID, filePath); canonicalDir != nil {
+		return canonicalDir, nil
+	}
+
+	if summaryFile := s.lookupDirectorySummaryFile(storageID, filePath); summaryFile != nil {
+		return summaryFile, nil
+	}
+
 	// NEW: Check if it's a virtual directory in the directory index
 	// This handles directories that don't have explicit metadata entries
 	if virtualDir := s.checkVirtualDirectory(storageID, filePath); virtualDir != nil {
@@ -170,11 +188,10 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		}, nil
 	}
 
-
 	// NEW: Forward to correct node if not handling locally (and not already forwarded)
 	if s.enableForwarding && !isAlreadyForwarded(ctx) {
 		targetNode := s.getTargetNode(storageID, filePath)
-		
+
 		// Try primary node first if healthy
 		if targetNode != nil && targetNode.ID != s.nodeID && s.isNodeHealthy(targetNode.ID) {
 			s.logger.Debug("lookup forwarding to primary node",
@@ -184,7 +201,7 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 				"target_node", targetNode.ID)
 			return s.forwardLookup(ctx, req, targetNode)
 		}
-		
+
 		// Primary is unhealthy, try backup nodes
 		if targetNode != nil && !s.isNodeHealthy(targetNode.ID) {
 			backupNodes := s.getBackupNodes(storageID, filePath)
@@ -219,6 +236,21 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 	if path == "" {
 		return &pb.GetAttrResponse{
 			Ino:   1,
+			Mode:  0755 | uint32(syscall.S_IFDIR),
+			Size:  0,
+			Mtime: time.Now().Unix(),
+			Atime: time.Now().Unix(),
+			Ctime: time.Now().Unix(),
+			Nlink: 2,
+			Uid:   uint32(1000),
+			Gid:   uint32(1000),
+			Found: true,
+		}, nil
+	}
+
+	if isManagedNamespaceDir(path) {
+		return &pb.GetAttrResponse{
+			Ino:   hashPath(path),
 			Mode:  0755 | uint32(syscall.S_IFDIR),
 			Size:  0,
 			Mtime: time.Now().Unix(),
@@ -352,6 +384,36 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 		return found, nil
 	}
 
+	if canonicalDir := s.lookupCanonicalDirectory(storageID, filePath); canonicalDir != nil {
+		return &pb.GetAttrResponse{
+			Ino:   canonicalDir.Ino,
+			Mode:  canonicalDir.Mode,
+			Size:  canonicalDir.Size,
+			Mtime: canonicalDir.Mtime,
+			Atime: canonicalDir.Mtime,
+			Ctime: canonicalDir.Mtime,
+			Nlink: 2,
+			Uid:   uint32(1000),
+			Gid:   uint32(1000),
+			Found: true,
+		}, nil
+	}
+
+	if summaryFile := s.lookupDirectorySummaryFile(storageID, filePath); summaryFile != nil {
+		return &pb.GetAttrResponse{
+			Ino:   summaryFile.Ino,
+			Mode:  summaryFile.Mode,
+			Size:  summaryFile.Size,
+			Mtime: summaryFile.Mtime,
+			Atime: summaryFile.Mtime,
+			Ctime: summaryFile.Mtime,
+			Nlink: 1,
+			Uid:   uint32(1000),
+			Gid:   uint32(1000),
+			Found: true,
+		}, nil
+	}
+
 	// NEW: Check if it's a virtual directory in the directory index
 	if virtualDir := s.checkVirtualDirectory(storageID, filePath); virtualDir != nil {
 		return &pb.GetAttrResponse{
@@ -384,11 +446,10 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 		}, nil
 	}
 
-
 	// NEW: Forward to correct node if not handling locally (and not already forwarded)
 	if s.enableForwarding && !isAlreadyForwarded(ctx) {
 		targetNode := s.getTargetNode(storageID, filePath)
-		
+
 		// Try primary node first if healthy
 		if targetNode != nil && targetNode.ID != s.nodeID && s.isNodeHealthy(targetNode.ID) {
 			s.logger.Debug("getattr forwarding to primary node",
@@ -398,7 +459,7 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 				"target_node", targetNode.ID)
 			return s.forwardGetAttr(ctx, req, targetNode)
 		}
-		
+
 		// Primary is unhealthy, try backup nodes
 		if targetNode != nil && !s.isNodeHealthy(targetNode.ID) {
 			backupNodes := s.getBackupNodes(storageID, filePath)
@@ -433,7 +494,6 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		s.logger.Error("read: path resolution failed", "path", path, "ok", ok, "storage_id", storageID, "file_path", filePath)
 		return status.Errorf(codes.NotFound, "path resolution failed: %s", path)
 	}
-
 
 	// Try local metadata first (covers both owned files AND replicas from IngestReplicaBatch)
 	var blobHash, repoURL, branch, displayPath string
@@ -624,21 +684,12 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 
 	// Track if file existed to properly update counter
 	var fileExisted bool
-	var blobHash string
 
 	err := s.db.Update(func(tx *nutsdb.Tx) error {
 		// Check if file exists in owned files bucket
 		ownershipKey := []byte(req.StorageId + ":" + req.FilePath)
 		_, err := tx.Get(bucketOwnedFiles, ownershipKey)
 		fileExisted = (err == nil)
-
-		// Read metadata to get blob hash before deleting
-		if metaData, getErr := tx.Get(bucketMetadata, key); getErr == nil {
-			var meta storedMetadata
-			if json.Unmarshal(metaData, &meta) == nil {
-				blobHash = meta.BlobHash
-			}
-		}
 
 		// Remove from main metadata bucket
 		if err := tx.Delete(bucketMetadata, key); err != nil && err != nutsdb.ErrKeyNotFound {
@@ -654,6 +705,22 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 		pathIndexKey := []byte(req.StorageId + ":" + req.FilePath)
 		if err := tx.Delete(bucketPathIndex, pathIndexKey); err != nil && err != nutsdb.ErrKeyNotFound {
 			return fmt.Errorf("failed to delete path index: %w", err)
+		}
+
+		// Remove from parent directory index
+		parentDir := extractDirPath(req.FilePath)
+		entryName := extractFileName(req.FilePath)
+		if err := s.removeFromDirectoryIndex(tx, req.StorageId, parentDir, entryName); err != nil {
+			s.logger.Warn("failed to remove file from dir index", "file_path", req.FilePath, "error", err)
+		}
+		if err := s.removeFromDirectorySummary(tx, req.StorageId, parentDir, entryName); err != nil {
+			return fmt.Errorf("failed to remove file from dir summary: %w", err)
+		}
+		if err := tx.Delete(bucketDirMeta, makeDirMetaKey(req.StorageId, req.FilePath)); err != nil && err != nutsdb.ErrKeyNotFound {
+			return fmt.Errorf("failed to delete dir metadata: %w", err)
+		}
+		if err := s.pruneImplicitDirectories(tx, req.StorageId, parentDir); err != nil {
+			return fmt.Errorf("failed to prune directories: %w", err)
 		}
 
 		return nil
@@ -675,21 +742,9 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 		s.totalFiles.Add(-1)
 	}
 
-	// Forward blob deletion to fetcher (async, best-effort)
-	if s.fetcherClient != nil && blobHash != "" {
-		go func() {
-			fwdCtx, fwdCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer fwdCancel()
-			deleted, _, fwdErr := s.fetcherClient.DeleteBlobs(fwdCtx, []string{blobHash}, false)
-			if fwdErr != nil {
-				s.logger.Warn("failed to forward blob deletion to fetcher",
-					"blob_hash", blobHash, "error", fwdErr)
-			} else if deleted > 0 {
-				s.logger.Debug("forwarded blob deletion to fetcher",
-					"blob_hash", blobHash)
-			}
-		}()
-	}
+	// Do not evict blob hashes from fetchers on per-file cleanup.
+	// Fetchers deduplicate blobs globally by content hash, so deleting a hash here
+	// can strand other Guardian/Doctor paths that still reference the same content.
 
 	s.logger.Debug("file deleted after rebalancing",
 		"storage_id", req.StorageId,
@@ -782,8 +837,37 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 			}
 		}
 
-		// 6. Delete all directory indexes for this repo
-		dirPrefix := storageID + "/"
+		// 6. Delete all canonical directory metadata for this repo
+		dirMetaPrefix := storageID + ":"
+		dirMetaKeys, err := tx.GetKeys(bucketDirMeta)
+		if err == nil {
+			for _, key := range dirMetaKeys {
+				keyStr := string(key)
+				if !strings.HasPrefix(keyStr, dirMetaPrefix) {
+					continue
+				}
+				if err := tx.Delete(bucketDirMeta, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Warn("failed to delete dir metadata", "key", keyStr)
+				}
+			}
+		}
+
+		// 7. Delete all directory summaries for this repo
+		dirSummaryKeys, err := tx.GetKeys(bucketDirSummary)
+		if err == nil {
+			for _, key := range dirSummaryKeys {
+				keyStr := string(key)
+				if !strings.HasPrefix(keyStr, dirMetaPrefix) {
+					continue
+				}
+				if err := tx.Delete(bucketDirSummary, key); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Warn("failed to delete dir summary", "key", keyStr)
+				}
+			}
+		}
+
+		// 8. Delete all directory indexes for this repo
+		dirPrefix := storageID + ":"
 		dirKeys, err := tx.GetKeys(bucketDirIndex)
 		if err == nil {
 			for _, key := range dirKeys {

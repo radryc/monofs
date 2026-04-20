@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,7 @@ type RouterConfig struct {
 	PeerRouters         []RouterPeer
 	FetcherAddresses    []string // Fetcher cluster addresses for monitoring
 	EncryptionKey       []byte   // 32-byte ChaCha20-Poly1305 key for packager archives
+	GuardianStateDir    string   // Optional directory for persistent Guardian router state
 
 	// Replication and failover configuration
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
@@ -45,6 +47,7 @@ func DefaultRouterConfig() RouterConfig {
 		HealthCheckInterval:   5 * time.Second,  // Check every 5 seconds (reduced frequency to avoid lock contention)
 		UnhealthyThreshold:    15 * time.Second, // Mark unhealthy after 15 seconds (3 missed checks)
 		PeerRouters:           nil,
+		GuardianStateDir:      "",
 		ReplicationFactor:     2,                // Primary + 1 backup (protects against 1 node failure)
 		RebalanceDelay:        10 * time.Minute, // Wait 10 minutes before permanent rebalancing
 		GracefulFailoverDelay: 60 * time.Second, // 60 seconds for planned restarts
@@ -61,6 +64,7 @@ type Router struct {
 	ingestedRepos        map[string]*ingestedRepo        // repoID -> repo info
 	inProgressIngestions map[string]*inProgressIngestion // storageID -> ingestion progress
 	version              atomic.Int64
+	namespaceGeneration  atomic.Uint64
 	config               RouterConfig
 	stopHealth           chan struct{}
 	logger               *slog.Logger
@@ -98,6 +102,9 @@ type Router struct {
 	searchClient pb.MonoFSSearchClient
 	searchConn   *grpc.ClientConn
 
+	// Ingestion whitelist
+	whitelist *whitelistStore
+
 	// Fetcher cluster integration (for monitoring)
 	fetcherClient *fetcher.Client
 
@@ -105,6 +112,23 @@ type Router struct {
 	clients     map[string]*clientState // clientID -> state
 	clientsMu   sync.RWMutex
 	stopClients chan struct{}
+
+	// Guardian clients (guardian-* prefixed clients with special config)
+	guardianClients   map[string]*guardianClientState // clientID -> guardian state
+	guardianClientsMu sync.RWMutex
+
+	// Guardian persistence
+	guardianPrincipals *guardianPrincipalStore
+	guardianVersions   *guardianVersionStore
+
+	// Guardian change subscriptions
+	guardianChangeSubs   map[uint64]*guardianChangeSubscriber
+	guardianChangeSubsMu sync.RWMutex
+	guardianChangeSeq    atomic.Uint64
+
+	guardianLogicalChangeSubs   map[uint64]*guardianLogicalChangeSubscriber
+	guardianLogicalChangeSubsMu sync.RWMutex
+	guardianLogicalChangeSeq    atomic.Uint64
 
 	// Drain mode for planned maintenance
 	drainMode   atomic.Bool
@@ -128,6 +152,17 @@ type clientState struct {
 	operationsCount int64 // Total FUSE operations
 	bytesRead       int64 // Total bytes read
 	mu              sync.RWMutex
+}
+
+// guardianClientState tracks a connected guardian-* client.
+type guardianClientState struct {
+	clientID      string
+	principalID   string
+	role          string
+	displayName   string
+	baseURL       string
+	authToken     string
+	lastHeartbeat time.Time
 }
 
 // nodeState tracks a backend node's state.
@@ -231,23 +266,40 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		logger = slog.Default()
 	}
 	logger = logger.With("component", "router")
+	guardianPrincipals, err := newGuardianPrincipalStore(cfg.GuardianStateDir)
+	if err != nil {
+		logger.Error("failed to initialize guardian principal store", "state_dir", cfg.GuardianStateDir, "error", err)
+		guardianPrincipals, _ = newGuardianPrincipalStore("")
+	}
+	guardianVersions, err := newGuardianVersionStore(cfg.GuardianStateDir)
+	if err != nil {
+		logger.Error("failed to initialize guardian version store", "state_dir", cfg.GuardianStateDir, "error", err)
+		guardianVersions, _ = newGuardianVersionStore("")
+	}
 	r := &Router{
-		nodes:                make(map[string]*nodeState),
-		ingestedRepos:        make(map[string]*ingestedRepo),
-		inProgressIngestions: make(map[string]*inProgressIngestion),
-		clients:              make(map[string]*clientState),
-		topologySnapshots:    make(map[int64][]sharding.Node),
-		pendingIndexRebuilds: make(map[string]map[string]bool),
-		failoverTimers:       make(map[string]*time.Timer),
-		failoverStartTimes:   make(map[string]time.Time),
-		config:               cfg,
-		stopHealth:           make(chan struct{}),
-		stopClients:          make(chan struct{}),
-		uiRequests:           make(chan UIRequest, 100), // Buffered to prevent UI blocking
-		stopUI:               make(chan struct{}),
-		logger:               logger,
+		nodes:                     make(map[string]*nodeState),
+		ingestedRepos:             make(map[string]*ingestedRepo),
+		inProgressIngestions:      make(map[string]*inProgressIngestion),
+		clients:                   make(map[string]*clientState),
+		guardianClients:           make(map[string]*guardianClientState),
+		guardianPrincipals:        guardianPrincipals,
+		guardianVersions:          guardianVersions,
+		guardianChangeSubs:        make(map[uint64]*guardianChangeSubscriber),
+		guardianLogicalChangeSubs: make(map[uint64]*guardianLogicalChangeSubscriber),
+		topologySnapshots:         make(map[int64][]sharding.Node),
+		pendingIndexRebuilds:      make(map[string]map[string]bool),
+		failoverTimers:            make(map[string]*time.Timer),
+		failoverStartTimes:        make(map[string]time.Time),
+		config:                    cfg,
+		stopHealth:                make(chan struct{}),
+		stopClients:               make(chan struct{}),
+		uiRequests:                make(chan UIRequest, 100), // Buffered to prevent UI blocking
+		stopUI:                    make(chan struct{}),
+		logger:                    logger,
+		whitelist:                 newWhitelistStore(),
 	}
 	r.version.Store(1)
+	r.namespaceGeneration.Store(1)
 
 	// Start UI request handler goroutine
 	go r.handleUIRequests()
@@ -287,10 +339,17 @@ func (r *Router) markForIndexRebuild(nodeID, storageID string) {
 func (r *Router) triggerIndexRebuild(nodeID, storageID string) error {
 	r.mu.RLock()
 	state := r.nodes[nodeID]
+	var client pb.MonoFSClient
+	if state != nil {
+		client = state.client
+	}
 	r.mu.RUnlock()
 
 	if state == nil {
 		return fmt.Errorf("node not found: %s", nodeID)
+	}
+	if client == nil {
+		return fmt.Errorf("node %s has no active client connection", nodeID)
 	}
 
 	r.logger.Info("triggering directory index rebuild",
@@ -300,7 +359,7 @@ func (r *Router) triggerIndexRebuild(nodeID, storageID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	resp, err := state.client.BuildDirectoryIndexes(ctx, &pb.BuildDirectoryIndexesRequest{
+	resp, err := client.BuildDirectoryIndexes(ctx, &pb.BuildDirectoryIndexesRequest{
 		StorageId: storageID,
 	})
 
@@ -567,9 +626,10 @@ func (r *Router) GetClusterInfo(ctx context.Context, req *pb.ClusterInfoRequest)
 	}
 
 	return &pb.ClusterInfoResponse{
-		Nodes:     nodes,
-		ClusterId: r.config.ClusterID,
-		Version:   r.version.Load(),
+		Nodes:           nodes,
+		ClusterId:       r.config.ClusterID,
+		Version:         r.version.Load(),
+		GuardianVisible: r.isGuardianVisible(),
 	}, nil
 }
 
@@ -922,6 +982,9 @@ func (r *Router) discoverClusterRepositories() {
 		}
 	}
 	r.mu.Unlock()
+	if newCount > 0 {
+		r.bumpNativeNamespaceGeneration("repository discovery")
+	}
 
 	r.logger.Info("cluster repository discovery complete",
 		"discovered", len(discoveredRepos),
@@ -1561,14 +1624,23 @@ func (r *Router) handleEarlyRecovery(nodeID string) {
 // checkAndRecoverNode verifies node onboarding status and triggers recovery if needed.
 // This handles nodes that were offline during repository ingestion.
 func (r *Router) checkAndRecoverNode(nodeID string, state *nodeState) {
-	// Get cluster's known repositories
+	// Get cluster's known repositories and snapshot the client reference under
+	// the read lock. The goroutine may run after the node has disconnected and
+	// state.client set to nil, so we must capture it while holding the lock and
+	// guard against a nil value.
 	r.mu.RLock()
 	clusterRepos := make(map[string]*ingestedRepo)
 	for storageID, repo := range r.ingestedRepos {
 		clusterRepos[storageID] = repo
 	}
 	fileCount := state.ownedFilesCount
+	nodeClient := state.client
 	r.mu.RUnlock()
+
+	if nodeClient == nil {
+		r.logger.Debug("skipping checkAndRecoverNode: node client is nil", "node_id", nodeID)
+		return
+	}
 
 	if len(clusterRepos) == 0 {
 		r.logger.Debug("no cluster repositories to check for recovery", "node_id", nodeID)
@@ -1582,7 +1654,7 @@ func (r *Router) checkAndRecoverNode(nodeID string, state *nodeState) {
 
 	// Query node's onboarding status
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	statusResp, err := state.client.GetOnboardingStatus(ctx, &pb.OnboardingStatusRequest{
+	statusResp, err := nodeClient.GetOnboardingStatus(ctx, &pb.OnboardingStatusRequest{
 		NodeId: nodeID,
 	})
 	cancel()
@@ -2671,6 +2743,56 @@ func (r *Router) RegisterClient(ctx context.Context, req *pb.RegisterClientReque
 	r.clientsMu.Lock()
 	defer r.clientsMu.Unlock()
 
+	// Handle clients that participate in managed-path auth.
+	if req.GuardianConfig != nil {
+		if req.GuardianConfig.AuthToken == "" {
+			return &pb.RegisterClientResponse{
+				Success: false,
+				Message: "guardian_config with auth_token is required",
+			}, nil
+		}
+		principalID := strings.TrimSpace(req.GuardianConfig.GetPrincipalId())
+		if principalID == "" {
+			principalID = req.ClientId
+		}
+		role := strings.TrimSpace(req.GuardianConfig.GetRole())
+		if role == "" {
+			role = inferGuardianPrincipalRole(principalID)
+		}
+		displayName := strings.TrimSpace(req.GuardianConfig.GetDisplayName())
+		if displayName == "" {
+			displayName = principalID
+		}
+		if strings.HasPrefix(req.ClientId, "guardian-") {
+			r.guardianClientsMu.Lock()
+			r.guardianClients[req.ClientId] = &guardianClientState{
+				clientID:      req.ClientId,
+				principalID:   principalID,
+				role:          role,
+				displayName:   displayName,
+				baseURL:       req.GuardianConfig.BaseUrl,
+				authToken:     req.GuardianConfig.AuthToken,
+				lastHeartbeat: time.Now(),
+			}
+			r.guardianClientsMu.Unlock()
+			r.logger.Info("guardian client registered",
+				"client_id", req.ClientId,
+				"principal_id", principalID,
+				"base_url", req.GuardianConfig.BaseUrl)
+		}
+		if _, err := r.guardianPrincipals.upsertConnectedClient(principalID, req.GuardianConfig.AuthToken, role, displayName, req.GuardianConfig.BaseUrl); err != nil {
+			r.logger.Warn("failed to persist guardian principal",
+				"client_id", req.ClientId,
+				"principal_id", principalID,
+				"error", err)
+		}
+	} else if strings.HasPrefix(req.ClientId, "guardian-") {
+		return &pb.RegisterClientResponse{
+			Success: false,
+			Message: "guardian_config with auth_token required for guardian-* clients",
+		}, nil
+	}
+
 	// Check if client already exists (reconnection)
 	if existing, ok := r.clients[req.ClientId]; ok {
 		existing.mu.Lock()
@@ -2762,6 +2884,14 @@ func (r *Router) UnregisterClient(ctx context.Context, req *pb.UnregisterClientR
 
 	delete(r.clients, req.ClientId)
 
+	// Remove from guardian clients if applicable
+	if strings.HasPrefix(req.ClientId, "guardian-") {
+		r.guardianClientsMu.Lock()
+		delete(r.guardianClients, req.ClientId)
+		r.guardianClientsMu.Unlock()
+		r.logger.Info("guardian client unregistered", "client_id", req.ClientId)
+	}
+
 	r.logger.Info("client unregistered",
 		"client_id", req.ClientId,
 		"reason", req.Reason,
@@ -2809,6 +2939,14 @@ func (r *Router) ClientHeartbeat(ctx context.Context, req *pb.ClientHeartbeatReq
 	state.info.BytesRead = req.BytesRead
 	state.info.State = pb.ClientState_CLIENT_CONNECTED
 	state.mu.Unlock()
+
+	if strings.HasPrefix(req.ClientId, "guardian-") {
+		r.guardianClientsMu.Lock()
+		if guardianState, ok := r.guardianClients[req.ClientId]; ok {
+			guardianState.lastHeartbeat = now
+		}
+		r.guardianClientsMu.Unlock()
+	}
 
 	return &pb.ClientHeartbeatResponse{
 		Success: true,
@@ -2912,6 +3050,15 @@ func (r *Router) cleanupStaleClientsOnce(staleThreshold, removeThreshold time.Du
 				state.mu.RUnlock()
 				delete(r.clients, clientID)
 			}
+			// Also remove from guardian clients if applicable
+			if strings.HasPrefix(clientID, "guardian-") {
+				r.guardianClientsMu.Lock()
+				if _, ok := r.guardianClients[clientID]; ok {
+					delete(r.guardianClients, clientID)
+					r.logger.Info("removed stale guardian client", "client_id", clientID)
+				}
+				r.guardianClientsMu.Unlock()
+			}
 		}
 		r.clientsMu.Unlock()
 	}
@@ -2928,6 +3075,116 @@ func (r *Router) GetClientCount() int {
 	r.clientsMu.RLock()
 	defer r.clientsMu.RUnlock()
 	return len(r.clients)
+}
+
+// isGuardianVisible reports whether Guardian namespaces should be exposed to clients.
+// Guardian visibility is no longer gated on a connected guardian-* UI client.
+func (r *Router) isGuardianVisible() bool {
+	return true
+}
+
+// validateGuardianToken checks if the given token matches a persistent or connected guardian principal.
+// Returns the matching principal ID and true if valid, or empty string and false if not.
+func (r *Router) validateGuardianToken(token string) (string, bool) {
+	if principal, ok := r.authenticateGuardianToken(token); ok {
+		return principal.PrincipalID, true
+	}
+	return "", false
+}
+
+func (r *Router) authenticateGuardianToken(token string) (*guardianPrincipal, bool) {
+	if r.guardianPrincipals != nil {
+		if principal, ok := r.guardianPrincipals.validateToken(token); ok {
+			return principal, true
+		}
+	}
+
+	r.guardianClientsMu.RLock()
+	defer r.guardianClientsMu.RUnlock()
+	for clientID, state := range r.guardianClients {
+		if state.authToken == token {
+			principalID := state.principalID
+			if principalID == "" {
+				principalID = clientID
+			}
+			role := state.role
+			if role == "" {
+				role = inferGuardianPrincipalRole(principalID)
+			}
+			displayName := state.displayName
+			if displayName == "" {
+				displayName = principalID
+			}
+			return &guardianPrincipal{
+				PrincipalID: principalID,
+				Role:        role,
+				DisplayName: displayName,
+				BaseURL:     state.baseURL,
+			}, true
+		}
+	}
+	return nil, false
+}
+
+func (r *Router) authenticateGuardianMutation(token string, mutationCtx *pb.GuardianMutationContext) (*guardianPrincipal, bool) {
+	if mutationCtx != nil {
+		requestedPrincipalID := strings.TrimSpace(mutationCtx.GetPrincipalId())
+		if requestedPrincipalID != "" {
+			if r.guardianPrincipals != nil {
+				if principal, ok := r.guardianPrincipals.validateTokenForPrincipal(token, requestedPrincipalID); ok {
+					return principal, true
+				}
+			}
+
+			r.guardianClientsMu.RLock()
+			for clientID, state := range r.guardianClients {
+				if state.authToken != token {
+					continue
+				}
+				principalID := state.principalID
+				if principalID == "" {
+					principalID = clientID
+				}
+				if principalID != requestedPrincipalID {
+					continue
+				}
+				role := state.role
+				if role == "" {
+					role = inferGuardianPrincipalRole(principalID)
+				}
+				displayName := state.displayName
+				if displayName == "" {
+					displayName = principalID
+				}
+				r.guardianClientsMu.RUnlock()
+				return &guardianPrincipal{
+					PrincipalID: principalID,
+					Role:        role,
+					DisplayName: displayName,
+					BaseURL:     state.baseURL,
+				}, true
+			}
+			r.guardianClientsMu.RUnlock()
+			return nil, false
+		}
+	}
+
+	return r.authenticateGuardianToken(token)
+}
+
+// getGuardianBaseURL returns the base URL for a guardian client.
+func (r *Router) getGuardianBaseURL(clientID string) string {
+	r.guardianClientsMu.RLock()
+	defer r.guardianClientsMu.RUnlock()
+	if state, ok := r.guardianClients[clientID]; ok {
+		return state.baseURL
+	}
+	return ""
+}
+
+// isGuardianRepo returns true if the given display path is a guardian partition.
+func (r *Router) isGuardianRepo(displayPath string) bool {
+	return displayPath == "guardian-system" || strings.HasPrefix(displayPath, "guardian/")
 }
 
 // GetClientStats returns aggregated client statistics for the performance page

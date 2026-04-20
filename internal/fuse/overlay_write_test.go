@@ -63,6 +63,7 @@ func (m *pathMockClient) Close() error            { return nil }
 func (m *pathMockClient) RecordOperation()        {}
 func (m *pathMockClient) RecordBytesRead(n int64) {}
 func (m *pathMockClient) RecordError()            {}
+func (m *pathMockClient) IsGuardianVisible() bool { return false }
 
 // ---------------------------------------------------------------------------
 // Test: addWriteBits correctly upgrades permissions

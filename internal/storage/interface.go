@@ -51,6 +51,53 @@ func ParseFetchType(s string) FetchType {
 	}
 }
 
+// StorageType identifies where packager archives are persisted.
+type StorageType string
+
+const (
+	StorageTypeLocal StorageType = "local" // Local filesystem (default)
+	StorageTypeS3    StorageType = "s3"    // Amazon S3 or S3-compatible
+	StorageTypeGCS   StorageType = "gcs"   // Google Cloud Storage
+)
+
+// CloudStorageConfig holds configuration for storing packager archives
+// in a cloud object store (S3 or GCS). Used by BlobBackend when
+// StorageType is not "local".
+type CloudStorageConfig struct {
+	// --- S3 ---
+
+	// S3Region is the AWS region (e.g. "us-east-1"). Required for S3.
+	S3Region string
+	// S3Bucket is the bucket name for archive storage.
+	S3Bucket string
+	// S3Prefix is an optional key prefix (e.g. "monofs/archives/").
+	S3Prefix string
+	// S3Endpoint overrides the default S3 endpoint (for MinIO, Ceph, etc.).
+	S3Endpoint string
+	// S3AccessKeyID for static credentials. Empty = use default AWS chain.
+	S3AccessKeyID string
+	// S3SecretAccessKey for static credentials.
+	S3SecretAccessKey string
+	// S3SessionToken for temporary credentials.
+	S3SessionToken string
+	// S3UsePathStyle forces path-style addressing (required for most
+	// S3-compatible services).
+	S3UsePathStyle bool
+
+	// --- GCS ---
+
+	// GCSBucket is the bucket name for archive storage.
+	GCSBucket string
+	// GCSPrefix is an optional object name prefix.
+	GCSPrefix string
+	// GCSCredentialsFile is the path to a service account JSON key file.
+	// Empty = use Application Default Credentials.
+	GCSCredentialsFile string
+	// GCSCredentialsJSON is inline service account JSON key content.
+	// Takes precedence over GCSCredentialsFile.
+	GCSCredentialsJSON []byte
+}
+
 // BackendConfig holds common configuration for all fetch backends.
 type BackendConfig struct {
 	// CacheDir is the local directory for caching source data.
@@ -70,6 +117,15 @@ type BackendConfig struct {
 	// EncryptionKey is the 32-byte ChaCha20-Poly1305 key for packager archives.
 	// Required for BlobBackend, ignored by other backends.
 	EncryptionKey []byte
+
+	// StorageType selects where packager archives are persisted.
+	// "local" (default), "s3", or "gcs".
+	// When set to "s3" or "gcs", archives are uploaded to the cloud
+	// and also cached locally under CacheDir for fast reads.
+	StorageType StorageType
+
+	// Cloud holds S3/GCS configuration. Only used when StorageType != "local".
+	Cloud CloudStorageConfig
 
 	// Extra holds backend-specific configuration.
 	Extra map[string]string

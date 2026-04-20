@@ -1,7 +1,7 @@
 services:
   # Fetcher 1 - External blob fetcher (packager archives + optional Git)
   # Runs in DMZ with external network access
-  fetcher1:
+  fetcher-a:
     build:
       context: .
       target: fetcher
@@ -19,7 +19,7 @@ services:
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
     volumes:
-      - fetcher1-cache:/data/cache
+      - fetcher-a-cache:/data/cache
       - ./config:/etc/monofs:ro
     networks:
       - monofs-net
@@ -38,7 +38,7 @@ services:
           memory: 512M
 
   # Fetcher 2 - Second fetcher instance for redundancy and load balancing
-  fetcher2:
+  fetcher-b:
     build:
       context: .
       target: fetcher
@@ -56,7 +56,7 @@ services:
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
     volumes:
-      - fetcher2-cache:/data/cache
+      - fetcher-b-cache:/data/cache
       - ./config:/etc/monofs:ro
     networks:
       - monofs-net
@@ -74,8 +74,8 @@ services:
         reservations:
           memory: 512M
 
-  # Search service - Zoekt-based code search
-  search:
+  # Search-index service - Zoekt-based code search
+  search-index:
     build:
       context: .
       target: search
@@ -89,9 +89,9 @@ services:
       - "--cache-dir=/data/cache"
       - "--workers=2"
       - "--queue-size=20"
-      - "--router-addr=router1:9090"
+      - "--router-addr=router-a:9090"
     volumes:
-      - search-data:/data
+      - search-index-data:/data
     networks:
       - monofs-net
       # No longer needs monofs-external - fetches files from storage nodes via router
@@ -122,16 +122,16 @@ services:
     networks:
       - monofs-net
     depends_on:
-      - router1
-      - router2
+      - router-a
+      - router-b
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "9090"]
+      test: ["CMD", "nc", "-z", "127.0.0.1", "9090"]
       interval: 10s
       timeout: 5s
       retries: 3
 
   # Router 1 - Primary cluster coordinator
-  router1:
+  router-a:
     build:
       context: .
       target: router
@@ -142,28 +142,28 @@ services:
     command:
       - "--port=9090"
       - "--http-port=8080"
-      - "--router-name=router1"
+      - "--router-name=router-a"
       - "--cluster-id=monofs-cluster"
-      - "--peer-routers=${ROUTER1_PEERS:-router2=http://router2:8080}"
-      - "--nodes=node1=node1:9000,node2=node2:9000,node3=node3:9000,node4=node4:9000,node5=node5:9000"
-      - "--weights=node1=100,node2=100,node3=100,node4=100,node5=100"
-      - "--external-addrs=node1=localhost:9001,node2=localhost:9002,node3=localhost:9003,node4=localhost:9004,node5=localhost:9005"
-      - "--search-addr=search:9100"
-      - "--fetcher-addrs=fetcher1:9200,fetcher2:9200"
+      - "--peer-routers=${ROUTER_A_PEERS:-router-b=http://router-b:8080}"
+      - "--nodes=node-a=node-a:9000,node-b=node-b:9000,node-c=node-c:9000,node-d=node-d:9000,node-e=node-e:9000"
+      - "--weights=node-a=100,node-b=100,node-c=100,node-d=100,node-e=100"
+      - "--external-addrs=node-a=localhost:9001,node-b=localhost:9002,node-c=localhost:9003,node-d=localhost:9004,node-e=localhost:9005"
+      - "--search-addr=search-index:9100"
+      - "--fetcher-addrs=fetcher-a:9200,fetcher-b:9200"
       - "--debug"
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
     networks:
       - monofs-net
     depends_on:
-      - node1
-      - node2
-      - node3
-      - node4
-      - node5
-      - search
-      - fetcher1
-      - fetcher2
+      - node-a
+      - node-b
+      - node-c
+      - node-d
+      - node-e
+      - search-index
+      - fetcher-a
+      - fetcher-b
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9090"]
       interval: 10s
@@ -171,7 +171,7 @@ services:
       retries: 3
 
   # Router 2 - Secondary cluster coordinator (backup failover)
-  router2:
+  router-b:
     build:
       context: .
       target: router
@@ -182,28 +182,28 @@ services:
     command:
       - "--port=9090"
       - "--http-port=8080"
-      - "--router-name=router2"
+      - "--router-name=router-b"
       - "--cluster-id=monofs-cluster"
-      - "--peer-routers=${ROUTER2_PEERS:-router1=http://router1:8080}"
-      - "--nodes=node1=node1:9000,node2=node2:9000,node3=node3:9000,node4=node4:9000,node5=node5:9000"
-      - "--weights=node1=100,node2=100,node3=100,node4=100,node5=100"
-      - "--external-addrs=node1=localhost:9001,node2=localhost:9002,node3=localhost:9003,node4=localhost:9004,node5=localhost:9005"
-      - "--search-addr=search:9100"
-      - "--fetcher-addrs=fetcher1:9200,fetcher2:9200"
+      - "--peer-routers=${ROUTER_B_PEERS:-router-a=http://router-a:8080}"
+      - "--nodes=node-a=node-a:9000,node-b=node-b:9000,node-c=node-c:9000,node-d=node-d:9000,node-e=node-e:9000"
+      - "--weights=node-a=100,node-b=100,node-c=100,node-d=100,node-e=100"
+      - "--external-addrs=node-a=localhost:9001,node-b=localhost:9002,node-c=localhost:9003,node-d=localhost:9004,node-e=localhost:9005"
+      - "--search-addr=search-index:9100"
+      - "--fetcher-addrs=fetcher-a:9200,fetcher-b:9200"
       - "--debug"
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
     networks:
       - monofs-net
     depends_on:
-      - node1
-      - node2
-      - node3
-      - node4
-      - node5
-      - search
-      - fetcher1
-      - fetcher2
+      - node-a
+      - node-b
+      - node-c
+      - node-d
+      - node-e
+      - search-index
+      - fetcher-a
+      - fetcher-b
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9090"]
       interval: 10s
@@ -211,7 +211,7 @@ services:
       retries: 3
 
   # Backend node 1
-  node1:
+  node-a:
     build:
       context: .
       target: server
@@ -223,20 +223,20 @@ services:
       - "9001:9000"
     command:
       - "--addr=:9000"
-      - "--node-id=node1"
+      - "--node-id=node-a"
       - "--db-path=/data/db"
       - "--git-cache=/data/git"
-      - "--fetcher=fetcher1:9200"
-      - "--fetcher=fetcher2:9200"
+      - "--fetcher=fetcher-a:9200"
+      - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
       - "--debug"
     volumes:
-      - node1-data:/data
+      - node-a-data:/data
     networks:
       - monofs-net
     depends_on:
-      - fetcher1
-      - fetcher2
+      - fetcher-a
+      - fetcher-b
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9000"]
       interval: 10s
@@ -244,7 +244,7 @@ services:
       retries: 3
 
   # Backend node 2
-  node2:
+  node-b:
     build:
       context: .
       target: server
@@ -256,20 +256,20 @@ services:
       - "9002:9000"
     command:
       - "--addr=:9000"
-      - "--node-id=node2"
+      - "--node-id=node-b"
       - "--db-path=/data/db"
       - "--git-cache=/data/git"
-      - "--fetcher=fetcher1:9200"
-      - "--fetcher=fetcher2:9200"
+      - "--fetcher=fetcher-a:9200"
+      - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
       - "--debug"
     volumes:
-      - node2-data:/data
+      - node-b-data:/data
     networks:
       - monofs-net
     depends_on:
-      - fetcher1
-      - fetcher2
+      - fetcher-a
+      - fetcher-b
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9000"]
       interval: 10s
@@ -277,7 +277,7 @@ services:
       retries: 3
 
   # Backend node 3
-  node3:
+  node-c:
     build:
       context: .
       target: server
@@ -289,20 +289,20 @@ services:
       - "9003:9000"
     command:
       - "--addr=:9000"
-      - "--node-id=node3"
+      - "--node-id=node-c"
       - "--db-path=/data/db"
       - "--git-cache=/data/git"
-      - "--fetcher=fetcher1:9200"
-      - "--fetcher=fetcher2:9200"
+      - "--fetcher=fetcher-a:9200"
+      - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
       - "--debug"
     volumes:
-      - node3-data:/data
+      - node-c-data:/data
     networks:
       - monofs-net
     depends_on:
-      - fetcher1
-      - fetcher2
+      - fetcher-a
+      - fetcher-b
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9000"]
       interval: 10s
@@ -310,7 +310,7 @@ services:
       retries: 3
 
   # Backend node 4
-  node4:
+  node-d:
     build:
       context: .
       target: server
@@ -322,20 +322,20 @@ services:
       - "9004:9000"
     command:
       - "--addr=:9000"
-      - "--node-id=node4"
+      - "--node-id=node-d"
       - "--db-path=/data/db"
       - "--git-cache=/data/git"
-      - "--fetcher=fetcher1:9200"
-      - "--fetcher=fetcher2:9200"
+      - "--fetcher=fetcher-a:9200"
+      - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
       - "--debug"
     volumes:
-      - node4-data:/data
+      - node-d-data:/data
     networks:
       - monofs-net
     depends_on:
-      - fetcher1
-      - fetcher2
+      - fetcher-a
+      - fetcher-b
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9000"]
       interval: 10s
@@ -343,7 +343,7 @@ services:
       retries: 3
 
   # Backend node 5
-  node5:
+  node-e:
     build:
       context: .
       target: server
@@ -355,20 +355,20 @@ services:
       - "9005:9000"
     command:
       - "--addr=:9000"
-      - "--node-id=node5"
+      - "--node-id=node-e"
       - "--db-path=/data/db"
       - "--git-cache=/data/git"
-      - "--fetcher=fetcher1:9200"
-      - "--fetcher=fetcher2:9200"
+      - "--fetcher=fetcher-a:9200"
+      - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
       - "--debug"
     volumes:
-      - node5-data:/data
+      - node-e-data:/data
     networks:
       - monofs-net
     depends_on:
-      - fetcher1
-      - fetcher2
+      - fetcher-a
+      - fetcher-b
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9000"]
       interval: 10s
@@ -464,14 +464,14 @@ services:
       - apparmor:unconfined
 
 volumes:
-  fetcher1-cache:
-  fetcher2-cache:
-  node1-data:
-  node2-data:
-  node3-data:
-  node4-data:
-  node5-data:
-  search-data:
+  fetcher-a-cache:
+  fetcher-b-cache:
+  node-a-data:
+  node-b-data:
+  node-c-data:
+  node-d-data:
+  node-e-data:
+  search-index-data:
   client-logs:
   client-cache:
   client-overlay:

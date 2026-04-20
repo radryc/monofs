@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,32 @@ ARG BUILD_TIME=unknown
 
 # Copy go mod files
 COPY go.mod go.sum ./
-RUN go mod download
+# Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
+RUN set -eu; \
+    tmp_output="$(mktemp)"; \
+    trap 'rm -f "$tmp_output"' EXIT; \
+    retryable_re='TLS handshake timeout|i/o timeout|connection reset by peer|connection refused|no such host|temporary failure in name resolution|context deadline exceeded|dial tcp|proxyconnect tcp|unexpected EOF|EOF|Client\.Timeout exceeded'; \
+    for attempt in 1 2 3; do \
+        if GONOSUMDB='*' GODEBUG=http2client=0 GOPROXY=https://proxy.golang.org,direct go mod download >"$tmp_output" 2>&1; then \
+            cat "$tmp_output"; \
+            exit 0; \
+        fi; \
+        cat "$tmp_output" >&2; \
+        if ! grep -Eq "$retryable_re" "$tmp_output"; then \
+            exit 1; \
+        fi; \
+        if [ "$attempt" -lt 3 ]; then \
+            echo "go mod download via proxy failed with a retryable network error (attempt ${attempt}/3); retrying..." >&2; \
+            sleep $((attempt * 5)); \
+        fi; \
+    done; \
+    echo "go mod download via proxy failed after 3 attempts; falling back to direct VCS fetches" >&2; \
+    if GONOSUMDB='*' GOSUMDB=off GODEBUG=http2client=0 GOPROXY=direct go mod download >"$tmp_output" 2>&1; then \
+        cat "$tmp_output"; \
+    else \
+        cat "$tmp_output" >&2; \
+        exit 1; \
+    fi
 
 # Copy source
 COPY . .
@@ -110,13 +135,15 @@ RUN mkdir -p /data/cache/git /data/cache/blob /etc/monofs && chown -R monofs:mon
 
 COPY --from=builder /bin/monofs-fetcher /usr/local/bin/monofs-fetcher
 COPY config/fetcher.json /etc/monofs/fetcher.json
+COPY docker/fetcher-entrypoint.sh /usr/local/bin/fetcher-entrypoint.sh
+RUN chmod +x /usr/local/bin/fetcher-entrypoint.sh
 
 USER monofs
 
 EXPOSE 9200
 
-ENTRYPOINT ["monofs-fetcher"]
-CMD ["--port=9200", "--cache-dir=/data/cache"]
+ENTRYPOINT ["/usr/local/bin/fetcher-entrypoint.sh"]
+CMD ["monofs-fetcher", "--port=9200", "--cache-dir=/data/cache"]
 
 # Client image (interactive with SSH)
 FROM alpine:3.19 AS client

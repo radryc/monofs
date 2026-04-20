@@ -78,6 +78,38 @@ testdata/tmp/
 *.db-lock
 nutsdb/
 
+# Docs
+docs/
+
+# Claude
+.claude
+
+# Root-level and cmd/ built binaries
+monofs-admin
+monofs-client
+monofs-fetcher
+monofs-router
+monofs-server
+monofs-session
+monofs-search
+monofs-loadtest
+cmd/*/monofs-*
+!cmd/monofs-session/
+!cmd/monofs-session/main_test.go
+cmd/monofs-admin/a
+cmd/monofs-admin/b
+
+# Kernel module build artifacts
+monofs-kmod/*.o
+monofs-kmod/*.ko
+monofs-kmod/*.mod
+monofs-kmod/*.mod.c
+monofs-kmod/*.symvers
+monofs-kmod/modules.order
+monofs-kmod/Module.symvers
+monofs-kmod/.*.cmd
+monofs-kmod/.tmp_versions/
+
 # OS specific
 Thumbs.DB
 Desktop.ini
@@ -98,3 +130,9 @@ benchmark-results/
 *.prof
 cpu.prof
 mem.prof
+.env
+.kilocode
+.claude
+AGENTS.md
+.github
+.gitignore

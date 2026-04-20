@@ -78,6 +78,7 @@ type repoInfo struct {
 	CommitTime    int64  `json:"commit_time,omitempty"`
 	CommitMessage string `json:"commit_message,omitempty"`
 	FetchType     string `json:"fetch_type,omitempty"`
+	GuardianURL   string `json:"guardian_url,omitempty"`
 }
 
 type storedMetadata struct {
@@ -95,6 +96,13 @@ type storedMetadata struct {
 	IsDir       bool   `json:"is_dir"`
 }
 
+type dirMetadata struct {
+	Path     string `json:"path"`
+	Mode     uint32 `json:"mode"`
+	Mtime    int64  `json:"mtime"`
+	Explicit bool   `json:"explicit"`
+}
+
 // dirIndexEntry represents a file entry in the directory index.
 type dirIndexEntry struct {
 	Name    string `json:"name"`     // Filename (not full path)
@@ -110,6 +118,8 @@ const (
 	bucketRepos            = "repos"             // Repository information (key: storageID)
 	bucketPathIndex        = "pathindex"         // Path to hash mapping (key: "storageID:filePath", value: SHA-256 hash)
 	bucketRepoLookup       = "repolookup"        // Display path to storageID mapping (key: displayPath, value: storageID)
+	bucketDirMeta          = "dirmeta"           // Canonical directory metadata (key: "storageID:dirPath", value: dirMetadata)
+	bucketDirSummary       = "dirsummary"        // Canonical replicated child summaries (key: "storageID:dirPath", value: []dirIndexEntry)
 	bucketDirIndex         = "dirindex"          // Directory index (key: "storageID:sha256(dirPath)", value: []dirIndexEntry)
 	bucketOwnedFiles       = "ownedfiles"        // Files owned by this node (key: "storageID:filePath", value: "1")
 	bucketReplicaFiles     = "replicafiles"      // Replica file tracking (key: "storageID:filePath", value: ownerNodeID)
@@ -130,6 +140,12 @@ func makeStorageKey(storageID, filePath string) []byte {
 func makeDirIndexKey(storageID, dirPath string) []byte {
 	hash := sha256.Sum256([]byte(dirPath))
 	return []byte(storageID + ":" + hex.EncodeToString(hash[:]))
+}
+
+// makeDirMetaKey generates a canonical directory metadata key.
+// Format: "storageID:dirPath"
+func makeDirMetaKey(storageID, dirPath string) []byte {
+	return []byte(storageID + ":" + dirPath)
 }
 
 // extractDirPath extracts the directory path from a file path.
@@ -265,6 +281,20 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, logger *slog.Logger)
 	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
 		db.Close()
 		return nil, fmt.Errorf("failed to create repo lookup bucket: %w", err)
+	}
+
+	if err := db.Update(func(tx *nutsdb.Tx) error {
+		return tx.NewBucket(nutsdb.DataStructureBTree, bucketDirMeta)
+	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
+		db.Close()
+		return nil, fmt.Errorf("failed to create directory metadata bucket: %w", err)
+	}
+
+	if err := db.Update(func(tx *nutsdb.Tx) error {
+		return tx.NewBucket(nutsdb.DataStructureBTree, bucketDirSummary)
+	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
+		db.Close()
+		return nil, fmt.Errorf("failed to create directory summary bucket: %w", err)
 	}
 
 	if err := db.Update(func(tx *nutsdb.Tx) error {
@@ -512,6 +542,25 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 	err := s.db.Update(func(tx *nutsdb.Tx) error {
 		// Check if already registered
 		if s.repoExistsByStorageIDTx(tx, req.StorageId) {
+			// Repository already exists — update GuardianURL if a new one is provided.
+			if req.GuardianUrl != "" {
+				value, err := tx.Get(bucketRepos, []byte(req.StorageId))
+				if err != nil {
+					return nil // can't read, skip update
+				}
+				var existing repoInfo
+				if err := json.Unmarshal(value, &existing); err != nil {
+					return nil
+				}
+				if existing.GuardianURL != req.GuardianUrl {
+					existing.GuardianURL = req.GuardianUrl
+					updated, err := json.Marshal(existing)
+					if err != nil {
+						return nil
+					}
+					_ = tx.Put(bucketRepos, []byte(req.StorageId), updated, 0)
+				}
+			}
 			s.logger.Debug("repository already registered", "storage_id", req.StorageId)
 			return nil
 		}
@@ -526,6 +575,7 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 			CommitTime:    req.CommitTime,
 			CommitMessage: req.CommitMessage,
 			FetchType:     req.FetchType.String(),
+			GuardianURL:   req.GuardianUrl,
 		}
 		repoKey := []byte(req.StorageId)
 		repoValue, err := json.Marshal(info)
@@ -618,6 +668,7 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 	// Generate SHA-256 hash key from storageID:filePath
 	key := makeStorageKey(storageID, meta.Path)
 	fullPath := makeFullPath(displayPath, meta.Path)
+	isDir := meta.BackendMetadata["file_type"] == "1"
 
 	s.logger.Info("storing key",
 		"hash_key", string(key),
@@ -637,7 +688,7 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 		BlobHash:    meta.BlobHash,
 		Branch:      meta.Ref,
 		RepoURL:     meta.Source,
-		IsDir:       false,
+		IsDir:       isDir,
 	}
 
 	value, err := json.Marshal(stored)
@@ -662,7 +713,7 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 		// 3. Update directory index incrementally for single-file operations
 		// This provides immediate directory consistency for single file ingestion
 		// (Batch operations skip this for performance - see IngestFileBatch)
-		if err := s.updateDirectoryIndexHierarchy(tx, storageID, meta.Path, key, meta.Mode, meta.Size, meta.Mtime); err != nil {
+		if err := s.updateDirectoryIndexHierarchy(tx, storageID, meta.Path, key, meta.Mode, meta.Size, meta.Mtime, isDir); err != nil {
 			s.logger.Warn("failed to update directory index",
 				"storage_id", storageID,
 				"path", meta.Path,
@@ -793,6 +844,10 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 		ownershipKey  []byte
 		blobHash      string
 		inlineContent []byte
+		mode          uint32
+		size          uint64
+		mtime         int64
+		isDir         bool
 	}
 
 	prepared := make([]preparedFile, 0, len(req.Files))
@@ -860,6 +915,10 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 			ownershipKey:  ownershipKey,
 			blobHash:      meta.BlobHash,
 			inlineContent: meta.InlineContent,
+			mode:          meta.Mode,
+			size:          meta.Size,
+			mtime:         meta.Mtime,
+			isDir:         isDir,
 		})
 	}
 
@@ -949,6 +1008,16 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 				filesFailed++
 				continue
 			}
+			if err := s.upsertDirectoryHierarchy(tx, storageID, pf.filePath, pf.mode, pf.mtime, pf.isDir); err != nil {
+				s.logger.Error("failed to store canonical directories", "error", err, "path", pf.filePath)
+				filesFailed++
+				continue
+			}
+			if err := s.upsertPathIntoDirectorySummary(tx, storageID, pf.filePath, pf.mode, pf.size, pf.mtime, pf.isDir, string(pf.key)); err != nil {
+				s.logger.Error("failed to store canonical dir summaries", "error", err, "path", pf.filePath)
+				filesFailed++
+				continue
+			}
 
 			if filesIngested < 3 { // Log first 3 keys for debugging
 				s.logger.Info("stored ownership key", "key", string(pf.ownershipKey))
@@ -967,6 +1036,12 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 			// then merge into the existing on-disk dir index.
 			dirMap := make(map[string][]dirIndexEntry)
 			for _, dh := range dirHints {
+				if err := s.upsertDirectoryHierarchy(tx, storageID, dh.filePath, dh.mode, dh.mtime, dh.isDir); err != nil {
+					return fmt.Errorf("store canonical directories from dir hint %q: %w", dh.filePath, err)
+				}
+				if err := s.upsertPathIntoDirectorySummary(tx, storageID, dh.filePath, dh.mode, dh.size, dh.mtime, dh.isDir, string(dh.hashKey)); err != nil {
+					return fmt.Errorf("store canonical dir summaries from dir hint %q: %w", dh.filePath, err)
+				}
 				parts := strings.Split(dh.filePath, "/")
 				for i := 0; i < len(parts); i++ {
 					var dirPath, entryName string
@@ -1393,6 +1468,7 @@ func (s *Server) GetRepositoryInfo(ctx context.Context, req *pb.GetRepositoryInf
 		CommitHash:    repoInfoData.CommitHash,
 		CommitTime:    repoInfoData.CommitTime,
 		CommitMessage: repoInfoData.CommitMessage,
+		GuardianUrl:   repoInfoData.GuardianURL,
 	}, nil
 }
 

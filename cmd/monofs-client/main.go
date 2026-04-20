@@ -33,6 +33,7 @@ func main() {
 	logFile := flag.String("log-file", "", "Path for structured JSON log file (DEBUG+). Stdout always gets INFO+ text.")
 	keepCache := flag.Bool("keep-cache", false, "Keep existing cache on mount (default: clear cache)")
 	rpcTimeout := flag.Duration("rpc-timeout", 10*time.Second, "Timeout for RPC calls to nodes")
+	clientID := flag.String("client-id", "", "Persistent client identifier (default: auto-generated and stored in ~/.monofs/client-id)")
 	flag.Parse()
 
 	if *mountpoint == "" {
@@ -79,10 +80,24 @@ func main() {
 		"log_file", *logFile,
 	)
 
+	// Resolve persistent client identity
+	resolvedClientID := *clientID
+	if resolvedClientID == "" {
+		var idErr error
+		resolvedClientID, idErr = client.LoadOrCreateClientID()
+		if idErr != nil {
+			logger.Warn("failed to load persistent client ID, using ephemeral", "error", idErr)
+		}
+	}
+	if resolvedClientID != "" {
+		logger.Info("client identity", "client_id", resolvedClientID)
+	}
+
 	// Connect to router and create sharded client
 	ctx := context.Background()
 	c, err := client.NewShardedClient(ctx, client.ShardedClientConfig{
 		RouterAddr:           *routerAddr,
+		ClientID:             resolvedClientID,
 		RefreshInterval:      30 * time.Second,
 		RPCTimeout:           *rpcTimeout,
 		UseExternalAddresses: false, // Use internal Docker network addresses
@@ -95,6 +110,7 @@ func main() {
 		// Create client in disconnected state - it will retry connections
 		c = client.NewDisconnectedClient(client.ShardedClientConfig{
 			RouterAddr:      *routerAddr,
+			ClientID:        resolvedClientID,
 			RefreshInterval: 30 * time.Second,
 			Logger:          logger.With("component", "sharded-client"),
 			MountPoint:      *mountpoint,

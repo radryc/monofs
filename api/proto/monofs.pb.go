@@ -25,9 +25,10 @@ const (
 type IngestionType int32
 
 const (
-	IngestionType_INGESTION_GIT  IngestionType = 0 // Git repository
-	IngestionType_INGESTION_S3   IngestionType = 2 // S3 bucket
-	IngestionType_INGESTION_FILE IngestionType = 3 // Local filesystem
+	IngestionType_INGESTION_GIT      IngestionType = 0 // Git repository
+	IngestionType_INGESTION_S3       IngestionType = 2 // S3 bucket
+	IngestionType_INGESTION_FILE     IngestionType = 3 // Local filesystem
+	IngestionType_INGESTION_GUARDIAN IngestionType = 4 // Guardian partition
 )
 
 // Enum value maps for IngestionType.
@@ -36,11 +37,13 @@ var (
 		0: "INGESTION_GIT",
 		2: "INGESTION_S3",
 		3: "INGESTION_FILE",
+		4: "INGESTION_GUARDIAN",
 	}
 	IngestionType_value = map[string]int32{
-		"INGESTION_GIT":  0,
-		"INGESTION_S3":   2,
-		"INGESTION_FILE": 3,
+		"INGESTION_GIT":      0,
+		"INGESTION_S3":       2,
+		"INGESTION_FILE":     3,
+		"INGESTION_GUARDIAN": 4,
 	}
 )
 
@@ -184,6 +187,59 @@ func (ClientState) EnumDescriptor() ([]byte, []int) {
 	return file_api_proto_monofs_proto_rawDescGZIP(), []int{2}
 }
 
+// ChangeType enumerates the kinds of file changes emitted by SubscribeToChanges.
+type ChangeType int32
+
+const (
+	ChangeType_CHANGE_TYPE_UNSPECIFIED ChangeType = 0
+	ChangeType_ADDED                   ChangeType = 1
+	ChangeType_MODIFIED                ChangeType = 2
+	ChangeType_DELETED                 ChangeType = 3
+)
+
+// Enum value maps for ChangeType.
+var (
+	ChangeType_name = map[int32]string{
+		0: "CHANGE_TYPE_UNSPECIFIED",
+		1: "ADDED",
+		2: "MODIFIED",
+		3: "DELETED",
+	}
+	ChangeType_value = map[string]int32{
+		"CHANGE_TYPE_UNSPECIFIED": 0,
+		"ADDED":                   1,
+		"MODIFIED":                2,
+		"DELETED":                 3,
+	}
+)
+
+func (x ChangeType) Enum() *ChangeType {
+	p := new(ChangeType)
+	*p = x
+	return p
+}
+
+func (x ChangeType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ChangeType) Descriptor() protoreflect.EnumDescriptor {
+	return file_api_proto_monofs_proto_enumTypes[3].Descriptor()
+}
+
+func (ChangeType) Type() protoreflect.EnumType {
+	return &file_api_proto_monofs_proto_enumTypes[3]
+}
+
+func (x ChangeType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ChangeType.Descriptor instead.
+func (ChangeType) EnumDescriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{3}
+}
+
 type IngestProgress_Stage int32
 
 const (
@@ -223,11 +279,11 @@ func (x IngestProgress_Stage) String() string {
 }
 
 func (IngestProgress_Stage) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_proto_monofs_proto_enumTypes[3].Descriptor()
+	return file_api_proto_monofs_proto_enumTypes[4].Descriptor()
 }
 
 func (IngestProgress_Stage) Type() protoreflect.EnumType {
-	return &file_api_proto_monofs_proto_enumTypes[3]
+	return &file_api_proto_monofs_proto_enumTypes[4]
 }
 
 func (x IngestProgress_Stage) Number() protoreflect.EnumNumber {
@@ -293,12 +349,13 @@ func (x *ClusterInfoRequest) GetUseExternalAddresses() bool {
 }
 
 type ClusterInfoResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Nodes         []*NodeInfo            `protobuf:"bytes,1,rep,name=nodes,proto3" json:"nodes,omitempty"`
-	ClusterId     string                 `protobuf:"bytes,2,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
-	Version       int64                  `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"` // Cluster config version for cache invalidation
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Nodes           []*NodeInfo            `protobuf:"bytes,1,rep,name=nodes,proto3" json:"nodes,omitempty"`
+	ClusterId       string                 `protobuf:"bytes,2,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	Version         int64                  `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`                                        // Cluster config version for cache invalidation
+	GuardianVisible bool                   `protobuf:"varint,4,opt,name=guardian_visible,json=guardianVisible,proto3" json:"guardian_visible,omitempty"` // True if Guardian namespaces should be shown to clients
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ClusterInfoResponse) Reset() {
@@ -350,6 +407,13 @@ func (x *ClusterInfoResponse) GetVersion() int64 {
 		return x.Version
 	}
 	return 0
+}
+
+func (x *ClusterInfoResponse) GetGuardianVisible() bool {
+	if x != nil {
+		return x.GuardianVisible
+	}
+	return false
 }
 
 type NodeInfo struct {
@@ -2313,6 +2377,8 @@ type RegisterRepositoryRequest struct {
 	CommitHash    string `protobuf:"bytes,8,opt,name=commit_hash,json=commitHash,proto3" json:"commit_hash,omitempty"`           // Git commit hash
 	CommitTime    int64  `protobuf:"varint,9,opt,name=commit_time,json=commitTime,proto3" json:"commit_time,omitempty"`          // Commit timestamp (Unix)
 	CommitMessage string `protobuf:"bytes,10,opt,name=commit_message,json=commitMessage,proto3" json:"commit_message,omitempty"` // Commit message
+	// Guardian metadata
+	GuardianUrl   string `protobuf:"bytes,11,opt,name=guardian_url,json=guardianUrl,proto3" json:"guardian_url,omitempty"` // Guardian partition URL (set for guardian repos)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2413,6 +2479,13 @@ func (x *RegisterRepositoryRequest) GetCommitTime() int64 {
 func (x *RegisterRepositoryRequest) GetCommitMessage() string {
 	if x != nil {
 		return x.CommitMessage
+	}
+	return ""
+}
+
+func (x *RegisterRepositoryRequest) GetGuardianUrl() string {
+	if x != nil {
+		return x.GuardianUrl
 	}
 	return ""
 }
@@ -2923,6 +2996,7 @@ type GetRepositoryInfoResponse struct {
 	CommitHash    string                 `protobuf:"bytes,5,opt,name=commit_hash,json=commitHash,proto3" json:"commit_hash,omitempty"`
 	CommitTime    int64                  `protobuf:"varint,6,opt,name=commit_time,json=commitTime,proto3" json:"commit_time,omitempty"`
 	CommitMessage string                 `protobuf:"bytes,7,opt,name=commit_message,json=commitMessage,proto3" json:"commit_message,omitempty"`
+	GuardianUrl   string                 `protobuf:"bytes,8,opt,name=guardian_url,json=guardianUrl,proto3" json:"guardian_url,omitempty"` // Guardian partition URL (set for guardian repos)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3002,6 +3076,13 @@ func (x *GetRepositoryInfoResponse) GetCommitTime() int64 {
 func (x *GetRepositoryInfoResponse) GetCommitMessage() string {
 	if x != nil {
 		return x.CommitMessage
+	}
+	return ""
+}
+
+func (x *GetRepositoryInfoResponse) GetGuardianUrl() string {
+	if x != nil {
+		return x.GuardianUrl
 	}
 	return ""
 }
@@ -3837,14 +3918,15 @@ func (x *DeleteRepositoryOnNodeResponse) GetDirsDeleted() int64 {
 }
 
 type RegisterClientRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClientId      string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`       // Unique client identifier (UUID)
-	MountPoint    string                 `protobuf:"bytes,2,opt,name=mount_point,json=mountPoint,proto3" json:"mount_point,omitempty"` // FUSE mount path
-	Hostname      string                 `protobuf:"bytes,3,opt,name=hostname,proto3" json:"hostname,omitempty"`                       // Client hostname
-	Writable      bool                   `protobuf:"varint,4,opt,name=writable,proto3" json:"writable,omitempty"`                      // Write mode enabled
-	Version       string                 `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`                         // Client version
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	ClientId       string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`                   // Unique client identifier (UUID)
+	MountPoint     string                 `protobuf:"bytes,2,opt,name=mount_point,json=mountPoint,proto3" json:"mount_point,omitempty"`             // FUSE mount path
+	Hostname       string                 `protobuf:"bytes,3,opt,name=hostname,proto3" json:"hostname,omitempty"`                                   // Client hostname
+	Writable       bool                   `protobuf:"varint,4,opt,name=writable,proto3" json:"writable,omitempty"`                                  // Write mode enabled
+	Version        string                 `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`                                     // Client version
+	GuardianConfig *GuardianConfig        `protobuf:"bytes,6,opt,name=guardian_config,json=guardianConfig,proto3" json:"guardian_config,omitempty"` // Required for guardian-* client IDs
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *RegisterClientRequest) Reset() {
@@ -3912,6 +3994,90 @@ func (x *RegisterClientRequest) GetVersion() string {
 	return ""
 }
 
+func (x *RegisterClientRequest) GetGuardianConfig() *GuardianConfig {
+	if x != nil {
+		return x.GuardianConfig
+	}
+	return nil
+}
+
+// GuardianConfig holds configuration for a guardian-capable client.
+type GuardianConfig struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	BaseUrl       string                 `protobuf:"bytes,1,opt,name=base_url,json=baseUrl,proto3" json:"base_url,omitempty"`             // Optional base URL of the guardian service/UI
+	AuthToken     string                 `protobuf:"bytes,2,opt,name=auth_token,json=authToken,proto3" json:"auth_token,omitempty"`       // Authentication token for guardian operations
+	PrincipalId   string                 `protobuf:"bytes,3,opt,name=principal_id,json=principalId,proto3" json:"principal_id,omitempty"` // Optional persistent principal ID (defaults to client_id)
+	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`                                  // Optional role: control-plane, cli, pusher
+	DisplayName   string                 `protobuf:"bytes,5,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"` // Optional human-friendly label
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GuardianConfig) Reset() {
+	*x = GuardianConfig{}
+	mi := &file_api_proto_monofs_proto_msgTypes[59]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianConfig) ProtoMessage() {}
+
+func (x *GuardianConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[59]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianConfig.ProtoReflect.Descriptor instead.
+func (*GuardianConfig) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{59}
+}
+
+func (x *GuardianConfig) GetBaseUrl() string {
+	if x != nil {
+		return x.BaseUrl
+	}
+	return ""
+}
+
+func (x *GuardianConfig) GetAuthToken() string {
+	if x != nil {
+		return x.AuthToken
+	}
+	return ""
+}
+
+func (x *GuardianConfig) GetPrincipalId() string {
+	if x != nil {
+		return x.PrincipalId
+	}
+	return ""
+}
+
+func (x *GuardianConfig) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *GuardianConfig) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
 type RegisterClientResponse struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	Success             bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
@@ -3923,7 +4089,7 @@ type RegisterClientResponse struct {
 
 func (x *RegisterClientResponse) Reset() {
 	*x = RegisterClientResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[59]
+	mi := &file_api_proto_monofs_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3935,7 +4101,7 @@ func (x *RegisterClientResponse) String() string {
 func (*RegisterClientResponse) ProtoMessage() {}
 
 func (x *RegisterClientResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[59]
+	mi := &file_api_proto_monofs_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3948,7 +4114,7 @@ func (x *RegisterClientResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterClientResponse.ProtoReflect.Descriptor instead.
 func (*RegisterClientResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{59}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *RegisterClientResponse) GetSuccess() bool {
@@ -3982,7 +4148,7 @@ type UnregisterClientRequest struct {
 
 func (x *UnregisterClientRequest) Reset() {
 	*x = UnregisterClientRequest{}
-	mi := &file_api_proto_monofs_proto_msgTypes[60]
+	mi := &file_api_proto_monofs_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3994,7 +4160,7 @@ func (x *UnregisterClientRequest) String() string {
 func (*UnregisterClientRequest) ProtoMessage() {}
 
 func (x *UnregisterClientRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[60]
+	mi := &file_api_proto_monofs_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4007,7 +4173,7 @@ func (x *UnregisterClientRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnregisterClientRequest.ProtoReflect.Descriptor instead.
 func (*UnregisterClientRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{60}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *UnregisterClientRequest) GetClientId() string {
@@ -4034,7 +4200,7 @@ type UnregisterClientResponse struct {
 
 func (x *UnregisterClientResponse) Reset() {
 	*x = UnregisterClientResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[61]
+	mi := &file_api_proto_monofs_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4046,7 +4212,7 @@ func (x *UnregisterClientResponse) String() string {
 func (*UnregisterClientResponse) ProtoMessage() {}
 
 func (x *UnregisterClientResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[61]
+	mi := &file_api_proto_monofs_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4059,7 +4225,7 @@ func (x *UnregisterClientResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnregisterClientResponse.ProtoReflect.Descriptor instead.
 func (*UnregisterClientResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{61}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *UnregisterClientResponse) GetSuccess() bool {
@@ -4088,7 +4254,7 @@ type ClientHeartbeatRequest struct {
 
 func (x *ClientHeartbeatRequest) Reset() {
 	*x = ClientHeartbeatRequest{}
-	mi := &file_api_proto_monofs_proto_msgTypes[62]
+	mi := &file_api_proto_monofs_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4100,7 +4266,7 @@ func (x *ClientHeartbeatRequest) String() string {
 func (*ClientHeartbeatRequest) ProtoMessage() {}
 
 func (x *ClientHeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[62]
+	mi := &file_api_proto_monofs_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4113,7 +4279,7 @@ func (x *ClientHeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientHeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*ClientHeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{62}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *ClientHeartbeatRequest) GetClientId() string {
@@ -4155,7 +4321,7 @@ type ClientHeartbeatResponse struct {
 
 func (x *ClientHeartbeatResponse) Reset() {
 	*x = ClientHeartbeatResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[63]
+	mi := &file_api_proto_monofs_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4167,7 +4333,7 @@ func (x *ClientHeartbeatResponse) String() string {
 func (*ClientHeartbeatResponse) ProtoMessage() {}
 
 func (x *ClientHeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[63]
+	mi := &file_api_proto_monofs_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4180,7 +4346,7 @@ func (x *ClientHeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientHeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*ClientHeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{63}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *ClientHeartbeatResponse) GetSuccess() bool {
@@ -4212,7 +4378,7 @@ type ListClientsRequest struct {
 
 func (x *ListClientsRequest) Reset() {
 	*x = ListClientsRequest{}
-	mi := &file_api_proto_monofs_proto_msgTypes[64]
+	mi := &file_api_proto_monofs_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4224,7 +4390,7 @@ func (x *ListClientsRequest) String() string {
 func (*ListClientsRequest) ProtoMessage() {}
 
 func (x *ListClientsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[64]
+	mi := &file_api_proto_monofs_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4237,7 +4403,7 @@ func (x *ListClientsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListClientsRequest.ProtoReflect.Descriptor instead.
 func (*ListClientsRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{64}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{65}
 }
 
 type ListClientsResponse struct {
@@ -4249,7 +4415,7 @@ type ListClientsResponse struct {
 
 func (x *ListClientsResponse) Reset() {
 	*x = ListClientsResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[65]
+	mi := &file_api_proto_monofs_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4261,7 +4427,7 @@ func (x *ListClientsResponse) String() string {
 func (*ListClientsResponse) ProtoMessage() {}
 
 func (x *ListClientsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[65]
+	mi := &file_api_proto_monofs_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4274,7 +4440,7 @@ func (x *ListClientsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListClientsResponse.ProtoReflect.Descriptor instead.
 func (*ListClientsResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{65}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *ListClientsResponse) GetClients() []*ClientInfo {
@@ -4303,7 +4469,7 @@ type ClientInfo struct {
 
 func (x *ClientInfo) Reset() {
 	*x = ClientInfo{}
-	mi := &file_api_proto_monofs_proto_msgTypes[66]
+	mi := &file_api_proto_monofs_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4315,7 +4481,7 @@ func (x *ClientInfo) String() string {
 func (*ClientInfo) ProtoMessage() {}
 
 func (x *ClientInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[66]
+	mi := &file_api_proto_monofs_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4328,7 +4494,7 @@ func (x *ClientInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientInfo.ProtoReflect.Descriptor instead.
 func (*ClientInfo) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{66}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *ClientInfo) GetClientId() string {
@@ -4419,7 +4585,7 @@ type FailoverRequest struct {
 
 func (x *FailoverRequest) Reset() {
 	*x = FailoverRequest{}
-	mi := &file_api_proto_monofs_proto_msgTypes[67]
+	mi := &file_api_proto_monofs_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4431,7 +4597,7 @@ func (x *FailoverRequest) String() string {
 func (*FailoverRequest) ProtoMessage() {}
 
 func (x *FailoverRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[67]
+	mi := &file_api_proto_monofs_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4444,7 +4610,7 @@ func (x *FailoverRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FailoverRequest.ProtoReflect.Descriptor instead.
 func (*FailoverRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{67}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *FailoverRequest) GetSourceNodeId() string {
@@ -4472,7 +4638,7 @@ type FailoverResponse struct {
 
 func (x *FailoverResponse) Reset() {
 	*x = FailoverResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[68]
+	mi := &file_api_proto_monofs_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4484,7 +4650,7 @@ func (x *FailoverResponse) String() string {
 func (*FailoverResponse) ProtoMessage() {}
 
 func (x *FailoverResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[68]
+	mi := &file_api_proto_monofs_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4497,7 +4663,7 @@ func (x *FailoverResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FailoverResponse.ProtoReflect.Descriptor instead.
 func (*FailoverResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{68}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *FailoverResponse) GetSuccess() bool {
@@ -4530,7 +4696,7 @@ type ClusterStatsRequest struct {
 
 func (x *ClusterStatsRequest) Reset() {
 	*x = ClusterStatsRequest{}
-	mi := &file_api_proto_monofs_proto_msgTypes[69]
+	mi := &file_api_proto_monofs_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4542,7 +4708,7 @@ func (x *ClusterStatsRequest) String() string {
 func (*ClusterStatsRequest) ProtoMessage() {}
 
 func (x *ClusterStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[69]
+	mi := &file_api_proto_monofs_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4555,7 +4721,7 @@ func (x *ClusterStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterStatsRequest.ProtoReflect.Descriptor instead.
 func (*ClusterStatsRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{69}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{70}
 }
 
 type ClusterStatsResponse struct {
@@ -4575,7 +4741,7 @@ type ClusterStatsResponse struct {
 
 func (x *ClusterStatsResponse) Reset() {
 	*x = ClusterStatsResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[70]
+	mi := &file_api_proto_monofs_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4587,7 +4753,7 @@ func (x *ClusterStatsResponse) String() string {
 func (*ClusterStatsResponse) ProtoMessage() {}
 
 func (x *ClusterStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[70]
+	mi := &file_api_proto_monofs_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4600,7 +4766,7 @@ func (x *ClusterStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterStatsResponse.ProtoReflect.Descriptor instead.
 func (*ClusterStatsResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{70}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *ClusterStatsResponse) GetTotalNodes() int32 {
@@ -4674,7 +4840,7 @@ type NodeStatsRequest struct {
 
 func (x *NodeStatsRequest) Reset() {
 	*x = NodeStatsRequest{}
-	mi := &file_api_proto_monofs_proto_msgTypes[71]
+	mi := &file_api_proto_monofs_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4686,7 +4852,7 @@ func (x *NodeStatsRequest) String() string {
 func (*NodeStatsRequest) ProtoMessage() {}
 
 func (x *NodeStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[71]
+	mi := &file_api_proto_monofs_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4699,7 +4865,7 @@ func (x *NodeStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeStatsRequest.ProtoReflect.Descriptor instead.
 func (*NodeStatsRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{71}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{72}
 }
 
 type NodeStatsResponse struct {
@@ -4711,7 +4877,7 @@ type NodeStatsResponse struct {
 
 func (x *NodeStatsResponse) Reset() {
 	*x = NodeStatsResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[72]
+	mi := &file_api_proto_monofs_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4723,7 +4889,7 @@ func (x *NodeStatsResponse) String() string {
 func (*NodeStatsResponse) ProtoMessage() {}
 
 func (x *NodeStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[72]
+	mi := &file_api_proto_monofs_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4736,7 +4902,7 @@ func (x *NodeStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeStatsResponse.ProtoReflect.Descriptor instead.
 func (*NodeStatsResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{72}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *NodeStatsResponse) GetNodes() []*NodeStatInfo {
@@ -4765,7 +4931,7 @@ type NodeStatInfo struct {
 
 func (x *NodeStatInfo) Reset() {
 	*x = NodeStatInfo{}
-	mi := &file_api_proto_monofs_proto_msgTypes[73]
+	mi := &file_api_proto_monofs_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4777,7 +4943,7 @@ func (x *NodeStatInfo) String() string {
 func (*NodeStatInfo) ProtoMessage() {}
 
 func (x *NodeStatInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[73]
+	mi := &file_api_proto_monofs_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4790,7 +4956,7 @@ func (x *NodeStatInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeStatInfo.ProtoReflect.Descriptor instead.
 func (*NodeStatInfo) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{73}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *NodeStatInfo) GetNodeId() string {
@@ -4881,7 +5047,7 @@ type DrainClusterRequest struct {
 
 func (x *DrainClusterRequest) Reset() {
 	*x = DrainClusterRequest{}
-	mi := &file_api_proto_monofs_proto_msgTypes[74]
+	mi := &file_api_proto_monofs_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4893,7 +5059,7 @@ func (x *DrainClusterRequest) String() string {
 func (*DrainClusterRequest) ProtoMessage() {}
 
 func (x *DrainClusterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[74]
+	mi := &file_api_proto_monofs_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4906,7 +5072,7 @@ func (x *DrainClusterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainClusterRequest.ProtoReflect.Descriptor instead.
 func (*DrainClusterRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{74}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *DrainClusterRequest) GetReason() string {
@@ -4934,7 +5100,7 @@ type DrainClusterResponse struct {
 
 func (x *DrainClusterResponse) Reset() {
 	*x = DrainClusterResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[75]
+	mi := &file_api_proto_monofs_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4946,7 +5112,7 @@ func (x *DrainClusterResponse) String() string {
 func (*DrainClusterResponse) ProtoMessage() {}
 
 func (x *DrainClusterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[75]
+	mi := &file_api_proto_monofs_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4959,7 +5125,7 @@ func (x *DrainClusterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainClusterResponse.ProtoReflect.Descriptor instead.
 func (*DrainClusterResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{75}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *DrainClusterResponse) GetSuccess() bool {
@@ -4991,7 +5157,7 @@ type UndrainClusterRequest struct {
 
 func (x *UndrainClusterRequest) Reset() {
 	*x = UndrainClusterRequest{}
-	mi := &file_api_proto_monofs_proto_msgTypes[76]
+	mi := &file_api_proto_monofs_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5003,7 +5169,7 @@ func (x *UndrainClusterRequest) String() string {
 func (*UndrainClusterRequest) ProtoMessage() {}
 
 func (x *UndrainClusterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[76]
+	mi := &file_api_proto_monofs_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5016,7 +5182,7 @@ func (x *UndrainClusterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UndrainClusterRequest.ProtoReflect.Descriptor instead.
 func (*UndrainClusterRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{76}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{77}
 }
 
 type UndrainClusterResponse struct {
@@ -5029,7 +5195,7 @@ type UndrainClusterResponse struct {
 
 func (x *UndrainClusterResponse) Reset() {
 	*x = UndrainClusterResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[77]
+	mi := &file_api_proto_monofs_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5041,7 +5207,7 @@ func (x *UndrainClusterResponse) String() string {
 func (*UndrainClusterResponse) ProtoMessage() {}
 
 func (x *UndrainClusterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[77]
+	mi := &file_api_proto_monofs_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5054,7 +5220,7 @@ func (x *UndrainClusterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UndrainClusterResponse.ProtoReflect.Descriptor instead.
 func (*UndrainClusterResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{77}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *UndrainClusterResponse) GetSuccess() bool {
@@ -5081,7 +5247,7 @@ type GetNodeFilesRequest struct {
 
 func (x *GetNodeFilesRequest) Reset() {
 	*x = GetNodeFilesRequest{}
-	mi := &file_api_proto_monofs_proto_msgTypes[78]
+	mi := &file_api_proto_monofs_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5093,7 +5259,7 @@ func (x *GetNodeFilesRequest) String() string {
 func (*GetNodeFilesRequest) ProtoMessage() {}
 
 func (x *GetNodeFilesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[78]
+	mi := &file_api_proto_monofs_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5106,7 +5272,7 @@ func (x *GetNodeFilesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNodeFilesRequest.ProtoReflect.Descriptor instead.
 func (*GetNodeFilesRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{78}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *GetNodeFilesRequest) GetNodeId() string {
@@ -5125,7 +5291,7 @@ type GetNodeFilesResponse struct {
 
 func (x *GetNodeFilesResponse) Reset() {
 	*x = GetNodeFilesResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[79]
+	mi := &file_api_proto_monofs_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5137,7 +5303,7 @@ func (x *GetNodeFilesResponse) String() string {
 func (*GetNodeFilesResponse) ProtoMessage() {}
 
 func (x *GetNodeFilesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[79]
+	mi := &file_api_proto_monofs_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5150,7 +5316,7 @@ func (x *GetNodeFilesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNodeFilesResponse.ProtoReflect.Descriptor instead.
 func (*GetNodeFilesResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{79}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *GetNodeFilesResponse) GetFiles() []*FileInfo {
@@ -5171,7 +5337,7 @@ type FileInfo struct {
 
 func (x *FileInfo) Reset() {
 	*x = FileInfo{}
-	mi := &file_api_proto_monofs_proto_msgTypes[80]
+	mi := &file_api_proto_monofs_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5183,7 +5349,7 @@ func (x *FileInfo) String() string {
 func (*FileInfo) ProtoMessage() {}
 
 func (x *FileInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[80]
+	mi := &file_api_proto_monofs_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5196,7 +5362,7 @@ func (x *FileInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileInfo.ProtoReflect.Descriptor instead.
 func (*FileInfo) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{80}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *FileInfo) GetStorageId() string {
@@ -5229,7 +5395,7 @@ type PredictorStatsRequest struct {
 
 func (x *PredictorStatsRequest) Reset() {
 	*x = PredictorStatsRequest{}
-	mi := &file_api_proto_monofs_proto_msgTypes[81]
+	mi := &file_api_proto_monofs_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5241,7 +5407,7 @@ func (x *PredictorStatsRequest) String() string {
 func (*PredictorStatsRequest) ProtoMessage() {}
 
 func (x *PredictorStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[81]
+	mi := &file_api_proto_monofs_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5254,7 +5420,7 @@ func (x *PredictorStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PredictorStatsRequest.ProtoReflect.Descriptor instead.
 func (*PredictorStatsRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{81}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{82}
 }
 
 type PredictorStatsResponse struct {
@@ -5274,7 +5440,7 @@ type PredictorStatsResponse struct {
 
 func (x *PredictorStatsResponse) Reset() {
 	*x = PredictorStatsResponse{}
-	mi := &file_api_proto_monofs_proto_msgTypes[82]
+	mi := &file_api_proto_monofs_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5286,7 +5452,7 @@ func (x *PredictorStatsResponse) String() string {
 func (*PredictorStatsResponse) ProtoMessage() {}
 
 func (x *PredictorStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[82]
+	mi := &file_api_proto_monofs_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5299,7 +5465,7 @@ func (x *PredictorStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PredictorStatsResponse.ProtoReflect.Descriptor instead.
 func (*PredictorStatsResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{82}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *PredictorStatsResponse) GetNodeId() string {
@@ -5365,6 +5531,2217 @@ func (x *PredictorStatsResponse) GetEnabled() bool {
 	return false
 }
 
+// Ingestion whitelist messages
+type AddWhitelistedClientRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ClientId      string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"` // Client UUID to whitelist
+	Label         string                 `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`                       // Human-friendly label (optional)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddWhitelistedClientRequest) Reset() {
+	*x = AddWhitelistedClientRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[84]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddWhitelistedClientRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddWhitelistedClientRequest) ProtoMessage() {}
+
+func (x *AddWhitelistedClientRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[84]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddWhitelistedClientRequest.ProtoReflect.Descriptor instead.
+func (*AddWhitelistedClientRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{84}
+}
+
+func (x *AddWhitelistedClientRequest) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+func (x *AddWhitelistedClientRequest) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+type AddWhitelistedClientResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddWhitelistedClientResponse) Reset() {
+	*x = AddWhitelistedClientResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[85]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddWhitelistedClientResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddWhitelistedClientResponse) ProtoMessage() {}
+
+func (x *AddWhitelistedClientResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[85]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddWhitelistedClientResponse.ProtoReflect.Descriptor instead.
+func (*AddWhitelistedClientResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{85}
+}
+
+func (x *AddWhitelistedClientResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *AddWhitelistedClientResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type RemoveWhitelistedClientRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ClientId      string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveWhitelistedClientRequest) Reset() {
+	*x = RemoveWhitelistedClientRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[86]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveWhitelistedClientRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveWhitelistedClientRequest) ProtoMessage() {}
+
+func (x *RemoveWhitelistedClientRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[86]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveWhitelistedClientRequest.ProtoReflect.Descriptor instead.
+func (*RemoveWhitelistedClientRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{86}
+}
+
+func (x *RemoveWhitelistedClientRequest) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+type RemoveWhitelistedClientResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveWhitelistedClientResponse) Reset() {
+	*x = RemoveWhitelistedClientResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[87]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveWhitelistedClientResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveWhitelistedClientResponse) ProtoMessage() {}
+
+func (x *RemoveWhitelistedClientResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[87]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveWhitelistedClientResponse.ProtoReflect.Descriptor instead.
+func (*RemoveWhitelistedClientResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{87}
+}
+
+func (x *RemoveWhitelistedClientResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *RemoveWhitelistedClientResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type ListWhitelistedClientsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListWhitelistedClientsRequest) Reset() {
+	*x = ListWhitelistedClientsRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[88]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWhitelistedClientsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWhitelistedClientsRequest) ProtoMessage() {}
+
+func (x *ListWhitelistedClientsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[88]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWhitelistedClientsRequest.ProtoReflect.Descriptor instead.
+func (*ListWhitelistedClientsRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{88}
+}
+
+type ListWhitelistedClientsResponse struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Clients          []*WhitelistedClient   `protobuf:"bytes,1,rep,name=clients,proto3" json:"clients,omitempty"`
+	WhitelistEnabled bool                   `protobuf:"varint,2,opt,name=whitelist_enabled,json=whitelistEnabled,proto3" json:"whitelist_enabled,omitempty"` // Whether whitelist enforcement is active
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ListWhitelistedClientsResponse) Reset() {
+	*x = ListWhitelistedClientsResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[89]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWhitelistedClientsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWhitelistedClientsResponse) ProtoMessage() {}
+
+func (x *ListWhitelistedClientsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[89]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWhitelistedClientsResponse.ProtoReflect.Descriptor instead.
+func (*ListWhitelistedClientsResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{89}
+}
+
+func (x *ListWhitelistedClientsResponse) GetClients() []*WhitelistedClient {
+	if x != nil {
+		return x.Clients
+	}
+	return nil
+}
+
+func (x *ListWhitelistedClientsResponse) GetWhitelistEnabled() bool {
+	if x != nil {
+		return x.WhitelistEnabled
+	}
+	return false
+}
+
+type WhitelistedClient struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ClientId      string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	Label         string                 `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`
+	AddedAt       int64                  `protobuf:"varint,3,opt,name=added_at,json=addedAt,proto3" json:"added_at,omitempty"` // Unix timestamp
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WhitelistedClient) Reset() {
+	*x = WhitelistedClient{}
+	mi := &file_api_proto_monofs_proto_msgTypes[90]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WhitelistedClient) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WhitelistedClient) ProtoMessage() {}
+
+func (x *WhitelistedClient) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[90]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WhitelistedClient.ProtoReflect.Descriptor instead.
+func (*WhitelistedClient) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{90}
+}
+
+func (x *WhitelistedClient) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+func (x *WhitelistedClient) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+func (x *WhitelistedClient) GetAddedAt() int64 {
+	if x != nil {
+		return x.AddedAt
+	}
+	return 0
+}
+
+type SetWhitelistEnabledRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Enabled       bool                   `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetWhitelistEnabledRequest) Reset() {
+	*x = SetWhitelistEnabledRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[91]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetWhitelistEnabledRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetWhitelistEnabledRequest) ProtoMessage() {}
+
+func (x *SetWhitelistEnabledRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[91]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetWhitelistEnabledRequest.ProtoReflect.Descriptor instead.
+func (*SetWhitelistEnabledRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{91}
+}
+
+func (x *SetWhitelistEnabledRequest) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+type SetWhitelistEnabledResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetWhitelistEnabledResponse) Reset() {
+	*x = SetWhitelistEnabledResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[92]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetWhitelistEnabledResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetWhitelistEnabledResponse) ProtoMessage() {}
+
+func (x *SetWhitelistEnabledResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[92]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetWhitelistEnabledResponse.ProtoReflect.Descriptor instead.
+func (*SetWhitelistEnabledResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{92}
+}
+
+func (x *SetWhitelistEnabledResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *SetWhitelistEnabledResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type GetWhitelistStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetWhitelistStatusRequest) Reset() {
+	*x = GetWhitelistStatusRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[93]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWhitelistStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWhitelistStatusRequest) ProtoMessage() {}
+
+func (x *GetWhitelistStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[93]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWhitelistStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetWhitelistStatusRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{93}
+}
+
+type GetWhitelistStatusResponse struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Enabled          bool                   `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	WhitelistedCount int32                  `protobuf:"varint,2,opt,name=whitelisted_count,json=whitelistedCount,proto3" json:"whitelisted_count,omitempty"`
+	Clients          []*WhitelistedClient   `protobuf:"bytes,3,rep,name=clients,proto3" json:"clients,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *GetWhitelistStatusResponse) Reset() {
+	*x = GetWhitelistStatusResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[94]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWhitelistStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWhitelistStatusResponse) ProtoMessage() {}
+
+func (x *GetWhitelistStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[94]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWhitelistStatusResponse.ProtoReflect.Descriptor instead.
+func (*GetWhitelistStatusResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{94}
+}
+
+func (x *GetWhitelistStatusResponse) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *GetWhitelistStatusResponse) GetWhitelistedCount() int32 {
+	if x != nil {
+		return x.WhitelistedCount
+	}
+	return 0
+}
+
+func (x *GetWhitelistStatusResponse) GetClients() []*WhitelistedClient {
+	if x != nil {
+		return x.Clients
+	}
+	return nil
+}
+
+// Delete a directory and all contents recursively on a single node
+type DeleteDirectoryRecursiveRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StorageId     string                 `protobuf:"bytes,1,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	DirPath       string                 `protobuf:"bytes,2,opt,name=dir_path,json=dirPath,proto3" json:"dir_path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteDirectoryRecursiveRequest) Reset() {
+	*x = DeleteDirectoryRecursiveRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[95]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteDirectoryRecursiveRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteDirectoryRecursiveRequest) ProtoMessage() {}
+
+func (x *DeleteDirectoryRecursiveRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[95]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteDirectoryRecursiveRequest.ProtoReflect.Descriptor instead.
+func (*DeleteDirectoryRecursiveRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{95}
+}
+
+func (x *DeleteDirectoryRecursiveRequest) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *DeleteDirectoryRecursiveRequest) GetDirPath() string {
+	if x != nil {
+		return x.DirPath
+	}
+	return ""
+}
+
+type DeleteDirectoryRecursiveResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	FilesDeleted  int64                  `protobuf:"varint,3,opt,name=files_deleted,json=filesDeleted,proto3" json:"files_deleted,omitempty"`
+	DirsDeleted   int64                  `protobuf:"varint,4,opt,name=dirs_deleted,json=dirsDeleted,proto3" json:"dirs_deleted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteDirectoryRecursiveResponse) Reset() {
+	*x = DeleteDirectoryRecursiveResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[96]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteDirectoryRecursiveResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteDirectoryRecursiveResponse) ProtoMessage() {}
+
+func (x *DeleteDirectoryRecursiveResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[96]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteDirectoryRecursiveResponse.ProtoReflect.Descriptor instead.
+func (*DeleteDirectoryRecursiveResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{96}
+}
+
+func (x *DeleteDirectoryRecursiveResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *DeleteDirectoryRecursiveResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *DeleteDirectoryRecursiveResponse) GetFilesDeleted() int64 {
+	if x != nil {
+		return x.FilesDeleted
+	}
+	return 0
+}
+
+func (x *DeleteDirectoryRecursiveResponse) GetDirsDeleted() int64 {
+	if x != nil {
+		return x.DirsDeleted
+	}
+	return 0
+}
+
+// Guardian file/directory deletion (router-level, fan-out to all nodes)
+type DeleteGuardianFileRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StorageId     string                 `protobuf:"bytes,1,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	FilePath      string                 `protobuf:"bytes,2,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	Token         string                 `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteGuardianFileRequest) Reset() {
+	*x = DeleteGuardianFileRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[97]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteGuardianFileRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteGuardianFileRequest) ProtoMessage() {}
+
+func (x *DeleteGuardianFileRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[97]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteGuardianFileRequest.ProtoReflect.Descriptor instead.
+func (*DeleteGuardianFileRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{97}
+}
+
+func (x *DeleteGuardianFileRequest) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *DeleteGuardianFileRequest) GetFilePath() string {
+	if x != nil {
+		return x.FilePath
+	}
+	return ""
+}
+
+func (x *DeleteGuardianFileRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+type DeleteGuardianFileResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteGuardianFileResponse) Reset() {
+	*x = DeleteGuardianFileResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[98]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteGuardianFileResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteGuardianFileResponse) ProtoMessage() {}
+
+func (x *DeleteGuardianFileResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[98]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteGuardianFileResponse.ProtoReflect.Descriptor instead.
+func (*DeleteGuardianFileResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{98}
+}
+
+func (x *DeleteGuardianFileResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *DeleteGuardianFileResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type DeleteGuardianDirectoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StorageId     string                 `protobuf:"bytes,1,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	DirPath       string                 `protobuf:"bytes,2,opt,name=dir_path,json=dirPath,proto3" json:"dir_path,omitempty"`
+	Token         string                 `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteGuardianDirectoryRequest) Reset() {
+	*x = DeleteGuardianDirectoryRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[99]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteGuardianDirectoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteGuardianDirectoryRequest) ProtoMessage() {}
+
+func (x *DeleteGuardianDirectoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[99]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteGuardianDirectoryRequest.ProtoReflect.Descriptor instead.
+func (*DeleteGuardianDirectoryRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{99}
+}
+
+func (x *DeleteGuardianDirectoryRequest) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *DeleteGuardianDirectoryRequest) GetDirPath() string {
+	if x != nil {
+		return x.DirPath
+	}
+	return ""
+}
+
+func (x *DeleteGuardianDirectoryRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+type DeleteGuardianDirectoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	FilesDeleted  int64                  `protobuf:"varint,3,opt,name=files_deleted,json=filesDeleted,proto3" json:"files_deleted,omitempty"`
+	DirsDeleted   int64                  `protobuf:"varint,4,opt,name=dirs_deleted,json=dirsDeleted,proto3" json:"dirs_deleted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteGuardianDirectoryResponse) Reset() {
+	*x = DeleteGuardianDirectoryResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[100]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteGuardianDirectoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteGuardianDirectoryResponse) ProtoMessage() {}
+
+func (x *DeleteGuardianDirectoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[100]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteGuardianDirectoryResponse.ProtoReflect.Descriptor instead.
+func (*DeleteGuardianDirectoryResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{100}
+}
+
+func (x *DeleteGuardianDirectoryResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *DeleteGuardianDirectoryResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *DeleteGuardianDirectoryResponse) GetFilesDeleted() int64 {
+	if x != nil {
+		return x.FilesDeleted
+	}
+	return 0
+}
+
+func (x *DeleteGuardianDirectoryResponse) GetDirsDeleted() int64 {
+	if x != nil {
+		return x.DirsDeleted
+	}
+	return 0
+}
+
+// SubscribeChangesRequest configures a SubscribeToChanges stream.
+type SubscribeChangesRequest struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	StorageId string                 `protobuf:"bytes,1,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	// Path prefixes to filter events (empty = all files under the storage ID).
+	PathPrefixes  []string `protobuf:"bytes,2,rep,name=path_prefixes,json=pathPrefixes,proto3" json:"path_prefixes,omitempty"`
+	ClientId      string   `protobuf:"bytes,3,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SubscribeChangesRequest) Reset() {
+	*x = SubscribeChangesRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[101]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubscribeChangesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubscribeChangesRequest) ProtoMessage() {}
+
+func (x *SubscribeChangesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[101]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubscribeChangesRequest.ProtoReflect.Descriptor instead.
+func (*SubscribeChangesRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{101}
+}
+
+func (x *SubscribeChangesRequest) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *SubscribeChangesRequest) GetPathPrefixes() []string {
+	if x != nil {
+		return x.PathPrefixes
+	}
+	return nil
+}
+
+func (x *SubscribeChangesRequest) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+// ChangeEvent is emitted on every file mutation within a watched storage ID.
+type ChangeEvent struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	StorageId   string                 `protobuf:"bytes,1,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	FilePath    string                 `protobuf:"bytes,2,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	Type        ChangeType             `protobuf:"varint,3,opt,name=type,proto3,enum=monofs.ChangeType" json:"type,omitempty"`
+	NewBlobHash string                 `protobuf:"bytes,4,opt,name=new_blob_hash,json=newBlobHash,proto3" json:"new_blob_hash,omitempty"`
+	OldBlobHash string                 `protobuf:"bytes,5,opt,name=old_blob_hash,json=oldBlobHash,proto3" json:"old_blob_hash,omitempty"`
+	// inline_content carries raw file bytes for small files (< 64 KiB) so
+	// consumers can act on YAML content without an extra Read round-trip.
+	InlineContent []byte `protobuf:"bytes,6,opt,name=inline_content,json=inlineContent,proto3" json:"inline_content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangeEvent) Reset() {
+	*x = ChangeEvent{}
+	mi := &file_api_proto_monofs_proto_msgTypes[102]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangeEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangeEvent) ProtoMessage() {}
+
+func (x *ChangeEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[102]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangeEvent.ProtoReflect.Descriptor instead.
+func (*ChangeEvent) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{102}
+}
+
+func (x *ChangeEvent) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *ChangeEvent) GetFilePath() string {
+	if x != nil {
+		return x.FilePath
+	}
+	return ""
+}
+
+func (x *ChangeEvent) GetType() ChangeType {
+	if x != nil {
+		return x.Type
+	}
+	return ChangeType_CHANGE_TYPE_UNSPECIFIED
+}
+
+func (x *ChangeEvent) GetNewBlobHash() string {
+	if x != nil {
+		return x.NewBlobHash
+	}
+	return ""
+}
+
+func (x *ChangeEvent) GetOldBlobHash() string {
+	if x != nil {
+		return x.OldBlobHash
+	}
+	return ""
+}
+
+func (x *ChangeEvent) GetInlineContent() []byte {
+	if x != nil {
+		return x.InlineContent
+	}
+	return nil
+}
+
+// InjectGuardianFile is a single file to be injected into a guardian partition.
+type InjectGuardianFile struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`       // relative path within the partition (e.g. "partition.yaml", "intents/foo.yaml")
+	Content       []byte                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"` // raw file content
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InjectGuardianFile) Reset() {
+	*x = InjectGuardianFile{}
+	mi := &file_api_proto_monofs_proto_msgTypes[103]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InjectGuardianFile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InjectGuardianFile) ProtoMessage() {}
+
+func (x *InjectGuardianFile) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[103]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InjectGuardianFile.ProtoReflect.Descriptor instead.
+func (*InjectGuardianFile) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{103}
+}
+
+func (x *InjectGuardianFile) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *InjectGuardianFile) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+// InjectGuardianPartitionRequest carries inline file content for a partition.
+type InjectGuardianPartitionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GuardianToken string                 `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"` // auth token of a registered guardian client
+	PartitionName string                 `protobuf:"bytes,2,opt,name=partition_name,json=partitionName,proto3" json:"partition_name,omitempty"` // partition name (no slashes)
+	Files         []*InjectGuardianFile  `protobuf:"bytes,3,rep,name=files,proto3" json:"files,omitempty"`
+	GuardianUiUrl string                 `protobuf:"bytes,4,opt,name=guardian_ui_url,json=guardianUiUrl,proto3" json:"guardian_ui_url,omitempty"` // externally accessible URL of the guardian topology page for this partition (e.g. "http://guardian.example.com/topology?partition=foo")
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InjectGuardianPartitionRequest) Reset() {
+	*x = InjectGuardianPartitionRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[104]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InjectGuardianPartitionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InjectGuardianPartitionRequest) ProtoMessage() {}
+
+func (x *InjectGuardianPartitionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[104]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InjectGuardianPartitionRequest.ProtoReflect.Descriptor instead.
+func (*InjectGuardianPartitionRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{104}
+}
+
+func (x *InjectGuardianPartitionRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *InjectGuardianPartitionRequest) GetPartitionName() string {
+	if x != nil {
+		return x.PartitionName
+	}
+	return ""
+}
+
+func (x *InjectGuardianPartitionRequest) GetFiles() []*InjectGuardianFile {
+	if x != nil {
+		return x.Files
+	}
+	return nil
+}
+
+func (x *InjectGuardianPartitionRequest) GetGuardianUiUrl() string {
+	if x != nil {
+		return x.GuardianUiUrl
+	}
+	return ""
+}
+
+// InjectGuardianPartitionResponse reports the result of an inline injection.
+type InjectGuardianPartitionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	StorageId     string                 `protobuf:"bytes,2,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"` // SHA-256 of "guardian/<partition_name>"
+	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	FilesIngested int32                  `protobuf:"varint,4,opt,name=files_ingested,json=filesIngested,proto3" json:"files_ingested,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InjectGuardianPartitionResponse) Reset() {
+	*x = InjectGuardianPartitionResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[105]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InjectGuardianPartitionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InjectGuardianPartitionResponse) ProtoMessage() {}
+
+func (x *InjectGuardianPartitionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[105]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InjectGuardianPartitionResponse.ProtoReflect.Descriptor instead.
+func (*InjectGuardianPartitionResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{105}
+}
+
+func (x *InjectGuardianPartitionResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *InjectGuardianPartitionResponse) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *InjectGuardianPartitionResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *InjectGuardianPartitionResponse) GetFilesIngested() int32 {
+	if x != nil {
+		return x.FilesIngested
+	}
+	return 0
+}
+
+type GuardianMutationContext struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PrincipalId   string                 `protobuf:"bytes,1,opt,name=principal_id,json=principalId,proto3" json:"principal_id,omitempty"`
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	CorrelationId string                 `protobuf:"bytes,3,opt,name=correlation_id,json=correlationId,proto3" json:"correlation_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GuardianMutationContext) Reset() {
+	*x = GuardianMutationContext{}
+	mi := &file_api_proto_monofs_proto_msgTypes[106]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianMutationContext) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianMutationContext) ProtoMessage() {}
+
+func (x *GuardianMutationContext) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[106]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianMutationContext.ProtoReflect.Descriptor instead.
+func (*GuardianMutationContext) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{106}
+}
+
+func (x *GuardianMutationContext) GetPrincipalId() string {
+	if x != nil {
+		return x.PrincipalId
+	}
+	return ""
+}
+
+func (x *GuardianMutationContext) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *GuardianMutationContext) GetCorrelationId() string {
+	if x != nil {
+		return x.CorrelationId
+	}
+	return ""
+}
+
+type GuardianPathWrite struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	LogicalPath       string                 `protobuf:"bytes,1,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	Content           []byte                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	ExpectedVersionId string                 `protobuf:"bytes,3,opt,name=expected_version_id,json=expectedVersionId,proto3" json:"expected_version_id,omitempty"` // empty = blind write, "absent" = create only
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *GuardianPathWrite) Reset() {
+	*x = GuardianPathWrite{}
+	mi := &file_api_proto_monofs_proto_msgTypes[107]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianPathWrite) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianPathWrite) ProtoMessage() {}
+
+func (x *GuardianPathWrite) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[107]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianPathWrite.ProtoReflect.Descriptor instead.
+func (*GuardianPathWrite) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{107}
+}
+
+func (x *GuardianPathWrite) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *GuardianPathWrite) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+func (x *GuardianPathWrite) GetExpectedVersionId() string {
+	if x != nil {
+		return x.ExpectedVersionId
+	}
+	return ""
+}
+
+type GuardianPathDelete struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	LogicalPath       string                 `protobuf:"bytes,1,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	ExpectedVersionId string                 `protobuf:"bytes,2,opt,name=expected_version_id,json=expectedVersionId,proto3" json:"expected_version_id,omitempty"` // optional CAS guard
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *GuardianPathDelete) Reset() {
+	*x = GuardianPathDelete{}
+	mi := &file_api_proto_monofs_proto_msgTypes[108]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianPathDelete) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianPathDelete) ProtoMessage() {}
+
+func (x *GuardianPathDelete) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[108]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianPathDelete.ProtoReflect.Descriptor instead.
+func (*GuardianPathDelete) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{108}
+}
+
+func (x *GuardianPathDelete) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *GuardianPathDelete) GetExpectedVersionId() string {
+	if x != nil {
+		return x.ExpectedVersionId
+	}
+	return ""
+}
+
+type GuardianFileVersion struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	LogicalPath     string                 `protobuf:"bytes,1,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	DisplayPath     string                 `protobuf:"bytes,2,opt,name=display_path,json=displayPath,proto3" json:"display_path,omitempty"`
+	StorageId       string                 `protobuf:"bytes,3,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	VersionId       string                 `protobuf:"bytes,4,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	BatchRevisionId string                 `protobuf:"bytes,5,opt,name=batch_revision_id,json=batchRevisionId,proto3" json:"batch_revision_id,omitempty"`
+	ContentSha256   string                 `protobuf:"bytes,6,opt,name=content_sha256,json=contentSha256,proto3" json:"content_sha256,omitempty"`
+	CommittedAt     int64                  `protobuf:"varint,7,opt,name=committed_at,json=committedAt,proto3" json:"committed_at,omitempty"`
+	Tombstone       bool                   `protobuf:"varint,8,opt,name=tombstone,proto3" json:"tombstone,omitempty"`
+	PrincipalId     string                 `protobuf:"bytes,9,opt,name=principal_id,json=principalId,proto3" json:"principal_id,omitempty"`
+	Reason          string                 `protobuf:"bytes,10,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GuardianFileVersion) Reset() {
+	*x = GuardianFileVersion{}
+	mi := &file_api_proto_monofs_proto_msgTypes[109]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianFileVersion) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianFileVersion) ProtoMessage() {}
+
+func (x *GuardianFileVersion) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[109]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianFileVersion.ProtoReflect.Descriptor instead.
+func (*GuardianFileVersion) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{109}
+}
+
+func (x *GuardianFileVersion) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetDisplayPath() string {
+	if x != nil {
+		return x.DisplayPath
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetVersionId() string {
+	if x != nil {
+		return x.VersionId
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetBatchRevisionId() string {
+	if x != nil {
+		return x.BatchRevisionId
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetContentSha256() string {
+	if x != nil {
+		return x.ContentSha256
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetCommittedAt() int64 {
+	if x != nil {
+		return x.CommittedAt
+	}
+	return 0
+}
+
+func (x *GuardianFileVersion) GetTombstone() bool {
+	if x != nil {
+		return x.Tombstone
+	}
+	return false
+}
+
+func (x *GuardianFileVersion) GetPrincipalId() string {
+	if x != nil {
+		return x.PrincipalId
+	}
+	return ""
+}
+
+func (x *GuardianFileVersion) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+type UpsertGuardianPathsRequest struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	GuardianToken string                   `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"`
+	Writes        []*GuardianPathWrite     `protobuf:"bytes,2,rep,name=writes,proto3" json:"writes,omitempty"`
+	Context       *GuardianMutationContext `protobuf:"bytes,3,opt,name=context,proto3" json:"context,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpsertGuardianPathsRequest) Reset() {
+	*x = UpsertGuardianPathsRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[110]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpsertGuardianPathsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpsertGuardianPathsRequest) ProtoMessage() {}
+
+func (x *UpsertGuardianPathsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[110]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpsertGuardianPathsRequest.ProtoReflect.Descriptor instead.
+func (*UpsertGuardianPathsRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{110}
+}
+
+func (x *UpsertGuardianPathsRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *UpsertGuardianPathsRequest) GetWrites() []*GuardianPathWrite {
+	if x != nil {
+		return x.Writes
+	}
+	return nil
+}
+
+func (x *UpsertGuardianPathsRequest) GetContext() *GuardianMutationContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+type UpsertGuardianPathsResponse struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Success         bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	BatchRevisionId string                 `protobuf:"bytes,2,opt,name=batch_revision_id,json=batchRevisionId,proto3" json:"batch_revision_id,omitempty"`
+	Versions        []*GuardianFileVersion `protobuf:"bytes,3,rep,name=versions,proto3" json:"versions,omitempty"`
+	Message         string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *UpsertGuardianPathsResponse) Reset() {
+	*x = UpsertGuardianPathsResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[111]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpsertGuardianPathsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpsertGuardianPathsResponse) ProtoMessage() {}
+
+func (x *UpsertGuardianPathsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[111]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpsertGuardianPathsResponse.ProtoReflect.Descriptor instead.
+func (*UpsertGuardianPathsResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{111}
+}
+
+func (x *UpsertGuardianPathsResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *UpsertGuardianPathsResponse) GetBatchRevisionId() string {
+	if x != nil {
+		return x.BatchRevisionId
+	}
+	return ""
+}
+
+func (x *UpsertGuardianPathsResponse) GetVersions() []*GuardianFileVersion {
+	if x != nil {
+		return x.Versions
+	}
+	return nil
+}
+
+func (x *UpsertGuardianPathsResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type DeleteGuardianPathsRequest struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	GuardianToken string                   `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"`
+	Deletes       []*GuardianPathDelete    `protobuf:"bytes,2,rep,name=deletes,proto3" json:"deletes,omitempty"`
+	Context       *GuardianMutationContext `protobuf:"bytes,3,opt,name=context,proto3" json:"context,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteGuardianPathsRequest) Reset() {
+	*x = DeleteGuardianPathsRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[112]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteGuardianPathsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteGuardianPathsRequest) ProtoMessage() {}
+
+func (x *DeleteGuardianPathsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[112]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteGuardianPathsRequest.ProtoReflect.Descriptor instead.
+func (*DeleteGuardianPathsRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{112}
+}
+
+func (x *DeleteGuardianPathsRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *DeleteGuardianPathsRequest) GetDeletes() []*GuardianPathDelete {
+	if x != nil {
+		return x.Deletes
+	}
+	return nil
+}
+
+func (x *DeleteGuardianPathsRequest) GetContext() *GuardianMutationContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+type DeleteGuardianPathsResponse struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Success         bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	BatchRevisionId string                 `protobuf:"bytes,2,opt,name=batch_revision_id,json=batchRevisionId,proto3" json:"batch_revision_id,omitempty"`
+	Tombstones      []*GuardianFileVersion `protobuf:"bytes,3,rep,name=tombstones,proto3" json:"tombstones,omitempty"`
+	Message         string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *DeleteGuardianPathsResponse) Reset() {
+	*x = DeleteGuardianPathsResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[113]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteGuardianPathsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteGuardianPathsResponse) ProtoMessage() {}
+
+func (x *DeleteGuardianPathsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[113]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteGuardianPathsResponse.ProtoReflect.Descriptor instead.
+func (*DeleteGuardianPathsResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{113}
+}
+
+func (x *DeleteGuardianPathsResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *DeleteGuardianPathsResponse) GetBatchRevisionId() string {
+	if x != nil {
+		return x.BatchRevisionId
+	}
+	return ""
+}
+
+func (x *DeleteGuardianPathsResponse) GetTombstones() []*GuardianFileVersion {
+	if x != nil {
+		return x.Tombstones
+	}
+	return nil
+}
+
+func (x *DeleteGuardianPathsResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type ListGuardianVersionsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GuardianToken string                 `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"`
+	LogicalPath   string                 `protobuf:"bytes,2,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	PageSize      int32                  `protobuf:"varint,3,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	PageToken     string                 `protobuf:"bytes,4,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListGuardianVersionsRequest) Reset() {
+	*x = ListGuardianVersionsRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[114]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListGuardianVersionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListGuardianVersionsRequest) ProtoMessage() {}
+
+func (x *ListGuardianVersionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[114]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListGuardianVersionsRequest.ProtoReflect.Descriptor instead.
+func (*ListGuardianVersionsRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{114}
+}
+
+func (x *ListGuardianVersionsRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *ListGuardianVersionsRequest) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *ListGuardianVersionsRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ListGuardianVersionsRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+type ListGuardianVersionsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Versions      []*GuardianFileVersion `protobuf:"bytes,1,rep,name=versions,proto3" json:"versions,omitempty"`
+	NextPageToken string                 `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListGuardianVersionsResponse) Reset() {
+	*x = ListGuardianVersionsResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[115]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListGuardianVersionsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListGuardianVersionsResponse) ProtoMessage() {}
+
+func (x *ListGuardianVersionsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[115]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListGuardianVersionsResponse.ProtoReflect.Descriptor instead.
+func (*ListGuardianVersionsResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{115}
+}
+
+func (x *ListGuardianVersionsResponse) GetVersions() []*GuardianFileVersion {
+	if x != nil {
+		return x.Versions
+	}
+	return nil
+}
+
+func (x *ListGuardianVersionsResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
+type GetGuardianVersionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GuardianToken string                 `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"`
+	LogicalPath   string                 `protobuf:"bytes,2,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	VersionId     string                 `protobuf:"bytes,3,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetGuardianVersionRequest) Reset() {
+	*x = GetGuardianVersionRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[116]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetGuardianVersionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetGuardianVersionRequest) ProtoMessage() {}
+
+func (x *GetGuardianVersionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[116]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetGuardianVersionRequest.ProtoReflect.Descriptor instead.
+func (*GetGuardianVersionRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{116}
+}
+
+func (x *GetGuardianVersionRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *GetGuardianVersionRequest) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *GetGuardianVersionRequest) GetVersionId() string {
+	if x != nil {
+		return x.VersionId
+	}
+	return ""
+}
+
+type GetGuardianVersionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Version       *GuardianFileVersion   `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
+	Content       []byte                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetGuardianVersionResponse) Reset() {
+	*x = GetGuardianVersionResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[117]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetGuardianVersionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetGuardianVersionResponse) ProtoMessage() {}
+
+func (x *GetGuardianVersionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[117]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetGuardianVersionResponse.ProtoReflect.Descriptor instead.
+func (*GetGuardianVersionResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{117}
+}
+
+func (x *GetGuardianVersionResponse) GetVersion() *GuardianFileVersion {
+	if x != nil {
+		return x.Version
+	}
+	return nil
+}
+
+func (x *GetGuardianVersionResponse) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+type SubscribeGuardianChangesRequest struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	GuardianToken        string                 `protobuf:"bytes,1,opt,name=guardian_token,json=guardianToken,proto3" json:"guardian_token,omitempty"`
+	LogicalPrefixes      []string               `protobuf:"bytes,2,rep,name=logical_prefixes,json=logicalPrefixes,proto3" json:"logical_prefixes,omitempty"`
+	IncludeInlineContent bool                   `protobuf:"varint,3,opt,name=include_inline_content,json=includeInlineContent,proto3" json:"include_inline_content,omitempty"`
+	Cursor               string                 `protobuf:"bytes,4,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *SubscribeGuardianChangesRequest) Reset() {
+	*x = SubscribeGuardianChangesRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[118]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubscribeGuardianChangesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubscribeGuardianChangesRequest) ProtoMessage() {}
+
+func (x *SubscribeGuardianChangesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[118]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubscribeGuardianChangesRequest.ProtoReflect.Descriptor instead.
+func (*SubscribeGuardianChangesRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{118}
+}
+
+func (x *SubscribeGuardianChangesRequest) GetGuardianToken() string {
+	if x != nil {
+		return x.GuardianToken
+	}
+	return ""
+}
+
+func (x *SubscribeGuardianChangesRequest) GetLogicalPrefixes() []string {
+	if x != nil {
+		return x.LogicalPrefixes
+	}
+	return nil
+}
+
+func (x *SubscribeGuardianChangesRequest) GetIncludeInlineContent() bool {
+	if x != nil {
+		return x.IncludeInlineContent
+	}
+	return false
+}
+
+func (x *SubscribeGuardianChangesRequest) GetCursor() string {
+	if x != nil {
+		return x.Cursor
+	}
+	return ""
+}
+
+type GuardianChangeEvent struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	LogicalPath     string                 `protobuf:"bytes,1,opt,name=logical_path,json=logicalPath,proto3" json:"logical_path,omitempty"`
+	DisplayPath     string                 `protobuf:"bytes,2,opt,name=display_path,json=displayPath,proto3" json:"display_path,omitempty"`
+	StorageId       string                 `protobuf:"bytes,3,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	Type            ChangeType             `protobuf:"varint,4,opt,name=type,proto3,enum=monofs.ChangeType" json:"type,omitempty"`
+	VersionId       string                 `protobuf:"bytes,5,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	BatchRevisionId string                 `protobuf:"bytes,6,opt,name=batch_revision_id,json=batchRevisionId,proto3" json:"batch_revision_id,omitempty"`
+	ContentSha256   string                 `protobuf:"bytes,7,opt,name=content_sha256,json=contentSha256,proto3" json:"content_sha256,omitempty"`
+	PrincipalId     string                 `protobuf:"bytes,8,opt,name=principal_id,json=principalId,proto3" json:"principal_id,omitempty"`
+	CorrelationId   string                 `protobuf:"bytes,9,opt,name=correlation_id,json=correlationId,proto3" json:"correlation_id,omitempty"`
+	CommittedAt     int64                  `protobuf:"varint,10,opt,name=committed_at,json=committedAt,proto3" json:"committed_at,omitempty"`
+	InlineContent   []byte                 `protobuf:"bytes,11,opt,name=inline_content,json=inlineContent,proto3" json:"inline_content,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GuardianChangeEvent) Reset() {
+	*x = GuardianChangeEvent{}
+	mi := &file_api_proto_monofs_proto_msgTypes[119]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GuardianChangeEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GuardianChangeEvent) ProtoMessage() {}
+
+func (x *GuardianChangeEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[119]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GuardianChangeEvent.ProtoReflect.Descriptor instead.
+func (*GuardianChangeEvent) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{119}
+}
+
+func (x *GuardianChangeEvent) GetLogicalPath() string {
+	if x != nil {
+		return x.LogicalPath
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetDisplayPath() string {
+	if x != nil {
+		return x.DisplayPath
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetStorageId() string {
+	if x != nil {
+		return x.StorageId
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetType() ChangeType {
+	if x != nil {
+		return x.Type
+	}
+	return ChangeType_CHANGE_TYPE_UNSPECIFIED
+}
+
+func (x *GuardianChangeEvent) GetVersionId() string {
+	if x != nil {
+		return x.VersionId
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetBatchRevisionId() string {
+	if x != nil {
+		return x.BatchRevisionId
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetContentSha256() string {
+	if x != nil {
+		return x.ContentSha256
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetPrincipalId() string {
+	if x != nil {
+		return x.PrincipalId
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetCorrelationId() string {
+	if x != nil {
+		return x.CorrelationId
+	}
+	return ""
+}
+
+func (x *GuardianChangeEvent) GetCommittedAt() int64 {
+	if x != nil {
+		return x.CommittedAt
+	}
+	return 0
+}
+
+func (x *GuardianChangeEvent) GetInlineContent() []byte {
+	if x != nil {
+		return x.InlineContent
+	}
+	return nil
+}
+
 var File_api_proto_monofs_proto protoreflect.FileDescriptor
 
 const file_api_proto_monofs_proto_rawDesc = "" +
@@ -5372,12 +7749,13 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x16api/proto/monofs.proto\x12\x06monofs\"g\n" +
 	"\x12ClusterInfoRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x124\n" +
-	"\x16use_external_addresses\x18\x02 \x01(\bR\x14useExternalAddresses\"v\n" +
+	"\x16use_external_addresses\x18\x02 \x01(\bR\x14useExternalAddresses\"\xa1\x01\n" +
 	"\x13ClusterInfoResponse\x12&\n" +
 	"\x05nodes\x18\x01 \x03(\v2\x10.monofs.NodeInfoR\x05nodes\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x02 \x01(\tR\tclusterId\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\x03R\aversion\"\x97\x03\n" +
+	"\aversion\x18\x03 \x01(\x03R\aversion\x12)\n" +
+	"\x10guardian_visible\x18\x04 \x01(\bR\x0fguardianVisible\"\x97\x03\n" +
 	"\bNodeInfo\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\x12\x16\n" +
@@ -5557,7 +7935,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12)\n" +
 	"\x10files_replicated\x18\x02 \x01(\x03R\x0ffilesReplicated\x12!\n" +
 	"\ffiles_failed\x18\x03 \x01(\x03R\vfilesFailed\x12#\n" +
-	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\x8d\x05\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xb0\x05\n" +
 	"\x19RegisterRepositoryRequest\x12\x1d\n" +
 	"\n" +
 	"storage_id\x18\x01 \x01(\tR\tstorageId\x12!\n" +
@@ -5573,7 +7951,8 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\vcommit_time\x18\t \x01(\x03R\n" +
 	"commitTime\x12%\n" +
 	"\x0ecommit_message\x18\n" +
-	" \x01(\tR\rcommitMessage\x1aB\n" +
+	" \x01(\tR\rcommitMessage\x12!\n" +
+	"\fguardian_url\x18\v \x01(\tR\vguardianUrl\x1aB\n" +
 	"\x14IngestionConfigEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a>\n" +
@@ -5608,7 +7987,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x0erepository_ids\x18\x01 \x03(\tR\rrepositoryIds\"9\n" +
 	"\x18GetRepositoryInfoRequest\x12\x1d\n" +
 	"\n" +
-	"storage_id\x18\x01 \x01(\tR\tstorageId\"\xf0\x01\n" +
+	"storage_id\x18\x01 \x01(\tR\tstorageId\"\x93\x02\n" +
 	"\x19GetRepositoryInfoResponse\x12\x1d\n" +
 	"\n" +
 	"storage_id\x18\x01 \x01(\tR\tstorageId\x12!\n" +
@@ -5619,7 +7998,8 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"commitHash\x12\x1f\n" +
 	"\vcommit_time\x18\x06 \x01(\x03R\n" +
 	"commitTime\x12%\n" +
-	"\x0ecommit_message\x18\a \x01(\tR\rcommitMessage\"2\n" +
+	"\x0ecommit_message\x18\a \x01(\tR\rcommitMessage\x12!\n" +
+	"\fguardian_url\x18\b \x01(\tR\vguardianUrl\"2\n" +
 	"\x17OnboardingStatusRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\"\xb3\x01\n" +
 	"\x18OnboardingStatusResponse\x12V\n" +
@@ -5676,14 +8056,22 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12#\n" +
 	"\rfiles_deleted\x18\x03 \x01(\x03R\ffilesDeleted\x12!\n" +
-	"\fdirs_deleted\x18\x04 \x01(\x03R\vdirsDeleted\"\xa7\x01\n" +
+	"\fdirs_deleted\x18\x04 \x01(\x03R\vdirsDeleted\"\xe8\x01\n" +
 	"\x15RegisterClientRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1f\n" +
 	"\vmount_point\x18\x02 \x01(\tR\n" +
 	"mountPoint\x12\x1a\n" +
 	"\bhostname\x18\x03 \x01(\tR\bhostname\x12\x1a\n" +
 	"\bwritable\x18\x04 \x01(\bR\bwritable\x12\x18\n" +
-	"\aversion\x18\x05 \x01(\tR\aversion\"\x80\x01\n" +
+	"\aversion\x18\x05 \x01(\tR\aversion\x12?\n" +
+	"\x0fguardian_config\x18\x06 \x01(\v2\x16.monofs.GuardianConfigR\x0eguardianConfig\"\xa4\x01\n" +
+	"\x0eGuardianConfig\x12\x19\n" +
+	"\bbase_url\x18\x01 \x01(\tR\abaseUrl\x12\x1d\n" +
+	"\n" +
+	"auth_token\x18\x02 \x01(\tR\tauthToken\x12!\n" +
+	"\fprincipal_id\x18\x03 \x01(\tR\vprincipalId\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role\x12!\n" +
+	"\fdisplay_name\x18\x05 \x01(\tR\vdisplayName\"\x80\x01\n" +
 	"\x16RegisterClientResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x122\n" +
@@ -5796,11 +8184,177 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\rprefetch_hits\x18\x06 \x01(\x03R\fprefetchHits\x12'\n" +
 	"\x0fprefetch_misses\x18\a \x01(\x03R\x0eprefetchMisses\x12\x19\n" +
 	"\bhit_rate\x18\b \x01(\x01R\ahitRate\x12\x18\n" +
-	"\aenabled\x18\t \x01(\bR\aenabled*N\n" +
+	"\aenabled\x18\t \x01(\bR\aenabled\"P\n" +
+	"\x1bAddWhitelistedClientRequest\x12\x1b\n" +
+	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x14\n" +
+	"\x05label\x18\x02 \x01(\tR\x05label\"R\n" +
+	"\x1cAddWhitelistedClientResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"=\n" +
+	"\x1eRemoveWhitelistedClientRequest\x12\x1b\n" +
+	"\tclient_id\x18\x01 \x01(\tR\bclientId\"U\n" +
+	"\x1fRemoveWhitelistedClientResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\x1f\n" +
+	"\x1dListWhitelistedClientsRequest\"\x82\x01\n" +
+	"\x1eListWhitelistedClientsResponse\x123\n" +
+	"\aclients\x18\x01 \x03(\v2\x19.monofs.WhitelistedClientR\aclients\x12+\n" +
+	"\x11whitelist_enabled\x18\x02 \x01(\bR\x10whitelistEnabled\"a\n" +
+	"\x11WhitelistedClient\x12\x1b\n" +
+	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x14\n" +
+	"\x05label\x18\x02 \x01(\tR\x05label\x12\x19\n" +
+	"\badded_at\x18\x03 \x01(\x03R\aaddedAt\"6\n" +
+	"\x1aSetWhitelistEnabledRequest\x12\x18\n" +
+	"\aenabled\x18\x01 \x01(\bR\aenabled\"Q\n" +
+	"\x1bSetWhitelistEnabledResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\x1b\n" +
+	"\x19GetWhitelistStatusRequest\"\x98\x01\n" +
+	"\x1aGetWhitelistStatusResponse\x12\x18\n" +
+	"\aenabled\x18\x01 \x01(\bR\aenabled\x12+\n" +
+	"\x11whitelisted_count\x18\x02 \x01(\x05R\x10whitelistedCount\x123\n" +
+	"\aclients\x18\x03 \x03(\v2\x19.monofs.WhitelistedClientR\aclients\"[\n" +
+	"\x1fDeleteDirectoryRecursiveRequest\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x01 \x01(\tR\tstorageId\x12\x19\n" +
+	"\bdir_path\x18\x02 \x01(\tR\adirPath\"\x9e\x01\n" +
+	" DeleteDirectoryRecursiveResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12#\n" +
+	"\rfiles_deleted\x18\x03 \x01(\x03R\ffilesDeleted\x12!\n" +
+	"\fdirs_deleted\x18\x04 \x01(\x03R\vdirsDeleted\"m\n" +
+	"\x19DeleteGuardianFileRequest\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x01 \x01(\tR\tstorageId\x12\x1b\n" +
+	"\tfile_path\x18\x02 \x01(\tR\bfilePath\x12\x14\n" +
+	"\x05token\x18\x03 \x01(\tR\x05token\"P\n" +
+	"\x1aDeleteGuardianFileResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"p\n" +
+	"\x1eDeleteGuardianDirectoryRequest\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x01 \x01(\tR\tstorageId\x12\x19\n" +
+	"\bdir_path\x18\x02 \x01(\tR\adirPath\x12\x14\n" +
+	"\x05token\x18\x03 \x01(\tR\x05token\"\x9d\x01\n" +
+	"\x1fDeleteGuardianDirectoryResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12#\n" +
+	"\rfiles_deleted\x18\x03 \x01(\x03R\ffilesDeleted\x12!\n" +
+	"\fdirs_deleted\x18\x04 \x01(\x03R\vdirsDeleted\"z\n" +
+	"\x17SubscribeChangesRequest\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x01 \x01(\tR\tstorageId\x12#\n" +
+	"\rpath_prefixes\x18\x02 \x03(\tR\fpathPrefixes\x12\x1b\n" +
+	"\tclient_id\x18\x03 \x01(\tR\bclientId\"\xe0\x01\n" +
+	"\vChangeEvent\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x01 \x01(\tR\tstorageId\x12\x1b\n" +
+	"\tfile_path\x18\x02 \x01(\tR\bfilePath\x12&\n" +
+	"\x04type\x18\x03 \x01(\x0e2\x12.monofs.ChangeTypeR\x04type\x12\"\n" +
+	"\rnew_blob_hash\x18\x04 \x01(\tR\vnewBlobHash\x12\"\n" +
+	"\rold_blob_hash\x18\x05 \x01(\tR\voldBlobHash\x12%\n" +
+	"\x0einline_content\x18\x06 \x01(\fR\rinlineContent\"B\n" +
+	"\x12InjectGuardianFile\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\fR\acontent\"\xc8\x01\n" +
+	"\x1eInjectGuardianPartitionRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x12%\n" +
+	"\x0epartition_name\x18\x02 \x01(\tR\rpartitionName\x120\n" +
+	"\x05files\x18\x03 \x03(\v2\x1a.monofs.InjectGuardianFileR\x05files\x12&\n" +
+	"\x0fguardian_ui_url\x18\x04 \x01(\tR\rguardianUiUrl\"\x9b\x01\n" +
+	"\x1fInjectGuardianPartitionResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x02 \x01(\tR\tstorageId\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\x12%\n" +
+	"\x0efiles_ingested\x18\x04 \x01(\x05R\rfilesIngested\"{\n" +
+	"\x17GuardianMutationContext\x12!\n" +
+	"\fprincipal_id\x18\x01 \x01(\tR\vprincipalId\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\x12%\n" +
+	"\x0ecorrelation_id\x18\x03 \x01(\tR\rcorrelationId\"\x80\x01\n" +
+	"\x11GuardianPathWrite\x12!\n" +
+	"\flogical_path\x18\x01 \x01(\tR\vlogicalPath\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\fR\acontent\x12.\n" +
+	"\x13expected_version_id\x18\x03 \x01(\tR\x11expectedVersionId\"g\n" +
+	"\x12GuardianPathDelete\x12!\n" +
+	"\flogical_path\x18\x01 \x01(\tR\vlogicalPath\x12.\n" +
+	"\x13expected_version_id\x18\x02 \x01(\tR\x11expectedVersionId\"\xe8\x02\n" +
+	"\x13GuardianFileVersion\x12!\n" +
+	"\flogical_path\x18\x01 \x01(\tR\vlogicalPath\x12!\n" +
+	"\fdisplay_path\x18\x02 \x01(\tR\vdisplayPath\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x03 \x01(\tR\tstorageId\x12\x1d\n" +
+	"\n" +
+	"version_id\x18\x04 \x01(\tR\tversionId\x12*\n" +
+	"\x11batch_revision_id\x18\x05 \x01(\tR\x0fbatchRevisionId\x12%\n" +
+	"\x0econtent_sha256\x18\x06 \x01(\tR\rcontentSha256\x12!\n" +
+	"\fcommitted_at\x18\a \x01(\x03R\vcommittedAt\x12\x1c\n" +
+	"\ttombstone\x18\b \x01(\bR\ttombstone\x12!\n" +
+	"\fprincipal_id\x18\t \x01(\tR\vprincipalId\x12\x16\n" +
+	"\x06reason\x18\n" +
+	" \x01(\tR\x06reason\"\xb1\x01\n" +
+	"\x1aUpsertGuardianPathsRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x121\n" +
+	"\x06writes\x18\x02 \x03(\v2\x19.monofs.GuardianPathWriteR\x06writes\x129\n" +
+	"\acontext\x18\x03 \x01(\v2\x1f.monofs.GuardianMutationContextR\acontext\"\xb6\x01\n" +
+	"\x1bUpsertGuardianPathsResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12*\n" +
+	"\x11batch_revision_id\x18\x02 \x01(\tR\x0fbatchRevisionId\x127\n" +
+	"\bversions\x18\x03 \x03(\v2\x1b.monofs.GuardianFileVersionR\bversions\x12\x18\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\"\xb4\x01\n" +
+	"\x1aDeleteGuardianPathsRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x124\n" +
+	"\adeletes\x18\x02 \x03(\v2\x1a.monofs.GuardianPathDeleteR\adeletes\x129\n" +
+	"\acontext\x18\x03 \x01(\v2\x1f.monofs.GuardianMutationContextR\acontext\"\xba\x01\n" +
+	"\x1bDeleteGuardianPathsResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12*\n" +
+	"\x11batch_revision_id\x18\x02 \x01(\tR\x0fbatchRevisionId\x12;\n" +
+	"\n" +
+	"tombstones\x18\x03 \x03(\v2\x1b.monofs.GuardianFileVersionR\n" +
+	"tombstones\x12\x18\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\"\xa3\x01\n" +
+	"\x1bListGuardianVersionsRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x12!\n" +
+	"\flogical_path\x18\x02 \x01(\tR\vlogicalPath\x12\x1b\n" +
+	"\tpage_size\x18\x03 \x01(\x05R\bpageSize\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x04 \x01(\tR\tpageToken\"\x7f\n" +
+	"\x1cListGuardianVersionsResponse\x127\n" +
+	"\bversions\x18\x01 \x03(\v2\x1b.monofs.GuardianFileVersionR\bversions\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x84\x01\n" +
+	"\x19GetGuardianVersionRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x12!\n" +
+	"\flogical_path\x18\x02 \x01(\tR\vlogicalPath\x12\x1d\n" +
+	"\n" +
+	"version_id\x18\x03 \x01(\tR\tversionId\"m\n" +
+	"\x1aGetGuardianVersionResponse\x125\n" +
+	"\aversion\x18\x01 \x01(\v2\x1b.monofs.GuardianFileVersionR\aversion\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\fR\acontent\"\xc1\x01\n" +
+	"\x1fSubscribeGuardianChangesRequest\x12%\n" +
+	"\x0eguardian_token\x18\x01 \x01(\tR\rguardianToken\x12)\n" +
+	"\x10logical_prefixes\x18\x02 \x03(\tR\x0flogicalPrefixes\x124\n" +
+	"\x16include_inline_content\x18\x03 \x01(\bR\x14includeInlineContent\x12\x16\n" +
+	"\x06cursor\x18\x04 \x01(\tR\x06cursor\"\xa8\x03\n" +
+	"\x13GuardianChangeEvent\x12!\n" +
+	"\flogical_path\x18\x01 \x01(\tR\vlogicalPath\x12!\n" +
+	"\fdisplay_path\x18\x02 \x01(\tR\vdisplayPath\x12\x1d\n" +
+	"\n" +
+	"storage_id\x18\x03 \x01(\tR\tstorageId\x12&\n" +
+	"\x04type\x18\x04 \x01(\x0e2\x12.monofs.ChangeTypeR\x04type\x12\x1d\n" +
+	"\n" +
+	"version_id\x18\x05 \x01(\tR\tversionId\x12*\n" +
+	"\x11batch_revision_id\x18\x06 \x01(\tR\x0fbatchRevisionId\x12%\n" +
+	"\x0econtent_sha256\x18\a \x01(\tR\rcontentSha256\x12!\n" +
+	"\fprincipal_id\x18\b \x01(\tR\vprincipalId\x12%\n" +
+	"\x0ecorrelation_id\x18\t \x01(\tR\rcorrelationId\x12!\n" +
+	"\fcommitted_at\x18\n" +
+	" \x01(\x03R\vcommittedAt\x12%\n" +
+	"\x0einline_content\x18\v \x01(\fR\rinlineContent*f\n" +
 	"\rIngestionType\x12\x11\n" +
 	"\rINGESTION_GIT\x10\x00\x12\x10\n" +
 	"\fINGESTION_S3\x10\x02\x12\x12\n" +
-	"\x0eINGESTION_FILE\x10\x03\"\x04\b\x01\x10\x01*\x95\x01\n" +
+	"\x0eINGESTION_FILE\x10\x03\x12\x16\n" +
+	"\x12INGESTION_GUARDIAN\x10\x04\"\x04\b\x01\x10\x01*\x95\x01\n" +
 	"\n" +
 	"SourceType\x12\x17\n" +
 	"\x13SOURCE_TYPE_UNKNOWN\x10\x00\x12\x13\n" +
@@ -5813,7 +8367,13 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x0eCLIENT_UNKNOWN\x10\x00\x12\x14\n" +
 	"\x10CLIENT_CONNECTED\x10\x01\x12\x10\n" +
 	"\fCLIENT_STALE\x10\x02\x12\x17\n" +
-	"\x13CLIENT_DISCONNECTED\x10\x032\xfb\t\n" +
+	"\x13CLIENT_DISCONNECTED\x10\x03*O\n" +
+	"\n" +
+	"ChangeType\x12\x1b\n" +
+	"\x17CHANGE_TYPE_UNSPECIFIED\x10\x00\x12\t\n" +
+	"\x05ADDED\x10\x01\x12\f\n" +
+	"\bMODIFIED\x10\x02\x12\v\n" +
+	"\aDELETED\x10\x032\xd7\x14\n" +
 	"\fMonoFSRouter\x12I\n" +
 	"\x0eGetClusterInfo\x12\x1a.monofs.ClusterInfoRequest\x1a\x1b.monofs.ClusterInfoResponse\x12@\n" +
 	"\tHeartbeat\x12\x18.monofs.HeartbeatRequest\x1a\x19.monofs.HeartbeatResponse\x12C\n" +
@@ -5830,7 +8390,21 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x0fGetClusterStats\x12\x1b.monofs.ClusterStatsRequest\x1a\x1c.monofs.ClusterStatsResponse\x12C\n" +
 	"\fGetNodeStats\x12\x18.monofs.NodeStatsRequest\x1a\x19.monofs.NodeStatsResponse\x12I\n" +
 	"\fDrainCluster\x12\x1b.monofs.DrainClusterRequest\x1a\x1c.monofs.DrainClusterResponse\x12O\n" +
-	"\x0eUndrainCluster\x12\x1d.monofs.UndrainClusterRequest\x1a\x1e.monofs.UndrainClusterResponse2\x9d\x0e\n" +
+	"\x0eUndrainCluster\x12\x1d.monofs.UndrainClusterRequest\x1a\x1e.monofs.UndrainClusterResponse\x12[\n" +
+	"\x12DeleteGuardianFile\x12!.monofs.DeleteGuardianFileRequest\x1a\".monofs.DeleteGuardianFileResponse\x12j\n" +
+	"\x17DeleteGuardianDirectory\x12&.monofs.DeleteGuardianDirectoryRequest\x1a'.monofs.DeleteGuardianDirectoryResponse\x12j\n" +
+	"\x17InjectGuardianPartition\x12&.monofs.InjectGuardianPartitionRequest\x1a'.monofs.InjectGuardianPartitionResponse\x12^\n" +
+	"\x13UpsertGuardianPaths\x12\".monofs.UpsertGuardianPathsRequest\x1a#.monofs.UpsertGuardianPathsResponse\x12^\n" +
+	"\x13DeleteGuardianPaths\x12\".monofs.DeleteGuardianPathsRequest\x1a#.monofs.DeleteGuardianPathsResponse\x12a\n" +
+	"\x14ListGuardianVersions\x12#.monofs.ListGuardianVersionsRequest\x1a$.monofs.ListGuardianVersionsResponse\x12[\n" +
+	"\x12GetGuardianVersion\x12!.monofs.GetGuardianVersionRequest\x1a\".monofs.GetGuardianVersionResponse\x12b\n" +
+	"\x18SubscribeGuardianChanges\x12'.monofs.SubscribeGuardianChangesRequest\x1a\x1b.monofs.GuardianChangeEvent0\x01\x12a\n" +
+	"\x14AddWhitelistedClient\x12#.monofs.AddWhitelistedClientRequest\x1a$.monofs.AddWhitelistedClientResponse\x12j\n" +
+	"\x17RemoveWhitelistedClient\x12&.monofs.RemoveWhitelistedClientRequest\x1a'.monofs.RemoveWhitelistedClientResponse\x12g\n" +
+	"\x16ListWhitelistedClients\x12%.monofs.ListWhitelistedClientsRequest\x1a&.monofs.ListWhitelistedClientsResponse\x12^\n" +
+	"\x13SetWhitelistEnabled\x12\".monofs.SetWhitelistEnabledRequest\x1a#.monofs.SetWhitelistEnabledResponse\x12[\n" +
+	"\x12GetWhitelistStatus\x12!.monofs.GetWhitelistStatusRequest\x1a\".monofs.GetWhitelistStatusResponse\x12L\n" +
+	"\x12SubscribeToChanges\x12\x1f.monofs.SubscribeChangesRequest\x1a\x13.monofs.ChangeEvent0\x012\x8c\x0f\n" +
 	"\x06MonoFS\x127\n" +
 	"\x06Lookup\x12\x15.monofs.LookupRequest\x1a\x16.monofs.LookupResponse\x12:\n" +
 	"\aGetAttr\x12\x16.monofs.GetAttrRequest\x1a\x17.monofs.GetAttrResponse\x125\n" +
@@ -5854,7 +8428,8 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x17MarkRepositoryOnboarded\x12&.monofs.MarkRepositoryOnboardedRequest\x1a'.monofs.MarkRepositoryOnboardedResponse\x12C\n" +
 	"\n" +
 	"DeleteFile\x12\x19.monofs.DeleteFileRequest\x1a\x1a.monofs.DeleteFileResponse\x12a\n" +
-	"\x10DeleteRepository\x12%.monofs.DeleteRepositoryOnNodeRequest\x1a&.monofs.DeleteRepositoryOnNodeResponse\x12d\n" +
+	"\x10DeleteRepository\x12%.monofs.DeleteRepositoryOnNodeRequest\x1a&.monofs.DeleteRepositoryOnNodeResponse\x12m\n" +
+	"\x18DeleteDirectoryRecursive\x12'.monofs.DeleteDirectoryRecursiveRequest\x1a(.monofs.DeleteDirectoryRecursiveResponse\x12d\n" +
 	"\x15BuildDirectoryIndexes\x12$.monofs.BuildDirectoryIndexesRequest\x1a%.monofs.BuildDirectoryIndexesResponse\x12R\n" +
 	"\x11GetPredictorStats\x12\x1d.monofs.PredictorStatsRequest\x1a\x1e.monofs.PredictorStatsResponseB$Z\"github.com/radryc/monofs/api/protob\x06proto3"
 
@@ -5870,213 +8445,295 @@ func file_api_proto_monofs_proto_rawDescGZIP() []byte {
 	return file_api_proto_monofs_proto_rawDescData
 }
 
-var file_api_proto_monofs_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_api_proto_monofs_proto_msgTypes = make([]protoimpl.MessageInfo, 91)
+var file_api_proto_monofs_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_api_proto_monofs_proto_msgTypes = make([]protoimpl.MessageInfo, 128)
 var file_api_proto_monofs_proto_goTypes = []any{
 	(IngestionType)(0),                       // 0: monofs.IngestionType
 	(SourceType)(0),                          // 1: monofs.SourceType
 	(ClientState)(0),                         // 2: monofs.ClientState
-	(IngestProgress_Stage)(0),                // 3: monofs.IngestProgress.Stage
-	(*ClusterInfoRequest)(nil),               // 4: monofs.ClusterInfoRequest
-	(*ClusterInfoResponse)(nil),              // 5: monofs.ClusterInfoResponse
-	(*NodeInfo)(nil),                         // 6: monofs.NodeInfo
-	(*HeartbeatRequest)(nil),                 // 7: monofs.HeartbeatRequest
-	(*HeartbeatResponse)(nil),                // 8: monofs.HeartbeatResponse
-	(*NodeInfoRequest)(nil),                  // 9: monofs.NodeInfoRequest
-	(*NodeInfoResponse)(nil),                 // 10: monofs.NodeInfoResponse
-	(*LookupRequest)(nil),                    // 11: monofs.LookupRequest
-	(*LookupResponse)(nil),                   // 12: monofs.LookupResponse
-	(*GetAttrRequest)(nil),                   // 13: monofs.GetAttrRequest
-	(*GetAttrResponse)(nil),                  // 14: monofs.GetAttrResponse
-	(*ReadDirRequest)(nil),                   // 15: monofs.ReadDirRequest
-	(*DirEntry)(nil),                         // 16: monofs.DirEntry
-	(*ReadRequest)(nil),                      // 17: monofs.ReadRequest
-	(*DataChunk)(nil),                        // 18: monofs.DataChunk
-	(*CreateRequest)(nil),                    // 19: monofs.CreateRequest
-	(*CreateResponse)(nil),                   // 20: monofs.CreateResponse
-	(*WriteRequest)(nil),                     // 21: monofs.WriteRequest
-	(*WriteResponse)(nil),                    // 22: monofs.WriteResponse
-	(*AuthRequest)(nil),                      // 23: monofs.AuthRequest
-	(*AuthResponse)(nil),                     // 24: monofs.AuthResponse
-	(*IngestRequest)(nil),                    // 25: monofs.IngestRequest
-	(*IngestProgress)(nil),                   // 26: monofs.IngestProgress
-	(*FileMetadata)(nil),                     // 27: monofs.FileMetadata
-	(*IngestFileRequest)(nil),                // 28: monofs.IngestFileRequest
-	(*IngestFileResponse)(nil),               // 29: monofs.IngestFileResponse
-	(*IngestFileBatchRequest)(nil),           // 30: monofs.IngestFileBatchRequest
-	(*IngestFileBatchResponse)(nil),          // 31: monofs.IngestFileBatchResponse
-	(*IngestReplicaBatchRequest)(nil),        // 32: monofs.IngestReplicaBatchRequest
-	(*IngestReplicaBatchResponse)(nil),       // 33: monofs.IngestReplicaBatchResponse
-	(*RegisterRepositoryRequest)(nil),        // 34: monofs.RegisterRepositoryRequest
-	(*RegisterRepositoryResponse)(nil),       // 35: monofs.RegisterRepositoryResponse
-	(*GetRepositoryFilesRequest)(nil),        // 36: monofs.GetRepositoryFilesRequest
-	(*GetRepositoryFilesResponse)(nil),       // 37: monofs.GetRepositoryFilesResponse
-	(*SyncMetadataFromNodeRequest)(nil),      // 38: monofs.SyncMetadataFromNodeRequest
-	(*SyncMetadataFromNodeResponse)(nil),     // 39: monofs.SyncMetadataFromNodeResponse
-	(*ClearFailoverCacheRequest)(nil),        // 40: monofs.ClearFailoverCacheRequest
-	(*ClearFailoverCacheResponse)(nil),       // 41: monofs.ClearFailoverCacheResponse
-	(*ListRepositoriesRequest)(nil),          // 42: monofs.ListRepositoriesRequest
-	(*ListRepositoriesResponse)(nil),         // 43: monofs.ListRepositoriesResponse
-	(*GetRepositoryInfoRequest)(nil),         // 44: monofs.GetRepositoryInfoRequest
-	(*GetRepositoryInfoResponse)(nil),        // 45: monofs.GetRepositoryInfoResponse
-	(*OnboardingStatusRequest)(nil),          // 46: monofs.OnboardingStatusRequest
-	(*OnboardingStatusResponse)(nil),         // 47: monofs.OnboardingStatusResponse
-	(*MarkRepositoryOnboardedRequest)(nil),   // 48: monofs.MarkRepositoryOnboardedRequest
-	(*MarkRepositoryOnboardedResponse)(nil),  // 49: monofs.MarkRepositoryOnboardedResponse
-	(*NotifyRepositoryIngestedRequest)(nil),  // 50: monofs.NotifyRepositoryIngestedRequest
-	(*NotifyRepositoryIngestedResponse)(nil), // 51: monofs.NotifyRepositoryIngestedResponse
-	(*DeleteRepositoryRequest)(nil),          // 52: monofs.DeleteRepositoryRequest
-	(*DeleteRepositoryResponse)(nil),         // 53: monofs.DeleteRepositoryResponse
-	(*GetNodeForFileRequest)(nil),            // 54: monofs.GetNodeForFileRequest
-	(*GetNodeForFileResponse)(nil),           // 55: monofs.GetNodeForFileResponse
-	(*DeleteFileRequest)(nil),                // 56: monofs.DeleteFileRequest
-	(*DeleteFileResponse)(nil),               // 57: monofs.DeleteFileResponse
-	(*BuildDirectoryIndexesRequest)(nil),     // 58: monofs.BuildDirectoryIndexesRequest
-	(*BuildDirectoryIndexesResponse)(nil),    // 59: monofs.BuildDirectoryIndexesResponse
-	(*DeleteRepositoryOnNodeRequest)(nil),    // 60: monofs.DeleteRepositoryOnNodeRequest
-	(*DeleteRepositoryOnNodeResponse)(nil),   // 61: monofs.DeleteRepositoryOnNodeResponse
-	(*RegisterClientRequest)(nil),            // 62: monofs.RegisterClientRequest
-	(*RegisterClientResponse)(nil),           // 63: monofs.RegisterClientResponse
-	(*UnregisterClientRequest)(nil),          // 64: monofs.UnregisterClientRequest
-	(*UnregisterClientResponse)(nil),         // 65: monofs.UnregisterClientResponse
-	(*ClientHeartbeatRequest)(nil),           // 66: monofs.ClientHeartbeatRequest
-	(*ClientHeartbeatResponse)(nil),          // 67: monofs.ClientHeartbeatResponse
-	(*ListClientsRequest)(nil),               // 68: monofs.ListClientsRequest
-	(*ListClientsResponse)(nil),              // 69: monofs.ListClientsResponse
-	(*ClientInfo)(nil),                       // 70: monofs.ClientInfo
-	(*FailoverRequest)(nil),                  // 71: monofs.FailoverRequest
-	(*FailoverResponse)(nil),                 // 72: monofs.FailoverResponse
-	(*ClusterStatsRequest)(nil),              // 73: monofs.ClusterStatsRequest
-	(*ClusterStatsResponse)(nil),             // 74: monofs.ClusterStatsResponse
-	(*NodeStatsRequest)(nil),                 // 75: monofs.NodeStatsRequest
-	(*NodeStatsResponse)(nil),                // 76: monofs.NodeStatsResponse
-	(*NodeStatInfo)(nil),                     // 77: monofs.NodeStatInfo
-	(*DrainClusterRequest)(nil),              // 78: monofs.DrainClusterRequest
-	(*DrainClusterResponse)(nil),             // 79: monofs.DrainClusterResponse
-	(*UndrainClusterRequest)(nil),            // 80: monofs.UndrainClusterRequest
-	(*UndrainClusterResponse)(nil),           // 81: monofs.UndrainClusterResponse
-	(*GetNodeFilesRequest)(nil),              // 82: monofs.GetNodeFilesRequest
-	(*GetNodeFilesResponse)(nil),             // 83: monofs.GetNodeFilesResponse
-	(*FileInfo)(nil),                         // 84: monofs.FileInfo
-	(*PredictorStatsRequest)(nil),            // 85: monofs.PredictorStatsRequest
-	(*PredictorStatsResponse)(nil),           // 86: monofs.PredictorStatsResponse
-	nil,                                      // 87: monofs.NodeInfo.MetadataEntry
-	nil,                                      // 88: monofs.IngestRequest.IngestionConfigEntry
-	nil,                                      // 89: monofs.IngestRequest.FetchConfigEntry
-	nil,                                      // 90: monofs.FileMetadata.BackendMetadataEntry
-	nil,                                      // 91: monofs.RegisterRepositoryRequest.IngestionConfigEntry
-	nil,                                      // 92: monofs.RegisterRepositoryRequest.FetchConfigEntry
-	nil,                                      // 93: monofs.OnboardingStatusResponse.RepositoriesEntry
-	nil,                                      // 94: monofs.ClusterStatsResponse.FailoversEntry
+	(ChangeType)(0),                          // 3: monofs.ChangeType
+	(IngestProgress_Stage)(0),                // 4: monofs.IngestProgress.Stage
+	(*ClusterInfoRequest)(nil),               // 5: monofs.ClusterInfoRequest
+	(*ClusterInfoResponse)(nil),              // 6: monofs.ClusterInfoResponse
+	(*NodeInfo)(nil),                         // 7: monofs.NodeInfo
+	(*HeartbeatRequest)(nil),                 // 8: monofs.HeartbeatRequest
+	(*HeartbeatResponse)(nil),                // 9: monofs.HeartbeatResponse
+	(*NodeInfoRequest)(nil),                  // 10: monofs.NodeInfoRequest
+	(*NodeInfoResponse)(nil),                 // 11: monofs.NodeInfoResponse
+	(*LookupRequest)(nil),                    // 12: monofs.LookupRequest
+	(*LookupResponse)(nil),                   // 13: monofs.LookupResponse
+	(*GetAttrRequest)(nil),                   // 14: monofs.GetAttrRequest
+	(*GetAttrResponse)(nil),                  // 15: monofs.GetAttrResponse
+	(*ReadDirRequest)(nil),                   // 16: monofs.ReadDirRequest
+	(*DirEntry)(nil),                         // 17: monofs.DirEntry
+	(*ReadRequest)(nil),                      // 18: monofs.ReadRequest
+	(*DataChunk)(nil),                        // 19: monofs.DataChunk
+	(*CreateRequest)(nil),                    // 20: monofs.CreateRequest
+	(*CreateResponse)(nil),                   // 21: monofs.CreateResponse
+	(*WriteRequest)(nil),                     // 22: monofs.WriteRequest
+	(*WriteResponse)(nil),                    // 23: monofs.WriteResponse
+	(*AuthRequest)(nil),                      // 24: monofs.AuthRequest
+	(*AuthResponse)(nil),                     // 25: monofs.AuthResponse
+	(*IngestRequest)(nil),                    // 26: monofs.IngestRequest
+	(*IngestProgress)(nil),                   // 27: monofs.IngestProgress
+	(*FileMetadata)(nil),                     // 28: monofs.FileMetadata
+	(*IngestFileRequest)(nil),                // 29: monofs.IngestFileRequest
+	(*IngestFileResponse)(nil),               // 30: monofs.IngestFileResponse
+	(*IngestFileBatchRequest)(nil),           // 31: monofs.IngestFileBatchRequest
+	(*IngestFileBatchResponse)(nil),          // 32: monofs.IngestFileBatchResponse
+	(*IngestReplicaBatchRequest)(nil),        // 33: monofs.IngestReplicaBatchRequest
+	(*IngestReplicaBatchResponse)(nil),       // 34: monofs.IngestReplicaBatchResponse
+	(*RegisterRepositoryRequest)(nil),        // 35: monofs.RegisterRepositoryRequest
+	(*RegisterRepositoryResponse)(nil),       // 36: monofs.RegisterRepositoryResponse
+	(*GetRepositoryFilesRequest)(nil),        // 37: monofs.GetRepositoryFilesRequest
+	(*GetRepositoryFilesResponse)(nil),       // 38: monofs.GetRepositoryFilesResponse
+	(*SyncMetadataFromNodeRequest)(nil),      // 39: monofs.SyncMetadataFromNodeRequest
+	(*SyncMetadataFromNodeResponse)(nil),     // 40: monofs.SyncMetadataFromNodeResponse
+	(*ClearFailoverCacheRequest)(nil),        // 41: monofs.ClearFailoverCacheRequest
+	(*ClearFailoverCacheResponse)(nil),       // 42: monofs.ClearFailoverCacheResponse
+	(*ListRepositoriesRequest)(nil),          // 43: monofs.ListRepositoriesRequest
+	(*ListRepositoriesResponse)(nil),         // 44: monofs.ListRepositoriesResponse
+	(*GetRepositoryInfoRequest)(nil),         // 45: monofs.GetRepositoryInfoRequest
+	(*GetRepositoryInfoResponse)(nil),        // 46: monofs.GetRepositoryInfoResponse
+	(*OnboardingStatusRequest)(nil),          // 47: monofs.OnboardingStatusRequest
+	(*OnboardingStatusResponse)(nil),         // 48: monofs.OnboardingStatusResponse
+	(*MarkRepositoryOnboardedRequest)(nil),   // 49: monofs.MarkRepositoryOnboardedRequest
+	(*MarkRepositoryOnboardedResponse)(nil),  // 50: monofs.MarkRepositoryOnboardedResponse
+	(*NotifyRepositoryIngestedRequest)(nil),  // 51: monofs.NotifyRepositoryIngestedRequest
+	(*NotifyRepositoryIngestedResponse)(nil), // 52: monofs.NotifyRepositoryIngestedResponse
+	(*DeleteRepositoryRequest)(nil),          // 53: monofs.DeleteRepositoryRequest
+	(*DeleteRepositoryResponse)(nil),         // 54: monofs.DeleteRepositoryResponse
+	(*GetNodeForFileRequest)(nil),            // 55: monofs.GetNodeForFileRequest
+	(*GetNodeForFileResponse)(nil),           // 56: monofs.GetNodeForFileResponse
+	(*DeleteFileRequest)(nil),                // 57: monofs.DeleteFileRequest
+	(*DeleteFileResponse)(nil),               // 58: monofs.DeleteFileResponse
+	(*BuildDirectoryIndexesRequest)(nil),     // 59: monofs.BuildDirectoryIndexesRequest
+	(*BuildDirectoryIndexesResponse)(nil),    // 60: monofs.BuildDirectoryIndexesResponse
+	(*DeleteRepositoryOnNodeRequest)(nil),    // 61: monofs.DeleteRepositoryOnNodeRequest
+	(*DeleteRepositoryOnNodeResponse)(nil),   // 62: monofs.DeleteRepositoryOnNodeResponse
+	(*RegisterClientRequest)(nil),            // 63: monofs.RegisterClientRequest
+	(*GuardianConfig)(nil),                   // 64: monofs.GuardianConfig
+	(*RegisterClientResponse)(nil),           // 65: monofs.RegisterClientResponse
+	(*UnregisterClientRequest)(nil),          // 66: monofs.UnregisterClientRequest
+	(*UnregisterClientResponse)(nil),         // 67: monofs.UnregisterClientResponse
+	(*ClientHeartbeatRequest)(nil),           // 68: monofs.ClientHeartbeatRequest
+	(*ClientHeartbeatResponse)(nil),          // 69: monofs.ClientHeartbeatResponse
+	(*ListClientsRequest)(nil),               // 70: monofs.ListClientsRequest
+	(*ListClientsResponse)(nil),              // 71: monofs.ListClientsResponse
+	(*ClientInfo)(nil),                       // 72: monofs.ClientInfo
+	(*FailoverRequest)(nil),                  // 73: monofs.FailoverRequest
+	(*FailoverResponse)(nil),                 // 74: monofs.FailoverResponse
+	(*ClusterStatsRequest)(nil),              // 75: monofs.ClusterStatsRequest
+	(*ClusterStatsResponse)(nil),             // 76: monofs.ClusterStatsResponse
+	(*NodeStatsRequest)(nil),                 // 77: monofs.NodeStatsRequest
+	(*NodeStatsResponse)(nil),                // 78: monofs.NodeStatsResponse
+	(*NodeStatInfo)(nil),                     // 79: monofs.NodeStatInfo
+	(*DrainClusterRequest)(nil),              // 80: monofs.DrainClusterRequest
+	(*DrainClusterResponse)(nil),             // 81: monofs.DrainClusterResponse
+	(*UndrainClusterRequest)(nil),            // 82: monofs.UndrainClusterRequest
+	(*UndrainClusterResponse)(nil),           // 83: monofs.UndrainClusterResponse
+	(*GetNodeFilesRequest)(nil),              // 84: monofs.GetNodeFilesRequest
+	(*GetNodeFilesResponse)(nil),             // 85: monofs.GetNodeFilesResponse
+	(*FileInfo)(nil),                         // 86: monofs.FileInfo
+	(*PredictorStatsRequest)(nil),            // 87: monofs.PredictorStatsRequest
+	(*PredictorStatsResponse)(nil),           // 88: monofs.PredictorStatsResponse
+	(*AddWhitelistedClientRequest)(nil),      // 89: monofs.AddWhitelistedClientRequest
+	(*AddWhitelistedClientResponse)(nil),     // 90: monofs.AddWhitelistedClientResponse
+	(*RemoveWhitelistedClientRequest)(nil),   // 91: monofs.RemoveWhitelistedClientRequest
+	(*RemoveWhitelistedClientResponse)(nil),  // 92: monofs.RemoveWhitelistedClientResponse
+	(*ListWhitelistedClientsRequest)(nil),    // 93: monofs.ListWhitelistedClientsRequest
+	(*ListWhitelistedClientsResponse)(nil),   // 94: monofs.ListWhitelistedClientsResponse
+	(*WhitelistedClient)(nil),                // 95: monofs.WhitelistedClient
+	(*SetWhitelistEnabledRequest)(nil),       // 96: monofs.SetWhitelistEnabledRequest
+	(*SetWhitelistEnabledResponse)(nil),      // 97: monofs.SetWhitelistEnabledResponse
+	(*GetWhitelistStatusRequest)(nil),        // 98: monofs.GetWhitelistStatusRequest
+	(*GetWhitelistStatusResponse)(nil),       // 99: monofs.GetWhitelistStatusResponse
+	(*DeleteDirectoryRecursiveRequest)(nil),  // 100: monofs.DeleteDirectoryRecursiveRequest
+	(*DeleteDirectoryRecursiveResponse)(nil), // 101: monofs.DeleteDirectoryRecursiveResponse
+	(*DeleteGuardianFileRequest)(nil),        // 102: monofs.DeleteGuardianFileRequest
+	(*DeleteGuardianFileResponse)(nil),       // 103: monofs.DeleteGuardianFileResponse
+	(*DeleteGuardianDirectoryRequest)(nil),   // 104: monofs.DeleteGuardianDirectoryRequest
+	(*DeleteGuardianDirectoryResponse)(nil),  // 105: monofs.DeleteGuardianDirectoryResponse
+	(*SubscribeChangesRequest)(nil),          // 106: monofs.SubscribeChangesRequest
+	(*ChangeEvent)(nil),                      // 107: monofs.ChangeEvent
+	(*InjectGuardianFile)(nil),               // 108: monofs.InjectGuardianFile
+	(*InjectGuardianPartitionRequest)(nil),   // 109: monofs.InjectGuardianPartitionRequest
+	(*InjectGuardianPartitionResponse)(nil),  // 110: monofs.InjectGuardianPartitionResponse
+	(*GuardianMutationContext)(nil),          // 111: monofs.GuardianMutationContext
+	(*GuardianPathWrite)(nil),                // 112: monofs.GuardianPathWrite
+	(*GuardianPathDelete)(nil),               // 113: monofs.GuardianPathDelete
+	(*GuardianFileVersion)(nil),              // 114: monofs.GuardianFileVersion
+	(*UpsertGuardianPathsRequest)(nil),       // 115: monofs.UpsertGuardianPathsRequest
+	(*UpsertGuardianPathsResponse)(nil),      // 116: monofs.UpsertGuardianPathsResponse
+	(*DeleteGuardianPathsRequest)(nil),       // 117: monofs.DeleteGuardianPathsRequest
+	(*DeleteGuardianPathsResponse)(nil),      // 118: monofs.DeleteGuardianPathsResponse
+	(*ListGuardianVersionsRequest)(nil),      // 119: monofs.ListGuardianVersionsRequest
+	(*ListGuardianVersionsResponse)(nil),     // 120: monofs.ListGuardianVersionsResponse
+	(*GetGuardianVersionRequest)(nil),        // 121: monofs.GetGuardianVersionRequest
+	(*GetGuardianVersionResponse)(nil),       // 122: monofs.GetGuardianVersionResponse
+	(*SubscribeGuardianChangesRequest)(nil),  // 123: monofs.SubscribeGuardianChangesRequest
+	(*GuardianChangeEvent)(nil),              // 124: monofs.GuardianChangeEvent
+	nil,                                      // 125: monofs.NodeInfo.MetadataEntry
+	nil,                                      // 126: monofs.IngestRequest.IngestionConfigEntry
+	nil,                                      // 127: monofs.IngestRequest.FetchConfigEntry
+	nil,                                      // 128: monofs.FileMetadata.BackendMetadataEntry
+	nil,                                      // 129: monofs.RegisterRepositoryRequest.IngestionConfigEntry
+	nil,                                      // 130: monofs.RegisterRepositoryRequest.FetchConfigEntry
+	nil,                                      // 131: monofs.OnboardingStatusResponse.RepositoriesEntry
+	nil,                                      // 132: monofs.ClusterStatsResponse.FailoversEntry
 }
 var file_api_proto_monofs_proto_depIdxs = []int32{
-	6,  // 0: monofs.ClusterInfoResponse.nodes:type_name -> monofs.NodeInfo
-	87, // 1: monofs.NodeInfo.metadata:type_name -> monofs.NodeInfo.MetadataEntry
-	0,  // 2: monofs.IngestRequest.ingestion_type:type_name -> monofs.IngestionType
-	1,  // 3: monofs.IngestRequest.fetch_type:type_name -> monofs.SourceType
-	88, // 4: monofs.IngestRequest.ingestion_config:type_name -> monofs.IngestRequest.IngestionConfigEntry
-	89, // 5: monofs.IngestRequest.fetch_config:type_name -> monofs.IngestRequest.FetchConfigEntry
-	3,  // 6: monofs.IngestProgress.stage:type_name -> monofs.IngestProgress.Stage
-	0,  // 7: monofs.FileMetadata.source_type:type_name -> monofs.IngestionType
-	1,  // 8: monofs.FileMetadata.fetch_type:type_name -> monofs.SourceType
-	90, // 9: monofs.FileMetadata.backend_metadata:type_name -> monofs.FileMetadata.BackendMetadataEntry
-	27, // 10: monofs.IngestFileRequest.metadata:type_name -> monofs.FileMetadata
-	27, // 11: monofs.IngestFileBatchRequest.files:type_name -> monofs.FileMetadata
-	27, // 12: monofs.IngestReplicaBatchRequest.files:type_name -> monofs.FileMetadata
-	0,  // 13: monofs.RegisterRepositoryRequest.ingestion_type:type_name -> monofs.IngestionType
-	1,  // 14: monofs.RegisterRepositoryRequest.fetch_type:type_name -> monofs.SourceType
-	91, // 15: monofs.RegisterRepositoryRequest.ingestion_config:type_name -> monofs.RegisterRepositoryRequest.IngestionConfigEntry
-	92, // 16: monofs.RegisterRepositoryRequest.fetch_config:type_name -> monofs.RegisterRepositoryRequest.FetchConfigEntry
-	84, // 17: monofs.SyncMetadataFromNodeRequest.files:type_name -> monofs.FileInfo
-	93, // 18: monofs.OnboardingStatusResponse.repositories:type_name -> monofs.OnboardingStatusResponse.RepositoriesEntry
-	70, // 19: monofs.ListClientsResponse.clients:type_name -> monofs.ClientInfo
-	2,  // 20: monofs.ClientInfo.state:type_name -> monofs.ClientState
-	94, // 21: monofs.ClusterStatsResponse.failovers:type_name -> monofs.ClusterStatsResponse.FailoversEntry
-	77, // 22: monofs.NodeStatsResponse.nodes:type_name -> monofs.NodeStatInfo
-	84, // 23: monofs.GetNodeFilesResponse.files:type_name -> monofs.FileInfo
-	4,  // 24: monofs.MonoFSRouter.GetClusterInfo:input_type -> monofs.ClusterInfoRequest
-	7,  // 25: monofs.MonoFSRouter.Heartbeat:input_type -> monofs.HeartbeatRequest
-	25, // 26: monofs.MonoFSRouter.IngestRepository:input_type -> monofs.IngestRequest
-	50, // 27: monofs.MonoFSRouter.NotifyRepositoryIngested:input_type -> monofs.NotifyRepositoryIngestedRequest
-	52, // 28: monofs.MonoFSRouter.DeleteRepository:input_type -> monofs.DeleteRepositoryRequest
-	54, // 29: monofs.MonoFSRouter.GetNodeForFile:input_type -> monofs.GetNodeForFileRequest
-	62, // 30: monofs.MonoFSRouter.RegisterClient:input_type -> monofs.RegisterClientRequest
-	64, // 31: monofs.MonoFSRouter.UnregisterClient:input_type -> monofs.UnregisterClientRequest
-	66, // 32: monofs.MonoFSRouter.ClientHeartbeat:input_type -> monofs.ClientHeartbeatRequest
-	68, // 33: monofs.MonoFSRouter.ListClients:input_type -> monofs.ListClientsRequest
-	71, // 34: monofs.MonoFSRouter.RequestFailover:input_type -> monofs.FailoverRequest
-	82, // 35: monofs.MonoFSRouter.GetNodeFiles:input_type -> monofs.GetNodeFilesRequest
-	73, // 36: monofs.MonoFSRouter.GetClusterStats:input_type -> monofs.ClusterStatsRequest
-	75, // 37: monofs.MonoFSRouter.GetNodeStats:input_type -> monofs.NodeStatsRequest
-	78, // 38: monofs.MonoFSRouter.DrainCluster:input_type -> monofs.DrainClusterRequest
-	80, // 39: monofs.MonoFSRouter.UndrainCluster:input_type -> monofs.UndrainClusterRequest
-	11, // 40: monofs.MonoFS.Lookup:input_type -> monofs.LookupRequest
-	13, // 41: monofs.MonoFS.GetAttr:input_type -> monofs.GetAttrRequest
-	15, // 42: monofs.MonoFS.ReadDir:input_type -> monofs.ReadDirRequest
-	17, // 43: monofs.MonoFS.Read:input_type -> monofs.ReadRequest
-	19, // 44: monofs.MonoFS.Create:input_type -> monofs.CreateRequest
-	21, // 45: monofs.MonoFS.Write:input_type -> monofs.WriteRequest
-	23, // 46: monofs.MonoFS.Authenticate:input_type -> monofs.AuthRequest
-	9,  // 47: monofs.MonoFS.GetNodeInfo:input_type -> monofs.NodeInfoRequest
-	28, // 48: monofs.MonoFS.IngestFile:input_type -> monofs.IngestFileRequest
-	30, // 49: monofs.MonoFS.IngestFileBatch:input_type -> monofs.IngestFileBatchRequest
-	32, // 50: monofs.MonoFS.IngestReplicaBatch:input_type -> monofs.IngestReplicaBatchRequest
-	34, // 51: monofs.MonoFS.RegisterRepository:input_type -> monofs.RegisterRepositoryRequest
-	36, // 52: monofs.MonoFS.GetRepositoryFiles:input_type -> monofs.GetRepositoryFilesRequest
-	38, // 53: monofs.MonoFS.SyncMetadataFromNode:input_type -> monofs.SyncMetadataFromNodeRequest
-	40, // 54: monofs.MonoFS.ClearFailoverCache:input_type -> monofs.ClearFailoverCacheRequest
-	42, // 55: monofs.MonoFS.ListRepositories:input_type -> monofs.ListRepositoriesRequest
-	44, // 56: monofs.MonoFS.GetRepositoryInfo:input_type -> monofs.GetRepositoryInfoRequest
-	46, // 57: monofs.MonoFS.GetOnboardingStatus:input_type -> monofs.OnboardingStatusRequest
-	48, // 58: monofs.MonoFS.MarkRepositoryOnboarded:input_type -> monofs.MarkRepositoryOnboardedRequest
-	56, // 59: monofs.MonoFS.DeleteFile:input_type -> monofs.DeleteFileRequest
-	60, // 60: monofs.MonoFS.DeleteRepository:input_type -> monofs.DeleteRepositoryOnNodeRequest
-	58, // 61: monofs.MonoFS.BuildDirectoryIndexes:input_type -> monofs.BuildDirectoryIndexesRequest
-	85, // 62: monofs.MonoFS.GetPredictorStats:input_type -> monofs.PredictorStatsRequest
-	5,  // 63: monofs.MonoFSRouter.GetClusterInfo:output_type -> monofs.ClusterInfoResponse
-	8,  // 64: monofs.MonoFSRouter.Heartbeat:output_type -> monofs.HeartbeatResponse
-	26, // 65: monofs.MonoFSRouter.IngestRepository:output_type -> monofs.IngestProgress
-	51, // 66: monofs.MonoFSRouter.NotifyRepositoryIngested:output_type -> monofs.NotifyRepositoryIngestedResponse
-	53, // 67: monofs.MonoFSRouter.DeleteRepository:output_type -> monofs.DeleteRepositoryResponse
-	55, // 68: monofs.MonoFSRouter.GetNodeForFile:output_type -> monofs.GetNodeForFileResponse
-	63, // 69: monofs.MonoFSRouter.RegisterClient:output_type -> monofs.RegisterClientResponse
-	65, // 70: monofs.MonoFSRouter.UnregisterClient:output_type -> monofs.UnregisterClientResponse
-	67, // 71: monofs.MonoFSRouter.ClientHeartbeat:output_type -> monofs.ClientHeartbeatResponse
-	69, // 72: monofs.MonoFSRouter.ListClients:output_type -> monofs.ListClientsResponse
-	72, // 73: monofs.MonoFSRouter.RequestFailover:output_type -> monofs.FailoverResponse
-	83, // 74: monofs.MonoFSRouter.GetNodeFiles:output_type -> monofs.GetNodeFilesResponse
-	74, // 75: monofs.MonoFSRouter.GetClusterStats:output_type -> monofs.ClusterStatsResponse
-	76, // 76: monofs.MonoFSRouter.GetNodeStats:output_type -> monofs.NodeStatsResponse
-	79, // 77: monofs.MonoFSRouter.DrainCluster:output_type -> monofs.DrainClusterResponse
-	81, // 78: monofs.MonoFSRouter.UndrainCluster:output_type -> monofs.UndrainClusterResponse
-	12, // 79: monofs.MonoFS.Lookup:output_type -> monofs.LookupResponse
-	14, // 80: monofs.MonoFS.GetAttr:output_type -> monofs.GetAttrResponse
-	16, // 81: monofs.MonoFS.ReadDir:output_type -> monofs.DirEntry
-	18, // 82: monofs.MonoFS.Read:output_type -> monofs.DataChunk
-	20, // 83: monofs.MonoFS.Create:output_type -> monofs.CreateResponse
-	22, // 84: monofs.MonoFS.Write:output_type -> monofs.WriteResponse
-	24, // 85: monofs.MonoFS.Authenticate:output_type -> monofs.AuthResponse
-	10, // 86: monofs.MonoFS.GetNodeInfo:output_type -> monofs.NodeInfoResponse
-	29, // 87: monofs.MonoFS.IngestFile:output_type -> monofs.IngestFileResponse
-	31, // 88: monofs.MonoFS.IngestFileBatch:output_type -> monofs.IngestFileBatchResponse
-	33, // 89: monofs.MonoFS.IngestReplicaBatch:output_type -> monofs.IngestReplicaBatchResponse
-	35, // 90: monofs.MonoFS.RegisterRepository:output_type -> monofs.RegisterRepositoryResponse
-	37, // 91: monofs.MonoFS.GetRepositoryFiles:output_type -> monofs.GetRepositoryFilesResponse
-	39, // 92: monofs.MonoFS.SyncMetadataFromNode:output_type -> monofs.SyncMetadataFromNodeResponse
-	41, // 93: monofs.MonoFS.ClearFailoverCache:output_type -> monofs.ClearFailoverCacheResponse
-	43, // 94: monofs.MonoFS.ListRepositories:output_type -> monofs.ListRepositoriesResponse
-	45, // 95: monofs.MonoFS.GetRepositoryInfo:output_type -> monofs.GetRepositoryInfoResponse
-	47, // 96: monofs.MonoFS.GetOnboardingStatus:output_type -> monofs.OnboardingStatusResponse
-	49, // 97: monofs.MonoFS.MarkRepositoryOnboarded:output_type -> monofs.MarkRepositoryOnboardedResponse
-	57, // 98: monofs.MonoFS.DeleteFile:output_type -> monofs.DeleteFileResponse
-	61, // 99: monofs.MonoFS.DeleteRepository:output_type -> monofs.DeleteRepositoryOnNodeResponse
-	59, // 100: monofs.MonoFS.BuildDirectoryIndexes:output_type -> monofs.BuildDirectoryIndexesResponse
-	86, // 101: monofs.MonoFS.GetPredictorStats:output_type -> monofs.PredictorStatsResponse
-	63, // [63:102] is the sub-list for method output_type
-	24, // [24:63] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	7,   // 0: monofs.ClusterInfoResponse.nodes:type_name -> monofs.NodeInfo
+	125, // 1: monofs.NodeInfo.metadata:type_name -> monofs.NodeInfo.MetadataEntry
+	0,   // 2: monofs.IngestRequest.ingestion_type:type_name -> monofs.IngestionType
+	1,   // 3: monofs.IngestRequest.fetch_type:type_name -> monofs.SourceType
+	126, // 4: monofs.IngestRequest.ingestion_config:type_name -> monofs.IngestRequest.IngestionConfigEntry
+	127, // 5: monofs.IngestRequest.fetch_config:type_name -> monofs.IngestRequest.FetchConfigEntry
+	4,   // 6: monofs.IngestProgress.stage:type_name -> monofs.IngestProgress.Stage
+	0,   // 7: monofs.FileMetadata.source_type:type_name -> monofs.IngestionType
+	1,   // 8: monofs.FileMetadata.fetch_type:type_name -> monofs.SourceType
+	128, // 9: monofs.FileMetadata.backend_metadata:type_name -> monofs.FileMetadata.BackendMetadataEntry
+	28,  // 10: monofs.IngestFileRequest.metadata:type_name -> monofs.FileMetadata
+	28,  // 11: monofs.IngestFileBatchRequest.files:type_name -> monofs.FileMetadata
+	28,  // 12: monofs.IngestReplicaBatchRequest.files:type_name -> monofs.FileMetadata
+	0,   // 13: monofs.RegisterRepositoryRequest.ingestion_type:type_name -> monofs.IngestionType
+	1,   // 14: monofs.RegisterRepositoryRequest.fetch_type:type_name -> monofs.SourceType
+	129, // 15: monofs.RegisterRepositoryRequest.ingestion_config:type_name -> monofs.RegisterRepositoryRequest.IngestionConfigEntry
+	130, // 16: monofs.RegisterRepositoryRequest.fetch_config:type_name -> monofs.RegisterRepositoryRequest.FetchConfigEntry
+	86,  // 17: monofs.SyncMetadataFromNodeRequest.files:type_name -> monofs.FileInfo
+	131, // 18: monofs.OnboardingStatusResponse.repositories:type_name -> monofs.OnboardingStatusResponse.RepositoriesEntry
+	64,  // 19: monofs.RegisterClientRequest.guardian_config:type_name -> monofs.GuardianConfig
+	72,  // 20: monofs.ListClientsResponse.clients:type_name -> monofs.ClientInfo
+	2,   // 21: monofs.ClientInfo.state:type_name -> monofs.ClientState
+	132, // 22: monofs.ClusterStatsResponse.failovers:type_name -> monofs.ClusterStatsResponse.FailoversEntry
+	79,  // 23: monofs.NodeStatsResponse.nodes:type_name -> monofs.NodeStatInfo
+	86,  // 24: monofs.GetNodeFilesResponse.files:type_name -> monofs.FileInfo
+	95,  // 25: monofs.ListWhitelistedClientsResponse.clients:type_name -> monofs.WhitelistedClient
+	95,  // 26: monofs.GetWhitelistStatusResponse.clients:type_name -> monofs.WhitelistedClient
+	3,   // 27: monofs.ChangeEvent.type:type_name -> monofs.ChangeType
+	108, // 28: monofs.InjectGuardianPartitionRequest.files:type_name -> monofs.InjectGuardianFile
+	112, // 29: monofs.UpsertGuardianPathsRequest.writes:type_name -> monofs.GuardianPathWrite
+	111, // 30: monofs.UpsertGuardianPathsRequest.context:type_name -> monofs.GuardianMutationContext
+	114, // 31: monofs.UpsertGuardianPathsResponse.versions:type_name -> monofs.GuardianFileVersion
+	113, // 32: monofs.DeleteGuardianPathsRequest.deletes:type_name -> monofs.GuardianPathDelete
+	111, // 33: monofs.DeleteGuardianPathsRequest.context:type_name -> monofs.GuardianMutationContext
+	114, // 34: monofs.DeleteGuardianPathsResponse.tombstones:type_name -> monofs.GuardianFileVersion
+	114, // 35: monofs.ListGuardianVersionsResponse.versions:type_name -> monofs.GuardianFileVersion
+	114, // 36: monofs.GetGuardianVersionResponse.version:type_name -> monofs.GuardianFileVersion
+	3,   // 37: monofs.GuardianChangeEvent.type:type_name -> monofs.ChangeType
+	5,   // 38: monofs.MonoFSRouter.GetClusterInfo:input_type -> monofs.ClusterInfoRequest
+	8,   // 39: monofs.MonoFSRouter.Heartbeat:input_type -> monofs.HeartbeatRequest
+	26,  // 40: monofs.MonoFSRouter.IngestRepository:input_type -> monofs.IngestRequest
+	51,  // 41: monofs.MonoFSRouter.NotifyRepositoryIngested:input_type -> monofs.NotifyRepositoryIngestedRequest
+	53,  // 42: monofs.MonoFSRouter.DeleteRepository:input_type -> monofs.DeleteRepositoryRequest
+	55,  // 43: monofs.MonoFSRouter.GetNodeForFile:input_type -> monofs.GetNodeForFileRequest
+	63,  // 44: monofs.MonoFSRouter.RegisterClient:input_type -> monofs.RegisterClientRequest
+	66,  // 45: monofs.MonoFSRouter.UnregisterClient:input_type -> monofs.UnregisterClientRequest
+	68,  // 46: monofs.MonoFSRouter.ClientHeartbeat:input_type -> monofs.ClientHeartbeatRequest
+	70,  // 47: monofs.MonoFSRouter.ListClients:input_type -> monofs.ListClientsRequest
+	73,  // 48: monofs.MonoFSRouter.RequestFailover:input_type -> monofs.FailoverRequest
+	84,  // 49: monofs.MonoFSRouter.GetNodeFiles:input_type -> monofs.GetNodeFilesRequest
+	75,  // 50: monofs.MonoFSRouter.GetClusterStats:input_type -> monofs.ClusterStatsRequest
+	77,  // 51: monofs.MonoFSRouter.GetNodeStats:input_type -> monofs.NodeStatsRequest
+	80,  // 52: monofs.MonoFSRouter.DrainCluster:input_type -> monofs.DrainClusterRequest
+	82,  // 53: monofs.MonoFSRouter.UndrainCluster:input_type -> monofs.UndrainClusterRequest
+	102, // 54: monofs.MonoFSRouter.DeleteGuardianFile:input_type -> monofs.DeleteGuardianFileRequest
+	104, // 55: monofs.MonoFSRouter.DeleteGuardianDirectory:input_type -> monofs.DeleteGuardianDirectoryRequest
+	109, // 56: monofs.MonoFSRouter.InjectGuardianPartition:input_type -> monofs.InjectGuardianPartitionRequest
+	115, // 57: monofs.MonoFSRouter.UpsertGuardianPaths:input_type -> monofs.UpsertGuardianPathsRequest
+	117, // 58: monofs.MonoFSRouter.DeleteGuardianPaths:input_type -> monofs.DeleteGuardianPathsRequest
+	119, // 59: monofs.MonoFSRouter.ListGuardianVersions:input_type -> monofs.ListGuardianVersionsRequest
+	121, // 60: monofs.MonoFSRouter.GetGuardianVersion:input_type -> monofs.GetGuardianVersionRequest
+	123, // 61: monofs.MonoFSRouter.SubscribeGuardianChanges:input_type -> monofs.SubscribeGuardianChangesRequest
+	89,  // 62: monofs.MonoFSRouter.AddWhitelistedClient:input_type -> monofs.AddWhitelistedClientRequest
+	91,  // 63: monofs.MonoFSRouter.RemoveWhitelistedClient:input_type -> monofs.RemoveWhitelistedClientRequest
+	93,  // 64: monofs.MonoFSRouter.ListWhitelistedClients:input_type -> monofs.ListWhitelistedClientsRequest
+	96,  // 65: monofs.MonoFSRouter.SetWhitelistEnabled:input_type -> monofs.SetWhitelistEnabledRequest
+	98,  // 66: monofs.MonoFSRouter.GetWhitelistStatus:input_type -> monofs.GetWhitelistStatusRequest
+	106, // 67: monofs.MonoFSRouter.SubscribeToChanges:input_type -> monofs.SubscribeChangesRequest
+	12,  // 68: monofs.MonoFS.Lookup:input_type -> monofs.LookupRequest
+	14,  // 69: monofs.MonoFS.GetAttr:input_type -> monofs.GetAttrRequest
+	16,  // 70: monofs.MonoFS.ReadDir:input_type -> monofs.ReadDirRequest
+	18,  // 71: monofs.MonoFS.Read:input_type -> monofs.ReadRequest
+	20,  // 72: monofs.MonoFS.Create:input_type -> monofs.CreateRequest
+	22,  // 73: monofs.MonoFS.Write:input_type -> monofs.WriteRequest
+	24,  // 74: monofs.MonoFS.Authenticate:input_type -> monofs.AuthRequest
+	10,  // 75: monofs.MonoFS.GetNodeInfo:input_type -> monofs.NodeInfoRequest
+	29,  // 76: monofs.MonoFS.IngestFile:input_type -> monofs.IngestFileRequest
+	31,  // 77: monofs.MonoFS.IngestFileBatch:input_type -> monofs.IngestFileBatchRequest
+	33,  // 78: monofs.MonoFS.IngestReplicaBatch:input_type -> monofs.IngestReplicaBatchRequest
+	35,  // 79: monofs.MonoFS.RegisterRepository:input_type -> monofs.RegisterRepositoryRequest
+	37,  // 80: monofs.MonoFS.GetRepositoryFiles:input_type -> monofs.GetRepositoryFilesRequest
+	39,  // 81: monofs.MonoFS.SyncMetadataFromNode:input_type -> monofs.SyncMetadataFromNodeRequest
+	41,  // 82: monofs.MonoFS.ClearFailoverCache:input_type -> monofs.ClearFailoverCacheRequest
+	43,  // 83: monofs.MonoFS.ListRepositories:input_type -> monofs.ListRepositoriesRequest
+	45,  // 84: monofs.MonoFS.GetRepositoryInfo:input_type -> monofs.GetRepositoryInfoRequest
+	47,  // 85: monofs.MonoFS.GetOnboardingStatus:input_type -> monofs.OnboardingStatusRequest
+	49,  // 86: monofs.MonoFS.MarkRepositoryOnboarded:input_type -> monofs.MarkRepositoryOnboardedRequest
+	57,  // 87: monofs.MonoFS.DeleteFile:input_type -> monofs.DeleteFileRequest
+	61,  // 88: monofs.MonoFS.DeleteRepository:input_type -> monofs.DeleteRepositoryOnNodeRequest
+	100, // 89: monofs.MonoFS.DeleteDirectoryRecursive:input_type -> monofs.DeleteDirectoryRecursiveRequest
+	59,  // 90: monofs.MonoFS.BuildDirectoryIndexes:input_type -> monofs.BuildDirectoryIndexesRequest
+	87,  // 91: monofs.MonoFS.GetPredictorStats:input_type -> monofs.PredictorStatsRequest
+	6,   // 92: monofs.MonoFSRouter.GetClusterInfo:output_type -> monofs.ClusterInfoResponse
+	9,   // 93: monofs.MonoFSRouter.Heartbeat:output_type -> monofs.HeartbeatResponse
+	27,  // 94: monofs.MonoFSRouter.IngestRepository:output_type -> monofs.IngestProgress
+	52,  // 95: monofs.MonoFSRouter.NotifyRepositoryIngested:output_type -> monofs.NotifyRepositoryIngestedResponse
+	54,  // 96: monofs.MonoFSRouter.DeleteRepository:output_type -> monofs.DeleteRepositoryResponse
+	56,  // 97: monofs.MonoFSRouter.GetNodeForFile:output_type -> monofs.GetNodeForFileResponse
+	65,  // 98: monofs.MonoFSRouter.RegisterClient:output_type -> monofs.RegisterClientResponse
+	67,  // 99: monofs.MonoFSRouter.UnregisterClient:output_type -> monofs.UnregisterClientResponse
+	69,  // 100: monofs.MonoFSRouter.ClientHeartbeat:output_type -> monofs.ClientHeartbeatResponse
+	71,  // 101: monofs.MonoFSRouter.ListClients:output_type -> monofs.ListClientsResponse
+	74,  // 102: monofs.MonoFSRouter.RequestFailover:output_type -> monofs.FailoverResponse
+	85,  // 103: monofs.MonoFSRouter.GetNodeFiles:output_type -> monofs.GetNodeFilesResponse
+	76,  // 104: monofs.MonoFSRouter.GetClusterStats:output_type -> monofs.ClusterStatsResponse
+	78,  // 105: monofs.MonoFSRouter.GetNodeStats:output_type -> monofs.NodeStatsResponse
+	81,  // 106: monofs.MonoFSRouter.DrainCluster:output_type -> monofs.DrainClusterResponse
+	83,  // 107: monofs.MonoFSRouter.UndrainCluster:output_type -> monofs.UndrainClusterResponse
+	103, // 108: monofs.MonoFSRouter.DeleteGuardianFile:output_type -> monofs.DeleteGuardianFileResponse
+	105, // 109: monofs.MonoFSRouter.DeleteGuardianDirectory:output_type -> monofs.DeleteGuardianDirectoryResponse
+	110, // 110: monofs.MonoFSRouter.InjectGuardianPartition:output_type -> monofs.InjectGuardianPartitionResponse
+	116, // 111: monofs.MonoFSRouter.UpsertGuardianPaths:output_type -> monofs.UpsertGuardianPathsResponse
+	118, // 112: monofs.MonoFSRouter.DeleteGuardianPaths:output_type -> monofs.DeleteGuardianPathsResponse
+	120, // 113: monofs.MonoFSRouter.ListGuardianVersions:output_type -> monofs.ListGuardianVersionsResponse
+	122, // 114: monofs.MonoFSRouter.GetGuardianVersion:output_type -> monofs.GetGuardianVersionResponse
+	124, // 115: monofs.MonoFSRouter.SubscribeGuardianChanges:output_type -> monofs.GuardianChangeEvent
+	90,  // 116: monofs.MonoFSRouter.AddWhitelistedClient:output_type -> monofs.AddWhitelistedClientResponse
+	92,  // 117: monofs.MonoFSRouter.RemoveWhitelistedClient:output_type -> monofs.RemoveWhitelistedClientResponse
+	94,  // 118: monofs.MonoFSRouter.ListWhitelistedClients:output_type -> monofs.ListWhitelistedClientsResponse
+	97,  // 119: monofs.MonoFSRouter.SetWhitelistEnabled:output_type -> monofs.SetWhitelistEnabledResponse
+	99,  // 120: monofs.MonoFSRouter.GetWhitelistStatus:output_type -> monofs.GetWhitelistStatusResponse
+	107, // 121: monofs.MonoFSRouter.SubscribeToChanges:output_type -> monofs.ChangeEvent
+	13,  // 122: monofs.MonoFS.Lookup:output_type -> monofs.LookupResponse
+	15,  // 123: monofs.MonoFS.GetAttr:output_type -> monofs.GetAttrResponse
+	17,  // 124: monofs.MonoFS.ReadDir:output_type -> monofs.DirEntry
+	19,  // 125: monofs.MonoFS.Read:output_type -> monofs.DataChunk
+	21,  // 126: monofs.MonoFS.Create:output_type -> monofs.CreateResponse
+	23,  // 127: monofs.MonoFS.Write:output_type -> monofs.WriteResponse
+	25,  // 128: monofs.MonoFS.Authenticate:output_type -> monofs.AuthResponse
+	11,  // 129: monofs.MonoFS.GetNodeInfo:output_type -> monofs.NodeInfoResponse
+	30,  // 130: monofs.MonoFS.IngestFile:output_type -> monofs.IngestFileResponse
+	32,  // 131: monofs.MonoFS.IngestFileBatch:output_type -> monofs.IngestFileBatchResponse
+	34,  // 132: monofs.MonoFS.IngestReplicaBatch:output_type -> monofs.IngestReplicaBatchResponse
+	36,  // 133: monofs.MonoFS.RegisterRepository:output_type -> monofs.RegisterRepositoryResponse
+	38,  // 134: monofs.MonoFS.GetRepositoryFiles:output_type -> monofs.GetRepositoryFilesResponse
+	40,  // 135: monofs.MonoFS.SyncMetadataFromNode:output_type -> monofs.SyncMetadataFromNodeResponse
+	42,  // 136: monofs.MonoFS.ClearFailoverCache:output_type -> monofs.ClearFailoverCacheResponse
+	44,  // 137: monofs.MonoFS.ListRepositories:output_type -> monofs.ListRepositoriesResponse
+	46,  // 138: monofs.MonoFS.GetRepositoryInfo:output_type -> monofs.GetRepositoryInfoResponse
+	48,  // 139: monofs.MonoFS.GetOnboardingStatus:output_type -> monofs.OnboardingStatusResponse
+	50,  // 140: monofs.MonoFS.MarkRepositoryOnboarded:output_type -> monofs.MarkRepositoryOnboardedResponse
+	58,  // 141: monofs.MonoFS.DeleteFile:output_type -> monofs.DeleteFileResponse
+	62,  // 142: monofs.MonoFS.DeleteRepository:output_type -> monofs.DeleteRepositoryOnNodeResponse
+	101, // 143: monofs.MonoFS.DeleteDirectoryRecursive:output_type -> monofs.DeleteDirectoryRecursiveResponse
+	60,  // 144: monofs.MonoFS.BuildDirectoryIndexes:output_type -> monofs.BuildDirectoryIndexesResponse
+	88,  // 145: monofs.MonoFS.GetPredictorStats:output_type -> monofs.PredictorStatsResponse
+	92,  // [92:146] is the sub-list for method output_type
+	38,  // [38:92] is the sub-list for method input_type
+	38,  // [38:38] is the sub-list for extension type_name
+	38,  // [38:38] is the sub-list for extension extendee
+	0,   // [0:38] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_monofs_proto_init() }
@@ -6089,8 +8746,8 @@ func file_api_proto_monofs_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_monofs_proto_rawDesc), len(file_api_proto_monofs_proto_rawDesc)),
-			NumEnums:      4,
-			NumMessages:   91,
+			NumEnums:      5,
+			NumMessages:   128,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

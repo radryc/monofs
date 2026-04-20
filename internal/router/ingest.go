@@ -70,9 +70,43 @@ func normalizeRepoID(repoURL string) string {
 
 // IngestRepository implements the IngestRepository RPC with streaming progress.
 func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_IngestRepositoryServer) error {
+	// Enforce ingestion whitelist
+	if r.whitelist.Enabled() {
+		clientID := extractClientID(stream.Context())
+		if !r.whitelist.IsAllowed(clientID) {
+			r.logger.Warn("ingestion denied by whitelist",
+				"client_id", clientID,
+				"source", req.Source)
+			return fmt.Errorf("client %q is not whitelisted for ingestion", clientID)
+		}
+	}
+
 	// Validate source
 	if req.Source == "" {
 		return fmt.Errorf("source must be specified")
+	}
+
+	// Guardian partition validation
+	var guardianURL string
+	if req.IngestionType == pb.IngestionType_INGESTION_GUARDIAN {
+		if req.SourceId == "" {
+			return fmt.Errorf("source_id (partition name) is required for guardian ingestion")
+		}
+		if strings.Contains(req.SourceId, "/") {
+			return fmt.Errorf("guardian partition name must not contain '/'")
+		}
+		token := req.IngestionConfig["guardian_token"]
+		if token == "" {
+			return fmt.Errorf("guardian_token is required in ingestion_config for guardian ingestion")
+		}
+		clientID, ok := r.validateGuardianToken(token)
+		if !ok {
+			return fmt.Errorf("invalid guardian token: no matching connected guardian client")
+		}
+		baseURL := r.getGuardianBaseURL(clientID)
+		if strings.TrimSpace(baseURL) != "" {
+			guardianURL = strings.TrimRight(baseURL, "/")
+		}
 	}
 
 	// Step 1: Determine display path (what users see in filesystem)
@@ -81,6 +115,10 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 	displayPath := req.SourceId
 	if displayPath == "" {
 		displayPath = normalizeRepoID(req.Source)
+	}
+	// Guardian partitions always live under guardian/ prefix
+	if req.IngestionType == pb.IngestionType_INGESTION_GUARDIAN {
+		displayPath = "guardian/" + req.SourceId
 	}
 
 	// Step 2: Generate internal storage ID (SHA-256 hash)
@@ -92,6 +130,9 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 		ingestionType = storage.IngestionTypeGit
 	} else if ingestionType == "ingestion_s3" {
 		ingestionType = storage.IngestionTypeS3
+	} else if ingestionType == "ingestion_guardian" {
+		// Guardian uses standard git backend for ingestion
+		ingestionType = storage.IngestionTypeGit
 	}
 
 	// All ingestion now produces blob archives by default
@@ -332,6 +373,7 @@ initComplete:
 			CommitHash:      commitHash,
 			CommitTime:      commitTime,
 			CommitMessage:   commitMessage,
+			GuardianUrl:     guardianURL,
 		})
 		regCancel()
 
@@ -966,6 +1008,7 @@ initComplete:
 		rebalanceProgress: 1.0,
 	}
 	r.mu.Unlock()
+	r.bumpNativeNamespaceGeneration("repository ingest")
 
 	// If this is a re-ingestion of an existing repository, trigger rebalancing
 	if isReingestion {

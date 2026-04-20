@@ -9,10 +9,12 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/sharding"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -22,14 +24,13 @@ var templates embed.FS
 //go:embed static/*
 var staticFiles embed.FS
 
-// mockIngestStream implements MonoFSRouter_IngestRepositoryServer for HTTP ingestion
+// mockIngestStream implements MonoFSRouter_IngestRepositoryServer for HTTP ingestion.
+// Progress messages are discarded — callers use fire-and-forget goroutines.
 type mockIngestStream struct {
-	progress []*pb.IngestProgress
-	ctx      context.Context
+	ctx context.Context
 }
 
-func (s *mockIngestStream) Send(p *pb.IngestProgress) error {
-	s.progress = append(s.progress, p)
+func (s *mockIngestStream) Send(_ *pb.IngestProgress) error {
 	return nil
 }
 
@@ -80,8 +81,13 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/routers", r.handleRouters)
 	mux.HandleFunc("/api/rebalance", r.handleRebalance)
 	mux.HandleFunc("/api/clients", r.handleClientsAPI)
+	mux.HandleFunc("/api/local-clients", r.handleLocalClientsAPI)
 	mux.HandleFunc("/api/fetchers", r.handleFetchersAPI)
 	mux.HandleFunc("/api/dependencies", r.handleDependenciesAPI)
+
+	// Whitelist API routes
+	mux.HandleFunc("/api/whitelist", r.handleWhitelistAPI)
+	mux.HandleFunc("/api/whitelist/toggle", r.handleWhitelistToggleAPI)
 
 	// Predictor API route
 	mux.HandleFunc("/api/predictor", r.handlePredictorAPI)
@@ -94,6 +100,13 @@ func (r *Router) ServeHTTP() http.Handler {
 
 	// File content API (for code viewer)
 	mux.HandleFunc("/api/file/content", r.handleFileContent)
+
+	// Guardian API routes
+	mux.HandleFunc("/api/guardian/clients", r.handleGuardianClientsAPI)
+	mux.HandleFunc("/api/guardian/local-clients", r.handleGuardianLocalClientsAPI)
+	mux.HandleFunc("/api/guardian/inject", r.handleGuardianInject)
+	mux.HandleFunc("/api/guardian/partitions", r.handleGuardianPartitions)
+	mux.HandleFunc("/api/guardian/partitions/", r.handleGuardianPartition)
 
 	// Health check endpoint for HAProxy
 	mux.HandleFunc("/health", r.handleHealth)
@@ -180,6 +193,23 @@ func (r *Router) handleIngest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Enforce ingestion whitelist
+	if r.whitelist.Enabled() {
+		clientID := req.FormValue("client_id")
+		if clientID == "" {
+			clientID = req.Header.Get("X-Client-ID")
+		}
+		if !r.whitelist.IsAllowed(clientID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("client %q is not whitelisted for ingestion", clientID),
+			})
+			return
+		}
+	}
+
 	source := req.FormValue("source")
 	ref := req.FormValue("ref")
 	sourceID := req.FormValue("source_id") // Optional: auto-generated if empty
@@ -205,6 +235,17 @@ func (r *Router) handleIngest(w http.ResponseWriter, req *http.Request) {
 		fetchType = "git"
 	}
 
+	// Guardian ingestion is not allowed through the UI — use the guardian API
+	if ingestionType == "guardian" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "guardian ingestion must use the guardian API endpoint",
+		})
+		return
+	}
+
 	// Parse backend config from form (format: ingestion_config[key]=value)
 	ingestionConfig := make(map[string]string)
 	fetchConfig := make(map[string]string)
@@ -212,10 +253,7 @@ func (r *Router) handleIngest(w http.ResponseWriter, req *http.Request) {
 
 	// Start ingestion asynchronously to avoid blocking HTTP request
 	go func() {
-		stream := &mockIngestStream{
-			ctx:      context.Background(), // Use background context for async operation
-			progress: make([]*pb.IngestProgress, 0),
-		}
+		stream := &mockIngestStream{ctx: context.Background()}
 
 		err := r.IngestRepository(&pb.IngestRequest{
 			Source:          source,
@@ -253,6 +291,8 @@ func parseIngestionTypeString(s string) pb.IngestionType {
 		return pb.IngestionType_INGESTION_S3
 	case "file":
 		return pb.IngestionType_INGESTION_FILE
+	case "guardian":
+		return pb.IngestionType_INGESTION_GUARDIAN
 	default:
 		return pb.IngestionType_INGESTION_GIT
 	}
@@ -610,8 +650,89 @@ func (r *Router) handleSearchStats(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// handleClientsAPI returns the list of connected clients
+// handleGuardianClientsAPI returns the list of connected guardian clients (local + peers)
+func (r *Router) handleGuardianClientsAPI(w http.ResponseWriter, req *http.Request) {
+	r.guardianClientsMu.RLock()
+
+	now := time.Now()
+	clients := make([]guardianClientJSON, 0, len(r.guardianClients))
+	routerName := r.config.RouterName
+	if routerName == "" {
+		routerName = "local"
+	}
+	for _, gc := range r.guardianClients {
+		state := "connected"
+		if now.Sub(gc.lastHeartbeat) > 60*time.Second {
+			state = "stale"
+		}
+		clients = append(clients, guardianClientJSON{
+			ClientID:      gc.clientID,
+			BaseURL:       gc.baseURL,
+			LastHeartbeat: gc.lastHeartbeat.Unix(),
+			ConnectedSec:  int64(now.Sub(gc.lastHeartbeat).Seconds()),
+			State:         state,
+			Router:        routerName,
+		})
+	}
+	r.guardianClientsMu.RUnlock()
+
+	// Fetch guardian clients from peer routers
+	for _, peer := range r.config.PeerRouters {
+		peerURL, err := normalizeRouterURL(peer.URL)
+		if err != nil {
+			continue
+		}
+		peerClients := fetchPeerGuardianClients(peerURL, peer.Name)
+		clients = append(clients, peerClients...)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"guardian_clients": clients,
+		"count":            len(clients),
+	})
+}
+
+// handleClientsAPI returns the list of connected clients (local + peers)
 func (r *Router) handleClientsAPI(w http.ResponseWriter, req *http.Request) {
+	ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
+	defer cancel()
+
+	resp, err := r.ListClients(ctx, &pb.ListClientsRequest{})
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to list clients: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Fetch clients from peer routers and merge
+	for _, peer := range r.config.PeerRouters {
+		peerURL, err := normalizeRouterURL(peer.URL)
+		if err != nil {
+			continue
+		}
+		peerClients := fetchPeerClients(peerURL)
+		if peerClients != nil {
+			resp.Clients = append(resp.Clients, peerClients...)
+		}
+	}
+
+	// Deduplicate by client_id (same client may appear on both routers after reconnect)
+	seen := make(map[string]bool, len(resp.Clients))
+	deduped := make([]*pb.ClientInfo, 0, len(resp.Clients))
+	for _, c := range resp.Clients {
+		if !seen[c.ClientId] {
+			seen[c.ClientId] = true
+			deduped = append(deduped, c)
+		}
+	}
+	resp.Clients = deduped
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleLocalClientsAPI returns only this router's clients (called by peer routers).
+func (r *Router) handleLocalClientsAPI(w http.ResponseWriter, req *http.Request) {
 	ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
 	defer cancel()
 
@@ -623,6 +744,34 @@ func (r *Router) handleClientsAPI(w http.ResponseWriter, req *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// handleGuardianLocalClientsAPI returns only this router's guardian clients (called by peer routers).
+func (r *Router) handleGuardianLocalClientsAPI(w http.ResponseWriter, req *http.Request) {
+	r.guardianClientsMu.RLock()
+	defer r.guardianClientsMu.RUnlock()
+
+	now := time.Now()
+	clients := make([]guardianClientJSON, 0, len(r.guardianClients))
+	for _, gc := range r.guardianClients {
+		state := "connected"
+		if now.Sub(gc.lastHeartbeat) > 60*time.Second {
+			state = "stale"
+		}
+		clients = append(clients, guardianClientJSON{
+			ClientID:      gc.clientID,
+			BaseURL:       gc.baseURL,
+			LastHeartbeat: gc.lastHeartbeat.Unix(),
+			ConnectedSec:  int64(now.Sub(gc.lastHeartbeat).Seconds()),
+			State:         state,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"guardian_clients": clients,
+		"count":            len(clients),
+	})
 }
 
 // handleFileContent reads file content for the code viewer
@@ -869,4 +1018,257 @@ func (r *Router) handlePredictorAPI(w http.ResponseWriter, req *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleGuardianInject handles POST /api/guardian/inject — ingest a guardian partition
+func (r *Router) handleGuardianInject(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	token := req.Header.Get("X-Guardian-Token")
+	if token == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "X-Guardian-Token header is required"})
+		return
+	}
+
+	if _, ok := r.validateGuardianToken(token); !ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid guardian token"})
+		return
+	}
+
+	source := req.FormValue("source")
+	partitionName := req.FormValue("partition_name")
+	ref := req.FormValue("ref")
+
+	if source == "" || partitionName == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "source and partition_name are required"})
+		return
+	}
+
+	if strings.Contains(partitionName, "/") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "partition_name must not contain '/'"})
+		return
+	}
+
+	ingestionConfig := map[string]string{"guardian_token": token}
+
+	go func() {
+		stream := &mockIngestStream{ctx: context.Background()}
+		err := r.IngestRepository(&pb.IngestRequest{
+			Source:          source,
+			Ref:             ref,
+			SourceId:        partitionName,
+			IngestionType:   pb.IngestionType_INGESTION_GUARDIAN,
+			FetchType:       pb.SourceType_SOURCE_TYPE_BLOB,
+			IngestionConfig: ingestionConfig,
+		}, stream)
+		if err != nil {
+			r.logger.Error("guardian ingestion failed", "partition", partitionName, "error", err)
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Guardian ingestion started for partition: " + partitionName,
+	})
+}
+
+// handleGuardianPartitions handles GET /api/guardian/partitions — list guardian partitions
+func (r *Router) handleGuardianPartitions(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	data := r.buildRepositoriesData()
+	var guardianRepos []map[string]interface{}
+	for _, repo := range data.Repositories {
+		if isGuardian, ok := repo["is_guardian"].(bool); ok && isGuardian {
+			guardianRepos = append(guardianRepos, repo)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"partitions": guardianRepos,
+	})
+}
+
+// handleGuardianPartition handles DELETE /api/guardian/partitions/{name}[/files?path=...][/dirs?path=...]
+func (r *Router) handleGuardianPartition(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	token := req.Header.Get("X-Guardian-Token")
+	if token == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "X-Guardian-Token header is required"})
+		return
+	}
+
+	if _, ok := r.validateGuardianToken(token); !ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid guardian token"})
+		return
+	}
+
+	// Parse path: /api/guardian/partitions/{name}[/files][/dirs]
+	pathParts := strings.Split(strings.TrimPrefix(req.URL.Path, "/api/guardian/partitions/"), "/")
+	if len(pathParts) == 0 || pathParts[0] == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "partition name is required"})
+		return
+	}
+
+	partitionName := pathParts[0]
+	displayPath := "guardian/" + partitionName
+	storageID := sharding.GenerateStorageID(displayPath)
+
+	var subAction string
+	if len(pathParts) > 1 {
+		subAction = pathParts[1]
+	}
+
+	switch subAction {
+	case "files":
+		// DELETE /api/guardian/partitions/{name}/files?path=some/file.txt
+		filePath := req.URL.Query().Get("path")
+		if filePath == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "path query parameter is required"})
+			return
+		}
+		resp, err := r.deleteGuardianFileFromAllNodes(storageID, filePath)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+
+	case "dirs":
+		// DELETE /api/guardian/partitions/{name}/dirs?path=some/subdir
+		dirPath := req.URL.Query().Get("path")
+		if dirPath == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "path query parameter is required"})
+			return
+		}
+		resp, err := r.deleteGuardianDirFromAllNodes(storageID, dirPath)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+
+	case "":
+		// DELETE /api/guardian/partitions/{name} — delete entire partition
+		resp, err := r.deleteRepositoryInternal(req.Context(), storageID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": resp.Success, "message": resp.Message})
+
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "unknown sub-action: " + subAction})
+	}
+}
+
+// fetchPeerClients fetches FUSE clients from a peer router's /api/local-clients endpoint.
+// Returns nil on any error (best-effort aggregation).
+func fetchPeerClients(peerURL string) []*pb.ClientInfo {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, peerURL+"/api/local-clients", nil)
+	if err != nil {
+		return nil
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(request)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var data pb.ListClientsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil
+	}
+	return data.Clients
+}
+
+// guardianClientJSON is the JSON shape for guardian client info in API responses.
+type guardianClientJSON struct {
+	ClientID      string `json:"client_id"`
+	BaseURL       string `json:"base_url"`
+	LastHeartbeat int64  `json:"last_heartbeat"`
+	ConnectedSec  int64  `json:"connected_sec"`
+	State         string `json:"state"`
+	Router        string `json:"router"`
+}
+
+// fetchPeerGuardianClients fetches guardian clients from a peer router.
+func fetchPeerGuardianClients(peerURL, peerName string) []guardianClientJSON {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, peerURL+"/api/guardian/local-clients", nil)
+	if err != nil {
+		return nil
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(request)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var data struct {
+		GuardianClients []guardianClientJSON `json:"guardian_clients"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil
+	}
+
+	for i := range data.GuardianClients {
+		data.GuardianClients[i].Router = peerName
+	}
+	return data.GuardianClients
 }

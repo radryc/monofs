@@ -19,4 +19,6 @@ type MonoFSClient interface {
 	RecordOperation()
 	RecordBytesRead(n int64)
 	RecordError()
+	// Guardian visibility
+	IsGuardianVisible() bool
 }
