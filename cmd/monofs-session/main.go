@@ -17,6 +17,11 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+const (
+	defaultSocketTimeout = 30 * time.Second
+	pushSocketTimeout    = 10 * time.Minute
+)
+
 // SessionRequest is sent to the FUSE client
 type SessionRequest struct {
 	Action    string `json:"action"` // start, status, commit, discard, diff
@@ -260,7 +265,7 @@ Run 'find / -name session.sock 2>/dev/null' to locate existing sockets.
 	defer conn.Close()
 
 	// Set timeout
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	conn.SetDeadline(time.Now().Add(socketTimeoutForAction(action)))
 
 	// Send request
 	req := SessionRequest{Action: action}
@@ -294,7 +299,7 @@ func (sc *SessionCommand) sendRequest(req SessionRequest) (*SessionResponse, err
 	}
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	conn.SetDeadline(time.Now().Add(socketTimeoutForAction(req.Action)))
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
@@ -306,6 +311,17 @@ func (sc *SessionCommand) sendRequest(req SessionRequest) (*SessionResponse, err
 	}
 
 	return &resp, nil
+}
+
+func socketTimeoutForAction(action string) time.Duration {
+	switch action {
+	case "push", "push-blobs":
+		// Push keeps the socket open until upload, backend verification,
+		// and overlay cleanup all finish.
+		return pushSocketTimeout
+	default:
+		return defaultSocketTimeout
+	}
 }
 
 func (sc *SessionCommand) showDiff(args []string) error {

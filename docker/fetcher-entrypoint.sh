@@ -40,4 +40,4 @@ else
 fi
 
 # Execute the main command
-exec "$@"
+exec /usr/local/bin/monofs-fetcher "$@"

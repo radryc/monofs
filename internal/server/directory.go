@@ -211,13 +211,33 @@ func (s *Server) loadDirectorySummaryTx(tx *nutsdb.Tx, storageID, dirPath string
 	return entries, nil
 }
 
+// isDirSummaryMissingOrCorrupt returns true if the error means the dir
+// summary entry simply doesn't exist or is unreadable due to an MMap /
+// segment-rotation issue (e.g. EBADF). In both cases the caller should
+// treat the summary as empty and rebuild it rather than propagating the
+// error, since the dir summary is a derived cache, not primary data.
+func isDirSummaryMissingOrCorrupt(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == nutsdb.ErrKeyNotFound {
+		return true
+	}
+	// nutsdb MMap reads can return "bad file descriptor" when segment files
+	// are rotated or compacted while a mapping is still open. Treat these
+	// as a cache miss so the entry is rebuilt on the next write.
+	msg := err.Error()
+	return strings.Contains(msg, "bad file descriptor") ||
+		strings.Contains(msg, "read err")
+}
+
 func (s *Server) upsertDirectorySummaryEntry(tx *nutsdb.Tx, storageID, dirPath string, entry dirIndexEntry) error {
 	entry = normalizeSummaryEntry(entry)
 	entries, err := s.loadDirectorySummaryTx(tx, storageID, dirPath)
-	if err != nil && err != nutsdb.ErrKeyNotFound {
+	if err != nil && !isDirSummaryMissingOrCorrupt(err) {
 		return fmt.Errorf("load dir summary for %q: %w", dirPath, err)
 	}
-	if err == nutsdb.ErrKeyNotFound {
+	if isDirSummaryMissingOrCorrupt(err) {
 		entries = nil
 	}
 
@@ -239,7 +259,8 @@ func (s *Server) upsertDirectorySummaryEntry(tx *nutsdb.Tx, storageID, dirPath s
 
 func (s *Server) removeFromDirectorySummary(tx *nutsdb.Tx, storageID, parentDir, entryName string) error {
 	entries, err := s.loadDirectorySummaryTx(tx, storageID, parentDir)
-	if err == nutsdb.ErrKeyNotFound {
+	if isDirSummaryMissingOrCorrupt(err) {
+		// Nothing to remove; summary will be rebuilt on the next upsert.
 		return nil
 	}
 	if err != nil {

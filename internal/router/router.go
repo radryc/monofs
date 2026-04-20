@@ -1624,14 +1624,23 @@ func (r *Router) handleEarlyRecovery(nodeID string) {
 // checkAndRecoverNode verifies node onboarding status and triggers recovery if needed.
 // This handles nodes that were offline during repository ingestion.
 func (r *Router) checkAndRecoverNode(nodeID string, state *nodeState) {
-	// Get cluster's known repositories
+	// Get cluster's known repositories and snapshot the client reference under
+	// the read lock. The goroutine may run after the node has disconnected and
+	// state.client set to nil, so we must capture it while holding the lock and
+	// guard against a nil value.
 	r.mu.RLock()
 	clusterRepos := make(map[string]*ingestedRepo)
 	for storageID, repo := range r.ingestedRepos {
 		clusterRepos[storageID] = repo
 	}
 	fileCount := state.ownedFilesCount
+	nodeClient := state.client
 	r.mu.RUnlock()
+
+	if nodeClient == nil {
+		r.logger.Debug("skipping checkAndRecoverNode: node client is nil", "node_id", nodeID)
+		return
+	}
 
 	if len(clusterRepos) == 0 {
 		r.logger.Debug("no cluster repositories to check for recovery", "node_id", nodeID)
@@ -1645,7 +1654,7 @@ func (r *Router) checkAndRecoverNode(nodeID string, state *nodeState) {
 
 	// Query node's onboarding status
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	statusResp, err := state.client.GetOnboardingStatus(ctx, &pb.OnboardingStatusRequest{
+	statusResp, err := nodeClient.GetOnboardingStatus(ctx, &pb.OnboardingStatusRequest{
 		NodeId: nodeID,
 	})
 	cancel()
