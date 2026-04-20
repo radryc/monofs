@@ -94,6 +94,8 @@ monofs-session
 monofs-search
 monofs-loadtest
 cmd/*/monofs-*
+!cmd/monofs-session/
+!cmd/monofs-session/main_test.go
 cmd/monofs-admin/a
 cmd/monofs-admin/b
 
