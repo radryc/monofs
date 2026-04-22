@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 	"syscall"
 	"time"
@@ -91,6 +93,12 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 			Mtime: time.Now().Unix(),
 			Found: true,
 		}, nil
+	}
+
+	if resolved, handled, err := s.resolveKVSPath(ctx, storageID, filePath); err != nil {
+		return nil, err
+	} else if handled {
+		return kvsLookupResponse(path, resolved), nil
 	}
 
 	// Lookup file within repository using path index
@@ -328,6 +336,12 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 		}, nil
 	}
 
+	if resolved, handled, err := s.resolveKVSPath(ctx, storageID, filePath); err != nil {
+		return nil, err
+	} else if handled {
+		return kvsGetAttrResponse(path, resolved), nil
+	}
+
 	// Get file attributes using path index
 	key, cached := s.getHashFromPath(storageID, filePath)
 	s.logger.Debug("getattr looking up key",
@@ -493,6 +507,47 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	if !ok || filePath == "" {
 		s.logger.Error("read: path resolution failed", "path", path, "ok", ok, "storage_id", storageID, "file_path", filePath)
 		return status.Errorf(codes.NotFound, "path resolution failed: %s", path)
+	}
+
+	if resolved, handled, err := s.resolveKVSPath(stream.Context(), storageID, filePath); err != nil {
+		return err
+	} else if handled {
+		if resolved == nil {
+			return status.Errorf(codes.NotFound, "file not found: %s", path)
+		}
+		if resolved.isDir {
+			return status.Errorf(codes.FailedPrecondition, "path is a directory: %s", path)
+		}
+		content, err := s.kvsStore.ReadFile(stream.Context(), resolved.logicalPath)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return status.Errorf(codes.NotFound, "file not found: %s", path)
+			}
+			return status.Errorf(codes.Internal, "kvs read failed: %v", err)
+		}
+		offset := req.Offset
+		size := req.Size
+		if offset >= int64(len(content)) {
+			return nil
+		}
+		content = content[offset:]
+		if size > 0 && size < int64(len(content)) {
+			content = content[:size]
+		}
+		chunkSize := 64 * 1024
+		currentOffset := offset
+		for len(content) > 0 {
+			chunk := content
+			if len(chunk) > chunkSize {
+				chunk = chunk[:chunkSize]
+			}
+			if err := stream.Send(&pb.DataChunk{Data: chunk, Offset: currentOffset}); err != nil {
+				return err
+			}
+			content = content[len(chunk):]
+			currentOffset += int64(len(chunk))
+		}
+		return nil
 	}
 
 	// Try local metadata first (covers both owned files AND replicas from IngestReplicaBatch)
@@ -680,6 +735,13 @@ func (s *Server) Write(stream grpc.ClientStreamingServer[pb.WriteRequest, pb.Wri
 // This is used to clean up old file copies after files have been moved to new nodes.
 // Important: This is ONLY called during rebalancing cleanup, NOT during recovery.
 func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb.DeleteFileResponse, error) {
+	if handledBackend := s.repositoryStorageBackend(req.StorageId, ""); handledBackend == storageBackendKVS {
+		if err := s.deleteKVSFile(ctx, req.StorageId, req.FilePath); err != nil {
+			return &pb.DeleteFileResponse{Success: false, Message: err.Error()}, err
+		}
+		return &pb.DeleteFileResponse{Success: true, Message: "File deleted successfully"}, nil
+	}
+
 	key := makeStorageKey(req.StorageId, req.FilePath)
 
 	// Track if file existed to properly update counter
