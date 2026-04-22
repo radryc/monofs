@@ -172,6 +172,7 @@ type nodeState struct {
 	lastSeen        time.Time
 	conn            *grpc.ClientConn
 	client          pb.MonoFSClient
+	kvsStatus       *pb.KVSNodeStatus
 
 	// NEW: Staging and failover state
 	status           NodeStatus
@@ -587,6 +588,17 @@ func (r *Router) GetClusterInfo(ctx context.Context, req *pb.ClusterInfoRequest)
 		}
 		if len(state.backingUpNodes) > 0 {
 			metadata["backing_up"] = fmt.Sprintf("%d nodes", len(state.backingUpNodes))
+		}
+		kvsStatus := normalizedKVSNodeStatus(state.kvsStatus)
+		metadata["kvs_enabled"] = fmt.Sprintf("%t", kvsStatus.GetEnabled())
+		metadata["kvs_mode"] = kvsStatus.GetMode()
+		metadata["kvs_role"] = kvsStatus.GetRole()
+		metadata["kvs_healthy"] = fmt.Sprintf("%t", kvsStatus.GetHealthy())
+		if kvsStatus.GetLeaderId() != "" {
+			metadata["kvs_leader_id"] = kvsStatus.GetLeaderId()
+		}
+		if kvsStatus.GetPeerCount() > 0 {
+			metadata["kvs_peer_count"] = fmt.Sprintf("%d", kvsStatus.GetPeerCount())
 		}
 
 		// Determine which address to return
@@ -1120,6 +1132,7 @@ func (r *Router) checkAllNodes() {
 				state.diskUsedBytes = nodeInfo.DiskUsedBytes
 				state.diskTotalBytes = nodeInfo.DiskTotalBytes
 				state.diskFreeBytes = nodeInfo.DiskFreeBytes
+				state.kvsStatus = normalizedKVSNodeStatus(nodeInfo.GetKvs())
 
 				// NEW: Detect node recovery/health restoration
 				if !state.info.Healthy && state.status == NodeActive {

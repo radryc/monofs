@@ -11,8 +11,9 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
 
-# Copy go mod files
-COPY go.mod go.sum ./
+# Copy module manifests from the monorepo root so the local kvs replace stays valid.
+COPY monofs/go.mod monofs/go.sum ./
+COPY kvs/go.mod kvs/go.sum /kvs/
 # Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
 RUN set -eu; \
     tmp_output="$(mktemp)"; \
@@ -40,8 +41,9 @@ RUN set -eu; \
         exit 1; \
     fi
 
-# Copy source
-COPY . .
+# Copy source after dependency download for better layer caching.
+COPY monofs/. .
+COPY kvs /kvs
 
 # Build binaries with version information
 RUN CGO_ENABLED=0 GOOS=linux go build \
@@ -134,8 +136,8 @@ RUN addgroup -S monofs && adduser -S monofs -G monofs
 RUN mkdir -p /data/cache/git /data/cache/blob /etc/monofs && chown -R monofs:monofs /data /etc/monofs
 
 COPY --from=builder /bin/monofs-fetcher /usr/local/bin/monofs-fetcher
-COPY config/fetcher.json /etc/monofs/fetcher.json
-COPY docker/fetcher-entrypoint.sh /usr/local/bin/fetcher-entrypoint.sh
+COPY monofs/config/fetcher.json /etc/monofs/fetcher.json
+COPY monofs/docker/fetcher-entrypoint.sh /usr/local/bin/fetcher-entrypoint.sh
 RUN chmod +x /usr/local/bin/fetcher-entrypoint.sh
 
 USER monofs
