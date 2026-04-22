@@ -18,6 +18,7 @@ type guardianNodeTarget struct {
 	id      string
 	address string
 	client  pb.MonoFSClient
+	kvsStatus *pb.KVSNodeStatus
 }
 
 // InjectGuardianPartition stores inline YAML files for a guardian partition
@@ -80,11 +81,73 @@ func (r *Router) collectHealthyGuardianNodes() []guardianNodeTarget {
 				id:      id,
 				address: state.info.Address,
 				client:  state.client,
+				kvsStatus: normalizedKVSNodeStatus(state.kvsStatus),
 			})
 		}
 	}
 
 	return nodes
+}
+
+func (r *Router) guardianMutationTargets(nodes []guardianNodeTarget, displayPath string) []guardianNodeTarget {
+	if len(nodes) <= 1 || guardianRepoStorageBackend(displayPath) != "kvs" {
+		return nodes
+	}
+
+	if leader, ok := pickGuardianKVSLeader(nodes); ok {
+		return []guardianNodeTarget{leader}
+	}
+
+	selected := nodes[0]
+	for _, node := range nodes[1:] {
+		if node.id < selected.id || (node.id == selected.id && node.address < selected.address) {
+			selected = node
+		}
+	}
+	return []guardianNodeTarget{selected}
+}
+
+func (r *Router) guardianKVSMutationTarget(displayPath string) (guardianNodeTarget, bool) {
+	if guardianRepoStorageBackend(displayPath) != "kvs" {
+		return guardianNodeTarget{}, false
+	}
+	targets := r.guardianMutationTargets(r.collectHealthyGuardianNodes(), displayPath)
+	if len(targets) != 1 {
+		return guardianNodeTarget{}, false
+	}
+	return targets[0], true
+}
+
+func (r *Router) guardianDisplayPathByStorageID(storageID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	repo := r.ingestedRepos[storageID]
+	if repo == nil {
+		return ""
+	}
+	return repo.repoID
+}
+
+func pickGuardianKVSLeader(nodes []guardianNodeTarget) (guardianNodeTarget, bool) {
+	leaderID := ""
+	for _, node := range nodes {
+		status := normalizedKVSNodeStatus(node.kvsStatus)
+		if status.GetEnabled() && strings.EqualFold(status.GetRole(), "leader") {
+			return node, true
+		}
+		if leaderID == "" && status.GetLeaderId() != "" {
+			leaderID = status.GetLeaderId()
+		}
+	}
+	if leaderID == "" {
+		return guardianNodeTarget{}, false
+	}
+	for _, node := range nodes {
+		if node.id == leaderID {
+			return node, true
+		}
+	}
+	return guardianNodeTarget{}, false
 }
 
 func (r *Router) guardianNodeClient(target guardianNodeTarget) (pb.MonoFSClient, func(), error) {

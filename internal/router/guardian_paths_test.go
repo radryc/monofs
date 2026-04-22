@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -545,6 +546,531 @@ func TestGuardianUpsertAddsDirHints(t *testing.T) {
 	}
 }
 
+func TestGuardianManagedReposUseKVSBackend(t *testing.T) {
+	router, _, node, cleanup := newGuardianRouterTestHarness(t)
+	defer cleanup()
+
+	tests := []struct {
+		name        string
+		logicalPath string
+		content     string
+		displayPath string
+	}{
+		{
+			name:        "partition repo",
+			logicalPath: "/partitions/genomics/intents/web.yaml",
+			content:     "kind: Intent\n",
+			displayPath: "guardian/genomics",
+		},
+		{
+			name:        "guardian system repo",
+			logicalPath: "/.queues/local/tasks/task-1.json",
+			content:     "{\"id\":\"task-1\"}",
+			displayPath: "guardian-system",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mapped, err := mapGuardianLogicalPath(tt.logicalPath)
+			if err != nil {
+				t.Fatalf("mapGuardianLogicalPath() error = %v", err)
+			}
+
+			_, err = router.UpsertGuardianPaths(context.Background(), &pb.UpsertGuardianPathsRequest{
+				GuardianToken: "secret-token",
+				Writes: []*pb.GuardianPathWrite{{
+					LogicalPath: tt.logicalPath,
+					Content:     []byte(tt.content),
+				}},
+				Context: &pb.GuardianMutationContext{
+					Reason:        "kvs backend test",
+					CorrelationId: tt.name,
+				},
+			})
+			if err != nil {
+				t.Fatalf("UpsertGuardianPaths() error = %v", err)
+			}
+
+			node.mu.Lock()
+			regReq := node.registerRequests[mapped.StorageID]
+			batch := node.ingestBatches[mapped.StorageID]
+			node.mu.Unlock()
+
+			if regReq == nil {
+				t.Fatalf("expected RegisterRepository request for storage_id %q", mapped.StorageID)
+			}
+			if regReq.GetDisplayPath() != tt.displayPath {
+				t.Fatalf("register display path = %q, want %q", regReq.GetDisplayPath(), tt.displayPath)
+			}
+			if regReq.GetFetchConfig()["storage_backend"] != "kvs" {
+				t.Fatalf("fetch config = %#v, want storage_backend=kvs", regReq.GetFetchConfig())
+			}
+			if regReq.GetIngestionConfig()["storage_backend"] != "kvs" {
+				t.Fatalf("ingestion config = %#v, want storage_backend=kvs", regReq.GetIngestionConfig())
+			}
+			if len(batch) == 0 {
+				t.Fatalf("expected ingest batch for storage_id %q", mapped.StorageID)
+			}
+			if batch[0].GetBackendMetadata()["storage_backend"] != "kvs" {
+				t.Fatalf("file backend metadata = %#v, want storage_backend=kvs", batch[0].GetBackendMetadata())
+			}
+		})
+	}
+}
+
+func TestGuardianManagedReposTargetKVSLeaderOnly(t *testing.T) {
+	router, nodes, cleanup := newGuardianMultiNodeRouterTestHarness(t, map[string]*pb.KVSNodeStatus{
+		"node-1": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
+		"node-2": {Enabled: true, Healthy: true, Mode: "raft", Role: "leader", LeaderId: "node-2", PeerCount: 3},
+		"node-3": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
+	})
+	defer cleanup()
+
+	_, err := router.UpsertGuardianPaths(context.Background(), &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{{
+			LogicalPath: "/partitions/genomics/intents/web.yaml",
+			Content:     []byte("kind: Intent\n"),
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "kvs leader routing",
+			CorrelationId: "leader-only-upsert",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGuardianPaths() error = %v", err)
+	}
+
+	for nodeID, node := range nodes {
+		node.mu.Lock()
+		registerCalls := node.registerCalls
+		ingestCalls := node.ingestBatchCalls
+		_, hasFile := node.files["guardian/genomics/intents/web.yaml"]
+		node.mu.Unlock()
+
+		if nodeID == "node-2" {
+			if registerCalls != 1 || ingestCalls != 1 {
+				t.Fatalf("leader node calls = register:%d ingest:%d, want 1/1", registerCalls, ingestCalls)
+			}
+			if !hasFile {
+				t.Fatal("expected leader node to receive guardian file")
+			}
+			continue
+		}
+		if registerCalls != 0 || ingestCalls != 0 {
+			t.Fatalf("follower %s calls = register:%d ingest:%d, want 0/0", nodeID, registerCalls, ingestCalls)
+		}
+		if hasFile {
+			t.Fatalf("follower %s unexpectedly stored guardian file", nodeID)
+		}
+	}
+}
+
+func TestGuardianManagedRepoDeletesTargetKVSLeaderOnly(t *testing.T) {
+	router, nodes, cleanup := newGuardianMultiNodeRouterTestHarness(t, map[string]*pb.KVSNodeStatus{
+		"node-1": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
+		"node-2": {Enabled: true, Healthy: true, Mode: "raft", Role: "leader", LeaderId: "node-2", PeerCount: 3},
+		"node-3": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
+	})
+	defer cleanup()
+
+	writeResp, err := router.UpsertGuardianPaths(context.Background(), &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{{
+			LogicalPath: "/partitions/genomics/intents/web.yaml",
+			Content:     []byte("kind: Intent\n"),
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "kvs leader delete setup",
+			CorrelationId: "leader-only-delete-setup",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGuardianPaths() error = %v", err)
+	}
+
+	for _, node := range nodes {
+		node.resetCallCounts()
+	}
+
+	_, err = router.DeleteGuardianPaths(context.Background(), &pb.DeleteGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Deletes: []*pb.GuardianPathDelete{{
+			LogicalPath:       "/partitions/genomics/intents/web.yaml",
+			ExpectedVersionId: writeResp.GetVersions()[0].GetVersionId(),
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "kvs leader delete",
+			CorrelationId: "leader-only-delete",
+		},
+	})
+	if err != nil {
+		t.Fatalf("DeleteGuardianPaths() error = %v", err)
+	}
+
+	for nodeID, node := range nodes {
+		node.mu.Lock()
+		deleteFileCalls := node.deleteFileCalls
+		node.mu.Unlock()
+
+		if nodeID == "node-2" {
+			if deleteFileCalls != 1 {
+				t.Fatalf("leader delete calls = %d, want 1", deleteFileCalls)
+			}
+			continue
+		}
+		if deleteFileCalls != 0 {
+			t.Fatalf("follower %s delete calls = %d, want 0", nodeID, deleteFileCalls)
+		}
+	}
+}
+
+func TestGuardianPathsMultiPartitionIsolation(t *testing.T) {
+	router, nodeClient, node, cleanup := newGuardianRouterTestHarness(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	writes := []struct {
+		logicalPath  string
+		physicalPath string
+		content      string
+		displayPath  string
+	}{
+		{
+			logicalPath:  "/partitions/genomics/intents/api.yaml",
+			physicalPath: "guardian/genomics/intents/api.yaml",
+			content:      "kind: Intent\nmetadata:\n  name: api\n",
+			displayPath:  "guardian/genomics",
+		},
+		{
+			logicalPath:  "/partitions/payments/intents/worker.yaml",
+			physicalPath: "guardian/payments/intents/worker.yaml",
+			content:      "kind: Intent\nmetadata:\n  name: worker\n",
+			displayPath:  "guardian/payments",
+		},
+		{
+			logicalPath:  "/.queues/local/tasks/task-42.json",
+			physicalPath: "guardian-system/.queues/local/tasks/task-42.json",
+			content:      "{\"id\":\"task-42\"}",
+			displayPath:  "guardian-system",
+		},
+	}
+
+	requestWrites := make([]*pb.GuardianPathWrite, 0, len(writes))
+	storageIDs := make(map[string]string, len(writes))
+	for _, write := range writes {
+		mapped, err := mapGuardianLogicalPath(write.logicalPath)
+		if err != nil {
+			t.Fatalf("mapGuardianLogicalPath(%q) error = %v", write.logicalPath, err)
+		}
+		storageIDs[write.displayPath] = mapped.StorageID
+		requestWrites = append(requestWrites, &pb.GuardianPathWrite{
+			LogicalPath: write.logicalPath,
+			Content:     []byte(write.content),
+		})
+	}
+
+	writeResp, err := router.UpsertGuardianPaths(ctx, &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes:        requestWrites,
+		Context: &pb.GuardianMutationContext{
+			Reason:        "multi-partition write test",
+			CorrelationId: "corr-multi-partition-write",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGuardianPaths() error = %v", err)
+	}
+	if !writeResp.GetSuccess() || len(writeResp.GetVersions()) != len(writes) {
+		t.Fatalf("unexpected upsert response: %+v", writeResp)
+	}
+
+	node.mu.Lock()
+	if len(node.registerRequests) != len(writes) {
+		node.mu.Unlock()
+		t.Fatalf("register request count = %d, want %d", len(node.registerRequests), len(writes))
+	}
+	if len(node.ingestBatches) != len(writes) {
+		node.mu.Unlock()
+		t.Fatalf("ingest batch count = %d, want %d", len(node.ingestBatches), len(writes))
+	}
+	for _, write := range writes {
+		storageID := storageIDs[write.displayPath]
+		regReq := node.registerRequests[storageID]
+		batch := node.ingestBatches[storageID]
+		if regReq == nil {
+			node.mu.Unlock()
+			t.Fatalf("expected RegisterRepository request for %q", write.displayPath)
+		}
+		if regReq.GetDisplayPath() != write.displayPath {
+			node.mu.Unlock()
+			t.Fatalf("register display path = %q, want %q", regReq.GetDisplayPath(), write.displayPath)
+		}
+		if len(batch) == 0 {
+			node.mu.Unlock()
+			t.Fatalf("expected ingest batch for %q", write.displayPath)
+		}
+	}
+	node.mu.Unlock()
+
+	for _, write := range writes {
+		attr, err := nodeClient.GetAttr(ctx, &pb.GetAttrRequest{Path: write.physicalPath})
+		if err != nil {
+			t.Fatalf("GetAttr(%q) error = %v", write.physicalPath, err)
+		}
+		if !attr.GetFound() {
+			t.Fatalf("expected %q to be readable", write.physicalPath)
+		}
+		content := readAllFromMonoFSClient(t, nodeClient, write.physicalPath)
+		if string(content) != write.content {
+			t.Fatalf("content for %q = %q, want %q", write.physicalPath, string(content), write.content)
+		}
+	}
+
+	deleteVersionID := ""
+	for _, version := range writeResp.GetVersions() {
+		if version.GetLogicalPath() == "/partitions/genomics/intents/api.yaml" {
+			deleteVersionID = version.GetVersionId()
+			break
+		}
+	}
+	if deleteVersionID == "" {
+		t.Fatal("expected genomics version id in upsert response")
+	}
+
+	deleteResp, err := router.DeleteGuardianPaths(ctx, &pb.DeleteGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Deletes: []*pb.GuardianPathDelete{{
+			LogicalPath:       "/partitions/genomics/intents/api.yaml",
+			ExpectedVersionId: deleteVersionID,
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "multi-partition delete test",
+			CorrelationId: "corr-multi-partition-delete",
+		},
+	})
+	if err != nil {
+		t.Fatalf("DeleteGuardianPaths() error = %v", err)
+	}
+	if !deleteResp.GetSuccess() || len(deleteResp.GetTombstones()) != 1 {
+		t.Fatalf("unexpected delete response: %+v", deleteResp)
+	}
+
+	deletedAttr, err := nodeClient.GetAttr(ctx, &pb.GetAttrRequest{Path: "guardian/genomics/intents/api.yaml"})
+	if err != nil {
+		t.Fatalf("GetAttr(deleted genomics file) error = %v", err)
+	}
+	if deletedAttr.GetFound() {
+		t.Fatal("expected deleted genomics file to disappear")
+	}
+
+	for _, path := range []string{"guardian/payments/intents/worker.yaml", "guardian-system/.queues/local/tasks/task-42.json"} {
+		attr, err := nodeClient.GetAttr(ctx, &pb.GetAttrRequest{Path: path})
+		if err != nil {
+			t.Fatalf("GetAttr(%q) after delete error = %v", path, err)
+		}
+		if !attr.GetFound() {
+			t.Fatalf("expected %q to remain after unrelated partition delete", path)
+		}
+	}
+
+	paymentsVersions, err := router.ListGuardianVersions(ctx, &pb.ListGuardianVersionsRequest{
+		GuardianToken: "secret-token",
+		LogicalPath:   "/partitions/payments/intents/worker.yaml",
+	})
+	if err != nil {
+		t.Fatalf("ListGuardianVersions(payments) error = %v", err)
+	}
+	if len(paymentsVersions.GetVersions()) != 1 || paymentsVersions.GetVersions()[0].GetTombstone() {
+		t.Fatalf("unexpected payments versions after genomics delete: %+v", paymentsVersions)
+	}
+
+	queueVersions, err := router.ListGuardianVersions(ctx, &pb.ListGuardianVersionsRequest{
+		GuardianToken: "secret-token",
+		LogicalPath:   "/.queues/local/tasks/task-42.json",
+	})
+	if err != nil {
+		t.Fatalf("ListGuardianVersions(queue) error = %v", err)
+	}
+	if len(queueVersions.GetVersions()) != 1 || queueVersions.GetVersions()[0].GetTombstone() {
+		t.Fatalf("unexpected queue versions after genomics delete: %+v", queueVersions)
+	}
+}
+
+func TestGuardianPathsPartitionIsolationBetweenRepositories(t *testing.T) {
+	router, nodeClient, _, cleanup := newGuardianRouterTestHarness(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	writeResp, err := router.UpsertGuardianPaths(ctx, &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{
+			{
+				LogicalPath: "/partitions/genomics/intents/api.yaml",
+				Content:     []byte("kind: Intent\nmetadata:\n  name: api\n"),
+			},
+			{
+				LogicalPath: "/partitions/payments/intents/worker.yaml",
+				Content:     []byte("kind: Intent\nmetadata:\n  name: worker\n"),
+			},
+		},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "partition isolation test",
+			CorrelationId: "corr-partition-isolation",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGuardianPaths() error = %v", err)
+	}
+	if !writeResp.GetSuccess() || len(writeResp.GetVersions()) != 2 {
+		t.Fatalf("unexpected upsert response: %+v", writeResp)
+	}
+
+	for path := range map[string]string{
+		"guardian/genomics/intents/api.yaml":    "kind: Intent\nmetadata:\n  name: api\n",
+		"guardian/payments/intents/worker.yaml": "kind: Intent\nmetadata:\n  name: worker\n",
+	} {
+		attr, err := nodeClient.GetAttr(ctx, &pb.GetAttrRequest{Path: path})
+		if err != nil {
+			t.Fatalf("GetAttr(%q) error = %v", path, err)
+		}
+		if !attr.GetFound() {
+			t.Fatalf("expected %q to be readable", path)
+		}
+	}
+
+	genomicsVersionID := guardianVersionIDForPath(t, writeResp.GetVersions(), "/partitions/genomics/intents/api.yaml")
+	deleteResp, err := router.DeleteGuardianPaths(ctx, &pb.DeleteGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Deletes: []*pb.GuardianPathDelete{{
+			LogicalPath:       "/partitions/genomics/intents/api.yaml",
+			ExpectedVersionId: genomicsVersionID,
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "partition isolation delete",
+			CorrelationId: "corr-partition-isolation-delete",
+		},
+	})
+	if err != nil {
+		t.Fatalf("DeleteGuardianPaths() error = %v", err)
+	}
+	if !deleteResp.GetSuccess() || len(deleteResp.GetTombstones()) != 1 {
+		t.Fatalf("unexpected delete response: %+v", deleteResp)
+	}
+
+	deletedAttr, err := nodeClient.GetAttr(ctx, &pb.GetAttrRequest{Path: "guardian/genomics/intents/api.yaml"})
+	if err != nil {
+		t.Fatalf("GetAttr(deleted genomics file) error = %v", err)
+	}
+	if deletedAttr.GetFound() {
+		t.Fatal("expected deleted genomics file to disappear")
+	}
+
+	paymentsAttr, err := nodeClient.GetAttr(ctx, &pb.GetAttrRequest{Path: "guardian/payments/intents/worker.yaml"})
+	if err != nil {
+		t.Fatalf("GetAttr(payments file) error = %v", err)
+	}
+	if !paymentsAttr.GetFound() {
+		t.Fatal("expected payments file to remain after deleting genomics")
+	}
+
+	paymentsVersions, err := router.ListGuardianVersions(ctx, &pb.ListGuardianVersionsRequest{
+		GuardianToken: "secret-token",
+		LogicalPath:   "/partitions/payments/intents/worker.yaml",
+	})
+	if err != nil {
+		t.Fatalf("ListGuardianVersions(payments) error = %v", err)
+	}
+	if len(paymentsVersions.GetVersions()) != 1 || paymentsVersions.GetVersions()[0].GetTombstone() {
+		t.Fatalf("unexpected payments versions after genomics delete: %+v", paymentsVersions)
+	}
+}
+
+func TestGuardianSystemStaysIsolatedFromPartitionDeletes(t *testing.T) {
+	router, nodeClient, _, cleanup := newGuardianRouterTestHarness(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	writeResp, err := router.UpsertGuardianPaths(ctx, &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{
+			{
+				LogicalPath: "/partitions/genomics/intents/api.yaml",
+				Content:     []byte("kind: Intent\nmetadata:\n  name: api\n"),
+			},
+			{
+				LogicalPath: "/.queues/local/tasks/task-42.json",
+				Content:     []byte("{\"id\":\"task-42\"}"),
+			},
+		},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "guardian-system isolation test",
+			CorrelationId: "corr-guardian-system-isolation",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGuardianPaths() error = %v", err)
+	}
+	if !writeResp.GetSuccess() || len(writeResp.GetVersions()) != 2 {
+		t.Fatalf("unexpected upsert response: %+v", writeResp)
+	}
+
+	queueContent := readAllFromMonoFSClient(t, nodeClient, "guardian-system/.queues/local/tasks/task-42.json")
+	if string(queueContent) != "{\"id\":\"task-42\"}" {
+		t.Fatalf("unexpected queue content = %q", string(queueContent))
+	}
+
+	genomicsVersionID := guardianVersionIDForPath(t, writeResp.GetVersions(), "/partitions/genomics/intents/api.yaml")
+	deleteResp, err := router.DeleteGuardianPaths(ctx, &pb.DeleteGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Deletes: []*pb.GuardianPathDelete{{
+			LogicalPath:       "/partitions/genomics/intents/api.yaml",
+			ExpectedVersionId: genomicsVersionID,
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "guardian-system isolation delete",
+			CorrelationId: "corr-guardian-system-isolation-delete",
+		},
+	})
+	if err != nil {
+		t.Fatalf("DeleteGuardianPaths() error = %v", err)
+	}
+	if !deleteResp.GetSuccess() || len(deleteResp.GetTombstones()) != 1 {
+		t.Fatalf("unexpected delete response: %+v", deleteResp)
+	}
+
+	queueAttr, err := nodeClient.GetAttr(ctx, &pb.GetAttrRequest{Path: "guardian-system/.queues/local/tasks/task-42.json"})
+	if err != nil {
+		t.Fatalf("GetAttr(queue file) error = %v", err)
+	}
+	if !queueAttr.GetFound() {
+		t.Fatal("expected guardian-system queue file to remain after partition delete")
+	}
+
+	queueVersions, err := router.ListGuardianVersions(ctx, &pb.ListGuardianVersionsRequest{
+		GuardianToken: "secret-token",
+		LogicalPath:   "/.queues/local/tasks/task-42.json",
+	})
+	if err != nil {
+		t.Fatalf("ListGuardianVersions(queue) error = %v", err)
+	}
+	if len(queueVersions.GetVersions()) != 1 || queueVersions.GetVersions()[0].GetTombstone() {
+		t.Fatalf("unexpected queue versions after partition delete: %+v", queueVersions)
+	}
+}
+
+func guardianVersionIDForPath(t *testing.T, versions []*pb.GuardianFileVersion, logicalPath string) string {
+	t.Helper()
+	for _, version := range versions {
+		if version.GetLogicalPath() == logicalPath {
+			return version.GetVersionId()
+		}
+	}
+	t.Fatalf("expected version for logical path %q", logicalPath)
+	return ""
+}
+
 func newGuardianRouterTestHarness(t *testing.T) (*Router, pb.MonoFSClient, *guardianTestNodeServer, func()) {
 	t.Helper()
 
@@ -583,13 +1109,74 @@ func newGuardianRouterTestHarness(t *testing.T) (*Router, pb.MonoFSClient, *guar
 	}
 }
 
+func newGuardianMultiNodeRouterTestHarness(t *testing.T, kvsStatuses map[string]*pb.KVSNodeStatus) (*Router, map[string]*guardianTestNodeServer, func()) {
+	t.Helper()
+
+	ids := make([]string, 0, len(kvsStatuses))
+	for id := range kvsStatuses {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	cfg := DefaultRouterConfig()
+	cfg.GuardianStateDir = t.TempDir()
+	router := NewRouter(cfg, nil)
+	nodes := make(map[string]*guardianTestNodeServer, len(ids))
+	stops := make([]func(), 0, len(ids))
+
+	for _, id := range ids {
+		nodeClient, node, stopNode := newGuardianTestNodeClient(t)
+		router.nodes[id] = &nodeState{
+			info: &pb.NodeInfo{
+				NodeId:  id,
+				Address: "bufnet-" + id,
+				Healthy: true,
+				Weight:  1,
+			},
+			client:    nodeClient,
+			kvsStatus: normalizedKVSNodeStatus(kvsStatuses[id]),
+			status:    NodeActive,
+		}
+		nodes[id] = node
+		stops = append(stops, stopNode)
+	}
+
+	registerResp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+		ClientId: "guardian-cli",
+		GuardianConfig: &pb.GuardianConfig{
+			BaseUrl:   "http://guardian.local",
+			AuthToken: "secret-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RegisterClient() error = %v", err)
+	}
+	if !registerResp.GetSuccess() {
+		t.Fatalf("RegisterClient() failed: %+v", registerResp)
+	}
+
+	return router, nodes, func() {
+		_ = router.Close()
+		for _, stop := range stops {
+			stop()
+		}
+	}
+}
+
 type guardianTestNodeServer struct {
 	pb.UnimplementedMonoFSServer
-	mu              sync.Mutex
-	repos           map[string]string
-	files           map[string][]byte
-	fileMode        map[string]uint32
-	lastIngestBatch []*pb.FileMetadata
+	mu               sync.Mutex
+	repos            map[string]string
+	registerRequests map[string]*pb.RegisterRepositoryRequest
+	files            map[string][]byte
+	fileMode         map[string]uint32
+	ingestBatches    map[string][]*pb.FileMetadata
+	lastIngestBatch  []*pb.FileMetadata
+	registerCalls    int
+	ingestBatchCalls int
+	deleteFileCalls  int
+	deleteDirCalls   int
+	deleteRepoCalls  int
 }
 
 func newGuardianTestNodeClient(t *testing.T) (pb.MonoFSClient, *guardianTestNodeServer, func()) {
@@ -598,9 +1185,11 @@ func newGuardianTestNodeClient(t *testing.T) (pb.MonoFSClient, *guardianTestNode
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer()
 	node := &guardianTestNodeServer{
-		repos:    make(map[string]string),
-		files:    make(map[string][]byte),
-		fileMode: make(map[string]uint32),
+		repos:            make(map[string]string),
+		registerRequests: make(map[string]*pb.RegisterRepositoryRequest),
+		files:            make(map[string][]byte),
+		fileMode:         make(map[string]uint32),
+		ingestBatches:    make(map[string][]*pb.FileMetadata),
 	}
 	pb.RegisterMonoFSServer(server, node)
 	go func() {
@@ -628,14 +1217,28 @@ func newGuardianTestNodeClient(t *testing.T) (pb.MonoFSClient, *guardianTestNode
 func (s *guardianTestNodeServer) RegisterRepository(_ context.Context, req *pb.RegisterRepositoryRequest) (*pb.RegisterRepositoryResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.registerCalls++
 	s.repos[req.GetStorageId()] = req.GetDisplayPath()
+	s.registerRequests[req.GetStorageId()] = &pb.RegisterRepositoryRequest{
+		StorageId:       req.GetStorageId(),
+		DisplayPath:     req.GetDisplayPath(),
+		Source:          req.GetSource(),
+		IngestionType:   req.GetIngestionType(),
+		FetchType:       req.GetFetchType(),
+		FetchConfig:     cloneStringMap(req.GetFetchConfig()),
+		IngestionConfig: cloneStringMap(req.GetIngestionConfig()),
+		GuardianUrl:     req.GetGuardianUrl(),
+	}
 	return &pb.RegisterRepositoryResponse{Success: true, Message: "ok"}, nil
 }
 
 func (s *guardianTestNodeServer) IngestFileBatch(_ context.Context, req *pb.IngestFileBatchRequest) (*pb.IngestFileBatchResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastIngestBatch = append([]*pb.FileMetadata(nil), req.GetFiles()...)
+	s.ingestBatchCalls++
+	batchCopy := cloneFileMetadataSlice(req.GetFiles())
+	s.lastIngestBatch = batchCopy
+	s.ingestBatches[req.GetStorageId()] = batchCopy
 	for _, file := range req.GetFiles() {
 		if file.GetBackendMetadata()["dir_hint"] == "true" {
 			continue
@@ -696,6 +1299,7 @@ func (s *guardianTestNodeServer) Read(req *pb.ReadRequest, stream grpc.ServerStr
 func (s *guardianTestNodeServer) DeleteFile(_ context.Context, req *pb.DeleteFileRequest) (*pb.DeleteFileResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.deleteFileCalls++
 
 	displayPath, ok := s.repos[req.GetStorageId()]
 	if !ok {
@@ -710,6 +1314,7 @@ func (s *guardianTestNodeServer) DeleteFile(_ context.Context, req *pb.DeleteFil
 func (s *guardianTestNodeServer) DeleteDirectoryRecursive(_ context.Context, req *pb.DeleteDirectoryRecursiveRequest) (*pb.DeleteDirectoryRecursiveResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.deleteDirCalls++
 
 	displayPath, ok := s.repos[req.GetStorageId()]
 	if !ok {
@@ -739,6 +1344,7 @@ func (s *guardianTestNodeServer) DeleteDirectoryRecursive(_ context.Context, req
 func (s *guardianTestNodeServer) DeleteRepository(_ context.Context, req *pb.DeleteRepositoryOnNodeRequest) (*pb.DeleteRepositoryOnNodeResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.deleteRepoCalls++
 
 	displayPath, ok := s.repos[req.GetStorageId()]
 	if !ok {
@@ -760,6 +1366,16 @@ func (s *guardianTestNodeServer) DeleteRepository(_ context.Context, req *pb.Del
 		FilesDeleted: filesDeleted,
 		DirsDeleted:  1,
 	}, nil
+}
+
+func (s *guardianTestNodeServer) resetCallCounts() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.registerCalls = 0
+	s.ingestBatchCalls = 0
+	s.deleteFileCalls = 0
+	s.deleteDirCalls = 0
+	s.deleteRepoCalls = 0
 }
 
 func (s *guardianTestNodeServer) hasDirectoryLocked(path string) bool {
@@ -822,6 +1438,35 @@ func newMockGuardianLogicalChangeStream() *mockGuardianLogicalChangeStream {
 		ctx:    ctx,
 		cancel: cancel,
 	}
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]string, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func cloneFileMetadataSlice(files []*pb.FileMetadata) []*pb.FileMetadata {
+	if len(files) == 0 {
+		return nil
+	}
+	cloned := make([]*pb.FileMetadata, 0, len(files))
+	for _, file := range files {
+		if file == nil {
+			cloned = append(cloned, nil)
+			continue
+		}
+		copyFile := *file
+		copyFile.InlineContent = append([]byte(nil), file.GetInlineContent()...)
+		copyFile.BackendMetadata = cloneStringMap(file.GetBackendMetadata())
+		cloned = append(cloned, &copyFile)
+	}
+	return cloned
 }
 
 func (m *mockGuardianLogicalChangeStream) SetHeader(metadata.MD) error { return nil }
