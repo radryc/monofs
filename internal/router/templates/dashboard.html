@@ -413,6 +413,25 @@
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
+    function kvsStatusSummary(kvs) {
+        if (!kvs || !kvs.enabled) {
+            return 'Disabled';
+        }
+        if (kvs.mode === 'local') {
+            return 'Local';
+        }
+        if (!kvs.healthy) {
+            return 'Raft starting';
+        }
+        if (kvs.role === 'leader') {
+            return 'Raft leader';
+        }
+        if (kvs.role === 'follower') {
+            return 'Raft follower';
+        }
+        return `Raft ${kvs.role || 'unknown'}`;
+    }
+
     async function loadFetcherStats() {
         try {
             const resp = await fetch('/api/fetchers');
@@ -467,6 +486,7 @@
                 </div>
             `;
         } catch (err) {
+                            <th>KVS</th>
             console.error('Failed to load fetcher stats:', err);
             // Update stat cards to show unavailable
             document.getElementById('totalFetchers').textContent = '-';
@@ -489,6 +509,7 @@
                 </div>
             `;
         }
+                                    <td>${kvsStatusSummary(node.kvs)}</td>
     }
 
     async function loadSearchStats() {

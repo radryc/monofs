@@ -1441,6 +1441,7 @@ func (s *Server) GetNodeInfo(ctx context.Context, req *pb.NodeInfoRequest) (*pb.
 		DiskUsedBytes:  diskUsed,
 		DiskTotalBytes: diskTotal,
 		DiskFreeBytes:  diskFree,
+		Kvs:            s.currentKVSStatus(),
 	}, nil
 }
 

@@ -229,6 +229,7 @@ func (r *Router) buildStatusData() *StatusData {
 	// Build response without holding lock
 	nodes := make([]map[string]interface{}, 0, len(nodesSnapshot))
 	for _, state := range nodesSnapshot {
+		kvsStatus := normalizedKVSNodeStatus(state.kvsStatus)
 		nodeInfo := map[string]interface{}{
 			"id":         state.info.NodeId,
 			"address":    state.info.Address,
@@ -239,6 +240,14 @@ func (r *Router) buildStatusData() *StatusData {
 			"disk_used":  state.diskUsedBytes,
 			"disk_total": state.diskTotalBytes,
 			"disk_free":  state.diskFreeBytes,
+			"kvs": map[string]interface{}{
+				"enabled":    kvsStatus.GetEnabled(),
+				"healthy":    kvsStatus.GetHealthy(),
+				"mode":       kvsStatus.GetMode(),
+				"role":       kvsStatus.GetRole(),
+				"leader_id":  kvsStatus.GetLeaderId(),
+				"peer_count": kvsStatus.GetPeerCount(),
+			},
 		}
 
 		// Add backup info
