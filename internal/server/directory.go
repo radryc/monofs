@@ -1049,6 +1049,25 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 		return nil
 	}
 
+	if resolved, handled, err := s.resolveKVSPath(stream.Context(), storageID, filePath); err != nil {
+		return err
+	} else if handled {
+		if resolved == nil || !resolved.isDir {
+			return nil
+		}
+		for _, entry := range resolved.entries {
+			entryLogicalPath := kvsChildLogicalPath(resolved.logicalPath, entry.Name)
+			if err := stream.Send(&pb.DirEntry{
+				Name: entry.Name,
+				Mode: kvsMode(entry.IsDir),
+				Ino:  hashPath(strings.TrimPrefix(entryLogicalPath, "/")),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	// Use directory index for O(1) directory listing
 	dirIndexKey := makeDirIndexKey(storageID, filePath)
 
@@ -1520,6 +1539,18 @@ func (s *Server) removeFromDirectoryIndex(tx *nutsdb.Tx, storageID, parentDir, e
 func (s *Server) DeleteDirectoryRecursive(ctx context.Context, req *pb.DeleteDirectoryRecursiveRequest) (*pb.DeleteDirectoryRecursiveResponse, error) {
 	storageID := req.StorageId
 	dirPath := req.DirPath
+	if handledBackend := s.repositoryStorageBackend(storageID, ""); handledBackend == storageBackendKVS {
+		filesDeleted, dirsDeleted, err := s.deleteKVSDirectory(ctx, storageID, dirPath)
+		if err != nil {
+			return nil, err
+		}
+		return &pb.DeleteDirectoryRecursiveResponse{
+			Success:      true,
+			Message:      fmt.Sprintf("Deleted %d files and %d directories", filesDeleted, dirsDeleted),
+			FilesDeleted: filesDeleted,
+			DirsDeleted:  dirsDeleted,
+		}, nil
+	}
 
 	s.logger.Info("deleting directory recursively",
 		"storage_id", storageID,
