@@ -34,7 +34,16 @@ func (r *Router) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryR
 	}
 
 	// Step 2: Delete from all backend nodes (synchronous, parallel)
-	totalFilesDeleted, totalDirsDeleted, nodeErrors := r.deleteRepositoryFromAllNodes(ctx, storageID)
+	totalFilesDeleted, totalDirsDeleted, nodeErrors := int64(0), int64(0), 0
+	if exists && guardianRepoStorageBackend(repo.repoID) == "kvs" {
+		if filesDeleted, dirsDeleted, errors, ok := r.deleteRepositoryFromKVSNode(ctx, storageID, repo.repoID); ok {
+			totalFilesDeleted, totalDirsDeleted, nodeErrors = filesDeleted, dirsDeleted, errors
+		} else {
+			totalFilesDeleted, totalDirsDeleted, nodeErrors = r.deleteRepositoryFromAllNodes(ctx, storageID)
+		}
+	} else {
+		totalFilesDeleted, totalDirsDeleted, nodeErrors = r.deleteRepositoryFromAllNodes(ctx, storageID)
+	}
 
 	// Step 3: Delete search index
 	r.deleteSearchIndex(ctx, storageID)
@@ -139,6 +148,52 @@ func (r *Router) deleteRepositoryFromNodes(storageID string, filesDeletedPtr *in
 	*filesDeletedPtr = totalFiles
 }
 
+func (r *Router) deleteRepositoryFromKVSNode(ctx context.Context, storageID, displayPath string) (int64, int64, int, bool) {
+	target, ok := r.guardianKVSMutationTarget(displayPath)
+	if !ok {
+		return 0, 0, 0, false
+	}
+
+	client, closeConn, err := r.guardianNodeClient(target)
+	if err != nil {
+		r.logger.Warn("failed to connect to kvs mutation target for repository delete",
+			"node_id", target.id,
+			"storage_id", storageID,
+			"error", err)
+		return 0, 0, 1, true
+	}
+	defer closeConn()
+
+	deleteCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	resp, err := client.DeleteRepository(deleteCtx, &pb.DeleteRepositoryOnNodeRequest{StorageId: storageID})
+	if err != nil {
+		r.logger.Warn("failed to delete kvs-backed repository from node",
+			"node_id", target.id,
+			"storage_id", storageID,
+			"error", err)
+		return 0, 0, 1, true
+	}
+	if resp == nil || !resp.Success {
+		message := ""
+		if resp != nil {
+			message = resp.GetMessage()
+		}
+		r.logger.Warn("node reported kvs-backed repository deletion failure",
+			"node_id", target.id,
+			"storage_id", storageID,
+			"message", message)
+		return 0, 0, 1, true
+	}
+
+	r.logger.Info("deleted kvs-backed repository from node",
+		"node_id", target.id,
+		"storage_id", storageID,
+		"files_deleted", resp.FilesDeleted,
+		"dirs_deleted", resp.DirsDeleted)
+	return resp.FilesDeleted, resp.DirsDeleted, 0, true
+}
+
 // deleteSearchIndex removes the search index for the repository.
 func (r *Router) deleteSearchIndex(ctx context.Context, storageID string) {
 	if r.searchClient == nil {
@@ -167,6 +222,27 @@ func (r *Router) deleteRepositoryInternal(ctx context.Context, storageID string)
 
 // deleteGuardianFileFromAllNodes deletes a single file from a guardian partition across all nodes.
 func (r *Router) deleteGuardianFileFromAllNodes(storageID, filePath string) (map[string]interface{}, error) {
+	if displayPath := r.guardianDisplayPathByStorageID(storageID); displayPath != "" {
+		if target, ok := r.guardianKVSMutationTarget(displayPath); ok {
+			client, closeConn, err := r.guardianNodeClient(target)
+			if err == nil {
+				defer closeConn()
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				resp, err := client.DeleteFile(ctx, &pb.DeleteFileRequest{StorageId: storageID, FilePath: filePath})
+				if err == nil && resp != nil && resp.Success {
+					r.bumpNativeNamespaceGeneration("guardian file delete")
+					return map[string]interface{}{
+						"success":       true,
+						"message":       "file deleted from 1 node",
+						"nodes_success": int64(1),
+						"nodes_error":   int64(0),
+					}, nil
+				}
+			}
+		}
+	}
+
 	r.mu.RLock()
 	nodesSnapshot := make(map[string]*nodeState)
 	for nodeID, state := range r.nodes {
@@ -217,6 +293,30 @@ func (r *Router) deleteGuardianFileFromAllNodes(storageID, filePath string) (map
 
 // deleteGuardianDirFromAllNodes deletes a directory recursively from a guardian partition across all nodes.
 func (r *Router) deleteGuardianDirFromAllNodes(storageID, dirPath string) (map[string]interface{}, error) {
+	if displayPath := r.guardianDisplayPathByStorageID(storageID); displayPath != "" {
+		if target, ok := r.guardianKVSMutationTarget(displayPath); ok {
+			client, closeConn, err := r.guardianNodeClient(target)
+			if err == nil {
+				defer closeConn()
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				resp, err := client.DeleteDirectoryRecursive(ctx, &pb.DeleteDirectoryRecursiveRequest{StorageId: storageID, DirPath: dirPath})
+				if err == nil && resp != nil && resp.Success {
+					if resp.FilesDeleted > 0 || resp.DirsDeleted > 0 {
+						r.bumpNativeNamespaceGeneration("guardian dir delete")
+					}
+					return map[string]interface{}{
+						"success":       true,
+						"message":       fmt.Sprintf("deleted %d files and %d dirs", resp.FilesDeleted, resp.DirsDeleted),
+						"files_deleted": resp.FilesDeleted,
+						"dirs_deleted":  resp.DirsDeleted,
+						"nodes_error":   int64(0),
+					}, nil
+				}
+			}
+		}
+	}
+
 	r.mu.RLock()
 	nodesSnapshot := make(map[string]*nodeState)
 	for nodeID, state := range r.nodes {
