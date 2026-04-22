@@ -47,6 +47,13 @@ type guardianDeletePlan struct {
 	needsDelete  bool
 }
 
+func guardianRepoStorageBackend(displayPath string) string {
+	if displayPath == "guardian-system" || strings.HasPrefix(displayPath, "guardian/") {
+		return "kvs"
+	}
+	return ""
+}
+
 func (r *Router) UpsertGuardianPaths(ctx context.Context, req *pb.UpsertGuardianPathsRequest) (*pb.UpsertGuardianPathsResponse, error) {
 	principal, ok := r.authenticateGuardianMutation(req.GetGuardianToken(), req.GetContext())
 	if !ok {
@@ -110,18 +117,23 @@ func (r *Router) UpsertGuardianPaths(ctx context.Context, req *pb.UpsertGuardian
 		if strings.TrimSpace(groupSource) == "" {
 			groupSource = "guardian-path-api"
 		}
+		var backendMetadata map[string]string
+		if storageBackend := guardianRepoStorageBackend(mapped.DisplayPath); storageBackend != "" {
+			backendMetadata = map[string]string{"storage_backend": storageBackend}
+		}
 		group.files = append(group.files, &pb.FileMetadata{
-			Path:          mapped.RelativePath,
-			StorageId:     mapped.StorageID,
-			DisplayPath:   mapped.DisplayPath,
-			Size:          uint64(len(write.GetContent())),
-			Mtime:         committedAt,
-			Mode:          0o644,
-			BlobHash:      guardianContentHash(write.GetContent()),
-			Source:        groupSource,
-			InlineContent: append([]byte(nil), write.GetContent()...),
-			SourceType:    pb.IngestionType_INGESTION_GUARDIAN,
-			FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
+			Path:            mapped.RelativePath,
+			StorageId:       mapped.StorageID,
+			DisplayPath:     mapped.DisplayPath,
+			Size:            uint64(len(write.GetContent())),
+			Mtime:           committedAt,
+			Mode:            0o644,
+			BlobHash:        guardianContentHash(write.GetContent()),
+			Source:          groupSource,
+			InlineContent:   append([]byte(nil), write.GetContent()...),
+			SourceType:      pb.IngestionType_INGESTION_GUARDIAN,
+			FetchType:       pb.SourceType_SOURCE_TYPE_BLOB,
+			BackendMetadata: backendMetadata,
 		})
 		plans = append(plans, guardianUpsertPlan{
 			write:      write,
@@ -188,7 +200,7 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 	if len(nodes) == 0 {
 		return nil, status.Error(codes.Unavailable, "no healthy nodes available")
 	}
-	nodeClient, closeConn, err := r.guardianNodeClient(nodes[0])
+	defaultNodeClient, closeConn, err := r.guardianNodeClient(nodes[0])
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "guardian node client: %v", err)
 	}
@@ -226,16 +238,25 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 			plan.needsDelete = true
 		default:
 			plan.physicalPath = guardianDisplayPathJoin(mapped.DisplayPath, mapped.RelativePath)
+			attrClient := defaultNodeClient
+			attrClose := func() {}
+			if target, ok := r.guardianKVSMutationTarget(mapped.DisplayPath); ok {
+				attrClient, attrClose, err = r.guardianNodeClient(target)
+				if err != nil {
+					return nil, status.Errorf(codes.Unavailable, "guardian node client: %v", err)
+				}
+			}
 			attrCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			attr, attrErr := nodeClient.GetAttr(attrCtx, &pb.GetAttrRequest{Path: plan.physicalPath})
+			attr, attrErr := attrClient.GetAttr(attrCtx, &pb.GetAttrRequest{Path: plan.physicalPath})
 			cancel()
 			if attrErr == nil && attr != nil && attr.Found {
 				plan.needsDelete = true
 				plan.isDir = attr.Mode&uint32(syscall.S_IFDIR) != 0
 				if !plan.isDir {
-					plan.content, _ = readGuardianFileContent(ctx, nodeClient, plan.physicalPath)
+					plan.content, _ = readGuardianFileContent(ctx, attrClient, plan.physicalPath)
 				}
 			}
+			attrClose()
 		}
 
 		if plan.existing != nil && len(plan.existing.Content) > 0 {
@@ -401,8 +422,9 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 		repoURL = strings.TrimRight(strings.TrimSpace(principal.BaseURL), "/")
 	}
 	batchFiles := appendGuardianDirHints(group.files)
+	targetNodes := r.guardianMutationTargets(nodes, group.displayPath)
 
-	for _, node := range nodes {
+	for _, node := range targetNodes {
 		node := node
 		wg.Add(1)
 		go func() {
@@ -422,13 +444,21 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 			if regSource == "" {
 				regSource = "guardian-path-api"
 			}
+			var fetchConfig map[string]string
+			var ingestionConfig map[string]string
+			if storageBackend := guardianRepoStorageBackend(group.displayPath); storageBackend != "" {
+				fetchConfig = map[string]string{"storage_backend": storageBackend}
+				ingestionConfig = map[string]string{"storage_backend": storageBackend}
+			}
 			_, regErr := nodeClient.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
-				StorageId:     group.storageID,
-				DisplayPath:   group.displayPath,
-				Source:        regSource,
-				IngestionType: pb.IngestionType_INGESTION_GUARDIAN,
-				FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
-				GuardianUrl:   repoURL,
+				StorageId:       group.storageID,
+				DisplayPath:     group.displayPath,
+				Source:          regSource,
+				IngestionType:   pb.IngestionType_INGESTION_GUARDIAN,
+				FetchType:       pb.SourceType_SOURCE_TYPE_BLOB,
+				FetchConfig:     fetchConfig,
+				IngestionConfig: ingestionConfig,
+				GuardianUrl:     repoURL,
 			})
 			regCancel()
 			if regErr != nil {
