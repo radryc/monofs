@@ -1,0 +1,5 @@
+*
+!monofs/
+!monofs/**
+!kvs/
+!kvs/**

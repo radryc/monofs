@@ -828,7 +828,18 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 	var filesDeleted int64
 	var dirsDeleted int64
 
-	err := s.db.Update(func(tx *nutsdb.Tx) error {
+	kvsFilesDeleted, kvsDirsDeleted, err := s.deleteKVSRepository(ctx, storageID)
+	if err != nil {
+		s.logger.Error("failed to delete kvs-backed repository contents", "storage_id", storageID, "error", err)
+		return &pb.DeleteRepositoryOnNodeResponse{
+			Success: false,
+			Message: err.Error(),
+		}, err
+	}
+	filesDeleted += kvsFilesDeleted
+	dirsDeleted += kvsDirsDeleted
+
+	err = s.db.Update(func(tx *nutsdb.Tx) error {
 		// 1. Delete repo info
 		repoKey := []byte(storageID)
 		var displayPath string

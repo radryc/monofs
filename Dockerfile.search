@@ -6,7 +6,8 @@ RUN apk add --no-cache git
 WORKDIR /app
 
 # Copy go mod files first for better caching
-COPY go.mod go.sum ./
+COPY monofs/go.mod monofs/go.sum ./
+COPY kvs/go.mod kvs/go.sum /kvs/
 # Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
 RUN set -eu; \
     tmp_output="$(mktemp)"; \
@@ -34,8 +35,9 @@ RUN set -eu; \
         exit 1; \
     fi
 
-# Copy source code
-COPY . .
+# Copy source code from the monorepo root so the local kvs replace resolves in Docker too.
+COPY monofs/. .
+COPY kvs /kvs
 
 # Build the search binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o /monofs-search ./cmd/monofs-search

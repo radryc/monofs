@@ -455,6 +455,7 @@ func (s *StubServer) GetNodeInfo(ctx context.Context, req *pb.NodeInfoRequest) (
 		Address:       s.address,
 		UptimeSeconds: int64(time.Since(s.startTime).Seconds()),
 		FilesServed:   s.filesServed.Load(),
+		Kvs:           &pb.KVSNodeStatus{Mode: "disabled", Role: "disabled"},
 	}, nil
 }
 

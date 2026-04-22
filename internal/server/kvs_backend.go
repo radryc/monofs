@@ -21,6 +21,7 @@ const storageBackendKVS = "kvs"
 
 type KVSStore interface {
 	kvsapi.Store
+	Status() kvsapi.StoreStatus
 	Close() error
 }
 
@@ -34,6 +35,21 @@ type kvsResolvedPath struct {
 
 func (s *Server) SetKVSStore(store KVSStore) {
 	s.kvsStore = store
+}
+
+func (s *Server) currentKVSStatus() *pb.KVSNodeStatus {
+	if s == nil || s.kvsStore == nil {
+		return &pb.KVSNodeStatus{Mode: "disabled", Role: "disabled"}
+	}
+	status := s.kvsStore.Status()
+	return &pb.KVSNodeStatus{
+		Enabled:   status.Enabled,
+		Healthy:   status.Healthy,
+		Mode:      status.Mode,
+		Role:      status.Role,
+		LeaderId:  status.LeaderID,
+		PeerCount: status.PeerCount,
+	}
 }
 
 func (s *Server) repositoryStorageBackend(storageID, fallback string) string {
@@ -323,6 +339,14 @@ func (s *Server) deleteKVSDirectory(ctx context.Context, storageID, filePath str
 		return 0, 0, status.Errorf(codes.Internal, "kvs directory delete failed: %v", err)
 	}
 	return int64(len(deletes)), dirsDeleted, nil
+}
+
+func (s *Server) deleteKVSRepository(ctx context.Context, storageID string) (int64, int64, error) {
+	repo, ok := s.repoInfoByStorageID(storageID)
+	if !ok || !repo.usesKVSBackend() {
+		return 0, 0, nil
+	}
+	return s.deleteKVSDirectory(ctx, storageID, "")
 }
 
 func (s *Server) collectKVSFiles(ctx context.Context, logicalDir string) ([]string, int64, error) {
