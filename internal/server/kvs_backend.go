@@ -49,6 +49,7 @@ func (s *Server) currentKVSStatus() *pb.KVSNodeStatus {
 		Role:      status.Role,
 		LeaderId:  status.LeaderID,
 		PeerCount: status.PeerCount,
+		KeyCount:  status.KeyCount,
 	}
 }
 

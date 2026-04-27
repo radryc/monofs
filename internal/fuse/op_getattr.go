@@ -48,10 +48,27 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 	// Check overlay — single source of truth for local changes.
 	// If tracked in overlay, use it directly; never fall through to backend.
 	if n.sessionMgr != nil {
+		parts := splitPath(n.path)
+		
+		// DOCTOR VIRTUAL FILE INTERCEPT
+		if len(parts) == 5 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" && parts[4] == "results.json" {
+			now := uint64(time.Now().Unix())
+			out.Mode = 0444 | uint32(syscall.S_IFREG)
+			out.Size = 0 // unknown until read
+			out.Nlink = 1
+			out.Mtime = now
+			out.Atime = now
+			out.Ctime = now
+			out.Uid = 1000
+			out.Gid = 1000
+			out.Ino = hashPathForNode(n.path)
+			out.SetTimeout(attrTimeout())
+			return 0
+		}
+		
 		state := n.sessionMgr.GetPathState(n.path)
 
 		// User root directory at filesystem root
-		parts := splitPath(n.path)
 		if len(parts) == 1 && state.IsUserRootDir {
 			now := uint64(time.Now().Unix())
 			out.Mode = 0755 | uint32(syscall.S_IFDIR)

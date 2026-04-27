@@ -15,9 +15,9 @@ import (
 )
 
 type guardianNodeTarget struct {
-	id      string
-	address string
-	client  pb.MonoFSClient
+	id        string
+	address   string
+	client    pb.MonoFSClient
 	kvsStatus *pb.KVSNodeStatus
 }
 
@@ -78,9 +78,9 @@ func (r *Router) collectHealthyGuardianNodes() []guardianNodeTarget {
 	for id, state := range r.nodes {
 		if state.info.Healthy {
 			nodes = append(nodes, guardianNodeTarget{
-				id:      id,
-				address: state.info.Address,
-				client:  state.client,
+				id:        id,
+				address:   state.info.Address,
+				client:    state.client,
 				kvsStatus: normalizedKVSNodeStatus(state.kvsStatus),
 			})
 		}

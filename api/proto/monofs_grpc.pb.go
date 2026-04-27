@@ -43,6 +43,7 @@ const (
 	MonoFSRouter_ListGuardianVersions_FullMethodName     = "/monofs.MonoFSRouter/ListGuardianVersions"
 	MonoFSRouter_GetGuardianVersion_FullMethodName       = "/monofs.MonoFSRouter/GetGuardianVersion"
 	MonoFSRouter_SubscribeGuardianChanges_FullMethodName = "/monofs.MonoFSRouter/SubscribeGuardianChanges"
+	MonoFSRouter_QueryLogs_FullMethodName                = "/monofs.MonoFSRouter/QueryLogs"
 	MonoFSRouter_AddWhitelistedClient_FullMethodName     = "/monofs.MonoFSRouter/AddWhitelistedClient"
 	MonoFSRouter_RemoveWhitelistedClient_FullMethodName  = "/monofs.MonoFSRouter/RemoveWhitelistedClient"
 	MonoFSRouter_ListWhitelistedClients_FullMethodName   = "/monofs.MonoFSRouter/ListWhitelistedClients"
@@ -96,6 +97,8 @@ type MonoFSRouterClient interface {
 	ListGuardianVersions(ctx context.Context, in *ListGuardianVersionsRequest, opts ...grpc.CallOption) (*ListGuardianVersionsResponse, error)
 	GetGuardianVersion(ctx context.Context, in *GetGuardianVersionRequest, opts ...grpc.CallOption) (*GetGuardianVersionResponse, error)
 	SubscribeGuardianChanges(ctx context.Context, in *SubscribeGuardianChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GuardianChangeEvent], error)
+	// Doctor Partition operations
+	QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error)
 	// Ingestion whitelist management
 	AddWhitelistedClient(ctx context.Context, in *AddWhitelistedClientRequest, opts ...grpc.CallOption) (*AddWhitelistedClientResponse, error)
 	RemoveWhitelistedClient(ctx context.Context, in *RemoveWhitelistedClientRequest, opts ...grpc.CallOption) (*RemoveWhitelistedClientResponse, error)
@@ -373,6 +376,16 @@ func (c *monoFSRouterClient) SubscribeGuardianChanges(ctx context.Context, in *S
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type MonoFSRouter_SubscribeGuardianChangesClient = grpc.ServerStreamingClient[GuardianChangeEvent]
 
+func (c *monoFSRouterClient) QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryLogsResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_QueryLogs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *monoFSRouterClient) AddWhitelistedClient(ctx context.Context, in *AddWhitelistedClientRequest, opts ...grpc.CallOption) (*AddWhitelistedClientResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AddWhitelistedClientResponse)
@@ -487,6 +500,8 @@ type MonoFSRouterServer interface {
 	ListGuardianVersions(context.Context, *ListGuardianVersionsRequest) (*ListGuardianVersionsResponse, error)
 	GetGuardianVersion(context.Context, *GetGuardianVersionRequest) (*GetGuardianVersionResponse, error)
 	SubscribeGuardianChanges(*SubscribeGuardianChangesRequest, grpc.ServerStreamingServer[GuardianChangeEvent]) error
+	// Doctor Partition operations
+	QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error)
 	// Ingestion whitelist management
 	AddWhitelistedClient(context.Context, *AddWhitelistedClientRequest) (*AddWhitelistedClientResponse, error)
 	RemoveWhitelistedClient(context.Context, *RemoveWhitelistedClientRequest) (*RemoveWhitelistedClientResponse, error)
@@ -577,6 +592,9 @@ func (UnimplementedMonoFSRouterServer) GetGuardianVersion(context.Context, *GetG
 }
 func (UnimplementedMonoFSRouterServer) SubscribeGuardianChanges(*SubscribeGuardianChangesRequest, grpc.ServerStreamingServer[GuardianChangeEvent]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeGuardianChanges not implemented")
+}
+func (UnimplementedMonoFSRouterServer) QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryLogs not implemented")
 }
 func (UnimplementedMonoFSRouterServer) AddWhitelistedClient(context.Context, *AddWhitelistedClientRequest) (*AddWhitelistedClientResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddWhitelistedClient not implemented")
@@ -1035,6 +1053,24 @@ func _MonoFSRouter_SubscribeGuardianChanges_Handler(srv interface{}, stream grpc
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type MonoFSRouter_SubscribeGuardianChangesServer = grpc.ServerStreamingServer[GuardianChangeEvent]
 
+func _MonoFSRouter_QueryLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryLogsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).QueryLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_QueryLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).QueryLogs(ctx, req.(*QueryLogsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _MonoFSRouter_AddWhitelistedClient_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AddWhitelistedClientRequest)
 	if err := dec(in); err != nil {
@@ -1232,6 +1268,10 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _MonoFSRouter_GetGuardianVersion_Handler,
 		},
 		{
+			MethodName: "QueryLogs",
+			Handler:    _MonoFSRouter_QueryLogs_Handler,
+		},
+		{
 			MethodName: "AddWhitelistedClient",
 			Handler:    _MonoFSRouter_AddWhitelistedClient_Handler,
 		},
@@ -1297,6 +1337,7 @@ const (
 	MonoFS_DeleteDirectoryRecursive_FullMethodName = "/monofs.MonoFS/DeleteDirectoryRecursive"
 	MonoFS_BuildDirectoryIndexes_FullMethodName    = "/monofs.MonoFS/BuildDirectoryIndexes"
 	MonoFS_GetPredictorStats_FullMethodName        = "/monofs.MonoFS/GetPredictorStats"
+	MonoFS_QueryLogs_FullMethodName                = "/monofs.MonoFS/QueryLogs"
 )
 
 // MonoFSClient is the client API for MonoFS service.
@@ -1346,6 +1387,8 @@ type MonoFSClient interface {
 	BuildDirectoryIndexes(ctx context.Context, in *BuildDirectoryIndexesRequest, opts ...grpc.CallOption) (*BuildDirectoryIndexesResponse, error)
 	// Predictor statistics (access pattern learning and prefetching)
 	GetPredictorStats(ctx context.Context, in *PredictorStatsRequest, opts ...grpc.CallOption) (*PredictorStatsResponse, error)
+	// Doctor Partition operations
+	QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error)
 }
 
 type monoFSClient struct {
@@ -1617,6 +1660,16 @@ func (c *monoFSClient) GetPredictorStats(ctx context.Context, in *PredictorStats
 	return out, nil
 }
 
+func (c *monoFSClient) QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryLogsResponse)
+	err := c.cc.Invoke(ctx, MonoFS_QueryLogs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MonoFSServer is the server API for MonoFS service.
 // All implementations must embed UnimplementedMonoFSServer
 // for forward compatibility.
@@ -1664,6 +1717,8 @@ type MonoFSServer interface {
 	BuildDirectoryIndexes(context.Context, *BuildDirectoryIndexesRequest) (*BuildDirectoryIndexesResponse, error)
 	// Predictor statistics (access pattern learning and prefetching)
 	GetPredictorStats(context.Context, *PredictorStatsRequest) (*PredictorStatsResponse, error)
+	// Doctor Partition operations
+	QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error)
 	mustEmbedUnimplementedMonoFSServer()
 }
 
@@ -1745,6 +1800,9 @@ func (UnimplementedMonoFSServer) BuildDirectoryIndexes(context.Context, *BuildDi
 }
 func (UnimplementedMonoFSServer) GetPredictorStats(context.Context, *PredictorStatsRequest) (*PredictorStatsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetPredictorStats not implemented")
+}
+func (UnimplementedMonoFSServer) QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryLogs not implemented")
 }
 func (UnimplementedMonoFSServer) mustEmbedUnimplementedMonoFSServer() {}
 func (UnimplementedMonoFSServer) testEmbeddedByValue()                {}
@@ -2174,6 +2232,24 @@ func _MonoFS_GetPredictorStats_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFS_QueryLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryLogsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSServer).QueryLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFS_QueryLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSServer).QueryLogs(ctx, req.(*QueryLogsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MonoFS_ServiceDesc is the grpc.ServiceDesc for MonoFS service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2264,6 +2340,10 @@ var MonoFS_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetPredictorStats",
 			Handler:    _MonoFS_GetPredictorStats_Handler,
+		},
+		{
+			MethodName: "QueryLogs",
+			Handler:    _MonoFS_QueryLogs_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

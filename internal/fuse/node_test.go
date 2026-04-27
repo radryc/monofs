@@ -95,6 +95,9 @@ func (m *mockClient) IsGuardianVisible() bool {
 	return false
 }
 
+func (m *mockClient) QueryLogs(ctx context.Context, query string) ([]byte, error) {
+        return nil, nil
+}
 // TestErrorFile tests that FS_ERROR.txt appears when backend fails
 func TestErrorFileAppearsOnBackendFailure(t *testing.T) {
 	// Create mock client that fails
