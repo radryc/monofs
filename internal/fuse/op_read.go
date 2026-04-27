@@ -20,6 +20,41 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 		return mfh.Read(ctx, dest, off)
 	}
 
+	if n.sessionMgr != nil {
+		parts := splitPath(n.path)
+		if len(parts) == 5 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" && parts[4] == "results.json" {
+			sessionID := parts[3]
+			localPath, err := n.sessionMgr.GetLocalPath("doctor/v1/query/" + sessionID + "/statement")
+			if err == nil {
+				queryBytes, err := os.ReadFile(localPath)
+				if err == nil {
+					ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+					defer cancel()
+					res, err := n.client.QueryLogs(ctx, string(queryBytes))
+					if err == nil {
+						end := int(off) + len(dest)
+						if end > len(res) {
+							end = len(res)
+						}
+						if int(off) >= len(res) {
+							n.client.RecordOperation()
+							return fuse.ReadResultData(nil), 0
+						}
+						n.client.RecordOperation()
+						n.client.RecordBytesRead(int64(end - int(off)))
+						return fuse.ReadResultData(res[off:end]), 0
+					}
+					n.logger.Warn("read: QueryLogs RPC failed", "error", err)
+				} else {
+					n.logger.Warn("read: failed to read local statement file", "error", err)
+				}
+			}
+		}
+	}
+	if mfh, ok := f.(*monofsFileHandle); ok {
+		return mfh.Read(ctx, dest, off)
+	}
+
 	// If the file is tracked in overlay, read from disk directly.
 	// This handles the case where go-fuse dispatches to the node's Read
 	// instead of the file handle's Read (e.g. after a re-open).

@@ -809,6 +809,25 @@ func (r *Router) GetNodeForFile(ctx context.Context, req *pb.GetNodeForFileReque
 	}
 }
 
+// QueryLogs implements pb.MonoFSRouterServer.
+func (r *Router) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
+	r.mu.RLock()
+	var client pb.MonoFSClient
+	for _, state := range r.nodes {
+		if state.info.Healthy && state.status == NodeActive {
+			client = state.client
+			break
+		}
+	}
+	r.mu.RUnlock()
+
+	if client == nil {
+		return nil, fmt.Errorf("no healthy nodes available for query")
+	}
+
+	return client.QueryLogs(ctx, req)
+}
+
 // getHRWFallbacks returns fallback nodes for a key in HRW order, excluding a specific node.
 // Must be called with r.mu held.
 func (r *Router) getHRWFallbacks(key string, excludeNodeID string, count int) []string {

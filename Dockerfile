@@ -170,10 +170,8 @@ RUN apk add --no-cache \
     libstdc++ \
     libgcc
 
-# Install Rust via rustup
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain stable --no-modify-path
-ENV PATH=/root/.cargo/bin:$PATH
+# Install Rust via apk to speed up builds and cache effectively
+RUN apk add --no-cache rust cargo
 
 # Install Bazel via Bazelisk
 RUN curl -fsSL https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 \

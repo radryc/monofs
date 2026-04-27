@@ -61,6 +61,21 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	// If a file is tracked in overlay or exists on disk under a user root dir,
 	// we use it directly and never fall through to the backend.
 	if n.sessionMgr != nil {
+		// DOCTOR VIRTUAL FILE INTERCEPT
+		parts := splitPath(childPath)
+		if len(parts) == 5 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" && parts[4] == "results.json" {
+			child := n.newChild(name, false, 0444|uint32(syscall.S_IFREG), 0)
+			out.Mode = 0444 | uint32(syscall.S_IFREG)
+			out.Size = 0 // unknown until read
+			out.Ino = hashPathForNode(childPath)
+			out.SetAttrTimeout(attrTimeout())
+			out.SetEntryTimeout(attrTimeout())
+			return n.NewInode(ctx, child, fs.StableAttr{
+				Mode: fuse.S_IFREG,
+				Ino:  out.Ino,
+			}), 0
+		}
+
 		state := n.sessionMgr.GetPathState(childPath)
 
 		// User root directory at filesystem root
@@ -117,7 +132,6 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 
 		// Paths under user root dirs: backend doesn't know about these.
 		// Check disk directly — authoritative for user dirs, no DB needed.
-		parts := splitPath(childPath)
 		if len(parts) > 1 && n.sessionMgr.IsUserRootDir(parts[0]) {
 			inode, errno := n.lookupFromOverlay(ctx, name, childPath, out)
 			if errno == 0 {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/rydzu/ainfra/kvs/pkg/kvsapi"
 	"github.com/rydzu/ainfra/kvs/pkg/localstore"
 )
 
@@ -26,6 +27,11 @@ func TestGetNodeInfoReportsEmbeddedKVSStatus(t *testing.T) {
 	store, err := localstore.Open(localstore.Config{DataDir: filepath.Join(tmpDir, "kvs"), MaxHotVersions: 2})
 	if err != nil {
 		t.Fatalf("failed to open kvs store: %v", err)
+	}
+	if _, err := store.UpsertFiles(context.Background(), kvsapi.MutationBatch{
+		Writes: []kvsapi.PathWrite{{LogicalPath: "/guardian/intents/web.yaml", Content: []byte("enabled: true")}},
+	}); err != nil {
+		t.Fatalf("failed to seed kvs store: %v", err)
 	}
 	server.SetKVSStore(store)
 
@@ -50,5 +56,8 @@ func TestGetNodeInfoReportsEmbeddedKVSStatus(t *testing.T) {
 	}
 	if got := resp.GetKvs().GetPeerCount(); got != 1 {
 		t.Fatalf("expected single-node local kvs peer count, got %d", got)
+	}
+	if got := resp.GetKvs().GetKeyCount(); got != 1 {
+		t.Fatalf("expected kvs key count 1, got %d", got)
 	}
 }

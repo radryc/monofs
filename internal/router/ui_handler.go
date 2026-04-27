@@ -247,6 +247,7 @@ func (r *Router) buildStatusData() *StatusData {
 				"role":       kvsStatus.GetRole(),
 				"leader_id":  kvsStatus.GetLeaderId(),
 				"peer_count": kvsStatus.GetPeerCount(),
+				"key_count":  kvsStatus.GetKeyCount(),
 			},
 		}
 

@@ -56,6 +56,9 @@ service MonoFSRouter {
     rpc ListGuardianVersions(ListGuardianVersionsRequest) returns (ListGuardianVersionsResponse);
     rpc GetGuardianVersion(GetGuardianVersionRequest) returns (GetGuardianVersionResponse);
     rpc SubscribeGuardianChanges(SubscribeGuardianChangesRequest) returns (stream GuardianChangeEvent);
+
+    // Doctor Partition operations
+    rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
     
     // Ingestion whitelist management
     rpc AddWhitelistedClient(AddWhitelistedClientRequest) returns (AddWhitelistedClientResponse);
@@ -128,6 +131,9 @@ service MonoFS {
 
     // Predictor statistics (access pattern learning and prefetching)
     rpc GetPredictorStats(PredictorStatsRequest) returns (PredictorStatsResponse);
+
+    // Doctor Partition operations
+    rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
 }
 
 // Cluster topology messages
@@ -187,6 +193,7 @@ message KVSNodeStatus {
     string role = 4;       // local, leader, follower, candidate, shutdown, unknown
     string leader_id = 5;
     int32 peer_count = 6;
+    int64 key_count = 7;
 }
 
 message LookupRequest {
@@ -969,4 +976,13 @@ message GuardianChangeEvent {
     string correlation_id = 9;
     int64 committed_at = 10;
     bytes inline_content = 11;
+}
+
+// Doctor Partition operations
+message QueryLogsRequest {
+    string query = 1;
+}
+
+message QueryLogsResponse {
+    bytes results_json = 1;
 }
