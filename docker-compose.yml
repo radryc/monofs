@@ -1,9 +1,19 @@
+x-otel-syslog-logging: &otel-syslog-logging
+  logging:
+    driver: syslog
+    options:
+      syslog-address: "tcp://127.0.0.1:1514"
+      syslog-format: rfc5424micro
+      tag: "{{.Name}}"
+
 services:
   # Fetcher 1 - External blob fetcher (packager archives + optional Git)
   # Runs in DMZ with external network access
   fetcher-a:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: fetcher
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -39,8 +49,10 @@ services:
 
   # Fetcher 2 - Second fetcher instance for redundancy and load balancing
   fetcher-b:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: fetcher
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -76,8 +88,10 @@ services:
 
   # Search-index service - Zoekt-based code search
   search-index:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: search
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -112,6 +126,7 @@ services:
 
   # HAProxy - Load balancer for routers
   haproxy:
+    <<: *otel-syslog-logging
     image: haproxy:2.9-alpine
     ports:
       - "9090:9090"
@@ -132,8 +147,10 @@ services:
 
   # Router 1 - Primary cluster coordinator
   router-a:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: router
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -172,8 +189,10 @@ services:
 
   # Router 2 - Secondary cluster coordinator (backup failover)
   router-b:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: router
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -212,8 +231,10 @@ services:
 
   # Backend node 1
   node-a:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: server
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -226,6 +247,14 @@ services:
       - "--node-id=node-a"
       - "--db-path=/data/db"
       - "--git-cache=/data/git"
+      - "--kvs-data-dir=/data/kvs"
+      - "--kvs-api-addr=node-a:9000"
+      - "--kvs-raft-addr=node-a:7000"
+      - "--kvs-bootstrap"
+      - "--kvs-peer=node-b,node-b:9000,node-b:7000"
+      - "--kvs-peer=node-c,node-c:9000,node-c:7000"
+      - "--kvs-peer=node-d,node-d:9000,node-d:7000"
+      - "--kvs-peer=node-e,node-e:9000,node-e:7000"
       - "--fetcher=fetcher-a:9200"
       - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
@@ -245,8 +274,10 @@ services:
 
   # Backend node 2
   node-b:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: server
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -259,6 +290,13 @@ services:
       - "--node-id=node-b"
       - "--db-path=/data/db"
       - "--git-cache=/data/git"
+      - "--kvs-data-dir=/data/kvs"
+      - "--kvs-api-addr=node-b:9000"
+      - "--kvs-raft-addr=node-b:7000"
+      - "--kvs-peer=node-a,node-a:9000,node-a:7000"
+      - "--kvs-peer=node-c,node-c:9000,node-c:7000"
+      - "--kvs-peer=node-d,node-d:9000,node-d:7000"
+      - "--kvs-peer=node-e,node-e:9000,node-e:7000"
       - "--fetcher=fetcher-a:9200"
       - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
@@ -278,8 +316,10 @@ services:
 
   # Backend node 3
   node-c:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: server
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -292,6 +332,13 @@ services:
       - "--node-id=node-c"
       - "--db-path=/data/db"
       - "--git-cache=/data/git"
+      - "--kvs-data-dir=/data/kvs"
+      - "--kvs-api-addr=node-c:9000"
+      - "--kvs-raft-addr=node-c:7000"
+      - "--kvs-peer=node-a,node-a:9000,node-a:7000"
+      - "--kvs-peer=node-b,node-b:9000,node-b:7000"
+      - "--kvs-peer=node-d,node-d:9000,node-d:7000"
+      - "--kvs-peer=node-e,node-e:9000,node-e:7000"
       - "--fetcher=fetcher-a:9200"
       - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
@@ -311,8 +358,10 @@ services:
 
   # Backend node 4
   node-d:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: server
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -325,6 +374,13 @@ services:
       - "--node-id=node-d"
       - "--db-path=/data/db"
       - "--git-cache=/data/git"
+      - "--kvs-data-dir=/data/kvs"
+      - "--kvs-api-addr=node-d:9000"
+      - "--kvs-raft-addr=node-d:7000"
+      - "--kvs-peer=node-a,node-a:9000,node-a:7000"
+      - "--kvs-peer=node-b,node-b:9000,node-b:7000"
+      - "--kvs-peer=node-c,node-c:9000,node-c:7000"
+      - "--kvs-peer=node-e,node-e:9000,node-e:7000"
       - "--fetcher=fetcher-a:9200"
       - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
@@ -344,8 +400,10 @@ services:
 
   # Backend node 5
   node-e:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: server
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -358,6 +416,13 @@ services:
       - "--node-id=node-e"
       - "--db-path=/data/db"
       - "--git-cache=/data/git"
+      - "--kvs-data-dir=/data/kvs"
+      - "--kvs-api-addr=node-e:9000"
+      - "--kvs-raft-addr=node-e:7000"
+      - "--kvs-peer=node-a,node-a:9000,node-a:7000"
+      - "--kvs-peer=node-b,node-b:9000,node-b:7000"
+      - "--kvs-peer=node-c,node-c:9000,node-c:7000"
+      - "--kvs-peer=node-d,node-d:9000,node-d:7000"
       - "--fetcher=fetcher-a:9200"
       - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
@@ -377,8 +442,10 @@ services:
 
   # Interactive client 1 with SSH and auto-mount
   client:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: client
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -407,8 +474,10 @@ services:
 
   # Interactive client 2 with SSH and auto-mount
   client2:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: client
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -436,8 +505,10 @@ services:
 
   # Interactive client 3 with SSH and auto-mount
   client3:
+    <<: *otel-syslog-logging
     build:
-      context: .
+      context: ..
+      dockerfile: monofs/Dockerfile
       target: client
       args:
         VERSION: ${GIT_VERSION:-dev}

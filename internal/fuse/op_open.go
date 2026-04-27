@@ -107,6 +107,15 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		return fh, fuse.FOPEN_DIRECT_IO, 0
 	}
 
+	// DOCTOR VIRTUAL FILE INTERCEPT
+	if n.sessionMgr != nil {
+		parts := splitPath(n.path)
+		if len(parts) == 5 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" && parts[4] == "results.json" {
+			// Virtual file, no handle needed, read will be intercepted in op_read.go
+			return nil, fuse.FOPEN_DIRECT_IO, 0
+		}
+	}
+
 	// Paths under user root dirs: backend doesn't know about these.
 	// Check disk directly — files may exist even if not tracked in DB yet
 	// (e.g. created by os.Rename between TrackChange calls).

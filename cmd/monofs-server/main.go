@@ -15,6 +15,8 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/server"
+	kvsgrpc "github.com/rydzu/ainfra/kvs/pkg/grpcserver"
+	"github.com/rydzu/ainfra/kvs/pkg/raftstore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
@@ -51,6 +53,15 @@ func main() {
 	var fetcherAddrs stringSlice
 	flag.Var(&fetcherAddrs, "fetcher", "Fetcher service address (can be specified multiple times)")
 	enablePrediction := flag.Bool("enable-prediction", false, "Enable access pattern prediction and prefetching")
+
+	// Embedded KVS configuration
+	kvsDataDir := flag.String("kvs-data-dir", "", "Embedded KVS data directory (empty disables KVS-backed repositories)")
+	kvsAPIAddr := flag.String("kvs-api-addr", "", "Dialable gRPC address for this node's embedded KVS service (defaults to --addr)")
+	kvsRaftAddr := flag.String("kvs-raft-addr", "", "Raft address for the embedded KVS store (empty keeps the embedded KVS store local-only)")
+	kvsBootstrap := flag.Bool("kvs-bootstrap", false, "Bootstrap this node as the initial embedded KVS raft cluster member")
+	kvsMaxHotVersions := flag.Int("kvs-max-hot-versions", 5, "Maximum number of hot versions retained in the embedded KVS store")
+	var kvsPeers stringSlice
+	flag.Var(&kvsPeers, "kvs-peer", "Embedded KVS peer in the form nodeID,apiAddress,raftAddress (repeatable)")
 
 	flag.Parse()
 
@@ -95,6 +106,44 @@ func main() {
 	if err != nil {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)
+	}
+
+	if *kvsBootstrap && *kvsRaftAddr == "" {
+		logger.Error("invalid kvs configuration", "error", "--kvs-bootstrap requires --kvs-raft-addr")
+		os.Exit(1)
+	}
+	if strings.TrimSpace(*kvsDataDir) != "" {
+		peerDefs, err := parseKVSPeers(kvsPeers)
+		if err != nil {
+			logger.Error("failed to parse kvs peers", "error", err)
+			os.Exit(1)
+		}
+		apiAddr := strings.TrimSpace(*kvsAPIAddr)
+		if apiAddr == "" {
+			apiAddr = *addr
+		}
+		kvsStore, err := raftstore.Open(raftstore.Config{
+			NodeID:         *nodeID,
+			DataDir:        *kvsDataDir,
+			RaftAddress:    strings.TrimSpace(*kvsRaftAddr),
+			APIAddress:     apiAddr,
+			Peers:          peerDefs,
+			Bootstrap:      *kvsBootstrap,
+			MaxHotVersions: *kvsMaxHotVersions,
+			LogOutput:      os.Stdout,
+		})
+		if err != nil {
+			logger.Error("failed to create embedded kvs store", "error", err)
+			os.Exit(1)
+		}
+		srv.SetKVSStore(kvsStore)
+		kvsgrpc.Register(grpcServer, kvsStore, kvsgrpc.Config{})
+		logger.Info("embedded kvs enabled",
+			"data_dir", *kvsDataDir,
+			"api_addr", apiAddr,
+			"raft_addr", strings.TrimSpace(*kvsRaftAddr),
+			"peer_count", len(peerDefs),
+			"bootstrap", *kvsBootstrap)
 	}
 
 	// Configure fetcher client and prediction if enabled
@@ -206,4 +255,28 @@ func requestFailover(routerAddr, nodeID string, logger *slog.Logger) error {
 		"message", resp.Message)
 
 	return nil
+}
+
+func parseKVSPeers(values []string) ([]raftstore.Peer, error) {
+	peers := make([]raftstore.Peer, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		parts := strings.Split(trimmed, ",")
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("invalid kvs peer %q: expected nodeID,apiAddress,raftAddress", value)
+		}
+		peer := raftstore.Peer{
+			NodeID:      strings.TrimSpace(parts[0]),
+			APIAddress:  strings.TrimSpace(parts[1]),
+			RaftAddress: strings.TrimSpace(parts[2]),
+		}
+		if peer.NodeID == "" || peer.APIAddress == "" || peer.RaftAddress == "" {
+			return nil, fmt.Errorf("invalid kvs peer %q: nodeID, apiAddress, and raftAddress are required", value)
+		}
+		peers = append(peers, peer)
+	}
+	return peers, nil
 }

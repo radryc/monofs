@@ -172,6 +172,7 @@ type nodeState struct {
 	lastSeen        time.Time
 	conn            *grpc.ClientConn
 	client          pb.MonoFSClient
+	kvsStatus       *pb.KVSNodeStatus
 
 	// NEW: Staging and failover state
 	status           NodeStatus
@@ -588,6 +589,17 @@ func (r *Router) GetClusterInfo(ctx context.Context, req *pb.ClusterInfoRequest)
 		if len(state.backingUpNodes) > 0 {
 			metadata["backing_up"] = fmt.Sprintf("%d nodes", len(state.backingUpNodes))
 		}
+		kvsStatus := normalizedKVSNodeStatus(state.kvsStatus)
+		metadata["kvs_enabled"] = fmt.Sprintf("%t", kvsStatus.GetEnabled())
+		metadata["kvs_mode"] = kvsStatus.GetMode()
+		metadata["kvs_role"] = kvsStatus.GetRole()
+		metadata["kvs_healthy"] = fmt.Sprintf("%t", kvsStatus.GetHealthy())
+		if kvsStatus.GetLeaderId() != "" {
+			metadata["kvs_leader_id"] = kvsStatus.GetLeaderId()
+		}
+		if kvsStatus.GetPeerCount() > 0 {
+			metadata["kvs_peer_count"] = fmt.Sprintf("%d", kvsStatus.GetPeerCount())
+		}
 
 		// Determine which address to return
 		address := state.info.Address
@@ -795,6 +807,25 @@ func (r *Router) GetNodeForFile(ctx context.Context, req *pb.GetNodeForFileReque
 	default:
 		return nil, fmt.Errorf("unknown rebalance state: %v", state)
 	}
+}
+
+// QueryLogs implements pb.MonoFSRouterServer.
+func (r *Router) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
+	r.mu.RLock()
+	var client pb.MonoFSClient
+	for _, state := range r.nodes {
+		if state.info.Healthy && state.status == NodeActive {
+			client = state.client
+			break
+		}
+	}
+	r.mu.RUnlock()
+
+	if client == nil {
+		return nil, fmt.Errorf("no healthy nodes available for query")
+	}
+
+	return client.QueryLogs(ctx, req)
 }
 
 // getHRWFallbacks returns fallback nodes for a key in HRW order, excluding a specific node.
@@ -1120,6 +1151,7 @@ func (r *Router) checkAllNodes() {
 				state.diskUsedBytes = nodeInfo.DiskUsedBytes
 				state.diskTotalBytes = nodeInfo.DiskTotalBytes
 				state.diskFreeBytes = nodeInfo.DiskFreeBytes
+				state.kvsStatus = normalizedKVSNodeStatus(nodeInfo.GetKvs())
 
 				// NEW: Detect node recovery/health restoration
 				if !state.info.Healthy && state.status == NodeActive {

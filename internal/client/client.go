@@ -14,6 +14,7 @@ type MonoFSClient interface {
 	GetAttr(ctx context.Context, path string) (*pb.GetAttrResponse, error)
 	ReadDir(ctx context.Context, path string) ([]*pb.DirEntry, error)
 	Read(ctx context.Context, path string, offset, size int64) ([]byte, error)
+	QueryLogs(ctx context.Context, query string) ([]byte, error)
 	Close() error
 	// Metrics tracking
 	RecordOperation()

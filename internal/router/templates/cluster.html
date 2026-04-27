@@ -22,6 +22,54 @@
 </div>
 
 <script>
+    function kvsStatusColor(kvs) {
+        if (!kvs || !kvs.enabled) {
+            return 'var(--text-secondary)';
+        }
+        if (kvs.healthy) {
+            return kvs.role === 'leader' ? 'var(--success)' : 'var(--info)';
+        }
+        return 'var(--warning)';
+    }
+
+    function kvsStatusSummary(kvs) {
+        if (!kvs || !kvs.enabled) {
+            return 'Disabled';
+        }
+        if (kvs.mode === 'local') {
+            return 'Local';
+        }
+        if (!kvs.healthy) {
+            return 'Raft starting';
+        }
+        if (kvs.role === 'leader') {
+            return 'Raft leader';
+        }
+        if (kvs.role === 'follower') {
+            return 'Raft follower';
+        }
+        return `Raft ${kvs.role || 'unknown'}`;
+    }
+
+    function kvsStatusDetails(kvs) {
+        if (!kvs || !kvs.enabled) {
+            return 'Embedded KVS disabled';
+        }
+        const keyCount = Number(kvs.key_count || 0).toLocaleString();
+        if (kvs.mode === 'local') {
+            return `Single-node local store • ${keyCount} keys`;
+        }
+        const details = [];
+        if (kvs.leader_id) {
+            details.push(`Leader ${kvs.leader_id}`);
+        }
+        if (kvs.peer_count) {
+            details.push(`${kvs.peer_count} peers`);
+        }
+        details.push(`${keyCount} keys`);
+        return details.join(' • ') || `Single-node local store • ${keyCount} keys`;
+    }
+
     async function loadClusterNodes() {
         try {
             const response = await fetch('/api/status');
@@ -61,11 +109,21 @@
                             <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">STATUS</div>
                             <div style="font-weight: 600; color: ${statusColor};">${statusText}</div>
                         </div>
+
+                        <div style="margin-bottom: 12px;">
+                            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">KVS</div>
+                            <div style="font-weight: 600; color: ${kvsStatusColor(node.kvs)};">${kvsStatusSummary(node.kvs)}</div>
+                            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">${kvsStatusDetails(node.kvs)}</div>
+                        </div>
                         
-                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+                        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;">
                             <div>
                                 <div style="font-size: 11px; color: var(--text-secondary);">FILES</div>
                                 <div style="font-size: 20px; font-weight: 600;">${(node.file_count || 0).toLocaleString()}</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">KVS KEYS</div>
+                                <div style="font-size: 20px; font-weight: 600;">${((node.kvs && node.kvs.key_count) || 0).toLocaleString()}</div>
                             </div>
                             <div>
                                 <div style="font-size: 11px; color: var(--text-secondary);">WEIGHT</div>
@@ -112,6 +170,7 @@
                             <th>Node ID</th>
                             <th>Address</th>
                             <th>Status</th>
+                            <th>KVS</th>
                             <th>Weight</th>
                             <th>Files</th>
                             <th>Disk Used</th>
@@ -135,12 +194,14 @@
                                 ? `${(node.disk_used / 1073741824).toFixed(1)}GB used / ${(node.disk_free / 1073741824).toFixed(1)}GB free`
                                 : 'N/A';
                             const backingUp = node.backing_up && node.backing_up.length > 0 ? node.backing_up.join(', ') : '-';
+                            const kvsDisplay = `<div style="font-weight: 600; color: ${kvsStatusColor(node.kvs)};">${kvsStatusSummary(node.kvs)}</div><div style="font-size: 11px; color: var(--text-secondary);">${kvsStatusDetails(node.kvs)}</div>`;
                             
                             return `
                                 <tr>
                                     <td><strong>${node.id}</strong></td>
                                     <td>${node.address}</td>
                                     <td>${statusBadge}</td>
+                                    <td>${kvsDisplay}</td>
                                     <td>${node.weight}</td>
                                     <td>${(node.file_count || 0).toLocaleString()}</td>
                                     <td>${diskDisplay}</td>

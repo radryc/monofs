@@ -7,9 +7,18 @@
 # Or use the make command:
 #   make deploy-s3
 
+x-otel-syslog-logging: &otel-syslog-logging
+  logging:
+    driver: syslog
+    options:
+      syslog-address: "tcp://127.0.0.1:1514"
+      syslog-format: rfc5424micro
+      tag: "{{.Name}}"
+
 services:
   # MinIO S3-compatible object storage
   minio:
+    <<: *otel-syslog-logging
     image: minio/minio:latest
     ports:
       - "19000:9000"  # S3 API
@@ -31,6 +40,7 @@ services:
 
   # Create the monofs bucket on startup
   minio-init:
+    <<: *otel-syslog-logging
     image: minio/mc:latest
     depends_on:
       minio:

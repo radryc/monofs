@@ -56,6 +56,9 @@ service MonoFSRouter {
     rpc ListGuardianVersions(ListGuardianVersionsRequest) returns (ListGuardianVersionsResponse);
     rpc GetGuardianVersion(GetGuardianVersionRequest) returns (GetGuardianVersionResponse);
     rpc SubscribeGuardianChanges(SubscribeGuardianChangesRequest) returns (stream GuardianChangeEvent);
+
+    // Doctor Partition operations
+    rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
     
     // Ingestion whitelist management
     rpc AddWhitelistedClient(AddWhitelistedClientRequest) returns (AddWhitelistedClientResponse);
@@ -128,6 +131,9 @@ service MonoFS {
 
     // Predictor statistics (access pattern learning and prefetching)
     rpc GetPredictorStats(PredictorStatsRequest) returns (PredictorStatsResponse);
+
+    // Doctor Partition operations
+    rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
 }
 
 // Cluster topology messages
@@ -177,6 +183,17 @@ message NodeInfoResponse {
     int64 disk_used_bytes = 6;   // Disk space used by data directory
     int64 disk_total_bytes = 7;  // Total disk space available
     int64 disk_free_bytes = 8;   // Disk space free on filesystem
+    KVSNodeStatus kvs = 9;       // Embedded KVS status for this node
+}
+
+message KVSNodeStatus {
+    bool enabled = 1;
+    bool healthy = 2;
+    string mode = 3;       // disabled, local, raft
+    string role = 4;       // local, leader, follower, candidate, shutdown, unknown
+    string leader_id = 5;
+    int32 peer_count = 6;
+    int64 key_count = 7;
 }
 
 message LookupRequest {
@@ -669,6 +686,7 @@ message NodeStatInfo {
     repeated string backing_up_nodes = 9;  // Nodes this node is backing up
     double sync_progress = 10;             // 0.0 to 1.0
     int64 last_heartbeat = 11;             // Unix timestamp
+    KVSNodeStatus kvs = 12;
 }
 
 // Cluster maintenance messages
@@ -958,4 +976,13 @@ message GuardianChangeEvent {
     string correlation_id = 9;
     int64 committed_at = 10;
     bytes inline_content = 11;
+}
+
+// Doctor Partition operations
+message QueryLogsRequest {
+    string query = 1;
+}
+
+message QueryLogsResponse {
+    bytes results_json = 1;
 }

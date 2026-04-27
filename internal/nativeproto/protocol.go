@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	FrameMagic  uint32 = 0x53464e4d
-	Version1    uint16 = 1
-	HeaderSize         = 52
+	FrameMagic uint32 = 0x53464e4d
+	Version1   uint16 = 1
+	HeaderSize        = 52
 
 	MaxFrameBytes uint32 = 1 << 20
 	MaxReadBytes  uint32 = 256 << 10
@@ -67,16 +67,16 @@ const (
 type ObjectID [16]byte
 
 type Header struct {
-	Magic     uint32
-	Version   uint16
-	Opcode    uint16
-	Flags     uint32
-	HeaderLen uint32
-	BodyLen   uint32
-	RequestID uint64
-	SessionID uint64
-	Status    uint32
-	Reserved  uint32
+	Magic      uint32
+	Version    uint16
+	Opcode     uint16
+	Flags      uint32
+	HeaderLen  uint32
+	BodyLen    uint32
+	RequestID  uint64
+	SessionID  uint64
+	Status     uint32
+	Reserved   uint32
 	Generation uint64
 }
 
@@ -171,13 +171,13 @@ type ReadDirResponse struct {
 }
 
 type StatFSResponse struct {
-	Blocks uint64
-	Bfree  uint64
-	Bavail uint64
-	Files  uint64
-	Ffree  uint64
-	Bsize  uint32
-	Frsize uint32
+	Blocks  uint64
+	Bfree   uint64
+	Bavail  uint64
+	Files   uint64
+	Ffree   uint64
+	Bsize   uint32
+	Frsize  uint32
 	NameLen uint32
 }
 

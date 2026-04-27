@@ -104,6 +104,7 @@ func (r *Router) GetNodeStats(ctx context.Context, req *pb.NodeStatsRequest) (*p
 
 		// Get file count from node's owned files
 		fileCount := node.ownedFilesCount
+		kvsStatus := normalizedKVSNodeStatus(node.kvsStatus)
 
 		nodeStats = append(nodeStats, &pb.NodeStatInfo{
 			NodeId:          nodeID,
@@ -117,6 +118,7 @@ func (r *Router) GetNodeStats(ctx context.Context, req *pb.NodeStatsRequest) (*p
 			BackingUpNodes:  backingUpNodes,
 			SyncProgress:    node.syncProgress,
 			LastHeartbeat:   lastHeartbeat,
+			Kvs:             kvsStatus,
 		})
 	}
 

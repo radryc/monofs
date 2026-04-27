@@ -41,6 +41,7 @@ type Server struct {
 
 	// Fetcher client for external blob retrieval (required)
 	fetcherClient *fetcher.Client
+	kvsStore      KVSStore
 
 	// Predictor for access pattern learning and prefetching
 	predictor *Predictor
@@ -70,15 +71,16 @@ type Server struct {
 }
 
 type repoInfo struct {
-	StorageID     string `json:"storage_id"`   // SHA-256 hash (primary key)
-	DisplayPath   string `json:"display_path"` // User-visible path
-	RepoURL       string `json:"repo_url"`
-	Branch        string `json:"branch"`
-	CommitHash    string `json:"commit_hash,omitempty"`
-	CommitTime    int64  `json:"commit_time,omitempty"`
-	CommitMessage string `json:"commit_message,omitempty"`
-	FetchType     string `json:"fetch_type,omitempty"`
-	GuardianURL   string `json:"guardian_url,omitempty"`
+	StorageID      string `json:"storage_id"`   // SHA-256 hash (primary key)
+	DisplayPath    string `json:"display_path"` // User-visible path
+	RepoURL        string `json:"repo_url"`
+	Branch         string `json:"branch"`
+	CommitHash     string `json:"commit_hash,omitempty"`
+	CommitTime     int64  `json:"commit_time,omitempty"`
+	CommitMessage  string `json:"commit_message,omitempty"`
+	FetchType      string `json:"fetch_type,omitempty"`
+	StorageBackend string `json:"storage_backend,omitempty"`
+	GuardianURL    string `json:"guardian_url,omitempty"`
 }
 
 type storedMetadata struct {
@@ -537,13 +539,14 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 		"storage_id", req.StorageId,
 		"display_path", req.DisplayPath,
 		"source", req.Source)
+	storageBackend := registerRepositoryStorageBackend(req)
 
 	// Store repository info in database
 	err := s.db.Update(func(tx *nutsdb.Tx) error {
 		// Check if already registered
 		if s.repoExistsByStorageIDTx(tx, req.StorageId) {
 			// Repository already exists — update GuardianURL if a new one is provided.
-			if req.GuardianUrl != "" {
+			if req.GuardianUrl != "" || storageBackend != "" {
 				value, err := tx.Get(bucketRepos, []byte(req.StorageId))
 				if err != nil {
 					return nil // can't read, skip update
@@ -552,13 +555,21 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 				if err := json.Unmarshal(value, &existing); err != nil {
 					return nil
 				}
+				updated := false
 				if existing.GuardianURL != req.GuardianUrl {
 					existing.GuardianURL = req.GuardianUrl
-					updated, err := json.Marshal(existing)
+					updated = true
+				}
+				if storageBackend != "" && existing.StorageBackend != storageBackend {
+					existing.StorageBackend = storageBackend
+					updated = true
+				}
+				if updated {
+					updatedValue, err := json.Marshal(existing)
 					if err != nil {
 						return nil
 					}
-					_ = tx.Put(bucketRepos, []byte(req.StorageId), updated, 0)
+					_ = tx.Put(bucketRepos, []byte(req.StorageId), updatedValue, 0)
 				}
 			}
 			s.logger.Debug("repository already registered", "storage_id", req.StorageId)
@@ -567,15 +578,16 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 
 		// Store repo metadata
 		info := &repoInfo{
-			StorageID:     req.StorageId,
-			DisplayPath:   req.DisplayPath,
-			RepoURL:       req.Source,
-			Branch:        "", // Branch will be set during file ingestion
-			CommitHash:    req.CommitHash,
-			CommitTime:    req.CommitTime,
-			CommitMessage: req.CommitMessage,
-			FetchType:     req.FetchType.String(),
-			GuardianURL:   req.GuardianUrl,
+			StorageID:      req.StorageId,
+			DisplayPath:    req.DisplayPath,
+			RepoURL:        req.Source,
+			Branch:         "", // Branch will be set during file ingestion
+			CommitHash:     req.CommitHash,
+			CommitTime:     req.CommitTime,
+			CommitMessage:  req.CommitMessage,
+			FetchType:      req.FetchType.String(),
+			StorageBackend: storageBackend,
+			GuardianURL:    req.GuardianUrl,
 		}
 		repoKey := []byte(req.StorageId)
 		repoValue, err := json.Marshal(info)
@@ -655,6 +667,17 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 	if storageID == "" || displayPath == "" {
 		return &pb.IngestFileResponse{Success: false},
 			fmt.Errorf("storage_id and display_path are required")
+	}
+	storageBackend := s.repositoryStorageBackend(storageID, meta.GetBackendMetadata()["storage_backend"])
+	if storageBackend == storageBackendKVS {
+		if err := s.ensureRepositoryRegistration(storageID, displayPath, meta.Source, meta.Ref, storageBackend); err != nil {
+			return &pb.IngestFileResponse{Success: false}, err
+		}
+		_, _, err := s.ingestKVSFiles(ctx, displayPath, []*pb.FileMetadata{meta})
+		if err != nil {
+			return &pb.IngestFileResponse{Success: false}, err
+		}
+		return &pb.IngestFileResponse{Success: true}, nil
 	}
 
 	s.logger.Info("ingesting file",
@@ -829,6 +852,26 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 	displayPath := req.DisplayPath
 	repoURL := req.Source
 	branch := req.Ref
+	storageBackend := ""
+	for _, meta := range req.Files {
+		if meta == nil {
+			continue
+		}
+		storageBackend = s.repositoryStorageBackend(storageID, meta.GetBackendMetadata()["storage_backend"])
+		if storageBackend != "" {
+			break
+		}
+	}
+	if storageBackend == storageBackendKVS {
+		if err := s.ensureRepositoryRegistration(storageID, displayPath, repoURL, branch, storageBackend); err != nil {
+			return &pb.IngestFileBatchResponse{Success: false, ErrorMessage: err.Error()}, err
+		}
+		filesIngested, filesFailed, err := s.ingestKVSFiles(ctx, displayPath, req.Files)
+		if err != nil {
+			return &pb.IngestFileBatchResponse{Success: false, FilesIngested: filesIngested, FilesFailed: filesFailed, ErrorMessage: err.Error()}, err
+		}
+		return &pb.IngestFileBatchResponse{Success: true, FilesIngested: filesIngested, FilesFailed: filesFailed}, nil
+	}
 
 	s.logger.Info("ingesting file batch",
 		"batch_size", len(req.Files),
@@ -934,10 +977,11 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 		isNewRepo := existsErr == nutsdb.ErrKeyNotFound
 
 		info := &repoInfo{
-			StorageID:   storageID,
-			DisplayPath: displayPath,
-			Branch:      branch,
-			RepoURL:     repoURL,
+			StorageID:      storageID,
+			DisplayPath:    displayPath,
+			Branch:         branch,
+			RepoURL:        repoURL,
+			StorageBackend: storageBackend,
 		}
 
 		// If repo exists but branch is empty and we have a branch, update it
@@ -949,6 +993,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 				info.CommitTime = existing.CommitTime
 				info.CommitMessage = existing.CommitMessage
 				info.FetchType = existing.FetchType
+				info.StorageBackend = existing.StorageBackend
 				if existing.Branch == "" && branch != "" {
 					s.logger.Info("updating repo branch in batch",
 						"storage_id", storageID,
@@ -1215,6 +1260,19 @@ func (s *Server) IngestReplicaBatch(ctx context.Context, req *pb.IngestReplicaBa
 	primaryNodeID := req.PrimaryNodeId
 	repoURL := req.Source
 	branch := req.Ref
+	storageBackend := ""
+	for _, meta := range req.Files {
+		if meta == nil {
+			continue
+		}
+		storageBackend = s.repositoryStorageBackend(storageID, meta.GetBackendMetadata()["storage_backend"])
+		if storageBackend != "" {
+			break
+		}
+	}
+	if storageBackend == storageBackendKVS {
+		return &pb.IngestReplicaBatchResponse{Success: true, FilesReplicated: 0, FilesFailed: 0}, nil
+	}
 
 	s.logger.Info("ingesting replica batch",
 		"batch_size", len(req.Files),
@@ -1383,6 +1441,7 @@ func (s *Server) GetNodeInfo(ctx context.Context, req *pb.NodeInfoRequest) (*pb.
 		DiskUsedBytes:  diskUsed,
 		DiskTotalBytes: diskTotal,
 		DiskFreeBytes:  diskFree,
+		Kvs:            s.currentKVSStatus(),
 	}, nil
 }
 
@@ -1533,10 +1592,18 @@ func (s *Server) NodeID() string {
 
 // Close closes the server resources.
 func (s *Server) Close() error {
-	if s.db != nil {
-		return s.db.Close()
+	var closeErr error
+	if s.kvsStore != nil {
+		if err := s.kvsStore.Close(); err != nil {
+			closeErr = err
+		}
 	}
-	return nil
+	if s.db != nil {
+		if err := s.db.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
 }
 
 // hashPath generates a stable inode number from a path using FNV-1a.
