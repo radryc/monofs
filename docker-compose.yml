@@ -1,7 +1,16 @@
+x-otel-syslog-logging: &otel-syslog-logging
+  logging:
+    driver: syslog
+    options:
+      syslog-address: "tcp://127.0.0.1:1514"
+      syslog-format: rfc5424micro
+      tag: "{{.Name}}"
+
 services:
   # Fetcher 1 - External blob fetcher (packager archives + optional Git)
   # Runs in DMZ with external network access
   fetcher-a:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -40,6 +49,7 @@ services:
 
   # Fetcher 2 - Second fetcher instance for redundancy and load balancing
   fetcher-b:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -78,6 +88,7 @@ services:
 
   # Search-index service - Zoekt-based code search
   search-index:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -115,6 +126,7 @@ services:
 
   # HAProxy - Load balancer for routers
   haproxy:
+    <<: *otel-syslog-logging
     image: haproxy:2.9-alpine
     ports:
       - "9090:9090"
@@ -135,6 +147,7 @@ services:
 
   # Router 1 - Primary cluster coordinator
   router-a:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -176,6 +189,7 @@ services:
 
   # Router 2 - Secondary cluster coordinator (backup failover)
   router-b:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -217,6 +231,7 @@ services:
 
   # Backend node 1
   node-a:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -259,6 +274,7 @@ services:
 
   # Backend node 2
   node-b:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -300,6 +316,7 @@ services:
 
   # Backend node 3
   node-c:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -341,6 +358,7 @@ services:
 
   # Backend node 4
   node-d:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -382,6 +400,7 @@ services:
 
   # Backend node 5
   node-e:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -423,6 +442,7 @@ services:
 
   # Interactive client 1 with SSH and auto-mount
   client:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -454,6 +474,7 @@ services:
 
   # Interactive client 2 with SSH and auto-mount
   client2:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile
@@ -484,6 +505,7 @@ services:
 
   # Interactive client 3 with SSH and auto-mount
   client3:
+    <<: *otel-syslog-logging
     build:
       context: ..
       dockerfile: monofs/Dockerfile

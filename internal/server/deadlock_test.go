@@ -339,7 +339,7 @@ func TestRepoExistsNoDeadlock(t *testing.T) {
 }
 
 // TestDatabaseRecovery tests recovery from database errors.
-// NOTE: This test is skipped because NutsDB with async writes (SyncEnable=false) 
+// NOTE: This test is skipped because NutsDB with async writes (SyncEnable=false)
 // does not guarantee data persistence until a proper shutdown occurs. In production,
 // the server should be gracefully stopped to ensure all writes are flushed.
 func TestDatabaseRecovery(t *testing.T) {
@@ -360,7 +360,7 @@ func TestDatabaseRecovery(t *testing.T) {
 	ctx := context.Background()
 	storageID := "test-storage-recovery"
 	displayPath := "test-recovery-repo"
-	
+
 	req := &pb.IngestFileRequest{
 		Metadata: &pb.FileMetadata{
 			Path:        "test-file.txt",
@@ -379,7 +379,7 @@ func TestDatabaseRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to ingest: %v", err)
 	}
-	
+
 	// Build directory indexes to ensure lookup works
 	_, err = server.BuildDirectoryIndexes(ctx, &pb.BuildDirectoryIndexesRequest{
 		StorageId: storageID,

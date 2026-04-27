@@ -248,10 +248,29 @@ type FetchBackend interface {
 	Stats() BackendStats
 }
 
+// StorageBackend handles specialized storage, ingestion, and querying (e.g., for Doctor Partition and logs).
+type StorageBackend interface {
+	// Type returns the storage type identifier.
+	Type() string
+
+	// Initialize prepares the backend with configuration.
+	Initialize(ctx context.Context, config BackendConfig) error
+
+	// Ingest writes a batch of data (e.g., structured logs) to the backend.
+	Ingest(ctx context.Context, id string, data []byte) error
+
+	// Query executes a search/query against the stored data (e.g., LogQL) and returns results.
+	Query(ctx context.Context, queryStr string) ([]byte, error)
+
+	// Close shuts down the backend and releases all resources.
+	Close() error
+}
+
 // BackendRegistry manages available backends
 type BackendRegistry struct {
 	ingestionBackends map[IngestionType]func() IngestionBackend
 	fetchBackends     map[FetchType]func() FetchBackend
+	storageBackends   map[string]func() StorageBackend
 }
 
 // DefaultRegistry is the global registry
@@ -262,6 +281,7 @@ func NewBackendRegistry() *BackendRegistry {
 	return &BackendRegistry{
 		ingestionBackends: make(map[IngestionType]func() IngestionBackend),
 		fetchBackends:     make(map[FetchType]func() FetchBackend),
+		storageBackends:   make(map[string]func() StorageBackend),
 	}
 }
 
@@ -273,6 +293,11 @@ func (r *BackendRegistry) RegisterIngestionBackend(t IngestionType, factory func
 // RegisterFetchBackend registers a fetch backend factory
 func (r *BackendRegistry) RegisterFetchBackend(t FetchType, factory func() FetchBackend) {
 	r.fetchBackends[t] = factory
+}
+
+// RegisterStorageBackend registers a storage backend factory
+func (r *BackendRegistry) RegisterStorageBackend(t string, factory func() StorageBackend) {
+	r.storageBackends[t] = factory
 }
 
 // CreateIngestionBackend creates a new ingestion backend instance
@@ -293,6 +318,15 @@ func (r *BackendRegistry) CreateFetchBackend(t FetchType) (FetchBackend, error) 
 	return factory(), nil
 }
 
+// CreateStorageBackend creates a new storage backend instance
+func (r *BackendRegistry) CreateStorageBackend(t string) (StorageBackend, error) {
+	factory, ok := r.storageBackends[t]
+	if !ok {
+		return nil, fmt.Errorf("unknown storage backend type: %s", t)
+	}
+	return factory(), nil
+}
+
 // ListIngestionTypes returns available ingestion types
 func (r *BackendRegistry) ListIngestionTypes() []IngestionType {
 	types := make([]IngestionType, 0, len(r.ingestionBackends))
@@ -306,6 +340,15 @@ func (r *BackendRegistry) ListIngestionTypes() []IngestionType {
 func (r *BackendRegistry) ListFetchTypes() []FetchType {
 	types := make([]FetchType, 0, len(r.fetchBackends))
 	for t := range r.fetchBackends {
+		types = append(types, t)
+	}
+	return types
+}
+
+// ListStorageBackendTypes returns available storage backend types
+func (r *BackendRegistry) ListStorageBackendTypes() []string {
+	types := make([]string, 0, len(r.storageBackends))
+	for t := range r.storageBackends {
 		types = append(types, t)
 	}
 	return types

@@ -18,6 +18,7 @@ func TestBuildStatusDataIncludesKVSStatus(t *testing.T) {
 			Role:      "leader",
 			LeaderId:  "node-a",
 			PeerCount: 3,
+			KeyCount:  42,
 		},
 	}
 	r.nodes["node-b"] = &nodeState{
@@ -49,6 +50,9 @@ func TestBuildStatusDataIncludesKVSStatus(t *testing.T) {
 	}
 	if got := kvsA["peer_count"]; got != int32(3) {
 		t.Fatalf("expected kvs peer count 3, got %#v", got)
+	}
+	if got := kvsA["key_count"]; got != int64(42) {
+		t.Fatalf("expected kvs key count 42, got %#v", got)
 	}
 
 	nodeB := statusNodeByID(t, data.Nodes, "node-b")

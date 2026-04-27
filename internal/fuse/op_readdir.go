@@ -209,6 +209,16 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	if n.sessionMgr != nil {
 		overlay := NewOverlayManager(n.sessionMgr)
 		dirEntries = overlay.MergeReadDir(dirEntries, n.path)
+
+		// DOCTOR VIRTUAL FILE INTERCEPT
+		parts := splitPath(n.path)
+		if len(parts) == 4 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" {
+			dirEntries = append(dirEntries, fuse.DirEntry{
+				Name: "results.json",
+				Mode: 0444 | uint32(syscall.S_IFREG),
+				Ino:  hashPathForNode(n.path + "/results.json"),
+			})
+		}
 	} else {
 		// No overlay - still need to sort for deterministic ordering
 		sort.Slice(dirEntries, func(i, j int) bool {

@@ -1944,3 +1944,25 @@ func (sc *ShardedClient) DeleteBlobs(ctx context.Context, paths []string) (*Dele
 
 	return result, nil
 }
+
+// QueryLogs delegates LogQL queries directly to the MonoFSRouter.
+func (sc *ShardedClient) QueryLogs(ctx context.Context, query string) ([]byte, error) {
+	sc.mu.RLock()
+	routerClient := sc.routerClient
+	sc.mu.RUnlock()
+
+	if routerClient == nil {
+		return nil, fmt.Errorf("no router connection")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, sc.rpcTimeout)
+	defer cancel()
+
+	resp, err := routerClient.QueryLogs(callCtx, &pb.QueryLogsRequest{
+		Query: query,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("QueryLogs failed: %w", err)
+	}
+	return resp.ResultsJson, nil
+}

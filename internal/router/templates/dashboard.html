@@ -201,6 +201,25 @@
             existing.healthy = existing.healthy || node.healthy;
             existing.file_count = Math.max(existing.file_count || 0, node.file_count || 0);
             existing.weight = Math.max(existing.weight || 0, node.weight || 0);
+            if (existing.kvs || node.kvs) {
+                const existingKVS = existing.kvs || {};
+                const nextKVS = node.kvs || {};
+                existing.kvs = {
+                    ...existingKVS,
+                    ...nextKVS,
+                    enabled: Boolean(existingKVS.enabled || nextKVS.enabled),
+                    healthy: Boolean(existingKVS.healthy || nextKVS.healthy),
+                    mode: existingKVS.mode && existingKVS.mode !== 'disabled'
+                        ? existingKVS.mode
+                        : (nextKVS.mode || existingKVS.mode),
+                    role: existingKVS.role && existingKVS.role !== 'disabled'
+                        ? existingKVS.role
+                        : (nextKVS.role || existingKVS.role),
+                    leader_id: existingKVS.leader_id || nextKVS.leader_id,
+                    peer_count: Math.max(existingKVS.peer_count || 0, nextKVS.peer_count || 0),
+                    key_count: Math.max(existingKVS.key_count || 0, nextKVS.key_count || 0)
+                };
+            }
             if (existing.status !== 'ACTIVE' && node.status) {
                 existing.status = node.status;
             }
@@ -369,6 +388,7 @@
                             <th>Router</th>
                             <th>Address</th>
                             <th>Status</th>
+                            <th>KVS</th>
                             <th>Weight</th>
                             <th>Files</th>
                         </tr>
@@ -392,6 +412,10 @@
                                     <td>${(node._routers || [node._router || 'local']).join(', ')}</td>
                                     <td>${node.address}</td>
                                     <td>${statusBadge}</td>
+                                    <td>
+                                        <div style="font-weight: 600;">${kvsStatusSummary(node.kvs)}</div>
+                                        <div style="font-size: 11px; color: var(--text-secondary);">${kvsStatusDetails(node.kvs)}</div>
+                                    </td>
                                     <td>${node.weight}</td>
                                     <td>${(node.file_count || 0).toLocaleString()}</td>
                                 </tr>
@@ -430,6 +454,22 @@
             return 'Raft follower';
         }
         return `Raft ${kvs.role || 'unknown'}`;
+    }
+
+    function kvsStatusDetails(kvs) {
+        const keyCount = Number((kvs && kvs.key_count) || 0).toLocaleString();
+        if (!kvs || !kvs.enabled) {
+            return `${keyCount} keys`;
+        }
+        if (kvs.mode === 'local') {
+            return `${keyCount} keys`;
+        }
+        const details = [];
+        if (kvs.peer_count) {
+            details.push(`${kvs.peer_count} peers`);
+        }
+        details.push(`${keyCount} keys`);
+        return details.join(' • ');
     }
 
     async function loadFetcherStats() {
@@ -486,7 +526,6 @@
                 </div>
             `;
         } catch (err) {
-                            <th>KVS</th>
             console.error('Failed to load fetcher stats:', err);
             // Update stat cards to show unavailable
             document.getElementById('totalFetchers').textContent = '-';
@@ -509,7 +548,6 @@
                 </div>
             `;
         }
-                                    <td>${kvsStatusSummary(node.kvs)}</td>
     }
 
     async function loadSearchStats() {

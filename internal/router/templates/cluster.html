@@ -55,6 +55,10 @@
         if (!kvs || !kvs.enabled) {
             return 'Embedded KVS disabled';
         }
+        const keyCount = Number(kvs.key_count || 0).toLocaleString();
+        if (kvs.mode === 'local') {
+            return `Single-node local store • ${keyCount} keys`;
+        }
         const details = [];
         if (kvs.leader_id) {
             details.push(`Leader ${kvs.leader_id}`);
@@ -62,7 +66,8 @@
         if (kvs.peer_count) {
             details.push(`${kvs.peer_count} peers`);
         }
-        return details.join(' • ') || 'Single-node local store';
+        details.push(`${keyCount} keys`);
+        return details.join(' • ') || `Single-node local store • ${keyCount} keys`;
     }
 
     async function loadClusterNodes() {
@@ -111,10 +116,14 @@
                             <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">${kvsStatusDetails(node.kvs)}</div>
                         </div>
                         
-                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+                        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;">
                             <div>
                                 <div style="font-size: 11px; color: var(--text-secondary);">FILES</div>
                                 <div style="font-size: 20px; font-weight: 600;">${(node.file_count || 0).toLocaleString()}</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">KVS KEYS</div>
+                                <div style="font-size: 20px; font-weight: 600;">${((node.kvs && node.kvs.key_count) || 0).toLocaleString()}</div>
                             </div>
                             <div>
                                 <div style="font-size: 11px; color: var(--text-secondary);">WEIGHT</div>

@@ -21,5 +21,6 @@ func normalizedKVSNodeStatus(status *pb.KVSNodeStatus) *pb.KVSNodeStatus {
 		Role:      role,
 		LeaderId:  status.GetLeaderId(),
 		PeerCount: status.GetPeerCount(),
+		KeyCount:  status.GetKeyCount(),
 	}
 }

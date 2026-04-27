@@ -113,6 +113,11 @@ func (m *mockNode) Read(req *pb.ReadRequest, stream pb.MonoFS_ReadServer) error 
 	return nil
 }
 
+func (m *mockNode) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
+	return &pb.QueryLogsResponse{}, nil
+}
+
+
 func (m *mockNode) setFail(fail bool) {
 	m.mu.Lock()
 	m.shouldFail = fail

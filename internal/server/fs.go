@@ -1,6 +1,8 @@
 package server
 
 import (
+	"github.com/radryc/monofs/internal/storage"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -1036,6 +1038,22 @@ func (s *Server) recordAccessForPredictor(ctx context.Context, storageID, filePa
 		}
 	}
 
+        s.predictor.RecordAccess(ctx, storageID, filePath, clientID, meta)
+}
+
 	// RecordAccess handles prediction and prefetching internally
-	s.predictor.RecordAccess(ctx, storageID, filePath, clientID, meta)
+
+// QueryLogs implements the Doctor partition evaluation by running a LogQL query
+func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
+        backend, err := storage.DefaultRegistry.CreateStorageBackend("logengine")
+        if err != nil {
+                return nil, status.Errorf(codes.Unavailable, "logengine not available: %v", err)
+        }
+        res, err := backend.Query(ctx, req.Query)
+        if err != nil {
+                return nil, status.Errorf(codes.Internal, "query failed: %v", err)
+        }
+        return &pb.QueryLogsResponse{
+                ResultsJson: res,
+        }, nil
 }
