@@ -1,6 +1,6 @@
 module github.com/radryc/monofs
 
-go 1.25.0
+go 1.25.7
 
 require (
 	cloud.google.com/go/storage v1.61.3
@@ -8,6 +8,7 @@ require (
 	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/aws/aws-sdk-go-v2 v1.41.4
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.1
+	github.com/aws/smithy-go v1.24.2
 	github.com/blugelabs/bluge v0.2.2
 	github.com/go-git/go-git/v5 v5.13.1
 	github.com/go-git/go-git/v6 v6.0.0-20260123133532-f99a98e81ce9
@@ -67,7 +68,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.30.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.17 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.9 // indirect
-	github.com/aws/smithy-go v1.24.2 // indirect
 	github.com/axiomhq/hyperloglog v0.2.6 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect

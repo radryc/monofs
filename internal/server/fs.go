@@ -1,8 +1,6 @@
 package server
 
 import (
-	"github.com/radryc/monofs/internal/storage"
-
 	"context"
 	"encoding/json"
 	"errors"
@@ -1038,22 +1036,110 @@ func (s *Server) recordAccessForPredictor(ctx context.Context, storageID, filePa
 		}
 	}
 
-        s.predictor.RecordAccess(ctx, storageID, filePath, clientID, meta)
+	s.predictor.RecordAccess(ctx, storageID, filePath, clientID, meta)
 }
 
-	// RecordAccess handles prediction and prefetching internally
+// RecordAccess handles prediction and prefetching internally
 
-// QueryLogs implements the Doctor partition evaluation by running a LogQL query
+// QueryLogs implements the Doctor partition log query.
 func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
-        backend, err := storage.DefaultRegistry.CreateStorageBackend("logengine")
-        if err != nil {
-                return nil, status.Errorf(codes.Unavailable, "logengine not available: %v", err)
-        }
-        res, err := backend.Query(ctx, req.Query)
-        if err != nil {
-                return nil, status.Errorf(codes.Internal, "query failed: %v", err)
-        }
-        return &pb.QueryLogsResponse{
-                ResultsJson: res,
-        }, nil
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	records, err := backend.QueryLogs(ctx, req.Query, int(req.Limit))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "query logs failed: %v", err)
+	}
+	b, err := marshalJSON(records)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
+	}
+	return &pb.QueryLogsResponse{ResultsJson: b}, nil
+}
+
+// QueryMetrics implements the Doctor partition metric query.
+func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	from := time.Unix(0, req.FromUnixNano).UTC()
+	to := time.Unix(0, req.ToUnixNano).UTC()
+	if req.FromUnixNano == 0 {
+		from = time.Time{}
+	}
+	if req.ToUnixNano == 0 {
+		to = time.Time{}
+	}
+	records, err := backend.QueryMetrics(ctx, req.MetricName, from, to)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "query metrics failed: %v", err)
+	}
+	b, err := marshalJSON(records)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
+	}
+	return &pb.QueryMetricsResponse{ResultsJson: b}, nil
+}
+
+// QueryTraces implements the Doctor partition trace query.
+func (s *Server) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	from := time.Unix(0, req.FromUnixNano).UTC()
+	to := time.Unix(0, req.ToUnixNano).UTC()
+	if req.FromUnixNano == 0 {
+		from = time.Time{}
+	}
+	if req.ToUnixNano == 0 {
+		to = time.Time{}
+	}
+	records, err := backend.QueryTraces(ctx, req.TraceId, req.Service, from, to, int(req.Limit))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "query traces failed: %v", err)
+	}
+	b, err := marshalJSON(records)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
+	}
+	return &pb.QueryTracesResponse{ResultsJson: b}, nil
+}
+
+// IngestLogs implements the Doctor partition log ingest.
+func (s *Server) IngestLogs(ctx context.Context, req *pb.IngestLogsRequest) (*pb.IngestLogsResponse, error) {
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	if err := backend.IngestLogs(ctx, req.ChunkId, protoToLogRecords(req.Logs)); err != nil {
+		return nil, status.Errorf(codes.Internal, "ingest logs failed: %v", err)
+	}
+	return &pb.IngestLogsResponse{Ok: true}, nil
+}
+
+// IngestMetrics implements the Doctor partition metric ingest.
+func (s *Server) IngestMetrics(ctx context.Context, req *pb.IngestMetricsRequest) (*pb.IngestMetricsResponse, error) {
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	if err := backend.IngestMetrics(ctx, req.ChunkId, protoToMetricRecords(req.Metrics)); err != nil {
+		return nil, status.Errorf(codes.Internal, "ingest metrics failed: %v", err)
+	}
+	return &pb.IngestMetricsResponse{Ok: true}, nil
+}
+
+// IngestTraces implements the Doctor partition trace ingest.
+func (s *Server) IngestTraces(ctx context.Context, req *pb.IngestTracesRequest) (*pb.IngestTracesResponse, error) {
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	if err := backend.IngestTraces(ctx, req.ChunkId, protoToSpanRecords(req.Spans)); err != nil {
+		return nil, status.Errorf(codes.Internal, "ingest traces failed: %v", err)
+	}
+	return &pb.IngestTracesResponse{Ok: true}, nil
 }

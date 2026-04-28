@@ -78,3 +78,50 @@ func statusNodeByID(t *testing.T, nodes []map[string]interface{}, nodeID string)
 	t.Fatalf("node %q not found in status payload", nodeID)
 	return nil
 }
+
+func TestDedupeGuardianClientsPrefersFreshestEntry(t *testing.T) {
+	input := []guardianClientJSON{
+		{
+			ClientID:      "guardian-control-plane-123",
+			BaseURL:       "http://127.0.0.1:8090",
+			LastHeartbeat: 100,
+			State:         "stale",
+			Router:        "router-a",
+		},
+		{
+			ClientID:      "guardian-pusher-k8s-456",
+			LastHeartbeat: 150,
+			State:         "connected",
+			Router:        "router-a",
+		},
+		{
+			ClientID:      "guardian-control-plane-123",
+			BaseURL:       "http://127.0.0.1:8090",
+			LastHeartbeat: 200,
+			State:         "connected",
+			Router:        "router-b",
+		},
+	}
+
+	got := dedupeGuardianClients(input)
+	if len(got) != 2 {
+		t.Fatalf("dedupeGuardianClients() len = %d, want 2", len(got))
+	}
+
+	if got[0].ClientID != "guardian-control-plane-123" {
+		t.Fatalf("first client ID = %q, want guardian-control-plane-123", got[0].ClientID)
+	}
+	if got[0].State != "connected" {
+		t.Fatalf("guardian-control-plane state = %q, want connected", got[0].State)
+	}
+	if got[0].LastHeartbeat != 200 {
+		t.Fatalf("guardian-control-plane last heartbeat = %d, want 200", got[0].LastHeartbeat)
+	}
+	if got[0].Router != "router-b" {
+		t.Fatalf("guardian-control-plane router = %q, want router-b", got[0].Router)
+	}
+
+	if got[1].ClientID != "guardian-pusher-k8s-456" {
+		t.Fatalf("second client ID = %q, want guardian-pusher-k8s-456", got[1].ClientID)
+	}
+}
