@@ -15,6 +15,7 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/server"
+	"github.com/radryc/monofs/internal/storage/logengine"
 	kvsgrpc "github.com/rydzu/ainfra/kvs/pkg/grpcserver"
 	"github.com/rydzu/ainfra/kvs/pkg/raftstore"
 	"google.golang.org/grpc"
@@ -62,6 +63,9 @@ func main() {
 	kvsMaxHotVersions := flag.Int("kvs-max-hot-versions", 5, "Maximum number of hot versions retained in the embedded KVS store")
 	var kvsPeers stringSlice
 	flag.Var(&kvsPeers, "kvs-peer", "Embedded KVS peer in the form nodeID,apiAddress,raftAddress (repeatable)")
+
+	// Doctor telemetry log engine
+	logengineDir := flag.String("logengine-dir", "", "Directory for the doctor telemetry log engine (empty disables)")
 
 	flag.Parse()
 
@@ -170,6 +174,20 @@ func main() {
 			logger.Info("server-side request forwarding enabled",
 				"router", *routerAddr)
 		}
+	}
+
+	// Initialize doctor telemetry log engine if configured.
+	if dir := strings.TrimSpace(*logengineDir); dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			logger.Error("failed to create logengine directory", "error", err)
+			os.Exit(1)
+		}
+		le := logengine.New(logengine.NewMockS3Store(dir), logengine.Config{
+			LocalCacheDir: dir,
+			ChunkDuration: 5 * time.Minute,
+		})
+		srv.SetDoctorBackend(le)
+		logger.Info("doctor logengine enabled", "dir", dir)
 	}
 
 	srv.Register(grpcServer)

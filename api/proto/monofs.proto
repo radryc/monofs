@@ -57,9 +57,14 @@ service MonoFSRouter {
     rpc GetGuardianVersion(GetGuardianVersionRequest) returns (GetGuardianVersionResponse);
     rpc SubscribeGuardianChanges(SubscribeGuardianChangesRequest) returns (stream GuardianChangeEvent);
 
-    // Doctor Partition operations
+    // Doctor Partition operations — telemetry ingest and query
     rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
-    
+    rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
+    rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
+    rpc IngestLogs(IngestLogsRequest) returns (IngestLogsResponse);
+    rpc IngestMetrics(IngestMetricsRequest) returns (IngestMetricsResponse);
+    rpc IngestTraces(IngestTracesRequest) returns (IngestTracesResponse);
+
     // Ingestion whitelist management
     rpc AddWhitelistedClient(AddWhitelistedClientRequest) returns (AddWhitelistedClientResponse);
     rpc RemoveWhitelistedClient(RemoveWhitelistedClientRequest) returns (RemoveWhitelistedClientResponse);
@@ -132,8 +137,13 @@ service MonoFS {
     // Predictor statistics (access pattern learning and prefetching)
     rpc GetPredictorStats(PredictorStatsRequest) returns (PredictorStatsResponse);
 
-    // Doctor Partition operations
+    // Doctor Partition operations — telemetry ingest and query
     rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
+    rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
+    rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
+    rpc IngestLogs(IngestLogsRequest) returns (IngestLogsResponse);
+    rpc IngestMetrics(IngestMetricsRequest) returns (IngestMetricsResponse);
+    rpc IngestTraces(IngestTracesRequest) returns (IngestTracesResponse);
 }
 
 // Cluster topology messages
@@ -184,6 +194,7 @@ message NodeInfoResponse {
     int64 disk_total_bytes = 7;  // Total disk space available
     int64 disk_free_bytes = 8;   // Disk space free on filesystem
     KVSNodeStatus kvs = 9;       // Embedded KVS status for this node
+    LogEngineStats log_engine = 10; // Doctor telemetry log engine stats
 }
 
 message KVSNodeStatus {
@@ -687,6 +698,14 @@ message NodeStatInfo {
     double sync_progress = 10;             // 0.0 to 1.0
     int64 last_heartbeat = 11;             // Unix timestamp
     KVSNodeStatus kvs = 12;
+    LogEngineStats log_engine = 13;
+}
+
+message LogEngineStats {
+    bool enabled = 1;
+    int64 log_chunks = 2;
+    int64 metric_chunks = 3;
+    int64 trace_chunks = 4;
 }
 
 // Cluster maintenance messages
@@ -981,8 +1000,92 @@ message GuardianChangeEvent {
 // Doctor Partition operations
 message QueryLogsRequest {
     string query = 1;
+    int64 from_unix_nano = 2;
+    int64 to_unix_nano = 3;
+    string service = 4;
+    int32 limit = 5;
 }
 
 message QueryLogsResponse {
     bytes results_json = 1;
+}
+
+message QueryMetricsRequest {
+    string metric_name = 1;
+    int64 from_unix_nano = 2;
+    int64 to_unix_nano = 3;
+}
+
+message QueryMetricsResponse {
+    bytes results_json = 1;
+}
+
+message QueryTracesRequest {
+    string trace_id = 1;
+    string service = 2;
+    int64 from_unix_nano = 3;
+    int64 to_unix_nano = 4;
+    int32 limit = 5;
+}
+
+message QueryTracesResponse {
+    bytes results_json = 1;
+}
+
+// LogEntry is a single log record for ingest.
+message LogEntry {
+    int64 timestamp_unix_nano = 1;
+    string level = 2;
+    string service = 3;
+    string trace_id = 4;
+    string raw_message = 5;
+}
+
+message IngestLogsRequest {
+    string chunk_id = 1;
+    repeated LogEntry logs = 2;
+}
+
+message IngestLogsResponse {
+    bool ok = 1;
+}
+
+// MetricEntry is a single metric data point for ingest.
+message MetricEntry {
+    int64 timestamp_unix_nano = 1;
+    string service = 2;
+    string metric_name = 3;
+    double value = 4;
+    map<string, string> labels = 5;
+}
+
+message IngestMetricsRequest {
+    string chunk_id = 1;
+    repeated MetricEntry metrics = 2;
+}
+
+message IngestMetricsResponse {
+    bool ok = 1;
+}
+
+// SpanEntry is a single trace span for ingest.
+message SpanEntry {
+    int64 start_unix_nano = 1;
+    int64 end_unix_nano = 2;
+    string trace_id = 3;
+    string span_id = 4;
+    string parent_span_id = 5;
+    string service = 6;
+    string name = 7;
+    string status_code = 8;
+    map<string, string> attributes = 9;
+}
+
+message IngestTracesRequest {
+    string chunk_id = 1;
+    repeated SpanEntry spans = 2;
+}
+
+message IngestTracesResponse {
+    bool ok = 1;
 }

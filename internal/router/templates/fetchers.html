@@ -19,6 +19,15 @@
     <div id="blobStorageContent"></div>
 </div>
 
+<!-- Log Store (Doctor telemetry) Overview -->
+<div class="card" id="logStoreCard" style="display: none;">
+    <div class="card-header">
+        <h2 class="card-title">Log Store</h2>
+        <span style="font-size: 12px; color: var(--text-secondary);">Doctor telemetry engine — per-node chunk counts</span>
+    </div>
+    <div id="logStoreContent"></div>
+</div>
+
 <!-- Fetcher Instances Grid -->
 <div class="card">
     <div class="card-header">
@@ -409,14 +418,104 @@
         document.getElementById('statsTable').innerHTML = html;
     }
 
+    function renderLogStore(data) {
+        const card = document.getElementById('logStoreCard');
+        const container = document.getElementById('logStoreContent');
+
+        if (!data.enabled) {
+            card.style.display = 'none';
+            return;
+        }
+        card.style.display = '';
+
+        const total = data.log_chunks + data.metric_chunks + data.trace_chunks;
+
+        let html = `
+            <div style="display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px;">
+                <div class="stat-card" style="flex: 1; min-width: 140px; text-align: center;">
+                    <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Logs</div>
+                    <div style="font-size: 28px; font-weight: 700; color: var(--info, #4fc3f7);">${formatNumber(data.log_chunks)}</div>
+                    <div style="font-size: 11px; color: var(--text-secondary);">chunks</div>
+                </div>
+                <div class="stat-card" style="flex: 1; min-width: 140px; text-align: center;">
+                    <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Metrics</div>
+                    <div style="font-size: 28px; font-weight: 700; color: var(--warning, #ffb74d);">${formatNumber(data.metric_chunks)}</div>
+                    <div style="font-size: 11px; color: var(--text-secondary);">chunks</div>
+                </div>
+                <div class="stat-card" style="flex: 1; min-width: 140px; text-align: center;">
+                    <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Traces</div>
+                    <div style="font-size: 28px; font-weight: 700; color: var(--success, #81c784);">${formatNumber(data.trace_chunks)}</div>
+                    <div style="font-size: 11px; color: var(--text-secondary);">chunks</div>
+                </div>
+                <div class="stat-card" style="flex: 1; min-width: 140px; text-align: center;">
+                    <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Total</div>
+                    <div style="font-size: 28px; font-weight: 700;">${formatNumber(total)}</div>
+                    <div style="font-size: 11px; color: var(--text-secondary);">chunks</div>
+                </div>
+            </div>
+        `;
+
+        if (data.nodes && data.nodes.length > 0) {
+            html += `
+                <div style="font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.05em;">
+                    Per Node
+                </div>
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                    <thead>
+                        <tr style="border-bottom: 1px solid var(--border);">
+                            <th style="text-align: left; padding: 6px 8px; color: var(--text-secondary); font-weight: 500;">Node</th>
+                            <th style="text-align: right; padding: 6px 8px; color: var(--text-secondary); font-weight: 500;">Status</th>
+                            <th style="text-align: right; padding: 6px 8px; color: var(--text-secondary); font-weight: 500;">Logs</th>
+                            <th style="text-align: right; padding: 6px 8px; color: var(--text-secondary); font-weight: 500;">Metrics</th>
+                            <th style="text-align: right; padding: 6px 8px; color: var(--text-secondary); font-weight: 500;">Traces</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            data.nodes.forEach(n => {
+                const status = n.enabled
+                    ? '<span class="badge badge-success">Enabled</span>'
+                    : '<span class="badge badge-danger">Disabled</span>';
+                html += `
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.04);">
+                        <td style="padding: 6px 8px;">
+                            <div style="font-weight: 600;">${n.node_id}</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);">${n.address}</div>
+                        </td>
+                        <td style="text-align: right; padding: 6px 8px;">${status}</td>
+                        <td style="text-align: right; padding: 6px 8px; font-weight: 600;">${formatNumber(n.log_chunks)}</td>
+                        <td style="text-align: right; padding: 6px 8px; font-weight: 600;">${formatNumber(n.metric_chunks)}</td>
+                        <td style="text-align: right; padding: 6px 8px; font-weight: 600;">${formatNumber(n.trace_chunks)}</td>
+                    </tr>
+                `;
+            });
+            html += `</tbody></table>`;
+        }
+
+        container.innerHTML = html;
+    }
+
+    async function loadLogEngineStats() {
+        try {
+            const resp = await fetch('/api/logengine');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            renderLogStore(data);
+        } catch (_) {
+            // silently ignore — logengine may not be deployed
+        }
+    }
+
     function refreshFetchers() {
         loadFetcherStats();
+        loadLogEngineStats();
     }
 
     // Initial load
     loadFetcherStats();
+    loadLogEngineStats();
     
     // Auto-refresh every 10 seconds
-    setInterval(loadFetcherStats, 10000);
+    setInterval(() => { loadFetcherStats(); loadLogEngineStats(); }, 10000);
 </script>
 {{end}}

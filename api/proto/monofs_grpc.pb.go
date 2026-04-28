@@ -44,6 +44,11 @@ const (
 	MonoFSRouter_GetGuardianVersion_FullMethodName       = "/monofs.MonoFSRouter/GetGuardianVersion"
 	MonoFSRouter_SubscribeGuardianChanges_FullMethodName = "/monofs.MonoFSRouter/SubscribeGuardianChanges"
 	MonoFSRouter_QueryLogs_FullMethodName                = "/monofs.MonoFSRouter/QueryLogs"
+	MonoFSRouter_QueryMetrics_FullMethodName             = "/monofs.MonoFSRouter/QueryMetrics"
+	MonoFSRouter_QueryTraces_FullMethodName              = "/monofs.MonoFSRouter/QueryTraces"
+	MonoFSRouter_IngestLogs_FullMethodName               = "/monofs.MonoFSRouter/IngestLogs"
+	MonoFSRouter_IngestMetrics_FullMethodName            = "/monofs.MonoFSRouter/IngestMetrics"
+	MonoFSRouter_IngestTraces_FullMethodName             = "/monofs.MonoFSRouter/IngestTraces"
 	MonoFSRouter_AddWhitelistedClient_FullMethodName     = "/monofs.MonoFSRouter/AddWhitelistedClient"
 	MonoFSRouter_RemoveWhitelistedClient_FullMethodName  = "/monofs.MonoFSRouter/RemoveWhitelistedClient"
 	MonoFSRouter_ListWhitelistedClients_FullMethodName   = "/monofs.MonoFSRouter/ListWhitelistedClients"
@@ -97,8 +102,13 @@ type MonoFSRouterClient interface {
 	ListGuardianVersions(ctx context.Context, in *ListGuardianVersionsRequest, opts ...grpc.CallOption) (*ListGuardianVersionsResponse, error)
 	GetGuardianVersion(ctx context.Context, in *GetGuardianVersionRequest, opts ...grpc.CallOption) (*GetGuardianVersionResponse, error)
 	SubscribeGuardianChanges(ctx context.Context, in *SubscribeGuardianChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GuardianChangeEvent], error)
-	// Doctor Partition operations
+	// Doctor Partition operations — telemetry ingest and query
 	QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error)
+	QueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (*QueryMetricsResponse, error)
+	QueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (*QueryTracesResponse, error)
+	IngestLogs(ctx context.Context, in *IngestLogsRequest, opts ...grpc.CallOption) (*IngestLogsResponse, error)
+	IngestMetrics(ctx context.Context, in *IngestMetricsRequest, opts ...grpc.CallOption) (*IngestMetricsResponse, error)
+	IngestTraces(ctx context.Context, in *IngestTracesRequest, opts ...grpc.CallOption) (*IngestTracesResponse, error)
 	// Ingestion whitelist management
 	AddWhitelistedClient(ctx context.Context, in *AddWhitelistedClientRequest, opts ...grpc.CallOption) (*AddWhitelistedClientResponse, error)
 	RemoveWhitelistedClient(ctx context.Context, in *RemoveWhitelistedClientRequest, opts ...grpc.CallOption) (*RemoveWhitelistedClientResponse, error)
@@ -386,6 +396,56 @@ func (c *monoFSRouterClient) QueryLogs(ctx context.Context, in *QueryLogsRequest
 	return out, nil
 }
 
+func (c *monoFSRouterClient) QueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (*QueryMetricsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryMetricsResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_QueryMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) QueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (*QueryTracesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryTracesResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_QueryTraces_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) IngestLogs(ctx context.Context, in *IngestLogsRequest, opts ...grpc.CallOption) (*IngestLogsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IngestLogsResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_IngestLogs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) IngestMetrics(ctx context.Context, in *IngestMetricsRequest, opts ...grpc.CallOption) (*IngestMetricsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IngestMetricsResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_IngestMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) IngestTraces(ctx context.Context, in *IngestTracesRequest, opts ...grpc.CallOption) (*IngestTracesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IngestTracesResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_IngestTraces_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *monoFSRouterClient) AddWhitelistedClient(ctx context.Context, in *AddWhitelistedClientRequest, opts ...grpc.CallOption) (*AddWhitelistedClientResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AddWhitelistedClientResponse)
@@ -500,8 +560,13 @@ type MonoFSRouterServer interface {
 	ListGuardianVersions(context.Context, *ListGuardianVersionsRequest) (*ListGuardianVersionsResponse, error)
 	GetGuardianVersion(context.Context, *GetGuardianVersionRequest) (*GetGuardianVersionResponse, error)
 	SubscribeGuardianChanges(*SubscribeGuardianChangesRequest, grpc.ServerStreamingServer[GuardianChangeEvent]) error
-	// Doctor Partition operations
+	// Doctor Partition operations — telemetry ingest and query
 	QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error)
+	QueryMetrics(context.Context, *QueryMetricsRequest) (*QueryMetricsResponse, error)
+	QueryTraces(context.Context, *QueryTracesRequest) (*QueryTracesResponse, error)
+	IngestLogs(context.Context, *IngestLogsRequest) (*IngestLogsResponse, error)
+	IngestMetrics(context.Context, *IngestMetricsRequest) (*IngestMetricsResponse, error)
+	IngestTraces(context.Context, *IngestTracesRequest) (*IngestTracesResponse, error)
 	// Ingestion whitelist management
 	AddWhitelistedClient(context.Context, *AddWhitelistedClientRequest) (*AddWhitelistedClientResponse, error)
 	RemoveWhitelistedClient(context.Context, *RemoveWhitelistedClientRequest) (*RemoveWhitelistedClientResponse, error)
@@ -595,6 +660,21 @@ func (UnimplementedMonoFSRouterServer) SubscribeGuardianChanges(*SubscribeGuardi
 }
 func (UnimplementedMonoFSRouterServer) QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method QueryLogs not implemented")
+}
+func (UnimplementedMonoFSRouterServer) QueryMetrics(context.Context, *QueryMetricsRequest) (*QueryMetricsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryMetrics not implemented")
+}
+func (UnimplementedMonoFSRouterServer) QueryTraces(context.Context, *QueryTracesRequest) (*QueryTracesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryTraces not implemented")
+}
+func (UnimplementedMonoFSRouterServer) IngestLogs(context.Context, *IngestLogsRequest) (*IngestLogsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IngestLogs not implemented")
+}
+func (UnimplementedMonoFSRouterServer) IngestMetrics(context.Context, *IngestMetricsRequest) (*IngestMetricsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IngestMetrics not implemented")
+}
+func (UnimplementedMonoFSRouterServer) IngestTraces(context.Context, *IngestTracesRequest) (*IngestTracesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IngestTraces not implemented")
 }
 func (UnimplementedMonoFSRouterServer) AddWhitelistedClient(context.Context, *AddWhitelistedClientRequest) (*AddWhitelistedClientResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddWhitelistedClient not implemented")
@@ -1071,6 +1151,96 @@ func _MonoFSRouter_QueryLogs_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFSRouter_QueryMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).QueryMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_QueryMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).QueryMetrics(ctx, req.(*QueryMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_QueryTraces_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryTracesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).QueryTraces(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_QueryTraces_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).QueryTraces(ctx, req.(*QueryTracesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_IngestLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngestLogsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).IngestLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_IngestLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).IngestLogs(ctx, req.(*IngestLogsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_IngestMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngestMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).IngestMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_IngestMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).IngestMetrics(ctx, req.(*IngestMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_IngestTraces_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngestTracesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).IngestTraces(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_IngestTraces_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).IngestTraces(ctx, req.(*IngestTracesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _MonoFSRouter_AddWhitelistedClient_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AddWhitelistedClientRequest)
 	if err := dec(in); err != nil {
@@ -1272,6 +1442,26 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _MonoFSRouter_QueryLogs_Handler,
 		},
 		{
+			MethodName: "QueryMetrics",
+			Handler:    _MonoFSRouter_QueryMetrics_Handler,
+		},
+		{
+			MethodName: "QueryTraces",
+			Handler:    _MonoFSRouter_QueryTraces_Handler,
+		},
+		{
+			MethodName: "IngestLogs",
+			Handler:    _MonoFSRouter_IngestLogs_Handler,
+		},
+		{
+			MethodName: "IngestMetrics",
+			Handler:    _MonoFSRouter_IngestMetrics_Handler,
+		},
+		{
+			MethodName: "IngestTraces",
+			Handler:    _MonoFSRouter_IngestTraces_Handler,
+		},
+		{
 			MethodName: "AddWhitelistedClient",
 			Handler:    _MonoFSRouter_AddWhitelistedClient_Handler,
 		},
@@ -1338,6 +1528,11 @@ const (
 	MonoFS_BuildDirectoryIndexes_FullMethodName    = "/monofs.MonoFS/BuildDirectoryIndexes"
 	MonoFS_GetPredictorStats_FullMethodName        = "/monofs.MonoFS/GetPredictorStats"
 	MonoFS_QueryLogs_FullMethodName                = "/monofs.MonoFS/QueryLogs"
+	MonoFS_QueryMetrics_FullMethodName             = "/monofs.MonoFS/QueryMetrics"
+	MonoFS_QueryTraces_FullMethodName              = "/monofs.MonoFS/QueryTraces"
+	MonoFS_IngestLogs_FullMethodName               = "/monofs.MonoFS/IngestLogs"
+	MonoFS_IngestMetrics_FullMethodName            = "/monofs.MonoFS/IngestMetrics"
+	MonoFS_IngestTraces_FullMethodName             = "/monofs.MonoFS/IngestTraces"
 )
 
 // MonoFSClient is the client API for MonoFS service.
@@ -1387,8 +1582,13 @@ type MonoFSClient interface {
 	BuildDirectoryIndexes(ctx context.Context, in *BuildDirectoryIndexesRequest, opts ...grpc.CallOption) (*BuildDirectoryIndexesResponse, error)
 	// Predictor statistics (access pattern learning and prefetching)
 	GetPredictorStats(ctx context.Context, in *PredictorStatsRequest, opts ...grpc.CallOption) (*PredictorStatsResponse, error)
-	// Doctor Partition operations
+	// Doctor Partition operations — telemetry ingest and query
 	QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error)
+	QueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (*QueryMetricsResponse, error)
+	QueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (*QueryTracesResponse, error)
+	IngestLogs(ctx context.Context, in *IngestLogsRequest, opts ...grpc.CallOption) (*IngestLogsResponse, error)
+	IngestMetrics(ctx context.Context, in *IngestMetricsRequest, opts ...grpc.CallOption) (*IngestMetricsResponse, error)
+	IngestTraces(ctx context.Context, in *IngestTracesRequest, opts ...grpc.CallOption) (*IngestTracesResponse, error)
 }
 
 type monoFSClient struct {
@@ -1670,6 +1870,56 @@ func (c *monoFSClient) QueryLogs(ctx context.Context, in *QueryLogsRequest, opts
 	return out, nil
 }
 
+func (c *monoFSClient) QueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (*QueryMetricsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryMetricsResponse)
+	err := c.cc.Invoke(ctx, MonoFS_QueryMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSClient) QueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (*QueryTracesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryTracesResponse)
+	err := c.cc.Invoke(ctx, MonoFS_QueryTraces_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSClient) IngestLogs(ctx context.Context, in *IngestLogsRequest, opts ...grpc.CallOption) (*IngestLogsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IngestLogsResponse)
+	err := c.cc.Invoke(ctx, MonoFS_IngestLogs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSClient) IngestMetrics(ctx context.Context, in *IngestMetricsRequest, opts ...grpc.CallOption) (*IngestMetricsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IngestMetricsResponse)
+	err := c.cc.Invoke(ctx, MonoFS_IngestMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSClient) IngestTraces(ctx context.Context, in *IngestTracesRequest, opts ...grpc.CallOption) (*IngestTracesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IngestTracesResponse)
+	err := c.cc.Invoke(ctx, MonoFS_IngestTraces_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MonoFSServer is the server API for MonoFS service.
 // All implementations must embed UnimplementedMonoFSServer
 // for forward compatibility.
@@ -1717,8 +1967,13 @@ type MonoFSServer interface {
 	BuildDirectoryIndexes(context.Context, *BuildDirectoryIndexesRequest) (*BuildDirectoryIndexesResponse, error)
 	// Predictor statistics (access pattern learning and prefetching)
 	GetPredictorStats(context.Context, *PredictorStatsRequest) (*PredictorStatsResponse, error)
-	// Doctor Partition operations
+	// Doctor Partition operations — telemetry ingest and query
 	QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error)
+	QueryMetrics(context.Context, *QueryMetricsRequest) (*QueryMetricsResponse, error)
+	QueryTraces(context.Context, *QueryTracesRequest) (*QueryTracesResponse, error)
+	IngestLogs(context.Context, *IngestLogsRequest) (*IngestLogsResponse, error)
+	IngestMetrics(context.Context, *IngestMetricsRequest) (*IngestMetricsResponse, error)
+	IngestTraces(context.Context, *IngestTracesRequest) (*IngestTracesResponse, error)
 	mustEmbedUnimplementedMonoFSServer()
 }
 
@@ -1803,6 +2058,21 @@ func (UnimplementedMonoFSServer) GetPredictorStats(context.Context, *PredictorSt
 }
 func (UnimplementedMonoFSServer) QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method QueryLogs not implemented")
+}
+func (UnimplementedMonoFSServer) QueryMetrics(context.Context, *QueryMetricsRequest) (*QueryMetricsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryMetrics not implemented")
+}
+func (UnimplementedMonoFSServer) QueryTraces(context.Context, *QueryTracesRequest) (*QueryTracesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryTraces not implemented")
+}
+func (UnimplementedMonoFSServer) IngestLogs(context.Context, *IngestLogsRequest) (*IngestLogsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IngestLogs not implemented")
+}
+func (UnimplementedMonoFSServer) IngestMetrics(context.Context, *IngestMetricsRequest) (*IngestMetricsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IngestMetrics not implemented")
+}
+func (UnimplementedMonoFSServer) IngestTraces(context.Context, *IngestTracesRequest) (*IngestTracesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IngestTraces not implemented")
 }
 func (UnimplementedMonoFSServer) mustEmbedUnimplementedMonoFSServer() {}
 func (UnimplementedMonoFSServer) testEmbeddedByValue()                {}
@@ -2250,6 +2520,96 @@ func _MonoFS_QueryLogs_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFS_QueryMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSServer).QueryMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFS_QueryMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSServer).QueryMetrics(ctx, req.(*QueryMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFS_QueryTraces_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryTracesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSServer).QueryTraces(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFS_QueryTraces_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSServer).QueryTraces(ctx, req.(*QueryTracesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFS_IngestLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngestLogsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSServer).IngestLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFS_IngestLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSServer).IngestLogs(ctx, req.(*IngestLogsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFS_IngestMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngestMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSServer).IngestMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFS_IngestMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSServer).IngestMetrics(ctx, req.(*IngestMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFS_IngestTraces_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngestTracesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSServer).IngestTraces(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFS_IngestTraces_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSServer).IngestTraces(ctx, req.(*IngestTracesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MonoFS_ServiceDesc is the grpc.ServiceDesc for MonoFS service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2344,6 +2704,26 @@ var MonoFS_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "QueryLogs",
 			Handler:    _MonoFS_QueryLogs_Handler,
+		},
+		{
+			MethodName: "QueryMetrics",
+			Handler:    _MonoFS_QueryMetrics_Handler,
+		},
+		{
+			MethodName: "QueryTraces",
+			Handler:    _MonoFS_QueryTraces_Handler,
+		},
+		{
+			MethodName: "IngestLogs",
+			Handler:    _MonoFS_IngestLogs_Handler,
+		},
+		{
+			MethodName: "IngestMetrics",
+			Handler:    _MonoFS_IngestMetrics_Handler,
+		},
+		{
+			MethodName: "IngestTraces",
+			Handler:    _MonoFS_IngestTraces_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +84,7 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/clients", r.handleClientsAPI)
 	mux.HandleFunc("/api/local-clients", r.handleLocalClientsAPI)
 	mux.HandleFunc("/api/fetchers", r.handleFetchersAPI)
+	mux.HandleFunc("/api/logengine", r.handleLogEngineAPI)
 	mux.HandleFunc("/api/dependencies", r.handleDependenciesAPI)
 
 	// Whitelist API routes
@@ -686,6 +688,8 @@ func (r *Router) handleGuardianClientsAPI(w http.ResponseWriter, req *http.Reque
 		clients = append(clients, peerClients...)
 	}
 
+	clients = dedupeGuardianClients(clients)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"guardian_clients": clients,
@@ -890,6 +894,65 @@ func (r *Router) handleFetchersAPI(w http.ResponseWriter, req *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+// handleLogEngineAPI returns per-node doctor telemetry logengine stats.
+func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
+	r.mu.RLock()
+	nodesSnapshot := make(map[string]*nodeState, len(r.nodes))
+	for k, v := range r.nodes {
+		nodesSnapshot[k] = v
+	}
+	r.mu.RUnlock()
+
+	type nodeLogStats struct {
+		NodeID       string `json:"node_id"`
+		Address      string `json:"address"`
+		Enabled      bool   `json:"enabled"`
+		LogChunks    int64  `json:"log_chunks"`
+		MetricChunks int64  `json:"metric_chunks"`
+		TraceChunks  int64  `json:"trace_chunks"`
+	}
+
+	var (
+		nodes        []nodeLogStats
+		totalLogs    int64
+		totalMetrics int64
+		totalTraces  int64
+		anyEnabled   bool
+	)
+
+	for nodeID, state := range nodesSnapshot {
+		ns := nodeLogStats{
+			NodeID:  nodeID,
+			Address: state.externalAddress,
+		}
+		if le := state.logEngineStats; le != nil {
+			ns.Enabled = le.Enabled
+			ns.LogChunks = le.LogChunks
+			ns.MetricChunks = le.MetricChunks
+			ns.TraceChunks = le.TraceChunks
+			if le.Enabled {
+				anyEnabled = true
+				totalLogs += le.LogChunks
+				totalMetrics += le.MetricChunks
+				totalTraces += le.TraceChunks
+			}
+		}
+		nodes = append(nodes, ns)
+	}
+
+	// Sort for stable output.
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID < nodes[j].NodeID })
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"enabled":       anyEnabled,
+		"log_chunks":    totalLogs,
+		"metric_chunks": totalMetrics,
+		"trace_chunks":  totalTraces,
+		"nodes":         nodes,
+	})
 }
 func (r *Router) handleDependenciesAPI(w http.ResponseWriter, req *http.Request) {
 	data, err := r.sendUIRequest(UIRequestDependencies, 10*time.Second)
@@ -1239,6 +1302,34 @@ type guardianClientJSON struct {
 	ConnectedSec  int64  `json:"connected_sec"`
 	State         string `json:"state"`
 	Router        string `json:"router"`
+}
+
+func dedupeGuardianClients(clients []guardianClientJSON) []guardianClientJSON {
+	if len(clients) <= 1 {
+		return clients
+	}
+
+	bestByID := make(map[string]guardianClientJSON, len(clients))
+	order := make([]string, 0, len(clients))
+	for _, client := range clients {
+		existing, ok := bestByID[client.ClientID]
+		if !ok {
+			bestByID[client.ClientID] = client
+			order = append(order, client.ClientID)
+			continue
+		}
+
+		if client.LastHeartbeat > existing.LastHeartbeat ||
+			(client.LastHeartbeat == existing.LastHeartbeat && client.State == "connected" && existing.State != "connected") {
+			bestByID[client.ClientID] = client
+		}
+	}
+
+	deduped := make([]guardianClientJSON, 0, len(bestByID))
+	for _, clientID := range order {
+		deduped = append(deduped, bestByID[clientID])
+	}
+	return deduped
 }
 
 // fetchPeerGuardianClients fetches guardian clients from a peer router.

@@ -176,13 +176,14 @@ type nodeState struct {
 
 	// NEW: Staging and failover state
 	status           NodeStatus
-	syncProgress     float64  // 0.0 - 1.0 for new nodes syncing
-	ownedFilesCount  int64    // Count of files owned by this node
-	diskUsedBytes    int64    // Disk space used by this node
-	diskTotalBytes   int64    // Total disk space available on this node
-	diskFreeBytes    int64    // Disk space free on filesystem
-	backingUpNodes   []string // Node IDs this node is backing up
-	onboardRequested bool     // Track if onboarding has been requested
+	syncProgress     float64            // 0.0 - 1.0 for new nodes syncing
+	ownedFilesCount  int64              // Count of files owned by this node
+	diskUsedBytes    int64              // Disk space used by this node
+	diskTotalBytes   int64              // Total disk space available on this node
+	diskFreeBytes    int64              // Disk space free on filesystem
+	backingUpNodes   []string           // Node IDs this node is backing up
+	onboardRequested bool               // Track if onboarding has been requested
+	logEngineStats   *pb.LogEngineStats // Doctor telemetry engine stats (nil = unknown)
 }
 
 // NodeStatus represents the operational status of a node.
@@ -391,6 +392,7 @@ func (r *Router) SetSearchClient(addr string) error {
 	// Try initial connection
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
 	)
 	if err != nil {
 		r.logger.Warn("failed to connect to search service, will retry in background",
@@ -420,6 +422,7 @@ func (r *Router) retrySearchConnection(addr string) {
 
 		conn, err := grpc.NewClient(addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
 		)
 		if err != nil {
 			r.logger.Debug("retry search connection failed",
@@ -474,6 +477,7 @@ func (r *Router) RegisterNode(nodeID, address string, weight uint32) error {
 	// Connect to the node to verify it's reachable
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
 	)
 	if err != nil {
 		return fmt.Errorf("connect to node %s: %w", nodeID, err)
@@ -811,21 +815,68 @@ func (r *Router) GetNodeForFile(ctx context.Context, req *pb.GetNodeForFileReque
 
 // QueryLogs implements pb.MonoFSRouterServer.
 func (r *Router) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
+	client, err := r.anyHealthyNodeClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.QueryLogs(ctx, req)
+}
+
+// QueryMetrics implements pb.MonoFSRouterServer.
+func (r *Router) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
+	client, err := r.anyHealthyNodeClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.QueryMetrics(ctx, req)
+}
+
+// QueryTraces implements pb.MonoFSRouterServer.
+func (r *Router) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
+	client, err := r.anyHealthyNodeClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.QueryTraces(ctx, req)
+}
+
+// IngestLogs implements pb.MonoFSRouterServer.
+func (r *Router) IngestLogs(ctx context.Context, req *pb.IngestLogsRequest) (*pb.IngestLogsResponse, error) {
+	client, err := r.anyHealthyNodeClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.IngestLogs(ctx, req)
+}
+
+// IngestMetrics implements pb.MonoFSRouterServer.
+func (r *Router) IngestMetrics(ctx context.Context, req *pb.IngestMetricsRequest) (*pb.IngestMetricsResponse, error) {
+	client, err := r.anyHealthyNodeClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.IngestMetrics(ctx, req)
+}
+
+// IngestTraces implements pb.MonoFSRouterServer.
+func (r *Router) IngestTraces(ctx context.Context, req *pb.IngestTracesRequest) (*pb.IngestTracesResponse, error) {
+	client, err := r.anyHealthyNodeClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.IngestTraces(ctx, req)
+}
+
+// anyHealthyNodeClient returns the gRPC client for any healthy active node.
+func (r *Router) anyHealthyNodeClient() (pb.MonoFSClient, error) {
 	r.mu.RLock()
-	var client pb.MonoFSClient
+	defer r.mu.RUnlock()
 	for _, state := range r.nodes {
 		if state.info.Healthy && state.status == NodeActive {
-			client = state.client
-			break
+			return state.client, nil
 		}
 	}
-	r.mu.RUnlock()
-
-	if client == nil {
-		return nil, fmt.Errorf("no healthy nodes available for query")
-	}
-
-	return client.QueryLogs(ctx, req)
+	return nil, fmt.Errorf("no healthy nodes available")
 }
 
 // getHRWFallbacks returns fallback nodes for a key in HRW order, excluding a specific node.
@@ -1093,6 +1144,7 @@ func (r *Router) checkAllNodes() {
 		if state.client == nil && state.conn == nil {
 			conn, err := grpc.NewClient(state.info.Address,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
 			)
 			if err != nil {
 				r.logger.Debug("failed to connect to node", "node_id", nodeID, "error", err)
@@ -1152,52 +1204,9 @@ func (r *Router) checkAllNodes() {
 				state.diskTotalBytes = nodeInfo.DiskTotalBytes
 				state.diskFreeBytes = nodeInfo.DiskFreeBytes
 				state.kvsStatus = normalizedKVSNodeStatus(nodeInfo.GetKvs())
-
-				// NEW: Detect node recovery/health restoration
-				if !state.info.Healthy && state.status == NodeActive {
-					r.logger.Info("node recovered", "node_id", nodeID)
-					state.info.Healthy = true
-					r.version.Add(1)
-
-					// Cancel rebalance timer if still pending (node returned in time)
-					timerWasCancelled := r.cancelFailoverTimer(nodeID)
-
-					// Clear any failover mapping for this node
-					if backupNodeID, hadFailover := r.failoverMap.LoadAndDelete(nodeID); hadFailover {
-						r.logger.Info("cleared failover mapping for recovered node",
-							"node_id", nodeID,
-							"backup_node", backupNodeID,
-							"timer_was_pending", timerWasCancelled)
-
-						// Remove this node from backup node's backingUpNodes list
-						if backupState, exists := r.nodes[backupNodeID.(string)]; exists {
-							for i, id := range backupState.backingUpNodes {
-								if id == nodeID {
-									backupState.backingUpNodes = append(
-										backupState.backingUpNodes[:i],
-										backupState.backingUpNodes[i+1:]...,
-									)
-									r.logger.Debug("removed from backup node's list",
-										"recovered_node", nodeID,
-										"backup_node", backupNodeID)
-									break
-								}
-							}
-						}
-					}
-
-					// Handle recovery based on whether timer had fired
-					if timerWasCancelled {
-						// Node returned before RebalanceDelay elapsed
-						// Only sync repos that were ingested during the outage
-						go r.handleEarlyRecovery(nodeID)
-					} else {
-						// Timer already fired (or was never set), full rebalance was triggered
-						// Just need to sync any remaining repos
-						go r.triggerRebalanceOnRecovery(nodeID)
-					}
-				} else if !state.info.Healthy {
-					// Node was unhealthy, now healthy (but maybe never was ACTIVE before)
+				state.logEngineStats = nodeInfo.GetLogEngine()
+				if !state.info.Healthy {
+					// Node was unhealthy, now healthy — recovery path
 					state.info.Healthy = true
 					r.version.Add(1)
 

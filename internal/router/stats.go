@@ -119,6 +119,7 @@ func (r *Router) GetNodeStats(ctx context.Context, req *pb.NodeStatsRequest) (*p
 			SyncProgress:    node.syncProgress,
 			LastHeartbeat:   lastHeartbeat,
 			Kvs:             kvsStatus,
+			LogEngine:       node.logEngineStats,
 		})
 	}
 

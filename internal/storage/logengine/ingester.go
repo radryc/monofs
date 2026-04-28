@@ -34,8 +34,23 @@ func NewIngester(store ObjectStoreBackend, chunkDur time.Duration) *Ingester {
 	}
 }
 
-// FlushChunk writes a buffer of logs to the dual-write architecture.
-func (i *Ingester) FlushChunk(ctx context.Context, chunkID string, logs []LogRecord) error {
+// FlushChunk writes a buffer of telemetry records for the given signal type.
+// Exactly one of logs/metrics/spans should be non-nil; the signal parameter selects
+// the storage path and Parquet schema.
+func (i *Ingester) FlushChunk(ctx context.Context, signal Signal, chunkID string, logs []LogRecord, metrics []MetricRecord, spans []SpanRecord) error {
+	switch signal {
+	case SignalLogs:
+		return i.flushLogs(ctx, chunkID, logs)
+	case SignalMetrics:
+		return i.flushMetrics(ctx, chunkID, metrics)
+	case SignalTraces:
+		return i.flushTraces(ctx, chunkID, spans)
+	default:
+		return fmt.Errorf("unknown signal: %s", signal)
+	}
+}
+
+func (i *Ingester) flushLogs(ctx context.Context, chunkID string, logs []LogRecord) error {
 	if len(logs) == 0 {
 		return nil
 	}
@@ -43,10 +58,7 @@ func (i *Ingester) FlushChunk(ctx context.Context, chunkID string, logs []LogRec
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
 
-	var minTime, maxTime time.Time
-	minTime = logs[0].Timestamp
-	maxTime = logs[0].Timestamp
-
+	minTime, maxTime := logs[0].Timestamp, logs[0].Timestamp
 	for _, l := range logs {
 		if l.Timestamp.Before(minTime) {
 			minTime = l.Timestamp
@@ -58,47 +70,128 @@ func (i *Ingester) FlushChunk(ctx context.Context, chunkID string, logs []LogRec
 
 	manifest := ChunkManifest{
 		ChunkID: chunkID,
+		Signal:  SignalLogs,
 		MinTime: minTime,
 		MaxTime: maxTime,
-		// TraceBloom: ... build bloom filter
 	}
+	chunkPrefix := filepath.Join("chunks", string(SignalLogs), chunkID)
 
-	chunkPrefix := filepath.Join("chunks", chunkID)
-
-	// Stream A: Parquet Write
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		errCh <- i.writeParquet(ctx, filepath.Join(chunkPrefix, "data.parquet"), logs)
+		errCh <- i.writeLogParquet(ctx, filepath.Join(chunkPrefix, "data.parquet"), logs)
 	}()
-
-	// Stream B: Bluge Indexing
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		errCh <- i.writeBlugeIndex(ctx, filepath.Join(chunkPrefix, "text.index.tar.gz"), logs)
 	}()
-
-	// Stream C: Metadata
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		errCh <- i.writeMetadata(ctx, filepath.Join(chunkPrefix, "metadata.json"), manifest)
 	}()
-
 	wg.Wait()
 	close(errCh)
-
 	for err := range errCh {
 		if err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
-func (i *Ingester) writeParquet(ctx context.Context, path string, logs []LogRecord) error {
+func (i *Ingester) flushMetrics(ctx context.Context, chunkID string, metrics []MetricRecord) error {
+	if len(metrics) == 0 {
+		return nil
+	}
+
+	minTime, maxTime := metrics[0].Timestamp, metrics[0].Timestamp
+	for _, m := range metrics {
+		if m.Timestamp.Before(minTime) {
+			minTime = m.Timestamp
+		}
+		if m.Timestamp.After(maxTime) {
+			maxTime = m.Timestamp
+		}
+	}
+
+	manifest := ChunkManifest{
+		ChunkID: chunkID,
+		Signal:  SignalMetrics,
+		MinTime: minTime,
+		MaxTime: maxTime,
+	}
+	chunkPrefix := filepath.Join("chunks", string(SignalMetrics), chunkID)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errCh <- i.writeMetricParquet(ctx, filepath.Join(chunkPrefix, "data.parquet"), metrics)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errCh <- i.writeMetadata(ctx, filepath.Join(chunkPrefix, "metadata.json"), manifest)
+	}()
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (i *Ingester) flushTraces(ctx context.Context, chunkID string, spans []SpanRecord) error {
+	if len(spans) == 0 {
+		return nil
+	}
+
+	minTime, maxTime := spans[0].Timestamp, spans[0].Timestamp
+	for _, s := range spans {
+		if s.Timestamp.Before(minTime) {
+			minTime = s.Timestamp
+		}
+		if s.EndTime.After(maxTime) {
+			maxTime = s.EndTime
+		}
+	}
+
+	manifest := ChunkManifest{
+		ChunkID: chunkID,
+		Signal:  SignalTraces,
+		MinTime: minTime,
+		MaxTime: maxTime,
+	}
+	chunkPrefix := filepath.Join("chunks", string(SignalTraces), chunkID)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errCh <- i.writeTraceParquet(ctx, filepath.Join(chunkPrefix, "data.parquet"), spans)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errCh <- i.writeMetadata(ctx, filepath.Join(chunkPrefix, "metadata.json"), manifest)
+	}()
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (i *Ingester) writeLogParquet(ctx context.Context, path string, logs []LogRecord) error {
 	fields := schema.FieldList{
 		schema.NewInt64Node("timestamp", parquet.Repetitions.Required, -1),
 		schema.NewByteArrayNode("level", parquet.Repetitions.Required, -1),
@@ -194,6 +287,199 @@ func (i *Ingester) writeParquet(ctx context.Context, path string, logs []LogReco
 		return err
 	}
 
+	return i.store.Write(ctx, path, &buf)
+}
+
+func (i *Ingester) writeMetricParquet(ctx context.Context, path string, metrics []MetricRecord) error {
+	fields := schema.FieldList{
+		schema.NewInt64Node("timestamp", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("service", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("metric_name", parquet.Repetitions.Required, -1),
+		schema.NewFloat64Node("value", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("labels_json", parquet.Repetitions.Required, -1),
+	}
+	parquetSchema, err := schema.NewGroupNode("metric_record", parquet.Repetitions.Required, fields, -1)
+	if err != nil {
+		return err
+	}
+
+	var buf bytes.Buffer
+	props := parquet.NewWriterProperties(
+		parquet.WithCompression(compress.Codecs.Zstd),
+		parquet.WithDictionaryDefault(true),
+	)
+	writer := file.NewParquetWriter(&buf, parquetSchema, file.WithWriterProps(props))
+	defer writer.Close()
+	rgw := writer.AppendRowGroup()
+
+	// Timestamp
+	cw, err := rgw.NextColumn()
+	if err != nil {
+		return err
+	}
+	tsWriter := cw.(*file.Int64ColumnChunkWriter)
+	timestamps := make([]int64, len(metrics))
+	for idx, m := range metrics {
+		timestamps[idx] = m.Timestamp.UnixNano()
+	}
+	tsWriter.WriteBatch(timestamps, nil, nil)
+	tsWriter.Close()
+
+	// Service
+	cw, err = rgw.NextColumn()
+	if err != nil {
+		return err
+	}
+	svcWriter := cw.(*file.ByteArrayColumnChunkWriter)
+	services := make([]parquet.ByteArray, len(metrics))
+	for idx, m := range metrics {
+		services[idx] = parquet.ByteArray(m.Service)
+	}
+	svcWriter.WriteBatch(services, nil, nil)
+	svcWriter.Close()
+
+	// MetricName
+	cw, err = rgw.NextColumn()
+	if err != nil {
+		return err
+	}
+	nameWriter := cw.(*file.ByteArrayColumnChunkWriter)
+	names := make([]parquet.ByteArray, len(metrics))
+	for idx, m := range metrics {
+		names[idx] = parquet.ByteArray(m.MetricName)
+	}
+	nameWriter.WriteBatch(names, nil, nil)
+	nameWriter.Close()
+
+	// Value
+	cw, err = rgw.NextColumn()
+	if err != nil {
+		return err
+	}
+	valWriter := cw.(*file.Float64ColumnChunkWriter)
+	values := make([]float64, len(metrics))
+	for idx, m := range metrics {
+		values[idx] = m.Value
+	}
+	valWriter.WriteBatch(values, nil, nil)
+	valWriter.Close()
+
+	// Labels JSON
+	cw, err = rgw.NextColumn()
+	if err != nil {
+		return err
+	}
+	lblWriter := cw.(*file.ByteArrayColumnChunkWriter)
+	labels := make([]parquet.ByteArray, len(metrics))
+	for idx, m := range metrics {
+		b, _ := json.Marshal(m.Labels)
+		labels[idx] = b
+	}
+	lblWriter.WriteBatch(labels, nil, nil)
+	lblWriter.Close()
+
+	if err := rgw.Close(); err != nil {
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	return i.store.Write(ctx, path, &buf)
+}
+
+func (i *Ingester) writeTraceParquet(ctx context.Context, path string, spans []SpanRecord) error {
+	fields := schema.FieldList{
+		schema.NewInt64Node("timestamp", parquet.Repetitions.Required, -1),
+		schema.NewInt64Node("end_time", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("trace_id", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("span_id", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("parent_span_id", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("service", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("name", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("status_code", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("attributes_json", parquet.Repetitions.Required, -1),
+	}
+	parquetSchema, err := schema.NewGroupNode("span_record", parquet.Repetitions.Required, fields, -1)
+	if err != nil {
+		return err
+	}
+
+	var buf bytes.Buffer
+	props := parquet.NewWriterProperties(
+		parquet.WithCompression(compress.Codecs.Zstd),
+		parquet.WithDictionaryDefault(true),
+	)
+	writer := file.NewParquetWriter(&buf, parquetSchema, file.WithWriterProps(props))
+	defer writer.Close()
+	rgw := writer.AppendRowGroup()
+
+	writeByteArrayCol := func(vals []parquet.ByteArray) error {
+		cw, err := rgw.NextColumn()
+		if err != nil {
+			return err
+		}
+		w := cw.(*file.ByteArrayColumnChunkWriter)
+		w.WriteBatch(vals, nil, nil)
+		w.Close()
+		return nil
+	}
+	writeInt64Col := func(vals []int64) error {
+		cw, err := rgw.NextColumn()
+		if err != nil {
+			return err
+		}
+		w := cw.(*file.Int64ColumnChunkWriter)
+		w.WriteBatch(vals, nil, nil)
+		w.Close()
+		return nil
+	}
+
+	n := len(spans)
+	timestamps := make([]int64, n)
+	endTimes := make([]int64, n)
+	traceIDs := make([]parquet.ByteArray, n)
+	spanIDs := make([]parquet.ByteArray, n)
+	parentSpanIDs := make([]parquet.ByteArray, n)
+	services := make([]parquet.ByteArray, n)
+	names := make([]parquet.ByteArray, n)
+	statusCodes := make([]parquet.ByteArray, n)
+	attrJSONs := make([]parquet.ByteArray, n)
+
+	for idx, s := range spans {
+		timestamps[idx] = s.Timestamp.UnixNano()
+		endTimes[idx] = s.EndTime.UnixNano()
+		traceIDs[idx] = parquet.ByteArray(s.TraceID)
+		spanIDs[idx] = parquet.ByteArray(s.SpanID)
+		parentSpanIDs[idx] = parquet.ByteArray(s.ParentSpanID)
+		services[idx] = parquet.ByteArray(s.Service)
+		names[idx] = parquet.ByteArray(s.Name)
+		statusCodes[idx] = parquet.ByteArray(s.StatusCode)
+		b, _ := json.Marshal(s.Attributes)
+		attrJSONs[idx] = b
+	}
+
+	for _, fn := range []func() error{
+		func() error { return writeInt64Col(timestamps) },
+		func() error { return writeInt64Col(endTimes) },
+		func() error { return writeByteArrayCol(traceIDs) },
+		func() error { return writeByteArrayCol(spanIDs) },
+		func() error { return writeByteArrayCol(parentSpanIDs) },
+		func() error { return writeByteArrayCol(services) },
+		func() error { return writeByteArrayCol(names) },
+		func() error { return writeByteArrayCol(statusCodes) },
+		func() error { return writeByteArrayCol(attrJSONs) },
+	} {
+		if err := fn(); err != nil {
+			return err
+		}
+	}
+
+	if err := rgw.Close(); err != nil {
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
 	return i.store.Write(ctx, path, &buf)
 }
 

@@ -12,7 +12,7 @@ import (
 	"github.com/radryc/monofs/internal/storage"
 )
 
-// LogEngine is the main interface for the high-compression, searchable log & trace engine.
+// LogEngine is the main interface for the high-compression, searchable log, metric & trace engine.
 type LogEngine struct {
 	store    *CachedStore
 	ingester *Ingester
@@ -46,36 +46,72 @@ func (e *LogEngine) Initialize(ctx context.Context, config storage.BackendConfig
 	return nil
 }
 
-// Ingest writes a batch of log records to the engine. Note: this uses LogRecord specifically.
+// IngestLogs writes a batch of log records to the engine.
 func (e *LogEngine) IngestLogs(ctx context.Context, chunkID string, logs []LogRecord) error {
-	return e.ingester.FlushChunk(ctx, chunkID, logs)
+	return e.ingester.FlushChunk(ctx, SignalLogs, chunkID, logs, nil, nil)
 }
 
-// Ingest implements storage.StorageBackend interface.
+// IngestMetrics writes a batch of metric records to the engine.
+func (e *LogEngine) IngestMetrics(ctx context.Context, chunkID string, metrics []MetricRecord) error {
+	return e.ingester.FlushChunk(ctx, SignalMetrics, chunkID, nil, metrics, nil)
+}
+
+// IngestTraces writes a batch of trace spans to the engine.
+func (e *LogEngine) IngestTraces(ctx context.Context, chunkID string, spans []SpanRecord) error {
+	return e.ingester.FlushChunk(ctx, SignalTraces, chunkID, nil, nil, spans)
+}
+
+// Ingest implements storage.StorageBackend interface (no-op passthrough).
 func (e *LogEngine) Ingest(ctx context.Context, id string, data []byte) error {
-	// In a real implementation, data would be unmarshaled into []LogRecord
 	return nil
 }
 
-// Query executes a LogQL query and returns the matching log records.
-func (e *LogEngine) QueryLogs(ctx context.Context, queryStr string) ([]LogRecord, error) {
-	return e.query.Query(ctx, queryStr)
+// QueryLogs executes a LogQL query and returns the matching log records.
+func (e *LogEngine) QueryLogs(ctx context.Context, queryStr string, limit int) ([]LogRecord, error) {
+	return e.query.QueryLogs(ctx, queryStr, limit)
 }
 
+// QueryMetrics returns metric data points matching the given name and time range.
+func (e *LogEngine) QueryMetrics(ctx context.Context, metricName string, from, to time.Time) ([]MetricRecord, error) {
+	return e.query.QueryMetrics(ctx, metricName, from, to)
+}
+
+// QueryTraces returns trace spans matching traceID and/or service in the given time range.
+func (e *LogEngine) QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]SpanRecord, error) {
+	return e.query.QueryTraces(ctx, traceID, service, from, to, limit)
+}
+
+// Query executes a LogQL query and returns the result as raw JSON bytes (for gRPC compat).
 func (e *LogEngine) Query(ctx context.Context, queryStr string) ([]byte, error) {
-	logs, err := e.query.Query(ctx, queryStr)
+	logs, err := e.query.QueryLogs(ctx, queryStr, 0)
 	if err != nil {
 		return nil, err
 	}
-	
-	// Encode logs to JSON
 	return json.Marshal(logs)
 }
 
 // Close cleans up resources.
 func (e *LogEngine) Close() error {
-	// Clean up cache dir if necessary or flush pending buffers
 	return nil
+}
+
+// LogEngineStats is a snapshot of per-signal chunk counts.
+type LogEngineStats struct {
+	LogChunks    int64
+	MetricChunks int64
+	TraceChunks  int64
+}
+
+// Stats returns per-signal chunk counts for this engine's backing store.
+func (e *LogEngine) Stats(ctx context.Context) (LogEngineStats, error) {
+	logChunks, _ := e.store.ListChunks(ctx, filepath.Join("chunks", string(SignalLogs)))
+	metricChunks, _ := e.store.ListChunks(ctx, filepath.Join("chunks", string(SignalMetrics)))
+	traceChunks, _ := e.store.ListChunks(ctx, filepath.Join("chunks", string(SignalTraces)))
+	return LogEngineStats{
+		LogChunks:    int64(len(logChunks)),
+		MetricChunks: int64(len(metricChunks)),
+		TraceChunks:  int64(len(traceChunks)),
+	}, nil
 }
 
 // --- Mock S3 Storage Implementation for demonstration ---

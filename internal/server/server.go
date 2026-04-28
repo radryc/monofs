@@ -68,6 +68,9 @@ type Server struct {
 	stopRefresh      chan struct{}               // Stop topology refresh goroutine
 	rpcTimeout       time.Duration               // Timeout for forwarded RPCs
 	hrwMu            sync.RWMutex                // Protects hrw and peer clients
+
+	// Doctor telemetry backend
+	logEngine DoctorBackend
 }
 
 type repoInfo struct {
@@ -1432,7 +1435,7 @@ func (s *Server) GetNodeInfo(ctx context.Context, req *pb.NodeInfoRequest) (*pb.
 		return nil, fmt.Errorf("failed to measure db usage: %w", err)
 	}
 
-	return &pb.NodeInfoResponse{
+	resp := &pb.NodeInfoResponse{
 		NodeId:         s.nodeID,
 		Address:        s.address,
 		UptimeSeconds:  int64(time.Since(s.startTime).Seconds()),
@@ -1442,7 +1445,10 @@ func (s *Server) GetNodeInfo(ctx context.Context, req *pb.NodeInfoRequest) (*pb.
 		DiskTotalBytes: diskTotal,
 		DiskFreeBytes:  diskFree,
 		Kvs:            s.currentKVSStatus(),
-	}, nil
+		LogEngine:      s.logEngineProtoStats(ctx),
+	}
+
+	return resp, nil
 }
 
 // GetPredictorStats returns predictor statistics for this node via gRPC.
