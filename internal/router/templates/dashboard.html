@@ -204,18 +204,14 @@
             if (existing.kvs || node.kvs) {
                 const existingKVS = existing.kvs || {};
                 const nextKVS = node.kvs || {};
+                const preferredKVS = choosePreferredKVS(existingKVS, nextKVS);
                 existing.kvs = {
-                    ...existingKVS,
-                    ...nextKVS,
+                    ...preferredKVS,
                     enabled: Boolean(existingKVS.enabled || nextKVS.enabled),
                     healthy: Boolean(existingKVS.healthy || nextKVS.healthy),
-                    mode: existingKVS.mode && existingKVS.mode !== 'disabled'
-                        ? existingKVS.mode
-                        : (nextKVS.mode || existingKVS.mode),
-                    role: existingKVS.role && existingKVS.role !== 'disabled'
-                        ? existingKVS.role
-                        : (nextKVS.role || existingKVS.role),
-                    leader_id: existingKVS.leader_id || nextKVS.leader_id,
+                    mode: preferredKVS.mode || existingKVS.mode || nextKVS.mode,
+                    role: preferredKVS.role || existingKVS.role || nextKVS.role,
+                    leader_id: preferredKVS.leader_id || existingKVS.leader_id || nextKVS.leader_id,
                     peer_count: Math.max(existingKVS.peer_count || 0, nextKVS.peer_count || 0),
                     key_count: Math.max(existingKVS.key_count || 0, nextKVS.key_count || 0)
                 };
@@ -229,6 +225,39 @@
             ...n,
             _routers: Array.from(n._routers)
         }));
+    }
+
+    function kvsFreshnessScore(kvs) {
+        if (!kvs || !kvs.enabled) {
+            return 0;
+        }
+        let score = 1;
+        if (kvs.mode === 'local') {
+            score += 2;
+        } else if (kvs.mode === 'raft') {
+            score += 4;
+        }
+        if (kvs.healthy) {
+            score += 8;
+        }
+        if (kvs.role === 'leader' || kvs.role === 'follower') {
+            score += 4;
+        } else if (kvs.role && kvs.role !== 'disabled') {
+            score += 2;
+        }
+        if (kvs.leader_id) {
+            score += 1;
+        }
+        return score;
+    }
+
+    function choosePreferredKVS(existingKVS, nextKVS) {
+        const existingScore = kvsFreshnessScore(existingKVS);
+        const nextScore = kvsFreshnessScore(nextKVS);
+        if (nextScore > existingScore) {
+            return nextKVS;
+        }
+        return existingKVS;
     }
 
     function dedupeRepositories(repos) {

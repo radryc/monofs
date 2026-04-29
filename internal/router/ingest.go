@@ -582,7 +582,8 @@ initComplete:
 	// Archives are split at 2GB boundaries.
 	// Files are stored using content hash as key (content-addressed) so that
 	// fetcher blob lookups by hash work correctly.
-	if r.fetcherClient != nil && len(collectedFiles) > 0 {
+	fetcherClient := r.getFetcherClient()
+	if fetcherClient != nil && len(collectedFiles) > 0 {
 		// Deduplicate by content hash — same blob should only appear once in archives.
 		seenHashes := make(map[string]bool, len(collectedFiles))
 		dedupedFiles := make([]archiveFile, 0, len(collectedFiles))
@@ -651,7 +652,7 @@ initComplete:
 				"files_in_archive", len(currentFiles),
 				"archive_size_mb", len(archiveData)/(1024*1024))
 
-			if err := r.fetcherClient.StoreArchive(stream.Context(), storageID, chunkIndex, archiveData); err != nil {
+			if err := fetcherClient.StoreArchive(stream.Context(), storageID, chunkIndex, archiveData); err != nil {
 				return fmt.Errorf("store archive chunk %d: %w", chunkIndex, err)
 			}
 
@@ -691,7 +692,7 @@ initComplete:
 		sendProgress(pb.IngestProgress_INGESTING,
 			fmt.Sprintf("Archives built: %d chunks", chunkIndex),
 			0, totalFiles, "")
-	} else if r.fetcherClient == nil {
+	} else if fetcherClient == nil {
 		r.logger.Warn("no fetcher client configured, skipping archive building")
 	}
 
