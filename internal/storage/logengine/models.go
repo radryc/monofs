@@ -32,15 +32,15 @@ type MetricRecord struct {
 
 // SpanRecord represents a single trace span.
 type SpanRecord struct {
-	Timestamp    time.Time // span start time
-	EndTime      time.Time
-	TraceID      string
-	SpanID       string
-	ParentSpanID string
-	Service      string
-	Name         string
-	StatusCode   string
-	Attributes   map[string]string
+	Timestamp    time.Time         `json:"start_time"`
+	EndTime      time.Time         `json:"end_time"`
+	TraceID      string            `json:"trace_id"`
+	SpanID       string            `json:"span_id"`
+	ParentSpanID string            `json:"parent_span_id,omitempty"`
+	Service      string            `json:"service"`
+	Name         string            `json:"name"`
+	StatusCode   string            `json:"status_code,omitempty"`
+	Attributes   map[string]string `json:"attributes,omitempty"`
 }
 
 // ChunkManifest stores lightweight metadata for a single chunk.

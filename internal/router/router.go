@@ -106,7 +106,10 @@ type Router struct {
 	whitelist *whitelistStore
 
 	// Fetcher cluster integration (for monitoring)
-	fetcherClient *fetcher.Client
+	fetcherMu           sync.RWMutex
+	fetcherClient       *fetcher.Client
+	fetcherRetryStop    chan struct{}
+	fetcherRetryRunning bool
 
 	// Connected FUSE clients
 	clients     map[string]*clientState // clientID -> state
@@ -144,6 +147,8 @@ type Router struct {
 	pendingIndexRebuilds   map[string]map[string]bool
 	pendingIndexRebuildsMu sync.Mutex
 }
+
+var fetcherReconnectInterval = 5 * time.Second
 
 // clientState tracks a connected FUSE client with performance metrics.
 type clientState struct {
@@ -440,33 +445,127 @@ func (r *Router) retrySearchConnection(addr string) {
 
 // SetFetcherClient configures the fetcher cluster client for monitoring.
 func (r *Router) SetFetcherClient(addrs []string) error {
-	if len(addrs) == 0 {
+	normalized := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		addr = strings.TrimSpace(addr)
+		if addr != "" {
+			normalized = append(normalized, addr)
+		}
+	}
+
+	if len(normalized) == 0 {
 		r.logger.Info("fetcher cluster not configured")
+		r.stopFetcherReconnectLoop()
+		r.swapFetcherClient(nil)
 		return nil
 	}
 
+	r.stopFetcherReconnectLoop()
+
 	config := fetcher.DefaultClientConfig()
-	config.FetcherAddresses = addrs
+	config.FetcherAddresses = normalized
 
 	client, err := fetcher.NewClient(config, r.logger)
 	if err != nil {
 		r.logger.Warn("failed to connect to fetcher cluster",
-			"addrs", addrs,
+			"addrs", normalized,
 			"error", err)
+		r.startFetcherReconnectLoop(normalized)
 		return err
 	}
 
-	r.fetcherClient = client
-	r.logger.Info("fetcher cluster client configured", "addrs", addrs)
+	r.stopFetcherReconnectLoop()
+	r.swapFetcherClient(client)
+	r.logger.Info("fetcher cluster client configured", "addrs", normalized)
 	return nil
 }
 
 // GetFetcherClusterStats returns statistics from all fetchers in the cluster.
 func (r *Router) GetFetcherClusterStats(ctx context.Context, includeSourceStats bool) (*fetcher.ClusterStats, error) {
-	if r.fetcherClient == nil {
+	client := r.getFetcherClient()
+	if client == nil {
 		return nil, fmt.Errorf("fetcher cluster not configured")
 	}
-	return r.fetcherClient.GetClusterStats(ctx, includeSourceStats)
+	return client.GetClusterStats(ctx, includeSourceStats)
+}
+
+func (r *Router) getFetcherClient() *fetcher.Client {
+	r.fetcherMu.RLock()
+	defer r.fetcherMu.RUnlock()
+	return r.fetcherClient
+}
+
+func (r *Router) swapFetcherClient(client *fetcher.Client) {
+	r.fetcherMu.Lock()
+	oldClient := r.fetcherClient
+	r.fetcherClient = client
+	r.fetcherMu.Unlock()
+
+	if oldClient != nil && oldClient != client {
+		_ = oldClient.Close()
+	}
+}
+
+func (r *Router) startFetcherReconnectLoop(addrs []string) {
+	r.fetcherMu.Lock()
+	if r.fetcherRetryRunning {
+		r.fetcherMu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	r.fetcherRetryStop = stop
+	r.fetcherRetryRunning = true
+	r.fetcherMu.Unlock()
+
+	go func(expectedAddrs []string, stopCh chan struct{}) {
+		ticker := time.NewTicker(fetcherReconnectInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stopCh:
+				r.finishFetcherReconnectLoop(stopCh)
+				return
+			case <-ticker.C:
+				config := fetcher.DefaultClientConfig()
+				config.FetcherAddresses = expectedAddrs
+
+				client, err := fetcher.NewClient(config, r.logger)
+				if err != nil {
+					r.logger.Debug("retrying fetcher cluster connection", "addrs", expectedAddrs, "error", err)
+					continue
+				}
+
+				r.swapFetcherClient(client)
+				r.logger.Info("fetcher cluster client configured after retry", "addrs", expectedAddrs)
+				r.finishFetcherReconnectLoop(stopCh)
+				return
+			}
+		}
+	}(append([]string(nil), addrs...), stop)
+}
+
+func (r *Router) stopFetcherReconnectLoop() {
+	r.fetcherMu.Lock()
+	stop := r.fetcherRetryStop
+	if stop != nil {
+		r.fetcherRetryStop = nil
+		r.fetcherRetryRunning = false
+	}
+	r.fetcherMu.Unlock()
+
+	if stop != nil {
+		close(stop)
+	}
+}
+
+func (r *Router) finishFetcherReconnectLoop(stopCh chan struct{}) {
+	r.fetcherMu.Lock()
+	defer r.fetcherMu.Unlock()
+	if r.fetcherRetryStop == stopCh {
+		r.fetcherRetryStop = nil
+		r.fetcherRetryRunning = false
+	}
 }
 
 // RegisterNode adds a backend node to the cluster.
@@ -1259,11 +1358,14 @@ func (r *Router) Close() error {
 
 	// Stop UI handler
 	close(r.stopUI)
+	r.stopFetcherReconnectLoop()
 
 	// Close search connection
 	if r.searchConn != nil {
 		r.searchConn.Close()
 	}
+
+	r.swapFetcherClient(nil)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
