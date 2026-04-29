@@ -71,7 +71,7 @@ func TestLogEngine_IngestAndQuery(t *testing.T) {
 	// Test QueryLogs
 	// Our mock query engine simply returns a mocked record for any query that includes "|=",
 	// but we can at least ensure the pipeline executes without errors.
-	results, err := engine.QueryLogs(ctx, `{service="payment"} |= "connection timeout"`)
+	results, err := engine.QueryLogs(ctx, `{service="payment"} |= "connection timeout"`, 0)
 	if err != nil {
 		t.Fatalf("failed to query logs: %v", err)
 	}

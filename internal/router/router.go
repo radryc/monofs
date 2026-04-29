@@ -3,6 +3,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -931,12 +932,51 @@ func (r *Router) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 }
 
 // QueryTraces implements pb.MonoFSRouterServer.
+// It fans out to all healthy nodes and merges results so that traces
+// distributed across shards are always returned regardless of which node
+// holds the chunks.
 func (r *Router) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
-	client, err := r.anyHealthyNodeClient()
-	if err != nil {
-		return nil, err
+	clients := r.allHealthyNodeClients()
+	if len(clients) == 0 {
+		return nil, fmt.Errorf("no healthy nodes available")
 	}
-	return client.QueryTraces(ctx, req)
+	if len(clients) == 1 {
+		return clients[0].QueryTraces(ctx, req)
+	}
+
+	type result struct {
+		resp *pb.QueryTracesResponse
+		err  error
+	}
+	results := make(chan result, len(clients))
+	for _, c := range clients {
+		go func(cl pb.MonoFSClient) {
+			resp, err := cl.QueryTraces(ctx, req)
+			results <- result{resp, err}
+		}(c)
+	}
+
+	var merged []json.RawMessage
+	for range clients {
+		res := <-results
+		if res.err != nil {
+			continue
+		}
+		var spans []json.RawMessage
+		if err := json.Unmarshal(res.resp.ResultsJson, &spans); err != nil {
+			continue
+		}
+		merged = append(merged, spans...)
+	}
+
+	if len(merged) == 0 {
+		return &pb.QueryTracesResponse{ResultsJson: []byte("[]")}, nil
+	}
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("merge trace results: %w", err)
+	}
+	return &pb.QueryTracesResponse{ResultsJson: out}, nil
 }
 
 // IngestLogs implements pb.MonoFSRouterServer.
@@ -976,6 +1016,19 @@ func (r *Router) anyHealthyNodeClient() (pb.MonoFSClient, error) {
 		}
 	}
 	return nil, fmt.Errorf("no healthy nodes available")
+}
+
+// allHealthyNodeClients returns gRPC clients for all healthy active nodes.
+func (r *Router) allHealthyNodeClients() []pb.MonoFSClient {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var clients []pb.MonoFSClient
+	for _, state := range r.nodes {
+		if state.info.Healthy && state.status == NodeActive {
+			clients = append(clients, state.client)
+		}
+	}
+	return clients
 }
 
 // getHRWFallbacks returns fallback nodes for a key in HRW order, excluding a specific node.
