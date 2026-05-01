@@ -157,6 +157,7 @@ type clientState struct {
 	lastHeartbeat   time.Time
 	operationsCount int64 // Total FUSE operations
 	bytesRead       int64 // Total bytes read
+	errorsCount     int64 // Total I/O errors
 	mu              sync.RWMutex
 }
 
@@ -3130,9 +3131,11 @@ func (r *Router) ClientHeartbeat(ctx context.Context, req *pb.ClientHeartbeatReq
 	state.lastHeartbeat = now
 	state.operationsCount = req.OperationsCount
 	state.bytesRead = req.BytesRead
+	state.errorsCount = req.ErrorsCount
 	state.info.LastHeartbeat = now.Unix()
 	state.info.OperationsCount = req.OperationsCount
 	state.info.BytesRead = req.BytesRead
+	state.info.ErrorsCount = req.ErrorsCount
 	state.info.State = pb.ClientState_CLIENT_CONNECTED
 	state.mu.Unlock()
 
@@ -3172,6 +3175,7 @@ func (r *Router) ListClients(ctx context.Context, req *pb.ListClientsRequest) (*
 			LastHeartbeat:   state.info.LastHeartbeat,
 			OperationsCount: state.operationsCount,
 			BytesRead:       state.bytesRead,
+			ErrorsCount:     state.errorsCount,
 		}
 
 		// Update state based on heartbeat freshness

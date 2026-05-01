@@ -59,6 +59,7 @@ func main() {
 	kvsDataDir := flag.String("kvs-data-dir", "", "Embedded KVS data directory (empty disables KVS-backed repositories)")
 	kvsAPIAddr := flag.String("kvs-api-addr", "", "Dialable gRPC address for this node's embedded KVS service (defaults to --addr)")
 	kvsRaftAddr := flag.String("kvs-raft-addr", "", "Raft address for the embedded KVS store (empty keeps the embedded KVS store local-only)")
+	kvsRaftAdvertiseAddr := flag.String("kvs-raft-advertise-addr", "", "Advertised Raft address for the embedded KVS store (defaults to --kvs-raft-addr)")
 	kvsBootstrap := flag.Bool("kvs-bootstrap", false, "Bootstrap this node as the initial embedded KVS raft cluster member")
 	kvsMaxHotVersions := flag.Int("kvs-max-hot-versions", 5, "Maximum number of hot versions retained in the embedded KVS store")
 	var kvsPeers stringSlice
@@ -116,6 +117,10 @@ func main() {
 		logger.Error("invalid kvs configuration", "error", "--kvs-bootstrap requires --kvs-raft-addr")
 		os.Exit(1)
 	}
+	if strings.TrimSpace(*kvsRaftAdvertiseAddr) != "" && *kvsRaftAddr == "" {
+		logger.Error("invalid kvs configuration", "error", "--kvs-raft-advertise-addr requires --kvs-raft-addr")
+		os.Exit(1)
+	}
 	if strings.TrimSpace(*kvsDataDir) != "" {
 		peerDefs, err := parseKVSPeers(kvsPeers)
 		if err != nil {
@@ -130,6 +135,7 @@ func main() {
 			NodeID:         *nodeID,
 			DataDir:        *kvsDataDir,
 			RaftAddress:    strings.TrimSpace(*kvsRaftAddr),
+			RaftAdvertise:  strings.TrimSpace(*kvsRaftAdvertiseAddr),
 			APIAddress:     apiAddr,
 			Peers:          peerDefs,
 			Bootstrap:      *kvsBootstrap,
@@ -146,6 +152,7 @@ func main() {
 			"data_dir", *kvsDataDir,
 			"api_addr", apiAddr,
 			"raft_addr", strings.TrimSpace(*kvsRaftAddr),
+			"raft_advertise_addr", strings.TrimSpace(*kvsRaftAdvertiseAddr),
 			"peer_count", len(peerDefs),
 			"bootstrap", *kvsBootstrap)
 	}

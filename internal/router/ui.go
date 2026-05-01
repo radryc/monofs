@@ -6,8 +6,8 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"io"
+	"io/fs"
 	"net/http"
 	"sort"
 	"strings"
@@ -19,8 +19,8 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-//go:embed templates/*
-var templates embed.FS
+//go:embed ui/dist
+var spaFS embed.FS
 
 //go:embed static/*
 var staticFiles embed.FS
@@ -61,19 +61,6 @@ func (s *mockIngestStream) SetTrailer(metadata.MD) {
 // ServeHTTP returns an HTTP handler for the web UI.
 func (r *Router) ServeHTTP() http.Handler {
 	mux := http.NewServeMux()
-
-	// Page routes
-	mux.HandleFunc("/", r.handleDashboard)
-	mux.HandleFunc("/cluster", r.handleClusterPage)
-	mux.HandleFunc("/clients", r.handleClientsPage)
-	mux.HandleFunc("/performance", r.handlePerformancePage)
-	mux.HandleFunc("/replication", r.handleReplicationPage)
-	mux.HandleFunc("/repositories", r.handleRepositoriesPage)
-	mux.HandleFunc("/ingest", r.handleIngestPage)
-	mux.HandleFunc("/search", r.handleSearchPage)
-	mux.HandleFunc("/indexer", r.handleIndexerPage)
-	mux.HandleFunc("/fetchers", r.handleFetchersPage)
-	mux.HandleFunc("/dependencies", r.handleDependenciesPage)
 
 	// API routes
 	mux.HandleFunc("/api/ingest", r.handleIngest)
@@ -116,76 +103,49 @@ func (r *Router) ServeHTTP() http.Handler {
 	// Static files (logo, etc.)
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
 
+	// SPA — serve Vue dist; fall back to index.html for all non-API paths
+	dist, err := fs.Sub(spaFS, "ui/dist")
+	if err != nil {
+		panic("spaFS sub: " + err.Error())
+	}
+	fileServer := http.FileServer(http.FS(dist))
+	mux.HandleFunc("/assets/", func(w http.ResponseWriter, req *http.Request) {
+		fileServer.ServeHTTP(w, req)
+	})
+	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, req *http.Request) {
+		fileServer.ServeHTTP(w, req)
+	})
+	mux.HandleFunc("/icons.svg", func(w http.ResponseWriter, req *http.Request) {
+		fileServer.ServeHTTP(w, req)
+	})
+	mux.HandleFunc("/", r.handleSPA(dist))
+
 	return mux
 }
 
-func (r *Router) handleDashboard(w http.ResponseWriter, req *http.Request) {
-	// Only match exact root path
-	if req.URL.Path != "/" {
-		http.NotFound(w, req)
-		return
-	}
-	r.renderPage(w, "dashboard", "Dashboard")
-}
-
-func (r *Router) handleClusterPage(w http.ResponseWriter, req *http.Request) {
-	r.renderPage(w, "cluster", "Cluster")
-}
-
-func (r *Router) handleClientsPage(w http.ResponseWriter, req *http.Request) {
-	r.renderPage(w, "clients", "Clients")
-}
-
-func (r *Router) handlePerformancePage(w http.ResponseWriter, req *http.Request) {
-	r.renderPage(w, "performance", "Performance")
-}
-
-func (r *Router) handleReplicationPage(w http.ResponseWriter, req *http.Request) {
-	r.renderPage(w, "replication", "Replication")
-}
-
-func (r *Router) handleRepositoriesPage(w http.ResponseWriter, req *http.Request) {
-	r.renderPage(w, "repositories", "Repositories")
-}
-
-func (r *Router) handleIngestPage(w http.ResponseWriter, req *http.Request) {
-	r.renderPage(w, "ingest", "Ingest")
-}
-
-func (r *Router) handleSearchPage(w http.ResponseWriter, req *http.Request) {
-	r.renderPage(w, "search", "Search")
-}
-
-func (r *Router) handleIndexerPage(w http.ResponseWriter, req *http.Request) {
-	r.renderPage(w, "indexer", "Indexer")
-}
-
-func (r *Router) handleFetchersPage(w http.ResponseWriter, req *http.Request) {
-	r.renderPage(w, "fetchers", "Fetchers")
-}
-
-func (r *Router) handleDependenciesPage(w http.ResponseWriter, req *http.Request) {
-	r.renderPage(w, "dependencies", "Dependencies")
-}
-
-func (r *Router) renderPage(w http.ResponseWriter, page, title string) {
-	tmpl, err := template.ParseFS(templates,
-		"templates/layout.html",
-		"templates/"+page+".html",
-	)
-	if err != nil {
-		http.Error(w, "Failed to load template: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	data := map[string]string{
-		"Page":  page,
-		"Title": title,
-	}
-
-	if err := tmpl.Execute(w, data); err != nil {
-		http.Error(w, "Failed to render template: "+err.Error(), http.StatusInternalServerError)
-		return
+// handleSPA serves the Vue SPA index.html for all non-asset routes.
+func (r *Router) handleSPA(dist fs.FS) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		// Try to serve the requested file first
+		path := strings.TrimPrefix(req.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		f, err := dist.Open(path)
+		if err == nil {
+			f.Close()
+			http.FileServer(http.FS(dist)).ServeHTTP(w, req)
+			return
+		}
+		// SPA fallback — serve index.html
+		index, err := dist.Open("index.html")
+		if err != nil {
+			http.Error(w, "UI not built", http.StatusServiceUnavailable)
+			return
+		}
+		defer index.Close()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		http.ServeContent(w, req, "index.html", time.Time{}, index.(io.ReadSeeker))
 	}
 }
 
