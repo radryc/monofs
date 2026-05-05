@@ -9,8 +9,8 @@ defineProps<{
 </script>
 
 <template>
-  <div class="bg-slate-900/60 backdrop-blur-sm border border-slate-700/40 rounded-lg px-3 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-    <div class="flex items-center gap-1.5 min-w-0 flex-1">
+  <div class="bg-slate-900/60 backdrop-blur-sm border border-slate-700/40 rounded-lg px-3 py-2.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+    <div class="flex items-center gap-1.5 min-w-0">
       <div v-if="icon" class="text-base leading-none shrink-0">{{ icon }}</div>
       <div class="text-xs text-slate-400 truncate">{{ label }}</div>
     </div>

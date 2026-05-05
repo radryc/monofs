@@ -29,18 +29,21 @@ export function useAutoRefresh(fn: () => void | Promise<void>, intervalMs: numbe
 /**
  * Format bytes into human-readable string
  */
-export function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
+export function formatBytes(bytes?: number | null): string {
+  const value = Number(bytes ?? 0)
+  if (!Number.isFinite(value) || value <= 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
+  const i = Math.min(Math.floor(Math.log(value) / Math.log(k)), sizes.length - 1)
+  return `${parseFloat((value / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
 }
 
-export function formatNumber(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
+export function formatNumber(n?: number | null): string {
+  const value = Number(n ?? 0)
+  if (!Number.isFinite(value)) return '0'
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
+  return String(value)
 }
 
 export function formatDate(d: string): string {

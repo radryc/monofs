@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -19,6 +20,9 @@ import (
 	"github.com/radryc/monofs/internal/router"
 	"github.com/radryc/monofs/internal/storage"
 	gitstorage "github.com/radryc/monofs/internal/storage/git"
+	"github.com/radryc/monofs/internal/telemetry"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 )
@@ -72,16 +76,42 @@ func main() {
 		encryptionKeyHex = flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
 	)
 	flag.Parse()
+	telemetryCfg, err := telemetry.LoadConfig("monofs-router")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load telemetry config: %v\n", err)
+		os.Exit(1)
+	}
+	telemetryHandle, err := telemetry.Setup(context.Background(), telemetryCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "setup telemetry: %v\n", err)
+		os.Exit(1)
+	}
+	if telemetryHandle.Enabled() {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := telemetryHandle.Shutdown(shutdownCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "shutdown telemetry: %v\n", err)
+			}
+		}()
+	}
 
 	// Setup logger
 	level := slog.LevelInfo
 	if *debug {
 		level = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	var handler slog.Handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: level,
-	}))
+	})
+	if telemetryHandle.Enabled() {
+		handler = telemetry.WrapSlogHandler(handler, "monofs/router")
+	}
+	logger := slog.New(handler)
 	slog.SetDefault(logger)
+	if telemetryHandle.Enabled() {
+		telemetry.EmitInfo(context.Background(), "monofs/router", "monofs router telemetry enabled")
+	}
 
 	logger.Info("starting monofs-router",
 		"version", Version,
@@ -187,6 +217,7 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second, // Allow pings every 5s (prevents too_many_pings)
 			PermitWithoutStream: true,            // Allow pings even when no streams active
@@ -211,6 +242,9 @@ func main() {
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", *httpPort),
 		Handler: r.ServeHTTP(),
+	}
+	if telemetryHandle.Enabled() {
+		httpServer.Handler = otelhttp.NewHandler(httpServer.Handler, "monofs-router-http")
 	}
 
 	var nativeListener net.Listener

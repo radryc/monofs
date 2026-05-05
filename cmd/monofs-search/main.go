@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -9,9 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/search"
+	"github.com/radryc/monofs/internal/telemetry"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -40,15 +44,41 @@ func main() {
 		fmt.Printf("monofs-search %s (commit: %s, built: %s)\n", Version, Commit, BuildTime)
 		os.Exit(0)
 	}
+	telemetryCfg, err := telemetry.LoadConfig("monofs-search")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load telemetry config: %v\n", err)
+		os.Exit(1)
+	}
+	telemetryHandle, err := telemetry.Setup(context.Background(), telemetryCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "setup telemetry: %v\n", err)
+		os.Exit(1)
+	}
+	if telemetryHandle.Enabled() {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := telemetryHandle.Shutdown(shutdownCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "shutdown telemetry: %v\n", err)
+			}
+		}()
+	}
 
 	// Setup logging
 	logLevel := slog.LevelInfo
 	if *debug {
 		logLevel = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	var handler slog.Handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: logLevel,
-	}))
+	})
+	if telemetryHandle.Enabled() {
+		handler = telemetry.WrapSlogHandler(handler, "monofs/search")
+	}
+	logger := slog.New(handler)
+	if telemetryHandle.Enabled() {
+		telemetry.EmitInfo(context.Background(), "monofs/search", "monofs search telemetry enabled")
+	}
 
 	logger.Info("starting monofs-search",
 		"version", Version,
@@ -77,6 +107,7 @@ func main() {
 
 	// Create gRPC server
 	grpcServer := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.MaxRecvMsgSize(100*1024*1024), // 100MB max message size
 		grpc.MaxSendMsgSize(100*1024*1024),
 	)
