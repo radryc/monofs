@@ -916,20 +916,32 @@ func (r *Router) GetNodeForFile(ctx context.Context, req *pb.GetNodeForFileReque
 
 // QueryLogs implements pb.MonoFSRouterServer.
 func (r *Router) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
-	client, err := r.anyHealthyNodeClient()
+	resultsJSON, err := r.fanoutJSONQuery(ctx, int(req.GetLimit()), "merge log results", func(client pb.MonoFSClient) ([]byte, error) {
+		resp, err := client.QueryLogs(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		return resp.GetResultsJson(), nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	return client.QueryLogs(ctx, req)
+	return &pb.QueryLogsResponse{ResultsJson: resultsJSON}, nil
 }
 
 // QueryMetrics implements pb.MonoFSRouterServer.
 func (r *Router) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
-	client, err := r.anyHealthyNodeClient()
+	resultsJSON, err := r.fanoutJSONQuery(ctx, 0, "merge metric results", func(client pb.MonoFSClient) ([]byte, error) {
+		resp, err := client.QueryMetrics(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		return resp.GetResultsJson(), nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	return client.QueryMetrics(ctx, req)
+	return &pb.QueryMetricsResponse{ResultsJson: resultsJSON}, nil
 }
 
 // QueryTraces implements pb.MonoFSRouterServer.
@@ -937,52 +949,22 @@ func (r *Router) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 // distributed across shards are always returned regardless of which node
 // holds the chunks.
 func (r *Router) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
-	clients := r.allHealthyNodeClients()
-	if len(clients) == 0 {
-		return nil, fmt.Errorf("no healthy nodes available")
-	}
-	if len(clients) == 1 {
-		return clients[0].QueryTraces(ctx, req)
-	}
-
-	type result struct {
-		resp *pb.QueryTracesResponse
-		err  error
-	}
-	results := make(chan result, len(clients))
-	for _, c := range clients {
-		go func(cl pb.MonoFSClient) {
-			resp, err := cl.QueryTraces(ctx, req)
-			results <- result{resp, err}
-		}(c)
-	}
-
-	var merged []json.RawMessage
-	for range clients {
-		res := <-results
-		if res.err != nil {
-			continue
+	resultsJSON, err := r.fanoutJSONQuery(ctx, int(req.GetLimit()), "merge trace results", func(client pb.MonoFSClient) ([]byte, error) {
+		resp, err := client.QueryTraces(ctx, req)
+		if err != nil {
+			return nil, err
 		}
-		var spans []json.RawMessage
-		if err := json.Unmarshal(res.resp.ResultsJson, &spans); err != nil {
-			continue
-		}
-		merged = append(merged, spans...)
-	}
-
-	if len(merged) == 0 {
-		return &pb.QueryTracesResponse{ResultsJson: []byte("[]")}, nil
-	}
-	out, err := json.Marshal(merged)
+		return resp.GetResultsJson(), nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("merge trace results: %w", err)
+		return nil, err
 	}
-	return &pb.QueryTracesResponse{ResultsJson: out}, nil
+	return &pb.QueryTracesResponse{ResultsJson: resultsJSON}, nil
 }
 
 // IngestLogs implements pb.MonoFSRouterServer.
 func (r *Router) IngestLogs(ctx context.Context, req *pb.IngestLogsRequest) (*pb.IngestLogsResponse, error) {
-	client, err := r.anyHealthyNodeClient()
+	client, err := r.telemetryNodeClient("logs", req.GetChunkId())
 	if err != nil {
 		return nil, err
 	}
@@ -991,7 +973,7 @@ func (r *Router) IngestLogs(ctx context.Context, req *pb.IngestLogsRequest) (*pb
 
 // IngestMetrics implements pb.MonoFSRouterServer.
 func (r *Router) IngestMetrics(ctx context.Context, req *pb.IngestMetricsRequest) (*pb.IngestMetricsResponse, error) {
-	client, err := r.anyHealthyNodeClient()
+	client, err := r.telemetryNodeClient("metrics", req.GetChunkId())
 	if err != nil {
 		return nil, err
 	}
@@ -1000,11 +982,120 @@ func (r *Router) IngestMetrics(ctx context.Context, req *pb.IngestMetricsRequest
 
 // IngestTraces implements pb.MonoFSRouterServer.
 func (r *Router) IngestTraces(ctx context.Context, req *pb.IngestTracesRequest) (*pb.IngestTracesResponse, error) {
-	client, err := r.anyHealthyNodeClient()
+	client, err := r.telemetryNodeClient("traces", req.GetChunkId())
 	if err != nil {
 		return nil, err
 	}
 	return client.IngestTraces(ctx, req)
+}
+
+func (r *Router) fanoutJSONQuery(ctx context.Context, limit int, mergeErrPrefix string, query func(pb.MonoFSClient) ([]byte, error)) ([]byte, error) {
+	clients := r.allHealthyNodeClients()
+	if len(clients) == 0 {
+		return nil, fmt.Errorf("no healthy nodes available")
+	}
+	if len(clients) == 1 {
+		return query(clients[0])
+	}
+
+	type result struct {
+		payload []byte
+		err     error
+	}
+	results := make(chan result, len(clients))
+	for _, c := range clients {
+		go func(cl pb.MonoFSClient) {
+			payload, err := query(cl)
+			results <- result{payload: payload, err: err}
+		}(c)
+	}
+
+	var (
+		merged   []json.RawMessage
+		firstErr error
+		success  bool
+	)
+	for range clients {
+		res := <-results
+		if res.err != nil {
+			if firstErr == nil {
+				firstErr = res.err
+			}
+			continue
+		}
+		success = true
+		var items []json.RawMessage
+		if err := json.Unmarshal(res.payload, &items); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", mergeErrPrefix, err)
+			}
+			continue
+		}
+		merged = append(merged, items...)
+	}
+
+	if !success && firstErr != nil {
+		return nil, firstErr
+	}
+	if limit > 0 && len(merged) > limit {
+		merged = merged[:limit]
+	}
+	if len(merged) == 0 {
+		return []byte("[]"), nil
+	}
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", mergeErrPrefix, err)
+	}
+	return out, nil
+}
+
+func telemetryShardKey(signal, chunkID string) string {
+	// Tenant is not carried in MonoFS telemetry RPCs yet, so shard under the
+	// current global/default tenant namespace to keep placement stable.
+	return "telemetry:tenant=default:signal=" + signal + ":chunk=" + chunkID
+}
+
+func (r *Router) telemetryNodeID(signal, chunkID string) (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	nodes := make([]sharding.Node, 0, len(r.nodes))
+	for _, state := range r.nodes {
+		if state.info.Healthy && state.status == NodeActive && state.client != nil {
+			nodes = append(nodes, sharding.Node{
+				ID:      state.info.NodeId,
+				Address: state.info.Address,
+				Weight:  state.info.Weight,
+				Healthy: true,
+			})
+		}
+	}
+	if len(nodes) == 0 {
+		return "", fmt.Errorf("no healthy nodes available")
+	}
+
+	sharder := sharding.NewHRW(nodes)
+	node := sharder.GetNode(telemetryShardKey(signal, chunkID))
+	if node == nil {
+		return "", fmt.Errorf("no healthy nodes available")
+	}
+	return node.ID, nil
+}
+
+func (r *Router) telemetryNodeClient(signal, chunkID string) (pb.MonoFSClient, error) {
+	nodeID, err := r.telemetryNodeID(signal, chunkID)
+	if err != nil {
+		return nil, err
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	state := r.nodes[nodeID]
+	if state == nil || !state.info.Healthy || state.status != NodeActive || state.client == nil {
+		return nil, fmt.Errorf("no healthy nodes available")
+	}
+	return state.client, nil
 }
 
 // anyHealthyNodeClient returns the gRPC client for any healthy active node.

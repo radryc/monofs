@@ -114,7 +114,7 @@ function timeAgoUnix(ts: number): string {
     <PageHeader title="Dashboard" subtitle="Overview across all routers in your MonoFS deployment" />
 
     <!-- Stat cards -->
-    <div class="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-12 gap-2 mb-6">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 mb-6">
       <StatCard v-for="stat in [
         { icon: '🧭', label: 'Routers',          value: routers?.routers?.length ?? '-' },
         { icon: '🌐', label: 'MetaStore Nodes',   value: loading ? '…' : totalNodes },
@@ -254,18 +254,18 @@ function timeAgoUnix(ts: number): string {
         <template #header>
           <h2 class="text-sm font-semibold text-slate-200">Fetcher Cluster</h2>
         </template>
-        <div class="px-6 py-5 space-y-2 text-sm">
+        <div class="px-6 py-5 space-y-2.5 text-xs">
           <div class="flex justify-between">
-            <span class="text-slate-400">Healthy</span>
-            <span class="text-slate-200">{{ fetcherStats?.healthy_fetchers ?? '-' }}/{{ fetcherStats?.total_fetchers ?? '-' }}</span>
+            <span class="text-slate-500">Healthy</span>
+            <span class="text-slate-300 font-medium tabular-nums">{{ fetcherStats?.healthy_fetchers ?? '-' }}/{{ fetcherStats?.total_fetchers ?? '-' }}</span>
           </div>
           <div class="flex justify-between">
-            <span class="text-slate-400">Cache Hit</span>
-            <span class="text-slate-200">{{ fetcherStats ? `${((fetcherStats.aggregated_hit_rate || 0) * 100).toFixed(1)}%` : '-' }}</span>
+            <span class="text-slate-500">Cache Hit</span>
+            <span class="text-slate-300 font-medium tabular-nums">{{ fetcherStats ? `${((fetcherStats.aggregated_hit_rate || 0) * 100).toFixed(1)}%` : '-' }}</span>
           </div>
           <div class="flex justify-between">
-            <span class="text-slate-400">Data Served</span>
-            <span class="text-slate-200">{{ fetcherStats ? formatBytes(fetcherStats.total_bytes_served) : '-' }}</span>
+            <span class="text-slate-500">Data Served</span>
+            <span class="text-slate-300 font-medium tabular-nums">{{ fetcherStats ? formatBytes(fetcherStats.total_bytes_served) : '-' }}</span>
           </div>
         </div>
       </DataCard>
@@ -275,18 +275,18 @@ function timeAgoUnix(ts: number): string {
         <template #header>
           <h2 class="text-sm font-semibold text-slate-200">Search Engine</h2>
         </template>
-        <div class="px-6 py-5 space-y-2 text-sm">
+        <div class="px-6 py-5 space-y-2.5 text-xs">
           <div class="flex justify-between">
-            <span class="text-slate-400">Indexes</span>
-            <span class="text-slate-200">{{ searchStats?.total_indexes ?? '-' }}</span>
+            <span class="text-slate-500">Indexes</span>
+            <span class="text-slate-300 font-medium tabular-nums">{{ searchStats?.total_indexes ?? '-' }}</span>
           </div>
           <div class="flex justify-between">
-            <span class="text-slate-400">Searches</span>
-            <span class="text-slate-200">{{ searchStats ? formatNumber(searchStats.searches_total) : '-' }}</span>
+            <span class="text-slate-500">Searches</span>
+            <span class="text-slate-300 font-medium tabular-nums">{{ searchStats ? formatNumber(searchStats.searches_total) : '-' }}</span>
           </div>
           <div class="flex justify-between">
-            <span class="text-slate-400">Avg Time</span>
-            <span class="text-slate-200">{{ searchStats ? `${searchStats.avg_search_duration_ms?.toFixed(0) ?? 0}ms` : '-' }}</span>
+            <span class="text-slate-500">Avg Time</span>
+            <span class="text-slate-300 font-medium tabular-nums">{{ searchStats ? `${searchStats.avg_search_duration_ms?.toFixed(0) ?? 0}ms` : '-' }}</span>
           </div>
         </div>
       </DataCard>

@@ -22,6 +22,16 @@ useAutoRefresh(async () => {
 
 const failedIndexes = computed(() => (indexes.value?.indexes ?? []).filter(i => i.status === 4))
 const goodIndexes = computed(() => (indexes.value?.indexes ?? []).filter(i => i.status !== 4))
+const safeStats = computed(() => ({
+  total_indexes: stats.value?.total_indexes ?? 0,
+  jobs_failed: stats.value?.jobs_failed ?? 0,
+  jobs_rejected: stats.value?.jobs_rejected ?? 0,
+  searches_total: stats.value?.searches_total ?? 0,
+  total_files_indexed: stats.value?.total_files_indexed ?? 0,
+  total_index_size_bytes: stats.value?.total_index_size_bytes ?? 0,
+  queue_length: stats.value?.queue_length ?? 0,
+  active_jobs: stats.value?.active_jobs ?? 0,
+}))
 
 async function rebuild(storageId?: string) {
   const key = storageId || '__all__'
@@ -80,22 +90,22 @@ function statusLabel(s: string | number): { label: string; class: string } {
 
     <!-- Stat cards row 1 -->
     <div v-if="stats" class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
-      <StatCard icon="📚" label="Indexed Repos" :value="stats.total_indexes" />
+      <StatCard icon="📚" label="Indexed Repos" :value="safeStats.total_indexes" />
       <StatCard icon="❌" label="Failed Jobs"
-        :value="stats.jobs_failed"
-        :class="stats.jobs_failed > 0 ? 'text-rose-400' : ''" />
+        :value="safeStats.jobs_failed"
+        :class="safeStats.jobs_failed > 0 ? 'text-rose-400' : ''" />
       <StatCard icon="⚠️" label="Rejected (Queue Full)"
-        :value="stats.jobs_rejected ?? 0"
-        :class="(stats.jobs_rejected ?? 0) > 0 ? 'text-amber-400' : ''" />
-      <StatCard icon="🔍" label="Searches" :value="formatNumber(stats.searches_total)" />
+        :value="safeStats.jobs_rejected"
+        :class="safeStats.jobs_rejected > 0 ? 'text-amber-400' : ''" />
+      <StatCard icon="🔍" label="Searches" :value="formatNumber(safeStats.searches_total)" />
     </div>
 
     <!-- Stat cards row 2 -->
     <div v-if="stats" class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-      <StatCard icon="📄" label="Total Files" :value="formatNumber(stats.total_files_indexed)" />
-      <StatCard icon="💾" label="Index Size" :value="formatBytes(stats.total_index_size_bytes)" />
-      <StatCard icon="⏳" label="Queue Length" :value="stats.queue_length" />
-      <StatCard icon="⚙️" label="Active Jobs" :value="stats.active_jobs" />
+      <StatCard icon="📄" label="Total Files" :value="formatNumber(safeStats.total_files_indexed)" />
+      <StatCard icon="💾" label="Index Size" :value="formatBytes(safeStats.total_index_size_bytes)" />
+      <StatCard icon="⏳" label="Queue Length" :value="safeStats.queue_length" />
+      <StatCard icon="⚙️" label="Active Jobs" :value="safeStats.active_jobs" />
     </div>
 
     <!-- Failed Indexes section (visible only when there are errors) -->

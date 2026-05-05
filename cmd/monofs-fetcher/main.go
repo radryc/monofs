@@ -41,6 +41,8 @@ import (
 	"github.com/radryc/monofs/internal/storage"
 	"github.com/radryc/monofs/internal/storage/blob"
 	storagegit "github.com/radryc/monofs/internal/storage/git"
+	"github.com/radryc/monofs/internal/telemetry"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -201,6 +203,25 @@ func main() {
 	if *logLevel != "" {
 		cfg.LogLevel = *logLevel
 	}
+	telemetryCfg, err := telemetry.LoadConfig("monofs-fetcher")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load telemetry config: %v\n", err)
+		os.Exit(1)
+	}
+	telemetryHandle, err := telemetry.Setup(context.Background(), telemetryCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "setup telemetry: %v\n", err)
+		os.Exit(1)
+	}
+	if telemetryHandle.Enabled() {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := telemetryHandle.Shutdown(shutdownCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "shutdown telemetry: %v\n", err)
+			}
+		}()
+	}
 
 	// Derive blob storage path from cache dir if not set explicitly
 	if cfg.Storage.LocalPath == "" {
@@ -219,8 +240,15 @@ func main() {
 	default:
 		level = slog.LevelInfo
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	var handler slog.Handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	if telemetryHandle.Enabled() {
+		handler = telemetry.WrapSlogHandler(handler, "monofs/fetcher")
+	}
+	logger := slog.New(handler)
 	slog.SetDefault(logger)
+	if telemetryHandle.Enabled() {
+		telemetry.EmitInfo(context.Background(), "monofs/fetcher", "monofs fetcher telemetry enabled")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -315,6 +343,7 @@ func main() {
 
 	// Create gRPC server
 	grpcServer := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.MaxRecvMsgSize(100*1024*1024), // 100MB max message
 		grpc.MaxSendMsgSize(100*1024*1024),
 	)
