@@ -21,6 +21,7 @@ import (
 
 // Lookup implements the Lookup RPC.
 func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupResponse, error) {
+	serverOpsTotal.WithLabelValues("lookup").Inc()
 	path := req.ParentPath
 	if path == "" && req.Name != "" {
 		path = req.Name
@@ -237,6 +238,7 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 
 // GetAttr implements the GetAttr RPC.
 func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAttrResponse, error) {
+	serverOpsTotal.WithLabelValues("getattr").Inc()
 	path := req.Path
 	s.logger.Debug("getattr request", "path", path)
 
@@ -498,6 +500,7 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 
 // Read implements the Read RPC - lazy loads from Git repo.
 func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.DataChunk]) error {
+	serverOpsTotal.WithLabelValues("read").Inc()
 	path := req.Path
 	s.logger.Info("read request", "path", path, "offset", req.Offset, "size", req.Size)
 
@@ -544,6 +547,8 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 			if err := stream.Send(&pb.DataChunk{Data: chunk, Offset: currentOffset}); err != nil {
 				return err
 			}
+			serverReadBytesTotal.Add(float64(len(chunk)))
+			serverKVSReadOpsTotal.WithLabelValues("read").Inc()
 			content = content[len(chunk):]
 			currentOffset += int64(len(chunk))
 		}
@@ -712,6 +717,7 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		}); err != nil {
 			return err
 		}
+		serverReadBytesTotal.Add(float64(len(chunk)))
 
 		content = content[len(chunk):]
 		currentOffset += int64(len(chunk))
@@ -735,6 +741,7 @@ func (s *Server) Write(stream grpc.ClientStreamingServer[pb.WriteRequest, pb.Wri
 // This is used to clean up old file copies after files have been moved to new nodes.
 // Important: This is ONLY called during rebalancing cleanup, NOT during recovery.
 func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb.DeleteFileResponse, error) {
+	serverOpsTotal.WithLabelValues("delete").Inc()
 	if handledBackend := s.repositoryStorageBackend(req.StorageId, ""); handledBackend == storageBackendKVS {
 		if err := s.deleteKVSFile(ctx, req.StorageId, req.FilePath); err != nil {
 			return &pb.DeleteFileResponse{Success: false, Message: err.Error()}, err

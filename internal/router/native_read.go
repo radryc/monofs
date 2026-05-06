@@ -24,6 +24,8 @@ func (r *Router) NativeRead(ctx context.Context, path string, offset, size int64
 	for _, target := range rankedTargets {
 		data, err := r.nativeReadFromTarget(ctx, target.client, target.id, path, offset, size)
 		if err == nil {
+			routerNativeReadOpsTotal.Inc()
+			routerNativeReadBytesTotal.Add(float64(len(data)))
 			return data, nil
 		}
 		lastErr = err
@@ -33,6 +35,8 @@ func (r *Router) NativeRead(ctx context.Context, path string, offset, size int64
 		for _, target := range r.nativeRouteTargets(ctx, path) {
 			data, err := r.nativeReadFromTarget(ctx, target.client, target.id, path, offset, size)
 			if err == nil {
+				routerNativeReadOpsTotal.Inc()
+				routerNativeReadBytesTotal.Add(float64(len(data)))
 				return data, nil
 			}
 		}

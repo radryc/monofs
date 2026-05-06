@@ -70,6 +70,7 @@ func normalizeRepoID(repoURL string) string {
 
 // IngestRepository implements the IngestRepository RPC with streaming progress.
 func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_IngestRepositoryServer) error {
+	routerIngestRepositoriesTotal.Inc()
 	// Enforce ingestion whitelist
 	if r.whitelist.Enabled() {
 		clientID := extractClientID(stream.Context())
@@ -1054,5 +1055,6 @@ initComplete:
 	}
 
 	sendProgress(pb.IngestProgress_COMPLETED, fmt.Sprintf("Repository ingested successfully: %d files", filesIngested), filesIngested, filesIngested, "")
+	routerIngestFilesTotal.Add(float64(filesIngested))
 	return nil
 }

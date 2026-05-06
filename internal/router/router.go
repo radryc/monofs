@@ -1505,6 +1505,9 @@ func (r *Router) Close() error {
 	close(r.stopUI)
 	r.stopFetcherReconnectLoop()
 
+	// Flush and stop the guardian version store background ticker.
+	r.guardianVersions.close()
+
 	// Close search connection
 	if r.searchConn != nil {
 		r.searchConn.Close()

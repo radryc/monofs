@@ -143,6 +143,7 @@ func (s *Service) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_Fetc
 	reader, size, err := backend.FetchBlobStream(ctx, fetchReq)
 	if err != nil {
 		s.logger.Error("fetch failed", "content_id", req.ContentId, "error", err)
+		fetcherBlobErrorsTotal.WithLabelValues(sourceType.String()).Inc()
 		return err
 	}
 	defer reader.Close()
@@ -172,7 +173,8 @@ func (s *Service) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_Fetc
 	}
 
 	s.bytesServed.Add(totalSent)
-	// [CONTENT_AUDIT] Log successful blob fetch at service level
+	fetcherBlobRequestsTotal.WithLabelValues(sourceType.String()).Inc()
+	fetcherBlobBytesTotal.WithLabelValues(sourceType.String()).Add(float64(totalSent))
 	s.logger.Debug("[CONTENT_AUDIT] fetcher_service_complete",
 		"content_id", req.ContentId,
 		"size", size,
@@ -259,6 +261,7 @@ func (s *Service) fetchSingleBlob(ctx context.Context, req *pb.FetchBlobRequest)
 
 	result, err := backend.FetchBlob(ctx, fetchReq)
 	if err != nil {
+		fetcherBlobErrorsTotal.WithLabelValues(sourceType.String()).Inc()
 		return &pb.FetchBlobBatchResponse{
 			ContentId: req.ContentId,
 			Error:     err.Error(),
@@ -267,6 +270,8 @@ func (s *Service) fetchSingleBlob(ctx context.Context, req *pb.FetchBlobRequest)
 
 	latency := time.Since(start).Milliseconds()
 	s.bytesServed.Add(result.Size)
+	fetcherBlobRequestsTotal.WithLabelValues(sourceType.String()).Inc()
+	fetcherBlobBytesTotal.WithLabelValues(sourceType.String()).Add(float64(result.Size))
 
 	return &pb.FetchBlobBatchResponse{
 		ContentId:      req.ContentId,
@@ -280,6 +285,7 @@ func (s *Service) fetchSingleBlob(ctx context.Context, req *pb.FetchBlobRequest)
 // PrefetchBlobs queues blobs for background prefetching.
 func (s *Service) PrefetchBlobs(ctx context.Context, req *pb.PrefetchRequest) (*pb.PrefetchResponse, error) {
 	s.totalRequests.Add(1)
+	fetcherPrefetchRequestsTotal.Inc()
 
 	accepted := int32(0)
 	alreadyCached := int32(0)
@@ -541,6 +547,7 @@ func (s *Service) StoreBlob(ctx context.Context, req *pb.StoreBlobRequest) (*pb.
 		}, nil
 	}
 
+	fetcherStoreBlobBytesTotal.Add(float64(len(req.Content)))
 	s.logger.Debug("stored blob",
 		"blob_hash", req.BlobHash,
 		"size", len(req.Content))
@@ -779,6 +786,8 @@ func (s *Service) StoreArchive(stream pb.BlobFetcher_StoreArchiveServer) error {
 		"chunk_index", chunkIndex,
 		"total_bytes", totalBytes,
 		"files_indexed", filesIndexed)
+	fetcherStoreArchiveBytesTotal.Add(float64(totalBytes))
+	fetcherStoreArchivesTotal.Inc()
 
 	return stream.SendAndClose(&pb.StoreArchiveResponse{
 		Success:      true,

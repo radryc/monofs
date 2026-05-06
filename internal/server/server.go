@@ -662,6 +662,7 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 
 // IngestFile stores file metadata from router ingestion.
 func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb.IngestFileResponse, error) {
+	serverOpsTotal.WithLabelValues("ingest").Inc()
 	meta := req.Metadata
 
 	storageID := meta.StorageId
@@ -829,6 +830,8 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 	}
 
 	s.logger.Info("file ingested successfully", "path", meta.Path, "key", string(key))
+	serverIngestFilesTotal.Inc()
+	serverIngestBytesTotal.Add(float64(meta.Size))
 
 	// Invalidate intermediate directory cache for all prefixes
 	parts := strings.Split(displayPath, "/")
@@ -843,6 +846,7 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 // IngestFileBatch stores multiple file metadata in a single database transaction.
 // This is significantly faster than calling IngestFile repeatedly (10-50x improvement).
 func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchRequest) (*pb.IngestFileBatchResponse, error) {
+	serverOpsTotal.WithLabelValues("ingest_batch").Inc()
 	if len(req.Files) == 0 {
 		return &pb.IngestFileBatchResponse{
 			Success:       true,
@@ -1198,6 +1202,10 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 		"files_ingested", filesIngested,
 		"files_failed", filesFailed,
 		"new_files", newFiles)
+	serverIngestFilesTotal.Add(float64(filesIngested))
+	for _, pf := range prepared {
+		serverIngestBytesTotal.Add(float64(pf.size))
+	}
 
 	// Forward blob content to fetchers synchronously.
 	// We must wait for blobs to be stored before returning, otherwise

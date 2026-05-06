@@ -18,6 +18,7 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.7.2
 	github.com/nutsdb/nutsdb v1.1.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
+	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/prometheus v0.310.1-0.20260320085417-166d20151c0d
 	github.com/radryc/packager v0.0.0-20260314073213-ebce590b0ca7
 	github.com/rydzu/ainfra/kvs v0.0.0
@@ -209,7 +210,6 @@ require (
 	github.com/pjbgf/sha1cd v0.5.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/exporter-toolkit v0.15.1 // indirect

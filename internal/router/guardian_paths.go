@@ -169,6 +169,14 @@ func (r *Router) UpsertGuardianPaths(ctx context.Context, req *pb.UpsertGuardian
 		r.publishLegacyGuardianChange(event)
 	}
 
+	var upsertBytes int
+	for _, write := range req.GetWrites() {
+		upsertBytes += len(write.GetContent())
+	}
+	routerGuardianUpsertBatchesTotal.Inc()
+	routerGuardianUpsertFilesTotal.Add(float64(len(versions)))
+	routerGuardianUpsertBytesTotal.Add(float64(upsertBytes))
+
 	return &pb.UpsertGuardianPathsResponse{
 		Success:         true,
 		BatchRevisionId: batchRevisionID,
@@ -307,6 +315,9 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 		r.publishGuardianLogicalChange(event)
 		r.publishLegacyGuardianChange(event)
 	}
+
+	routerGuardianDeleteBatchesTotal.Inc()
+	routerGuardianDeleteFilesTotal.Add(float64(len(tombstones)))
 
 	return &pb.DeleteGuardianPathsResponse{
 		Success:         true,

@@ -64,7 +64,8 @@ func main() {
 		fetcherAddrs     = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
 		healthInt        = flag.Duration("health-interval", 2*time.Second, "Health check interval")
 		unhealthyThr     = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
-		debug            = flag.Bool("debug", false, "Enable debug logging")
+		debug            = flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
+		logLevel         = flag.String("log-level", "info", "Log level: debug, info, warn, error")
 		guardianStateDir = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
 
 		// Replication and failover configuration
@@ -98,6 +99,14 @@ func main() {
 
 	// Setup logger
 	level := slog.LevelInfo
+	switch *logLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
 	if *debug {
 		level = slog.LevelDebug
 	}
