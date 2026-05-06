@@ -532,6 +532,10 @@ func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Re
 	stats.CacheBytes += written
 	bb.stats.Store(&stats)
 
+	packagerStoreArchiveBytesTotal.Add(float64(written))
+	packagerStoreArchivesTotal.Inc()
+	packagerIndexedBlobsGauge.Add(float64(count))
+
 	return written, count, nil
 }
 
@@ -611,6 +615,9 @@ func (bb *BlobBackend) StoreBlob(blobHash string, content []byte) error {
 		stats.CachedItems++
 		stats.CacheBytes += int64(len(content))
 		bb.stats.Store(&stats)
+
+		packagerStoreBlobsTotal.WithLabelValues("single").Inc()
+		packagerIndexedBlobsGauge.Inc()
 
 		return nil, nil
 	})
@@ -788,6 +795,9 @@ func (w *StoreBlobBatchWriter) sealCurrentArchive() error {
 	stats.CachedItems += int64(len(w.curHashes))
 	stats.CacheBytes += archiveBytes
 	w.bb.stats.Store(&stats)
+
+	packagerStoreBlobsTotal.WithLabelValues("batch").Add(float64(len(w.curHashes)))
+	packagerIndexedBlobsGauge.Add(float64(len(w.curHashes)))
 
 	w.result.ArchivesCreated++
 	w.tmpFile = nil
@@ -1010,6 +1020,7 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 		newStats.CacheMisses++
 		newStats.Errors++
 		bb.stats.Store(&newStats)
+		packagerFetchErrorsTotal.WithLabelValues(string(bb.config.StorageType)).Inc()
 		return nil, fmt.Errorf("blob not found: %s", req.ContentID)
 	}
 
@@ -1017,6 +1028,7 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 	if err != nil {
 		newStats.Errors++
 		bb.stats.Store(&newStats)
+		packagerFetchErrorsTotal.WithLabelValues(string(bb.config.StorageType)).Inc()
 		return nil, fmt.Errorf("open archive for blob %s: %w", req.ContentID, err)
 	}
 
@@ -1024,12 +1036,20 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 	if err != nil {
 		newStats.Errors++
 		bb.stats.Store(&newStats)
+		packagerFetchErrorsTotal.WithLabelValues(string(bb.config.StorageType)).Inc()
 		return nil, fmt.Errorf("read blob %s from archive: %w", req.ContentID, err)
 	}
 
 	newStats.CacheHits++
 	newStats.BytesFetched += int64(len(data))
 	bb.stats.Store(&newStats)
+
+	storageType := string(bb.config.StorageType)
+	if storageType == "" {
+		storageType = "local"
+	}
+	packagerFetchBlobTotal.WithLabelValues(storageType).Inc()
+	packagerFetchBytesTotal.WithLabelValues(storageType).Add(float64(len(data)))
 
 	return &storage.FetchResult{
 		Content:        data,

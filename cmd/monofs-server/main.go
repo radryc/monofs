@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/radryc/monofs/internal/telemetry"
 	kvsgrpc "github.com/rydzu/ainfra/kvs/pkg/grpcserver"
 	"github.com/rydzu/ainfra/kvs/pkg/raftstore"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -50,7 +52,8 @@ func main() {
 	routerAddr := flag.String("router", "", "Router address for failover coordination (optional)")
 	dbPath := flag.String("db-path", "/tmp/monofs-db", "NutsDB database path")
 	gitCache := flag.String("git-cache", "/tmp/monofs-git-cache", "Git repository cache directory")
-	debug := flag.Bool("debug", false, "Enable debug logging")
+	debug := flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
+	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
 
 	// Fetcher configuration
 	var fetcherAddrs stringSlice
@@ -69,6 +72,9 @@ func main() {
 
 	// Doctor telemetry log engine
 	logengineDir := flag.String("logengine-dir", "", "Directory for the doctor telemetry log engine (empty disables)")
+
+	// Metrics
+	metricsAddr := flag.String("metrics-addr", ":9100", "Listen address for Prometheus /metrics endpoint (empty disables)")
 
 	flag.Parse()
 
@@ -99,6 +105,14 @@ func main() {
 
 	// Setup logger
 	level := slog.LevelInfo
+	switch *logLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
 	if *debug {
 		level = slog.LevelDebug
 	}
@@ -177,6 +191,7 @@ func main() {
 		}
 		srv.SetKVSStore(kvsStore)
 		kvsgrpc.Register(grpcServer, kvsStore, kvsgrpc.Config{})
+		kvsStore.StartPurge(context.Background(), 5*time.Minute)
 		logger.Info("embedded kvs enabled",
 			"data_dir", *kvsDataDir,
 			"api_addr", apiAddr,
@@ -230,6 +245,24 @@ func main() {
 
 	// Enable reflection for debugging with grpcurl
 	reflection.Register(grpcServer)
+
+	// Start Prometheus metrics HTTP server (separate from gRPC, since monofs-server has no UI port).
+	if addr := strings.TrimSpace(*metricsAddr); addr != "" {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", promhttp.Handler())
+		metricsServer := &http.Server{Addr: addr, Handler: metricsMux}
+		go func() {
+			logger.Info("metrics server listening", "addr", addr)
+			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("metrics server error", "error", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = metricsServer.Shutdown(shutdownCtx)
+		}()
+	}
 
 	// Start serving in background
 	go func() {

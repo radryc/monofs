@@ -287,6 +287,7 @@ func (s *Server) ingestKVSFiles(ctx context.Context, displayPath string, files [
 	}); err != nil {
 		return 0, int64(len(writes)), status.Errorf(codes.Internal, "kvs ingest failed: %v", err)
 	}
+	serverKVSWriteOpsTotal.WithLabelValues("upsert").Add(float64(len(writes)))
 	return int64(len(writes)), 0, nil
 }
 
@@ -308,6 +309,7 @@ func (s *Server) deleteKVSFile(ctx context.Context, storageID, filePath string) 
 	if err != nil {
 		return status.Errorf(codes.Internal, "kvs delete failed: %v", err)
 	}
+	serverKVSWriteOpsTotal.WithLabelValues("delete").Inc()
 	return nil
 }
 

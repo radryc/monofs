@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,9 +11,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-)
+	"time"
 
-import pb "github.com/radryc/monofs/api/proto"
+	pb "github.com/radryc/monofs/api/proto"
+)
 
 type storedGuardianFileVersion struct {
 	LogicalPath     string `json:"logical_path"`
@@ -26,7 +28,8 @@ type storedGuardianFileVersion struct {
 	PrincipalID     string `json:"principal_id"`
 	Reason          string `json:"reason"`
 	CorrelationID   string `json:"correlation_id,omitempty"`
-	Content         []byte `json:"content,omitempty"`
+	// Content is kept in memory only; not persisted to avoid unbounded snapshot growth.
+	Content []byte `json:"-"`
 }
 
 type guardianVersionSnapshot struct {
@@ -49,15 +52,19 @@ type guardianVersionCommit struct {
 
 type guardianVersionStore struct {
 	mu          sync.RWMutex
-	records     map[string][]*storedGuardianFileVersion
-	current     map[string]string
+	records     map[string][]*storedGuardianFileVersion // asset paths: full history, persisted
+	current     map[string]string                       // asset paths: logicalPath → versionID
+	ephemeral   map[string]*storedGuardianFileVersion   // machinery paths: current version only, never persisted
 	persistPath string
+	dirty       bool
+	stopFlush   context.CancelFunc
 }
 
 func newGuardianVersionStore(stateDir string) (*guardianVersionStore, error) {
 	store := &guardianVersionStore{
-		records: make(map[string][]*storedGuardianFileVersion),
-		current: make(map[string]string),
+		records:   make(map[string][]*storedGuardianFileVersion),
+		current:   make(map[string]string),
+		ephemeral: make(map[string]*storedGuardianFileVersion),
 	}
 	if strings.TrimSpace(stateDir) == "" {
 		return store, nil
@@ -69,7 +76,44 @@ func newGuardianVersionStore(stateDir string) (*guardianVersionStore, error) {
 	if err := store.load(); err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	store.stopFlush = cancel
+	go store.flushLoop(ctx)
 	return store, nil
+}
+
+// flushLoop writes the snapshot to disk every 5 s if the store has been dirtied
+// since the last flush. This coalesces per-file saves from a batch into a single
+// write, eliminating the per-commit O(n) amplification.
+func (s *guardianVersionStore) flushLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.mu.Lock()
+			if s.dirty {
+				_ = s.saveLocked()
+				s.dirty = false
+			}
+			s.mu.Unlock()
+		case <-ctx.Done():
+			// Final flush on shutdown.
+			s.mu.Lock()
+			if s.dirty {
+				_ = s.saveLocked()
+			}
+			s.mu.Unlock()
+			return
+		}
+	}
+}
+
+// close shuts down the background flush goroutine.
+func (s *guardianVersionStore) close() {
+	if s.stopFlush != nil {
+		s.stopFlush()
+	}
 }
 
 func (s *guardianVersionStore) load() error {
@@ -97,7 +141,46 @@ func (s *guardianVersionStore) load() error {
 	if snapshot.Current != nil {
 		s.current = snapshot.Current
 	}
+	// Prune any machinery paths that were persisted before the asset/ephemeral
+	// split was introduced. This shrinks the state file on the next flush.
+	s.pruneMachineryLocked()
 	return nil
+}
+
+// pruneMachineryLocked removes machinery paths from the loaded asset maps.
+// Must be called with s.mu held.
+func (s *guardianVersionStore) pruneMachineryLocked() {
+	for path := range s.records {
+		if !isGuardianAssetPath(path) {
+			delete(s.records, path)
+			delete(s.current, path)
+			s.dirty = true
+		}
+	}
+}
+
+// isGuardianAssetPath reports whether logicalPath is a user-managed asset
+// (intent YAML, partition config, etc.) rather than guardian's internal
+// machinery (task queue files, claim files, result files, state snapshots,
+// archive logs).
+//
+// Asset paths are persisted with full version history.
+// Machinery paths are tracked in memory only (current version for optimistic
+// locking) and are never written to disk, keeping the state file tiny and
+// constant-size regardless of task throughput or partition count.
+func isGuardianAssetPath(logicalPath string) bool {
+	// guardian-system paths: .queues/ and .archive/ are always machinery.
+	if strings.HasPrefix(logicalPath, "/.queues/") || strings.HasPrefix(logicalPath, "/.archive/") {
+		return false
+	}
+	// Within any namespace, a path segment starting with "." is internal state:
+	// e.g. /partitions/doctor/.state/... or /partitions/foo/.locks/...
+	for _, seg := range strings.Split(logicalPath, "/") {
+		if len(seg) > 0 && seg[0] == '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *guardianVersionStore) saveLocked() error {
@@ -121,12 +204,21 @@ func (s *guardianVersionStore) saveLocked() error {
 	if err := os.Rename(tmpPath, s.persistPath); err != nil {
 		return fmt.Errorf("replace guardian versions: %w", err)
 	}
+	n := float64(len(data))
+	routerGuardianVersionStoreWriteBytesTotal.Add(n)
+	routerGuardianVersionStoreFileBytes.Set(n)
 	return nil
 }
 
 func (s *guardianVersionStore) currentVersion(logicalPath string) (*storedGuardianFileVersion, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	// Check ephemeral (machinery) tier first.
+	if rec, ok := s.ephemeral[logicalPath]; ok {
+		cloned := *rec
+		cloned.Content = append([]byte(nil), rec.Content...)
+		return &cloned, true
+	}
 	versionID, ok := s.current[logicalPath]
 	if !ok {
 		return nil, false
@@ -167,11 +259,20 @@ func (s *guardianVersionStore) commit(change guardianVersionCommit) (*pb.Guardia
 		Content:         append([]byte(nil), change.Content...),
 	}
 
-	s.records[change.LogicalPath] = append(s.records[change.LogicalPath], record)
-	s.current[change.LogicalPath] = record.VersionID
-	if err := s.saveLocked(); err != nil {
-		return nil, err
+	if !isGuardianAssetPath(change.LogicalPath) {
+		// Machinery path: track only the current version in memory for optimistic-
+		// locking checks (expected_version_id). No history, no persistence.
+		s.ephemeral[change.LogicalPath] = record
+		return record.toProto(), nil
 	}
+
+	const maxVersionsPerPath = 50
+	s.records[change.LogicalPath] = append(s.records[change.LogicalPath], record)
+	if len(s.records[change.LogicalPath]) > maxVersionsPerPath {
+		s.records[change.LogicalPath] = s.records[change.LogicalPath][len(s.records[change.LogicalPath])-maxVersionsPerPath:]
+	}
+	s.current[change.LogicalPath] = record.VersionID
+	s.dirty = true
 	return record.toProto(), nil
 }
 

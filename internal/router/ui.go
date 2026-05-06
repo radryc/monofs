@@ -15,6 +15,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/radryc/monofs/internal/sharding"
 	"google.golang.org/grpc/metadata"
 )
@@ -99,6 +100,9 @@ func (r *Router) ServeHTTP() http.Handler {
 
 	// Health check endpoint for HAProxy
 	mux.HandleFunc("/health", r.handleHealth)
+
+	// Prometheus metrics
+	mux.Handle("/metrics", promhttp.Handler())
 
 	// Static files (logo, etc.)
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
