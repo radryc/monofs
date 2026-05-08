@@ -13,6 +13,8 @@ import (
 	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"go.opentelemetry.io/otel/attribute"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -501,18 +503,30 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 // Read implements the Read RPC - lazy loads from Git repo.
 func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.DataChunk]) error {
 	serverOpsTotal.WithLabelValues("read").Inc()
+	ctx := stream.Context()
 	path := req.Path
-	s.logger.Info("read request", "path", path, "offset", req.Offset, "size", req.Size)
+	span := oteltrace.SpanFromContext(ctx)
+	span.SetAttributes(attribute.String("monofs.read.path", path))
+	s.logger.InfoContext(ctx, "read request", "path", path, "offset", req.Offset, "size", req.Size)
 
 	// Resolve path to (storageID, filePath)
 	storageID, filePath, ok := s.resolvePathToStorage(path)
+	span.SetAttributes(
+		attribute.String("monofs.read.storage_id", storageID),
+		attribute.String("monofs.read.file_path", filePath),
+	)
 
 	if !ok || filePath == "" {
-		s.logger.Error("read: path resolution failed", "path", path, "ok", ok, "storage_id", storageID, "file_path", filePath)
+		s.logger.ErrorContext(ctx, "read: path resolution failed", "path", path, "ok", ok, "storage_id", storageID, "file_path", filePath)
+		span.AddEvent("monofs.read.path_resolution_failed", oteltrace.WithAttributes(
+			attribute.String("monofs.read.path", path),
+			attribute.String("monofs.read.storage_id", storageID),
+			attribute.String("monofs.read.file_path", filePath),
+		))
 		return status.Errorf(codes.NotFound, "path resolution failed: %s", path)
 	}
 
-	if resolved, handled, err := s.resolveKVSPath(stream.Context(), storageID, filePath); err != nil {
+	if resolved, handled, err := s.resolveKVSPath(ctx, storageID, filePath); err != nil {
 		return err
 	} else if handled {
 		if resolved == nil {
@@ -521,7 +535,7 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		if resolved.isDir {
 			return status.Errorf(codes.FailedPrecondition, "path is a directory: %s", path)
 		}
-		content, err := s.kvsStore.ReadFile(stream.Context(), resolved.logicalPath)
+		content, err := s.kvsStore.ReadFile(ctx, resolved.logicalPath)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return status.Errorf(codes.NotFound, "file not found: %s", path)
@@ -559,7 +573,7 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	var blobHash, repoURL, branch, displayPath string
 	key, cached := s.getHashFromPath(storageID, filePath)
 
-	s.logger.Debug("read file",
+	s.logger.DebugContext(ctx, "read file",
 		"path", path,
 		"storage_id", storageID,
 		"file_path", filePath,
@@ -587,7 +601,7 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	// If not found in primary storage, try failover cache
 	if err != nil {
 		if failoverMeta, ok := s.checkFailoverCache(storageID, filePath); ok {
-			s.logger.Debug("read: serving from failover cache",
+			s.logger.DebugContext(ctx, "read: serving from failover cache",
 				"path", path,
 				"storage_id", storageID,
 				"file_path", filePath)
@@ -600,12 +614,12 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	}
 
 	// If not found locally, try forwarding to the correct node
-	if err != nil && s.enableForwarding && !isAlreadyForwarded(stream.Context()) {
+	if err != nil && s.enableForwarding && !isAlreadyForwarded(ctx) {
 		targetNode := s.getTargetNode(storageID, filePath)
 
 		// Try primary node first if healthy
 		if targetNode != nil && targetNode.ID != s.nodeID && s.isNodeHealthy(targetNode.ID) {
-			s.logger.Debug("read forwarding to primary node",
+			s.logger.DebugContext(ctx, "read forwarding to primary node",
 				"path", path,
 				"storage_id", storageID,
 				"file_path", filePath,
@@ -620,7 +634,7 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 				if backup.ID == s.nodeID {
 					break
 				}
-				s.logger.Debug("read forwarding to backup node",
+				s.logger.DebugContext(ctx, "read forwarding to backup node",
 					"path", path,
 					"primary", targetNode.ID,
 					"backup", backup.ID)
@@ -634,15 +648,22 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 
 	// If not found anywhere, return error
 	if err != nil {
-		s.logger.Warn("read: metadata not found",
+		s.logger.WarnContext(ctx, "read: metadata not found",
 			"path", path,
 			"storage_id", storageID,
-			"file_path", filePath)
+			"file_path", filePath,
+			"metadata_lookup_error", err)
+		span.AddEvent("monofs.read.metadata_not_found", oteltrace.WithAttributes(
+			attribute.String("monofs.read.path", path),
+			attribute.String("monofs.read.storage_id", storageID),
+			attribute.String("monofs.read.file_path", filePath),
+			attribute.String("monofs.read.lookup_error", err.Error()),
+		))
 		return status.Errorf(codes.NotFound, "file not found: %s", path)
 	}
 
 	if blobHash == "" {
-		s.logger.Warn("read: blob hash is empty", "path", path, "repo_url", repoURL, "branch", branch, "display_path", displayPath)
+		s.logger.WarnContext(ctx, "read: blob hash is empty", "path", path, "repo_url", repoURL, "branch", branch, "display_path", displayPath)
 		return status.Errorf(codes.NotFound, "blob hash is empty for: %s", path)
 	}
 
@@ -656,20 +677,19 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	// Read blob content via fetcher
 	var content []byte
 	var wasPrefetched bool
-	ctx := stream.Context()
 
-	s.logger.Debug("read: reading blob via fetcher", "blob_hash", blobHash, "repo_url", repoURL, "display_path", displayPath, "branch", branch)
+	s.logger.DebugContext(ctx, "read: reading blob via fetcher", "blob_hash", blobHash, "repo_url", repoURL, "display_path", displayPath, "branch", branch)
 
 	// Fetcher client is required for all blob reads
 	if s.fetcherClient == nil {
-		s.logger.Error("read: fetcher client not configured - cannot read blobs without fetchers")
+		s.logger.ErrorContext(ctx, "read: fetcher client not configured - cannot read blobs without fetchers")
 		return status.Errorf(codes.FailedPrecondition, "storage node not configured: fetcher client required")
 	}
 
 	var fetchErr error
 	content, wasPrefetched, fetchErr = s.readViaFetcher(ctx, storageID, blobHash, repoURL, filePath, branch)
 	if fetchErr != nil {
-		s.logger.Error("read: fetcher request failed", "path", path, "blob_hash", blobHash, "error", fetchErr)
+		s.logger.ErrorContext(ctx, "read: fetcher request failed", "path", path, "blob_hash", blobHash, "error", fetchErr)
 		return status.Errorf(codes.Unavailable, "failed to read blob via fetcher: %v", fetchErr)
 	}
 
@@ -680,7 +700,7 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		s.prefetchMisses.Add(1)
 	}
 
-	s.logger.Info("read: blob retrieved successfully", "path", path, "content_size", len(content), "blob_hash", blobHash, "prefetch_hit", wasPrefetched)
+	s.logger.InfoContext(ctx, "read: blob retrieved successfully", "path", path, "content_size", len(content), "blob_hash", blobHash, "prefetch_hit", wasPrefetched)
 	s.filesServed.Add(1)
 
 	// Record access for predictor (asynchronously to not block response)

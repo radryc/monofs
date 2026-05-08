@@ -6,11 +6,6 @@ WORKDIR /app
 # Install build dependencies
 RUN apk add --no-cache git
 
-# Build arguments for version information
-ARG VERSION=dev
-ARG COMMIT=unknown
-ARG BUILD_TIME=unknown
-
 # Copy module manifests from the monorepo root so the local kvs replace stays valid.
 COPY monofs/go.mod monofs/go.sum ./
 COPY kvs/go.mod kvs/go.sum /kvs/
@@ -45,34 +40,81 @@ RUN set -eu; \
 COPY monofs/. .
 COPY kvs /kvs
 
-# Build binaries with version information
+FROM builder AS server-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-server ./cmd/monofs-server
+
+FROM builder AS router-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
 
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-router ./cmd/monofs-router
 
+FROM builder AS client-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-client ./cmd/monofs-client
+
+FROM builder AS admin-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
 
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-admin ./cmd/monofs-admin
 
+FROM builder AS session-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-session ./cmd/monofs-session
+
+FROM builder AS search-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
 
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-search ./cmd/monofs-search
 
+FROM builder AS fetcher-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-fetcher ./cmd/monofs-fetcher
+
+FROM builder AS loadtest-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
 
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
@@ -83,7 +125,7 @@ FROM alpine:3.19 AS server
 
 RUN apk add --no-cache ca-certificates
 
-COPY --from=builder /bin/monofs-server /usr/local/bin/monofs-server
+COPY --from=server-builder /bin/monofs-server /usr/local/bin/monofs-server
 
 EXPOSE 9000
 
@@ -95,7 +137,7 @@ FROM alpine:3.19 AS router
 
 RUN apk add --no-cache ca-certificates
 
-COPY --from=builder /bin/monofs-router /usr/local/bin/monofs-router
+COPY --from=router-builder /bin/monofs-router /usr/local/bin/monofs-router
 
 EXPOSE 9090
 
@@ -114,7 +156,7 @@ RUN addgroup -S monofs && adduser -S monofs -G monofs
 # Create data directories
 RUN mkdir -p /data/indexes /data/cache && chown -R monofs:monofs /data
 
-COPY --from=builder /bin/monofs-search /usr/local/bin/monofs-search
+COPY --from=search-builder /bin/monofs-search /usr/local/bin/monofs-search
 
 USER monofs
 
@@ -135,7 +177,7 @@ RUN addgroup -S monofs && adduser -S monofs -G monofs
 # Create cache directories
 RUN mkdir -p /data/cache/git /data/cache/blob /etc/monofs && chown -R monofs:monofs /data /etc/monofs
 
-COPY --from=builder /bin/monofs-fetcher /usr/local/bin/monofs-fetcher
+COPY --from=fetcher-builder /bin/monofs-fetcher /usr/local/bin/monofs-fetcher
 COPY monofs/config/fetcher.json /etc/monofs/fetcher.json
 COPY monofs/docker/fetcher-entrypoint.sh /usr/local/bin/fetcher-entrypoint.sh
 RUN chmod +x /usr/local/bin/fetcher-entrypoint.sh
@@ -193,10 +235,10 @@ RUN ssh-keygen -A && \
     sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
     sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
-COPY --from=builder /bin/monofs-client /usr/local/bin/monofs-client
-COPY --from=builder /bin/monofs-admin /usr/local/bin/monofs-admin
-COPY --from=builder /bin/monofs-session /usr/local/bin/monofs-session
-COPY --from=builder /bin/monofs-loadtest /usr/local/bin/monofs-loadtest
+COPY --from=client-builder /bin/monofs-client /usr/local/bin/monofs-client
+COPY --from=admin-builder /bin/monofs-admin /usr/local/bin/monofs-admin
+COPY --from=session-builder /bin/monofs-session /usr/local/bin/monofs-session
+COPY --from=loadtest-builder /bin/monofs-loadtest /usr/local/bin/monofs-loadtest
 
 # Create mount point, overlay directory, and log files (monofs-owned)
 RUN mkdir -p /mnt/monofs && \
