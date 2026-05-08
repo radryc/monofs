@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	apilog "go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type slogHandler struct {
@@ -17,10 +18,11 @@ func (h *slogHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h *slogHandler) Handle(ctx context.Context, record slog.Record) error {
+	record = enrichRecordWithTraceContext(ctx, record.Clone())
 	if err := h.base.Handle(ctx, record); err != nil {
 		return err
 	}
-	emitLogRecord(ctx, h.scope, severityForSlogLevel(record.Level), record.Message)
+	emitSlogRecord(ctx, h.scope, record)
 	return nil
 }
 
@@ -41,4 +43,30 @@ func severityForSlogLevel(level slog.Level) apilog.Severity {
 	default:
 		return apilog.SeverityInfo
 	}
+}
+
+func enrichRecordWithTraceContext(ctx context.Context, record slog.Record) slog.Record {
+	spanCtx := trace.SpanContextFromContext(ctx)
+	if !spanCtx.IsValid() {
+		return record
+	}
+	if !recordHasAttr(record, "trace_id") {
+		record.AddAttrs(slog.String("trace_id", spanCtx.TraceID().String()))
+	}
+	if !recordHasAttr(record, "span_id") {
+		record.AddAttrs(slog.String("span_id", spanCtx.SpanID().String()))
+	}
+	return record
+}
+
+func recordHasAttr(record slog.Record, key string) bool {
+	found := false
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == key {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }

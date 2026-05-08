@@ -130,6 +130,27 @@ func EmitInfo(ctx context.Context, scope, message string) {
 	emitLogRecord(ctx, scope, apilog.SeverityInfo, message)
 }
 
+func emitSlogRecord(ctx context.Context, scope string, record slog.Record) {
+	providerMu.RLock()
+	current := provider
+	providerMu.RUnlock()
+	if current == nil {
+		return
+	}
+
+	logger := current.Logger(scope)
+	var otelRecord apilog.Record
+	otelRecord.SetTimestamp(record.Time.UTC())
+	otelRecord.SetSeverity(severityForSlogLevel(record.Level))
+	otelRecord.SetSeverityText(severityText(severityForSlogLevel(record.Level)))
+	otelRecord.SetBody(apilog.StringValue(record.Message))
+	record.Attrs(func(attr slog.Attr) bool {
+		otelRecord.AddAttributes(slogAttrToLogKV(attr))
+		return true
+	})
+	logger.Emit(ctx, otelRecord)
+}
+
 func emitLogRecord(ctx context.Context, scope string, severity apilog.Severity, message string) {
 	providerMu.RLock()
 	current := provider
@@ -145,6 +166,45 @@ func emitLogRecord(ctx context.Context, scope string, severity apilog.Severity, 
 	record.SetSeverityText(severityText(severity))
 	record.SetBody(apilog.StringValue(message))
 	logger.Emit(ctx, record)
+}
+
+func slogAttrToLogKV(attr slog.Attr) apilog.KeyValue {
+	return apilog.KeyValue{
+		Key:   attr.Key,
+		Value: slogValueToLogValue(attr.Value.Resolve()),
+	}
+}
+
+func slogValueToLogValue(value slog.Value) apilog.Value {
+	switch value.Kind() {
+	case slog.KindBool:
+		return apilog.BoolValue(value.Bool())
+	case slog.KindDuration:
+		return apilog.StringValue(value.Duration().String())
+	case slog.KindFloat64:
+		return apilog.Float64Value(value.Float64())
+	case slog.KindInt64:
+		return apilog.Int64Value(value.Int64())
+	case slog.KindString:
+		return apilog.StringValue(value.String())
+	case slog.KindTime:
+		return apilog.StringValue(value.Time().Format(time.RFC3339Nano))
+	case slog.KindUint64:
+		uintValue := value.Uint64()
+		if uintValue <= uint64(^uint64(0)>>1) {
+			return apilog.Int64Value(int64(uintValue))
+		}
+		return apilog.StringValue(fmt.Sprintf("%d", uintValue))
+	case slog.KindGroup:
+		group := value.Group()
+		kvs := make([]apilog.KeyValue, 0, len(group))
+		for _, nested := range group {
+			kvs = append(kvs, slogAttrToLogKV(nested))
+		}
+		return apilog.MapValue(kvs...)
+	default:
+		return apilog.StringValue(fmt.Sprint(value.Any()))
+	}
 }
 
 func buildResourceAttributes(cfg Config) []attribute.KeyValue {
