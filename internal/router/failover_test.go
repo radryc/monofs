@@ -1013,6 +1013,35 @@ func TestHandleEarlyRecoveryWithNewRepos(t *testing.T) {
 	t.Log("✓ Early recovery with new repos initiated correctly")
 }
 
+func TestApplyGuardianRepoStorageBackend(t *testing.T) {
+	tests := []struct {
+		name        string
+		displayPath string
+		wantKVS     bool
+	}{
+		{name: "guardian system", displayPath: "guardian-system", wantKVS: true},
+		{name: "guardian partition", displayPath: "guardian/payments", wantKVS: true},
+		{name: "regular repo", displayPath: "github.com/acme/service", wantKVS: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{DisplayPath: tt.displayPath})
+			gotFetch := req.GetFetchConfig()["storage_backend"]
+			gotIngest := req.GetIngestionConfig()["storage_backend"]
+			if tt.wantKVS {
+				if gotFetch != "kvs" || gotIngest != "kvs" {
+					t.Fatalf("storage backend = fetch:%q ingest:%q, want kvs/kvs", gotFetch, gotIngest)
+				}
+				return
+			}
+			if gotFetch != "" || gotIngest != "" {
+				t.Fatalf("storage backend = fetch:%q ingest:%q, want empty", gotFetch, gotIngest)
+			}
+		})
+	}
+}
+
 // TestRebalanceDelayConfiguration tests that config is respected.
 func TestRebalanceDelayConfiguration(t *testing.T) {
 	tests := []struct {

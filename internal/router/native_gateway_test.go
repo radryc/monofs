@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/fsstat"
 	"github.com/radryc/monofs/internal/nativeproto"
 )
 
@@ -43,8 +44,9 @@ func TestNativeGatewayHelloMountLookupReadDirAndStatFS(t *testing.T) {
 			Address:        "bufnet",
 			Healthy:        true,
 			Weight:         1,
-			DiskTotalBytes: 8 * nativeNamespaceBlockSize,
-			DiskFreeBytes:  4 * nativeNamespaceBlockSize,
+			DiskUsedBytes:  int64(4 * nativeNamespaceBlockSize),
+			DiskTotalBytes: int64(8 * nativeNamespaceBlockSize),
+			DiskFreeBytes:  int64(4 * nativeNamespaceBlockSize),
 			TotalFiles:     1,
 		},
 		client: client,
@@ -165,8 +167,12 @@ func TestNativeGatewayHelloMountLookupReadDirAndStatFS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeStatFSResponse() error = %v", err)
 	}
-	if statfsResp.Blocks != 8 {
-		t.Fatalf("statfs blocks = %d, want 8", statfsResp.Blocks)
+	want := fsstat.FromUsage(uint64(4*nativeNamespaceBlockSize), 1)
+	if statfsResp.Blocks != want.Blocks {
+		t.Fatalf("statfs blocks = %d, want %d", statfsResp.Blocks, want.Blocks)
+	}
+	if statfsResp.Bfree != want.Bfree {
+		t.Fatalf("statfs bfree = %d, want %d", statfsResp.Bfree, want.Bfree)
 	}
 
 	router.bumpNativeNamespaceGeneration("test")
@@ -226,8 +232,9 @@ func TestNativeGatewayOpenReadReadAndClose(t *testing.T) {
 			Address:        "bufnet",
 			Healthy:        true,
 			Weight:         1,
-			DiskTotalBytes: 8 * nativeNamespaceBlockSize,
-			DiskFreeBytes:  4 * nativeNamespaceBlockSize,
+			DiskUsedBytes:  int64(4 * nativeNamespaceBlockSize),
+			DiskTotalBytes: int64(8 * nativeNamespaceBlockSize),
+			DiskFreeBytes:  int64(4 * nativeNamespaceBlockSize),
 			TotalFiles:     1,
 		},
 		client: client,

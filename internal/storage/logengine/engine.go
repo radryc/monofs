@@ -67,13 +67,13 @@ func (e *LogEngine) Ingest(ctx context.Context, id string, data []byte) error {
 }
 
 // QueryLogs executes a LogQL query and returns the matching log records.
-func (e *LogEngine) QueryLogs(ctx context.Context, queryStr string, limit int) ([]LogRecord, error) {
-	return e.query.QueryLogs(ctx, queryStr, limit)
+func (e *LogEngine) QueryLogs(ctx context.Context, queryStr, service string, from, to time.Time, limit int) ([]LogRecord, error) {
+	return e.query.QueryLogs(ctx, queryStr, service, from, to, limit)
 }
 
-// QueryMetrics returns metric data points matching the given name and time range.
-func (e *LogEngine) QueryMetrics(ctx context.Context, metricName string, from, to time.Time) ([]MetricRecord, error) {
-	return e.query.QueryMetrics(ctx, metricName, from, to)
+// QueryMetrics returns metric data points matching the given query and time range.
+func (e *LogEngine) QueryMetrics(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
+	return e.query.QueryMetrics(ctx, query, from, to)
 }
 
 // QueryTraces returns trace spans matching traceID and/or service in the given time range.
@@ -83,7 +83,7 @@ func (e *LogEngine) QueryTraces(ctx context.Context, traceID, service string, fr
 
 // Query executes a LogQL query and returns the result as raw JSON bytes (for gRPC compat).
 func (e *LogEngine) Query(ctx context.Context, queryStr string) ([]byte, error) {
-	logs, err := e.query.QueryLogs(ctx, queryStr, 0)
+	logs, err := e.query.QueryLogs(ctx, queryStr, "", time.Time{}, time.Time{}, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -181,4 +181,18 @@ type dummyReadSeekCloser struct {
 
 func (d *dummyReadSeekCloser) Close() error {
 	return nil
+}
+
+type tempFileReadSeekCloser struct {
+	*os.File
+}
+
+func (t *tempFileReadSeekCloser) Close() error {
+	name := t.Name()
+	err := t.File.Close()
+	removeErr := os.Remove(name)
+	if err != nil {
+		return err
+	}
+	return removeErr
 }

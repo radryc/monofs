@@ -10,19 +10,18 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/fsstat"
 	"github.com/radryc/monofs/internal/monopath"
 	"github.com/radryc/monofs/internal/sharding"
 )
 
 const (
-	nativeNamespaceRPCTimeout    = 5 * time.Second
-	nativeNamespaceEntryTTL      = 1 * time.Second
-	nativeNamespaceAttrTTL       = 1 * time.Second
-	nativeNamespaceDirTTL        = 1 * time.Second
-	nativeNamespaceRouteTTL      = 30 * time.Second
-	nativeNamespaceBlockSize     = 4096
-	nativeNamespaceFallbackBytes = 4 * 1024 * 1024 * 1024 * 1024
-	nativeNamespaceFreeFiles     = 1_000_000
+	nativeNamespaceRPCTimeout = 5 * time.Second
+	nativeNamespaceEntryTTL   = 1 * time.Second
+	nativeNamespaceAttrTTL    = 1 * time.Second
+	nativeNamespaceDirTTL     = 1 * time.Second
+	nativeNamespaceRouteTTL   = 30 * time.Second
+	nativeNamespaceBlockSize  = fsstat.BlockSize
 )
 
 // NativeTTLConfig describes default cache lifetimes that the native gateway can
@@ -350,51 +349,40 @@ func (r *Router) NativeStatFS(ctx context.Context) (*NativeStatFS, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	var totalBytes uint64
-	var freeBytes uint64
+	var usedBytes uint64
 	var totalFiles uint64
-	var healthyCount int
+	var activeCount int
 
 	for _, state := range r.nodes {
-		if state == nil || state.info == nil || !state.info.Healthy || state.status != NodeActive {
+		if state == nil || state.info == nil || state.status != NodeActive {
 			continue
 		}
-		healthyCount++
+		activeCount++
 
-		total := uint64FromInt64(maxInt64(state.diskTotalBytes, state.info.GetDiskTotalBytes()))
-		free := uint64FromInt64(maxInt64(state.diskFreeBytes, state.info.GetDiskFreeBytes()))
+		used := uint64FromInt64(maxInt64(state.diskUsedBytes, state.info.GetDiskUsedBytes()))
 		files := uint64FromInt64(maxInt64(state.ownedFilesCount, state.info.GetTotalFiles()))
 
-		totalBytes += total
-		freeBytes += free
+		usedBytes += used
 		totalFiles += files
 	}
 
-	if healthyCount == 0 {
-		return nil, fmt.Errorf("no healthy nodes available")
+	if activeCount == 0 {
+		return nil, fmt.Errorf("no active nodes available")
 	}
 
-	if totalBytes == 0 {
-		totalBytes = nativeNamespaceFallbackBytes
-		freeBytes = nativeNamespaceFallbackBytes / 2
-	}
-	if freeBytes > totalBytes {
-		freeBytes = totalBytes
-	}
-
-	files := totalFiles + nativeNamespaceFreeFiles
+	snapshot := fsstat.FromUsage(usedBytes, totalFiles)
 	version := r.version.Load()
 	generation := int64(r.nativeEffectiveGeneration())
 
 	return &NativeStatFS{
-		Blocks:              ceilDiv(totalBytes, nativeNamespaceBlockSize),
-		Bfree:               ceilDiv(freeBytes, nativeNamespaceBlockSize),
-		Bavail:              ceilDiv(freeBytes, nativeNamespaceBlockSize),
-		Files:               files,
-		Ffree:               nativeNamespaceFreeFiles,
-		Bsize:               nativeNamespaceBlockSize,
-		Frsize:              nativeNamespaceBlockSize,
-		NameLen:             255,
+		Blocks:              snapshot.Blocks,
+		Bfree:               snapshot.Bfree,
+		Bavail:              snapshot.Bavail,
+		Files:               snapshot.Files,
+		Ffree:               snapshot.Ffree,
+		Bsize:               snapshot.Bsize,
+		Frsize:              snapshot.Frsize,
+		NameLen:             snapshot.NameLen,
 		ClusterVersion:      version,
 		NamespaceGeneration: generation,
 	}, nil

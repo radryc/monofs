@@ -4,15 +4,34 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 )
+
+const (
+	chunkListCacheTTL = 10 * time.Second
+	manifestCacheTTL  = time.Minute
+)
+
+type chunkListCacheEntry struct {
+	chunkIDs  []string
+	expiresAt time.Time
+}
+
+type manifestCacheEntry struct {
+	manifest  ChunkManifest
+	expiresAt time.Time
+}
 
 // ErrGhostChunk is returned when a chunk is requested but not found in the remote storage.
 var ErrGhostChunk = errors.New("ghost chunk: not found in storage")
@@ -29,27 +48,127 @@ type ObjectStoreBackend interface {
 // It caches index files to a local NVMe drive and uses singleflight to
 // prevent cache stampedes.
 type CachedStore struct {
-	remote   ObjectStoreBackend
-	localDir string
-	sf       singleflight.Group
+	remote    ObjectStoreBackend
+	localDir  string
+	sf        singleflight.Group
+	mu        sync.RWMutex
+	chunks    map[string]chunkListCacheEntry
+	manifests map[string]manifestCacheEntry
 }
 
 // NewCachedStore creates a new CachedStore.
 func NewCachedStore(remote ObjectStoreBackend, localDir string) *CachedStore {
 	return &CachedStore{
-		remote:   remote,
-		localDir: localDir,
+		remote:    remote,
+		localDir:  localDir,
+		chunks:    make(map[string]chunkListCacheEntry),
+		manifests: make(map[string]manifestCacheEntry),
 	}
 }
 
 // Write passes through to the remote storage.
 func (c *CachedStore) Write(ctx context.Context, path string, reader io.Reader) error {
-	return c.remote.Write(ctx, path, reader)
+	if err := c.remote.Write(ctx, path, reader); err != nil {
+		return err
+	}
+	c.invalidatePath(path)
+	return nil
 }
 
 // ListChunks passes through to the remote storage.
 func (c *CachedStore) ListChunks(ctx context.Context, prefix string) ([]string, error) {
-	return c.remote.ListChunks(ctx, prefix)
+	normalizedPrefix := normalizeChunkPrefix(prefix)
+	if normalizedPrefix == "" {
+		return c.remote.ListChunks(ctx, prefix)
+	}
+
+	now := time.Now()
+	c.mu.RLock()
+	entry, ok := c.chunks[normalizedPrefix]
+	c.mu.RUnlock()
+	if ok && now.Before(entry.expiresAt) {
+		return append([]string(nil), entry.chunkIDs...), nil
+	}
+
+	chunkIDs, err := c.remote.ListChunks(ctx, normalizedPrefix)
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(chunkIDs)
+
+	c.mu.Lock()
+	c.chunks[normalizedPrefix] = chunkListCacheEntry{
+		chunkIDs:  append([]string(nil), chunkIDs...),
+		expiresAt: now.Add(chunkListCacheTTL),
+	}
+	c.mu.Unlock()
+
+	return chunkIDs, nil
+}
+
+// ReadManifest returns a cached chunk manifest when available.
+func (c *CachedStore) ReadManifest(ctx context.Context, signal Signal, chunkID string) (ChunkManifest, error) {
+	manifestPath := filepath.Join("chunks", string(signal), chunkID, "metadata.json")
+	now := time.Now()
+
+	c.mu.RLock()
+	entry, ok := c.manifests[manifestPath]
+	c.mu.RUnlock()
+	if ok && now.Before(entry.expiresAt) {
+		return entry.manifest, nil
+	}
+
+	rc, err := c.remote.Read(ctx, manifestPath)
+	if err != nil {
+		return ChunkManifest{}, err
+	}
+	defer rc.Close()
+
+	var manifest ChunkManifest
+	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
+		return ChunkManifest{}, err
+	}
+
+	c.mu.Lock()
+	c.manifests[manifestPath] = manifestCacheEntry{
+		manifest:  manifest,
+		expiresAt: now.Add(manifestCacheTTL),
+	}
+	c.mu.Unlock()
+
+	return manifest, nil
+}
+
+func normalizeChunkPrefix(prefix string) string {
+	cleaned := strings.Trim(strings.TrimSpace(prefix), "/")
+	if cleaned == "" {
+		return ""
+	}
+	parts := strings.Split(cleaned, "/")
+	if len(parts) >= 2 && parts[0] == "chunks" {
+		return filepath.Join(parts[0], parts[1])
+	}
+	return cleaned
+}
+
+func (c *CachedStore) invalidatePath(path string) {
+	cleaned := strings.Trim(strings.TrimSpace(path), "/")
+	if cleaned == "" {
+		return
+	}
+
+	parts := strings.Split(cleaned, "/")
+	if len(parts) < 3 || parts[0] != "chunks" {
+		return
+	}
+
+	prefix := filepath.Join(parts[0], parts[1])
+	c.mu.Lock()
+	delete(c.chunks, prefix)
+	if strings.HasSuffix(cleaned, "/metadata.json") {
+		delete(c.manifests, cleaned)
+	}
+	c.mu.Unlock()
 }
 
 // Read handles caching for index files and pass-through for Parquet/metadata.

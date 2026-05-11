@@ -27,6 +27,7 @@ func main() {
 	mountpoint := flag.String("mount", "", "Mount point (required)")
 	cacheDir := flag.String("cache", "", "Cache directory (optional, disables cache if empty)")
 	overlayDir := flag.String("overlay", "", "Override default overlay storage location (~/.monofs/overlay)")
+	useExternalAddrs := flag.Bool("use-external-addrs", false, "Request router-advertised external node addresses (for host/WSL clients)")
 	writable := flag.Bool("writable", false, "Enable write support (changes stored client-side)")
 	debug := flag.Bool("debug", false, "Enable MonoFS layer DEBUG logs (written to --log-file if set, else stdout)")
 	fuseDebug := flag.Bool("fuse-debug", false, "Enable go-fuse C layer debug output (very verbose, written to <log-file>.fuse or stderr)")
@@ -74,6 +75,7 @@ func main() {
 		"mount", *mountpoint,
 		"cache", *cacheDir,
 		"overlay", *overlayDir,
+		"use_external_addrs", *useExternalAddrs,
 		"writable", *writable,
 		"debug", *debug,
 		"fuse_debug", *fuseDebug,
@@ -95,27 +97,20 @@ func main() {
 
 	// Connect to router and create sharded client
 	ctx := context.Background()
-	c, err := client.NewShardedClient(ctx, client.ShardedClientConfig{
-		RouterAddr:           *routerAddr,
-		ClientID:             resolvedClientID,
-		RefreshInterval:      30 * time.Second,
-		RPCTimeout:           *rpcTimeout,
-		UseExternalAddresses: false, // Use internal Docker network addresses
-		Logger:               logger.With("component", "sharded-client"),
-		MountPoint:           *mountpoint,
-		Writable:             *writable,
-	})
+	clientCfg := newShardedClientConfig(
+		*routerAddr,
+		resolvedClientID,
+		*mountpoint,
+		*writable,
+		*rpcTimeout,
+		logger.With("component", "sharded-client"),
+		*useExternalAddrs,
+	)
+	c, err := client.NewShardedClient(ctx, clientCfg)
 	if err != nil {
 		logger.Warn("failed to connect to router, will retry in background", "error", err)
 		// Create client in disconnected state - it will retry connections
-		c = client.NewDisconnectedClient(client.ShardedClientConfig{
-			RouterAddr:      *routerAddr,
-			ClientID:        resolvedClientID,
-			RefreshInterval: 30 * time.Second,
-			Logger:          logger.With("component", "sharded-client"),
-			MountPoint:      *mountpoint,
-			Writable:        *writable,
-		})
+		c = client.NewDisconnectedClient(clientCfg)
 	} else {
 		logger.Info("connected to cluster", "healthy_nodes", len(c.GetHealthyNodes()))
 	}
@@ -285,6 +280,25 @@ func main() {
 	// Wait for unmount
 	server.Wait()
 	logger.Info("filesystem unmounted")
+}
+
+func newShardedClientConfig(
+	routerAddr, clientID, mountpoint string,
+	writable bool,
+	rpcTimeout time.Duration,
+	logger *slog.Logger,
+	useExternalAddresses bool,
+) client.ShardedClientConfig {
+	return client.ShardedClientConfig{
+		RouterAddr:           routerAddr,
+		ClientID:             clientID,
+		RefreshInterval:      30 * time.Second,
+		RPCTimeout:           rpcTimeout,
+		UseExternalAddresses: useExternalAddresses,
+		Logger:               logger,
+		MountPoint:           mountpoint,
+		Writable:             writable,
+	}
 }
 
 // buildLogger constructs the MonoFS structured logger.

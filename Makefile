@@ -17,6 +17,7 @@ ADMIN_BINARY := monofs-admin
 SESSION_BINARY := monofs-session
 SEARCH_BINARY := monofs-search
 FETCHER_BINARY := monofs-fetcher
+TRACE_DUMP_BINARY := monofs-trace-dump
 
 # Directories
 BIN_DIR := bin
@@ -57,7 +58,7 @@ ROUTER_B_PEERS ?= router-a=http://router-a:8080
 .DEFAULT_GOAL := build
 
 # Phony targets
-.PHONY: all build build-server build-client build-router build-admin build-session build-search build-fetcher build-loadtest build-modverify build-kmod clean clean-kmod proto proto-check \
+.PHONY: all build build-server build-client build-router build-admin build-session build-search build-fetcher build-trace-dump build-loadtest build-modverify build-kmod clean clean-kmod proto proto-check \
         test test-unit test-e2e test-e2e-sudo test-smoke test-race test-coverage vet fmt fmt-check tidy \
         install-tools run-server run-client run-router run-cluster help \
         deploy deploy-s3 deploy-s3-external deploy-s3-clean deploy-stop deploy-clean deploy-restart deploy-local deploy-local-stop deploy-local-clean deploy-local-restart \
@@ -73,7 +74,7 @@ all: clean proto build test-unit ## Clean, generate proto, build, and run unit t
 
 ##@ Build
 
-build: build-server build-client build-router build-admin build-session build-search build-fetcher build-loadtest ## Build all binaries
+build: build-server build-client build-router build-admin build-session build-search build-fetcher build-trace-dump build-loadtest ## Build all binaries
 
 build-server: $(BIN_DIR) ## Build the server binary
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(SERVER_BINARY) ./$(CMD_DIR)/$(SERVER_BINARY)
@@ -102,6 +103,10 @@ build-search: $(BIN_DIR) ## Build the search service binary
 build-fetcher: $(BIN_DIR) ## Build the fetcher service binary
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(FETCHER_BINARY) ./$(CMD_DIR)/$(FETCHER_BINARY)
 	@echo "Built $(BIN_DIR)/$(FETCHER_BINARY)"
+
+build-trace-dump: $(BIN_DIR) ## Build the trace dump CLI binary
+	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(TRACE_DUMP_BINARY) ./$(CMD_DIR)/$(TRACE_DUMP_BINARY)
+	@echo "Built $(BIN_DIR)/$(TRACE_DUMP_BINARY)"
 
 build-loadtest: $(BIN_DIR) ## Build the load test binary
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/monofs-loadtest ./$(CMD_DIR)/monofs-loadtest

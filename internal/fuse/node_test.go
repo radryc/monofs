@@ -10,6 +10,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/fsstat"
 )
 
 // mockClient implements MonoFSClient for testing
@@ -17,6 +18,7 @@ type mockClient struct {
 	shouldFail bool
 	failError  error
 	entries    []*pb.DirEntry
+	statfs     fsstat.Snapshot
 }
 
 func (m *mockClient) Lookup(ctx context.Context, path string) (*pb.LookupResponse, error) {
@@ -70,6 +72,16 @@ func (m *mockClient) Read(ctx context.Context, path string, offset, size int64) 
 	return []byte("test content"), nil
 }
 
+func (m *mockClient) StatFS(ctx context.Context) (fsstat.Snapshot, error) {
+	if m.shouldFail {
+		return fsstat.Snapshot{}, m.failError
+	}
+	if m.statfs != (fsstat.Snapshot{}) {
+		return m.statfs, nil
+	}
+	return fsstat.FromUsage(0, 0), nil
+}
+
 func (m *mockClient) GetHealthyNodes() []string {
 	if m.shouldFail {
 		return []string{}
@@ -96,8 +108,44 @@ func (m *mockClient) IsGuardianVisible() bool {
 }
 
 func (m *mockClient) QueryLogs(ctx context.Context, query string) ([]byte, error) {
-        return nil, nil
+	return nil, nil
 }
+
+func TestStatfsUsesClientSnapshot(t *testing.T) {
+	mockCli := &mockClient{
+		statfs: fsstat.FromUsage(128*1024, 42),
+	}
+
+	root := NewRoot(mockCli, nil, nil)
+	var out fuse.StatfsOut
+
+	if errno := root.Statfs(context.Background(), &out); errno != 0 {
+		t.Fatalf("Statfs() errno = %v", errno)
+	}
+
+	if got, want := out.Blocks, mockCli.statfs.Blocks; got != want {
+		t.Fatalf("Blocks = %d, want %d", got, want)
+	}
+	if got, want := out.Bfree, mockCli.statfs.Bfree; got != want {
+		t.Fatalf("Bfree = %d, want %d", got, want)
+	}
+	if got, want := out.Files, mockCli.statfs.Files; got != want {
+		t.Fatalf("Files = %d, want %d", got, want)
+	}
+}
+
+func TestStatfsMapsBackendErrorsToEIO(t *testing.T) {
+	root := NewRoot(&mockClient{
+		shouldFail: true,
+		failError:  fmt.Errorf("router unavailable"),
+	}, nil, nil)
+
+	var out fuse.StatfsOut
+	if errno := root.Statfs(context.Background(), &out); errno != syscall.EIO {
+		t.Fatalf("Statfs() errno = %v, want %v", errno, syscall.EIO)
+	}
+}
+
 // TestErrorFile tests that FS_ERROR.txt appears when backend fails
 func TestErrorFileAppearsOnBackendFailure(t *testing.T) {
 	// Create mock client that fails

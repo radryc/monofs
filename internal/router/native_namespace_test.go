@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/fsstat"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -202,8 +203,9 @@ func TestNativeStatFSAggregatesHealthyActiveNodes(t *testing.T) {
 		info: &pb.NodeInfo{
 			NodeId:         "node-a",
 			Healthy:        true,
-			DiskTotalBytes: 10 * nativeNamespaceBlockSize,
-			DiskFreeBytes:  6 * nativeNamespaceBlockSize,
+			DiskUsedBytes:  int64(4 * nativeNamespaceBlockSize),
+			DiskTotalBytes: int64(10 * nativeNamespaceBlockSize),
+			DiskFreeBytes:  int64(6 * nativeNamespaceBlockSize),
 			TotalFiles:     100,
 		},
 		status: NodeActive,
@@ -212,8 +214,9 @@ func TestNativeStatFSAggregatesHealthyActiveNodes(t *testing.T) {
 		info: &pb.NodeInfo{
 			NodeId:         "node-b",
 			Healthy:        true,
-			DiskTotalBytes: 20 * nativeNamespaceBlockSize,
-			DiskFreeBytes:  5 * nativeNamespaceBlockSize,
+			DiskUsedBytes:  int64(15 * nativeNamespaceBlockSize),
+			DiskTotalBytes: int64(20 * nativeNamespaceBlockSize),
+			DiskFreeBytes:  int64(5 * nativeNamespaceBlockSize),
 			TotalFiles:     50,
 		},
 		status: NodeActive,
@@ -222,25 +225,26 @@ func TestNativeStatFSAggregatesHealthyActiveNodes(t *testing.T) {
 		info: &pb.NodeInfo{
 			NodeId:         "node-c",
 			Healthy:        false,
-			DiskTotalBytes: 99 * nativeNamespaceBlockSize,
-			DiskFreeBytes:  99 * nativeNamespaceBlockSize,
+			DiskTotalBytes: int64(99 * nativeNamespaceBlockSize),
+			DiskFreeBytes:  int64(99 * nativeNamespaceBlockSize),
 			TotalFiles:     9999,
 		},
-		status: NodeActive,
+		status: NodeSyncing,
 	}
 
 	statfs, err := router.NativeStatFS(context.Background())
 	if err != nil {
 		t.Fatalf("NativeStatFS() error = %v", err)
 	}
-	if got, want := statfs.Blocks, uint64(30); got != want {
-		t.Fatalf("blocks = %d, want %d", got, want)
+	want := fsstat.FromUsage(uint64(19*nativeNamespaceBlockSize), 150)
+	if got := statfs.Blocks; got != want.Blocks {
+		t.Fatalf("blocks = %d, want %d", got, want.Blocks)
 	}
-	if got, want := statfs.Bfree, uint64(11); got != want {
-		t.Fatalf("bfree = %d, want %d", got, want)
+	if got := statfs.Bfree; got != want.Bfree {
+		t.Fatalf("bfree = %d, want %d", got, want.Bfree)
 	}
-	if got, want := statfs.Files, uint64(150+nativeNamespaceFreeFiles); got != want {
-		t.Fatalf("files = %d, want %d", got, want)
+	if got := statfs.Files; got != want.Files {
+		t.Fatalf("files = %d, want %d", got, want.Files)
 	}
 }
 

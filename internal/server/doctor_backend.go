@@ -16,8 +16,8 @@ type DoctorBackend interface {
 	IngestLogs(ctx context.Context, chunkID string, logs []logengine.LogRecord) error
 	IngestMetrics(ctx context.Context, chunkID string, metrics []logengine.MetricRecord) error
 	IngestTraces(ctx context.Context, chunkID string, spans []logengine.SpanRecord) error
-	QueryLogs(ctx context.Context, query string, limit int) ([]logengine.LogRecord, error)
-	QueryMetrics(ctx context.Context, metricName string, from, to time.Time) ([]logengine.MetricRecord, error)
+	QueryLogs(ctx context.Context, query, service string, from, to time.Time, limit int) ([]logengine.LogRecord, error)
+	QueryMetrics(ctx context.Context, query logengine.MetricQuery, from, to time.Time) ([]logengine.MetricRecord, error)
 	QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]logengine.SpanRecord, error)
 	Stats(ctx context.Context) (logengine.LogEngineStats, error)
 }
