@@ -7,10 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -52,6 +49,7 @@ type Server struct {
 	// Stats
 	filesServed    atomic.Uint64
 	totalFiles     atomic.Int64 // Total files owned by this node
+	ownedBytes     atomic.Int64 // Logical bytes owned by this node
 	prefetchHits   atomic.Uint64
 	prefetchMisses atomic.Uint64
 
@@ -187,33 +185,61 @@ func makeFullPath(displayPath, filePath string) string {
 	return displayPath + "/" + filePath
 }
 
-// dirSize calculates the total size (bytes) of regular files under a directory.
-// Missing directories return size 0 without error.
-func dirSize(path string) (int64, error) {
-	if path == "" {
-		return 0, nil
+func splitOwnedFileKey(key []byte) (storageID, filePath string, ok bool) {
+	parts := strings.SplitN(string(key), ":", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		return "", "", false
 	}
-	var total int64
-	err := filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
+	return parts[0], parts[1], true
+}
+
+func storedMetadataSize(data []byte) (int64, error) {
+	var meta storedMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return 0, err
+	}
+	if meta.Size > uint64(^uint64(0)>>1) {
+		return 0, fmt.Errorf("metadata size overflows int64: %d", meta.Size)
+	}
+	return int64(meta.Size), nil
+}
+
+func loadStoredMetadataSize(tx *nutsdb.Tx, metadataKey []byte) (int64, error) {
+	value, err := tx.Get(bucketMetadata, metadataKey)
+	if err != nil {
+		if err == nutsdb.ErrKeyNotFound {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return storedMetadataSize(value)
+}
+
+func loadOwnedUsage(tx *nutsdb.Tx) (int64, int64, error) {
+	keys, err := tx.GetKeys(bucketOwnedFiles)
+	if err != nil {
+		if err == nutsdb.ErrBucketNotFound {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+
+	var totalFiles int64
+	var totalBytes int64
+	for _, key := range keys {
+		storageID, filePath, ok := splitOwnedFileKey(key)
+		if !ok {
+			continue
+		}
+		size, err := loadStoredMetadataSize(tx, makeStorageKey(storageID, filePath))
 		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
+			return 0, 0, err
 		}
-		if d.Type().IsRegular() {
-			info, infoErr := d.Info()
-			if infoErr != nil {
-				return infoErr
-			}
-			total += info.Size()
-		}
-		return nil
-	})
-	if os.IsNotExist(err) {
-		return 0, nil
+		totalFiles++
+		totalBytes += size
 	}
-	return total, err
+
+	return totalFiles, totalBytes, nil
 }
 
 // getHashFromPath retrieves the stored hash for a given storageID:filePath from the index.
@@ -347,17 +373,20 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, logger *slog.Logger)
 		db:           db,
 	}
 
-	// Initialize file count from database
+	// Initialize ownership counters from database.
 	var initialCount int64
-	s.db.View(func(tx *nutsdb.Tx) error {
-		keys, err := tx.GetKeys(bucketOwnedFiles)
-		if err == nil {
-			initialCount = int64(len(keys))
-		}
-		return nil
-	})
+	var initialBytes int64
+	if err := s.db.View(func(tx *nutsdb.Tx) error {
+		var err error
+		initialCount, initialBytes, err = loadOwnedUsage(tx)
+		return err
+	}); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize ownership counters: %w", err)
+	}
 	s.totalFiles.Store(initialCount)
-	logger.Info("initialized file count", "total_files", initialCount)
+	s.ownedBytes.Store(initialBytes)
+	logger.Info("initialized ownership counters", "total_files", initialCount, "owned_bytes", initialBytes)
 
 	return s, nil
 }
@@ -725,7 +754,20 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 	}
 
 	// Store in NutsDB (metadata, path index, repo info, and directory index)
+	var newFiles int64
+	var usedBytesDelta int64
 	err = s.db.Update(func(tx *nutsdb.Tx) error {
+		ownershipKey := []byte(storageID + ":" + meta.Path)
+		_, ownershipErr := tx.Get(bucketOwnedFiles, ownershipKey)
+		fileExists := (ownershipErr == nil)
+		var oldSize int64
+		if fileExists {
+			oldSize, err = loadStoredMetadataSize(tx, key)
+			if err != nil {
+				return fmt.Errorf("load previous metadata size: %w", err)
+			}
+		}
+
 		// 1. Store metadata with hash key
 		if err := tx.Put(bucketMetadata, key, value, 0); err != nil {
 			return err
@@ -808,17 +850,15 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 		}
 
 		// 7. Mark this file as owned by this node
-		ownershipKey := []byte(storageID + ":" + meta.Path)
-		_, ownershipErr := tx.Get(bucketOwnedFiles, ownershipKey)
-		fileExists := (ownershipErr == nil)
-
 		if err := tx.Put(bucketOwnedFiles, ownershipKey, []byte("1"), 0); err != nil {
 			return fmt.Errorf("mark file ownership: %w", err)
 		}
 
-		// Increment counter only for new files
-		if !fileExists {
-			s.totalFiles.Add(1)
+		if fileExists {
+			usedBytesDelta = int64(meta.Size) - oldSize
+		} else {
+			newFiles = 1
+			usedBytesDelta = int64(meta.Size)
 		}
 
 		return nil
@@ -830,6 +870,12 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 	}
 
 	s.logger.Info("file ingested successfully", "path", meta.Path, "key", string(key))
+	if newFiles != 0 {
+		s.totalFiles.Add(newFiles)
+	}
+	if usedBytesDelta != 0 {
+		s.ownedBytes.Add(usedBytesDelta)
+	}
 	serverIngestFilesTotal.Inc()
 	serverIngestBytesTotal.Add(float64(meta.Size))
 
@@ -976,6 +1022,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 	var filesIngested int64
 	var filesFailed int64
 	var newFiles int64
+	var usedBytesDelta int64
 
 	err := s.db.Update(func(tx *nutsdb.Tx) error {
 		// Store or update repository info - always update to ensure branch is set
@@ -1039,6 +1086,16 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 			// Check if file already exists
 			_, existErr := tx.Get(bucketOwnedFiles, pf.ownershipKey)
 			fileExists := (existErr == nil)
+			var oldSize int64
+			if fileExists {
+				size, sizeErr := loadStoredMetadataSize(tx, pf.key)
+				if sizeErr != nil {
+					s.logger.Error("failed to load previous metadata size", "error", sizeErr, "path", pf.filePath)
+					filesFailed++
+					continue
+				}
+				oldSize = size
+			}
 
 			// Store metadata
 			if err := tx.Put(bucketMetadata, pf.key, pf.value, 0); err != nil {
@@ -1079,6 +1136,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 			if !fileExists {
 				newFiles++
 			}
+			usedBytesDelta += int64(pf.size) - oldSize
 		}
 
 		// Process dir-hint entries: update the directory index for files
@@ -1197,6 +1255,9 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 
 	// Update file count
 	s.totalFiles.Add(newFiles)
+	if usedBytesDelta != 0 {
+		s.ownedBytes.Add(usedBytesDelta)
+	}
 
 	s.logger.Info("batch ingestion completed",
 		"files_ingested", filesIngested,
@@ -1436,11 +1497,9 @@ func (s *Server) GetNodeInfo(ctx context.Context, req *pb.NodeInfoRequest) (*pb.
 	}
 
 	// Actual disk usage: database only (blobs are on fetchers now)
-	var diskUsed int64
-	if size, err := dirSize(s.dbPath); err == nil {
-		diskUsed += size
-	} else {
-		return nil, fmt.Errorf("failed to measure db usage: %w", err)
+	diskUsed := s.ownedBytes.Load()
+	if diskUsed < 0 {
+		diskUsed = 0
 	}
 
 	resp := &pb.NodeInfoResponse{

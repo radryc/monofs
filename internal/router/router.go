@@ -1886,11 +1886,11 @@ func (r *Router) handleEarlyRecovery(nodeID string) {
 
 		// Register the repository on the returning node (it doesn't know about it)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := state.client.RegisterRepository(ctx, &pb.RegisterRepositoryRequest{
+		_, err := state.client.RegisterRepository(ctx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
 			StorageId:   storageID,
 			DisplayPath: repo.repoID,
 			Source:      repo.repoURL,
-		})
+		}))
 		cancel()
 
 		if err != nil {
@@ -2059,11 +2059,11 @@ func (r *Router) recoverNode(nodeID string, missingRepos, incompleteRepos []stri
 			"repo_url", repoInfo.repoURL)
 
 		regCtx, regCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		regResp, err := targetState.client.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
+		regResp, err := targetState.client.RegisterRepository(regCtx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
 			StorageId:   storageID,
 			DisplayPath: repoInfo.repoID,
 			Source:      repoInfo.repoURL,
-		})
+		}))
 		regCancel()
 
 		if err != nil {
@@ -2417,11 +2417,11 @@ func (r *Router) onboardNewNode(nodeID string) {
 
 		// STEP 2: Register repository on new node before syncing files
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := newNode.client.RegisterRepository(ctx, &pb.RegisterRepositoryRequest{
+		_, err := newNode.client.RegisterRepository(ctx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
 			StorageId:   repoID,
 			DisplayPath: displayPath,
 			Source:      repoURL,
-		})
+		}))
 		cancel()
 
 		if err != nil {

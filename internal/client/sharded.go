@@ -16,6 +16,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/fsstat"
 	"github.com/radryc/monofs/internal/monopath"
 	"github.com/radryc/monofs/internal/sharding"
 	"google.golang.org/grpc"
@@ -1496,6 +1497,59 @@ func (sc *ShardedClient) IsGuardianVisible() bool {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 	return sc.guardianVisible
+}
+
+// StatFS returns namespace-wide filesystem statistics derived from router
+// cluster info and the current logical usage counters.
+func (sc *ShardedClient) StatFS(ctx context.Context) (fsstat.Snapshot, error) {
+	sc.mu.RLock()
+	routerClient := sc.routerClient
+	clientID := sc.clientID
+	useExternalAddresses := sc.useExternalAddresses
+	rpcTimeout := sc.rpcTimeout
+	sc.mu.RUnlock()
+
+	if routerClient == nil {
+		return fsstat.Snapshot{}, fmt.Errorf("no router connection")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	resp, err := routerClient.GetClusterInfo(callCtx, &pb.ClusterInfoRequest{
+		ClientId:             clientID,
+		UseExternalAddresses: useExternalAddresses,
+	})
+	if err != nil {
+		return fsstat.Snapshot{}, fmt.Errorf("get cluster info for statfs: %w", err)
+	}
+
+	var usedBytes uint64
+	var totalFiles uint64
+	var activeNodes int
+
+	for _, node := range resp.GetNodes() {
+		if node == nil {
+			continue
+		}
+		if status := node.GetMetadata()["status"]; status != "" && status != "Active" {
+			continue
+		}
+
+		activeNodes++
+		if node.GetDiskUsedBytes() > 0 {
+			usedBytes += uint64(node.GetDiskUsedBytes())
+		}
+		if node.GetTotalFiles() > 0 {
+			totalFiles += uint64(node.GetTotalFiles())
+		}
+	}
+
+	if activeNodes == 0 {
+		return fsstat.Snapshot{}, fmt.Errorf("no active nodes available")
+	}
+
+	return fsstat.FromUsage(usedBytes, totalFiles), nil
 }
 
 // GetClientID returns the unique client identifier

@@ -2,6 +2,30 @@ package logengine
 
 import "time"
 
+// MetricMatchType identifies how a metric label matcher should be evaluated.
+type MetricMatchType string
+
+const (
+	MetricMatchEqual     MetricMatchType = "equal"
+	MetricMatchNotEqual  MetricMatchType = "not_equal"
+	MetricMatchRegexp    MetricMatchType = "regexp"
+	MetricMatchNotRegexp MetricMatchType = "not_regexp"
+)
+
+// MetricLabelMatcher filters metrics by label name/value.
+type MetricLabelMatcher struct {
+	Name  string          `json:"name"`
+	Value string          `json:"value"`
+	Type  MetricMatchType `json:"type"`
+}
+
+// MetricQuery defines the filters that can be pushed into metric chunk scans.
+type MetricQuery struct {
+	MetricName    string               `json:"metric_name,omitempty"`
+	Service       string               `json:"service,omitempty"`
+	LabelMatchers []MetricLabelMatcher `json:"label_matchers,omitempty"`
+}
+
 // Signal identifies the telemetry signal type stored in a chunk.
 type Signal string
 
@@ -45,9 +69,12 @@ type SpanRecord struct {
 
 // ChunkManifest stores lightweight metadata for a single chunk.
 type ChunkManifest struct {
-	ChunkID    string    `json:"chunk_id"`
-	Signal     Signal    `json:"signal"`
-	MinTime    time.Time `json:"min_time"`
-	MaxTime    time.Time `json:"max_time"`
-	TraceBloom []byte    `json:"trace_bloom,omitempty"` // Serialized bloom filter for trace_id
+	ChunkID           string              `json:"chunk_id"`
+	Signal            Signal              `json:"signal"`
+	MinTime           time.Time           `json:"min_time"`
+	MaxTime           time.Time           `json:"max_time"`
+	Services          []string            `json:"services,omitempty"`
+	MetricNames       []string            `json:"metric_names,omitempty"`
+	MetricLabelValues map[string][]string `json:"metric_label_values,omitempty"`
+	TraceBloom        []byte              `json:"trace_bloom,omitempty"` // Serialized bloom filter for trace_id
 }

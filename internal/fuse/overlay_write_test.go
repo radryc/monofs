@@ -12,6 +12,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/fsstat"
 )
 
 // testLogger returns a logger suitable for tests (writes to stderr at debug level).
@@ -59,13 +60,17 @@ func (m *pathMockClient) Read(ctx context.Context, path string, offset, size int
 	return nil, fmt.Errorf("not found")
 }
 
+func (m *pathMockClient) StatFS(ctx context.Context) (fsstat.Snapshot, error) {
+	return fsstat.FromUsage(0, 0), nil
+}
+
 func (m *pathMockClient) Close() error            { return nil }
 func (m *pathMockClient) RecordOperation()        {}
 func (m *pathMockClient) RecordBytesRead(n int64) {}
 func (m *pathMockClient) RecordError()            {}
 func (m *pathMockClient) IsGuardianVisible() bool { return false }
 func (m *pathMockClient) QueryLogs(ctx context.Context, query string) ([]byte, error) {
-        return nil, nil
+	return nil, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -54,6 +54,25 @@ func guardianRepoStorageBackend(displayPath string) string {
 	return ""
 }
 
+func applyGuardianRepoStorageBackend(req *pb.RegisterRepositoryRequest) *pb.RegisterRepositoryRequest {
+	if req == nil {
+		return nil
+	}
+	storageBackend := guardianRepoStorageBackend(req.GetDisplayPath())
+	if storageBackend == "" {
+		return req
+	}
+	if req.FetchConfig == nil {
+		req.FetchConfig = make(map[string]string, 1)
+	}
+	req.FetchConfig["storage_backend"] = storageBackend
+	if req.IngestionConfig == nil {
+		req.IngestionConfig = make(map[string]string, 1)
+	}
+	req.IngestionConfig["storage_backend"] = storageBackend
+	return req
+}
+
 func (r *Router) UpsertGuardianPaths(ctx context.Context, req *pb.UpsertGuardianPathsRequest) (*pb.UpsertGuardianPathsResponse, error) {
 	principal, ok := r.authenticateGuardianMutation(req.GetGuardianToken(), req.GetContext())
 	if !ok {
@@ -455,22 +474,14 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 			if regSource == "" {
 				regSource = "guardian-path-api"
 			}
-			var fetchConfig map[string]string
-			var ingestionConfig map[string]string
-			if storageBackend := guardianRepoStorageBackend(group.displayPath); storageBackend != "" {
-				fetchConfig = map[string]string{"storage_backend": storageBackend}
-				ingestionConfig = map[string]string{"storage_backend": storageBackend}
-			}
-			_, regErr := nodeClient.RegisterRepository(regCtx, &pb.RegisterRepositoryRequest{
-				StorageId:       group.storageID,
-				DisplayPath:     group.displayPath,
-				Source:          regSource,
-				IngestionType:   pb.IngestionType_INGESTION_GUARDIAN,
-				FetchType:       pb.SourceType_SOURCE_TYPE_BLOB,
-				FetchConfig:     fetchConfig,
-				IngestionConfig: ingestionConfig,
-				GuardianUrl:     repoURL,
-			})
+			_, regErr := nodeClient.RegisterRepository(regCtx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
+				StorageId:     group.storageID,
+				DisplayPath:   group.displayPath,
+				Source:        regSource,
+				IngestionType: pb.IngestionType_INGESTION_GUARDIAN,
+				FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
+				GuardianUrl:   repoURL,
+			}))
 			regCancel()
 			if regErr != nil {
 				r.logger.Warn("RegisterRepository failed for guardian upsert", "node", node.id, "display_path", group.displayPath, "error", regErr)

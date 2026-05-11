@@ -1010,10 +1010,26 @@ message QueryLogsResponse {
     bytes results_json = 1;
 }
 
+enum MetricLabelMatcherType {
+    METRIC_LABEL_MATCHER_TYPE_UNSPECIFIED = 0;
+    METRIC_LABEL_MATCHER_TYPE_EQUAL = 1;
+    METRIC_LABEL_MATCHER_TYPE_NOT_EQUAL = 2;
+    METRIC_LABEL_MATCHER_TYPE_REGEXP = 3;
+    METRIC_LABEL_MATCHER_TYPE_NOT_REGEXP = 4;
+}
+
+message MetricLabelMatcher {
+    string name = 1;
+    string value = 2;
+    MetricLabelMatcherType type = 3;
+}
+
 message QueryMetricsRequest {
     string metric_name = 1;
     int64 from_unix_nano = 2;
     int64 to_unix_nano = 3;
+    string service = 4;
+    repeated MetricLabelMatcher label_matchers = 5;
 }
 
 message QueryMetricsResponse {

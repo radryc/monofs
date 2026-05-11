@@ -120,6 +120,12 @@ mkdir -p /tmp/monofs
 ls /tmp/monofs/github.com/golang/example/
 ```
 
+If the router advertises separate host-facing node addresses, pass `--use-external-addrs` for local or WSL mounts:
+
+```bash
+./bin/monofs-client --mount=/tmp/monofs --router=localhost:9090 --use-external-addrs
+```
+
 ---
 
 ## Architecture Overview
@@ -363,6 +369,7 @@ Go to http://localhost:8080/search
 **Client:**
 - `--mount` - Mount point (required)
 - `--router` - Router address
+- `--use-external-addrs` - Request router-advertised external node addresses for host/WSL clients
 - `--cache` - Local cache directory
 - `--writable` - Enable write support
 - `--overlay` - Overlay directory for writes (required with --writable)

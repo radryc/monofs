@@ -1,10 +1,10 @@
 package logengine
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -68,14 +68,24 @@ func (s *S3Store) Read(ctx context.Context, path string) (io.ReadSeekCloser, err
 	}
 	defer resp.Body.Close()
 
-	// Download the whole object to a memory buffer to support Seeking.
-	// (Warning: this might consume significant memory for large chunks).
-	data, err := io.ReadAll(resp.Body)
+	tmpFile, err := os.CreateTemp("", "monofs-logengine-*")
 	if err != nil {
 		return nil, err
 	}
+	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+		tmpName := tmpFile.Name()
+		tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		tmpName := tmpFile.Name()
+		tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
 
-	return &dummyReadSeekCloser{bytes.NewReader(data)}, nil
+	return &tempFileReadSeekCloser{File: tmpFile}, nil
 }
 
 // ListChunks returns a list of chunk IDs inside the given prefix.

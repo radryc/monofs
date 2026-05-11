@@ -13,6 +13,7 @@ import (
 	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/storage/logengine"
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -773,12 +774,19 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 
 	// Track if file existed to properly update counter
 	var fileExisted bool
+	var deletedBytes int64
 
 	err := s.db.Update(func(tx *nutsdb.Tx) error {
 		// Check if file exists in owned files bucket
 		ownershipKey := []byte(req.StorageId + ":" + req.FilePath)
 		_, err := tx.Get(bucketOwnedFiles, ownershipKey)
 		fileExisted = (err == nil)
+		if fileExisted {
+			deletedBytes, err = loadStoredMetadataSize(tx, key)
+			if err != nil {
+				return fmt.Errorf("failed to load metadata size: %w", err)
+			}
+		}
 
 		// Remove from main metadata bucket
 		if err := tx.Delete(bucketMetadata, key); err != nil && err != nutsdb.ErrKeyNotFound {
@@ -829,6 +837,9 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 	// Decrement counter only if file actually existed
 	if fileExisted {
 		s.totalFiles.Add(-1)
+		if deletedBytes != 0 {
+			s.ownedBytes.Add(-deletedBytes)
+		}
 	}
 
 	// Do not evict blob hashes from fetchers on per-file cleanup.
@@ -854,6 +865,7 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 
 	var filesDeleted int64
 	var dirsDeleted int64
+	var deletedBytes int64
 
 	kvsFilesDeleted, kvsDirsDeleted, err := s.deleteKVSRepository(ctx, storageID)
 	if err != nil {
@@ -903,9 +915,22 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 				if !strings.HasPrefix(keyStr, prefix) {
 					continue
 				}
+				_, filePath, ok := splitOwnedFileKey(key)
+				if ok {
+					size, sizeErr := loadStoredMetadataSize(tx, makeStorageKey(storageID, filePath))
+					if sizeErr != nil {
+						return fmt.Errorf("load owned metadata size %q: %w", keyStr, sizeErr)
+					}
+					deletedBytes += size
+				}
 				// Delete from metadata bucket
-				if err := tx.Delete(bucketMetadata, key); err != nil && err != nutsdb.ErrKeyNotFound {
-					s.logger.Warn("failed to delete owned file metadata", "key", keyStr)
+				if ok {
+					if err := tx.Delete(bucketMetadata, makeStorageKey(storageID, filePath)); err != nil && err != nutsdb.ErrKeyNotFound {
+						s.logger.Warn("failed to delete owned file metadata", "key", keyStr)
+					}
+				}
+				if !ok {
+					s.logger.Warn("failed to parse owned file key", "key", keyStr)
 				}
 				// Delete ownership tracking
 				if err := tx.Delete(bucketOwnedFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
@@ -995,6 +1020,9 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 
 	// Update file counter
 	s.totalFiles.Add(-filesDeleted)
+	if deletedBytes != 0 {
+		s.ownedBytes.Add(-deletedBytes)
+	}
 
 	// Clear intermediate directory cache
 	s.intermediateDirCache.Range(func(key, value interface{}) bool {
@@ -1074,7 +1102,15 @@ func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
-	records, err := backend.QueryLogs(ctx, req.Query, int(req.Limit))
+	from := time.Unix(0, req.FromUnixNano).UTC()
+	to := time.Unix(0, req.ToUnixNano).UTC()
+	if req.FromUnixNano == 0 {
+		from = time.Time{}
+	}
+	if req.ToUnixNano == 0 {
+		to = time.Time{}
+	}
+	records, err := backend.QueryLogs(ctx, req.Query, req.Service, from, to, int(req.Limit))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query logs failed: %v", err)
 	}
@@ -1099,7 +1135,11 @@ func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
-	records, err := backend.QueryMetrics(ctx, req.MetricName, from, to)
+	records, err := backend.QueryMetrics(ctx, logengine.MetricQuery{
+		MetricName:    req.MetricName,
+		Service:       req.GetService(),
+		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
+	}, from, to)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query metrics failed: %v", err)
 	}
@@ -1108,6 +1148,37 @@ func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
 	return &pb.QueryMetricsResponse{ResultsJson: b}, nil
+}
+
+func protoMetricMatchers(matchers []*pb.MetricLabelMatcher) []logengine.MetricLabelMatcher {
+	if len(matchers) == 0 {
+		return nil
+	}
+	out := make([]logengine.MetricLabelMatcher, 0, len(matchers))
+	for _, matcher := range matchers {
+		if matcher == nil {
+			continue
+		}
+		out = append(out, logengine.MetricLabelMatcher{
+			Name:  matcher.GetName(),
+			Value: matcher.GetValue(),
+			Type:  protoMetricMatcherType(matcher.GetType()),
+		})
+	}
+	return out
+}
+
+func protoMetricMatcherType(matchType pb.MetricLabelMatcherType) logengine.MetricMatchType {
+	switch matchType {
+	case pb.MetricLabelMatcherType_METRIC_LABEL_MATCHER_TYPE_NOT_EQUAL:
+		return logengine.MetricMatchNotEqual
+	case pb.MetricLabelMatcherType_METRIC_LABEL_MATCHER_TYPE_REGEXP:
+		return logengine.MetricMatchRegexp
+	case pb.MetricLabelMatcherType_METRIC_LABEL_MATCHER_TYPE_NOT_REGEXP:
+		return logengine.MetricMatchNotRegexp
+	default:
+		return logengine.MetricMatchEqual
+	}
 }
 
 // QueryTraces implements the Doctor partition trace query.

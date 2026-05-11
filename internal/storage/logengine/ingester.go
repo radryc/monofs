@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -69,10 +71,11 @@ func (i *Ingester) flushLogs(ctx context.Context, chunkID string, logs []LogReco
 	}
 
 	manifest := ChunkManifest{
-		ChunkID: chunkID,
-		Signal:  SignalLogs,
-		MinTime: minTime,
-		MaxTime: maxTime,
+		ChunkID:  chunkID,
+		Signal:   SignalLogs,
+		MinTime:  minTime,
+		MaxTime:  maxTime,
+		Services: collectLogServices(logs),
 	}
 	chunkPrefix := filepath.Join("chunks", string(SignalLogs), chunkID)
 
@@ -117,10 +120,13 @@ func (i *Ingester) flushMetrics(ctx context.Context, chunkID string, metrics []M
 	}
 
 	manifest := ChunkManifest{
-		ChunkID: chunkID,
-		Signal:  SignalMetrics,
-		MinTime: minTime,
-		MaxTime: maxTime,
+		ChunkID:           chunkID,
+		Signal:            SignalMetrics,
+		MinTime:           minTime,
+		MaxTime:           maxTime,
+		Services:          collectMetricServices(metrics),
+		MetricNames:       collectMetricNames(metrics),
+		MetricLabelValues: collectMetricLabelValues(metrics),
 	}
 	chunkPrefix := filepath.Join("chunks", string(SignalMetrics), chunkID)
 
@@ -162,10 +168,12 @@ func (i *Ingester) flushTraces(ctx context.Context, chunkID string, spans []Span
 	}
 
 	manifest := ChunkManifest{
-		ChunkID: chunkID,
-		Signal:  SignalTraces,
-		MinTime: minTime,
-		MaxTime: maxTime,
+		ChunkID:    chunkID,
+		Signal:     SignalTraces,
+		MinTime:    minTime,
+		MaxTime:    maxTime,
+		Services:   collectTraceServices(spans),
+		TraceBloom: buildTraceBloom(spans),
 	}
 	chunkPrefix := filepath.Join("chunks", string(SignalTraces), chunkID)
 
@@ -571,4 +579,127 @@ func (i *Ingester) writeMetadata(ctx context.Context, path string, manifest Chun
 		return err
 	}
 	return i.store.Write(ctx, path, &buf)
+}
+
+func collectLogServices(logs []LogRecord) []string {
+	services := make(map[string]struct{})
+	for _, log := range logs {
+		if log.Service == "" {
+			continue
+		}
+		services[log.Service] = struct{}{}
+	}
+	return sortedKeys(services)
+}
+
+func collectMetricServices(metrics []MetricRecord) []string {
+	services := make(map[string]struct{})
+	for _, metric := range metrics {
+		if metric.Service == "" {
+			continue
+		}
+		services[metric.Service] = struct{}{}
+	}
+	return sortedKeys(services)
+}
+
+func collectMetricNames(metrics []MetricRecord) []string {
+	names := make(map[string]struct{})
+	for _, metric := range metrics {
+		if metric.MetricName == "" {
+			continue
+		}
+		names[metric.MetricName] = struct{}{}
+	}
+	return sortedKeys(names)
+}
+
+func collectMetricLabelValues(metrics []MetricRecord) map[string][]string {
+	valuesByName := make(map[string]map[string]struct{})
+	for _, metric := range metrics {
+		for name, value := range metric.Labels {
+			if name == "" || value == "" {
+				continue
+			}
+			values := valuesByName[name]
+			if values == nil {
+				values = make(map[string]struct{})
+				valuesByName[name] = values
+			}
+			values[value] = struct{}{}
+		}
+	}
+	if len(valuesByName) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(valuesByName))
+	for name, values := range valuesByName {
+		out[name] = sortedKeys(values)
+	}
+	return out
+}
+
+func collectTraceServices(spans []SpanRecord) []string {
+	services := make(map[string]struct{})
+	for _, span := range spans {
+		if span.Service == "" {
+			continue
+		}
+		services[span.Service] = struct{}{}
+	}
+	return sortedKeys(services)
+}
+
+func sortedKeys(values map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func buildTraceBloom(spans []SpanRecord) []byte {
+	if len(spans) == 0 {
+		return nil
+	}
+	const bloomBytes = 256
+	const bloomHashes = 4
+
+	bloom := make([]byte, bloomBytes)
+	for _, span := range spans {
+		if span.TraceID == "" {
+			continue
+		}
+		indexes := bloomIndexes(span.TraceID, bloomBytes*8, bloomHashes)
+		for _, idx := range indexes {
+			byteIdx := idx / 8
+			bitIdx := idx % 8
+			bloom[byteIdx] |= 1 << bitIdx
+		}
+	}
+	return bloom
+}
+
+func bloomIndexes(value string, bitCount, hashCount int) []int {
+	primary := fnv.New64a()
+	_, _ = primary.Write([]byte(value))
+	primarySum := primary.Sum64()
+
+	secondary := fnv.New64()
+	_, _ = secondary.Write([]byte(value))
+	secondarySum := secondary.Sum64()
+	if secondarySum == 0 {
+		secondarySum = 1
+	}
+
+	indexes := make([]int, 0, hashCount)
+	for idx := 0; idx < hashCount; idx++ {
+		combined := primarySum + uint64(idx)*secondarySum
+		indexes = append(indexes, int(combined%uint64(bitCount)))
+	}
+	return indexes
 }

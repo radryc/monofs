@@ -1,13 +1,13 @@
 package logengine
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/RoaringBitmap/roaring"
@@ -23,6 +23,17 @@ type QueryEngine struct {
 	store *CachedStore
 }
 
+type candidateChunk struct {
+	chunkID   string
+	manifest  ChunkManifest
+	cutoffMax time.Time
+}
+
+type compiledMetricMatcher struct {
+	matcher *labels.Matcher
+	name    string
+}
+
 // NewQueryEngine creates a new QueryEngine.
 func NewQueryEngine(store *CachedStore) *QueryEngine {
 	return &QueryEngine{
@@ -32,12 +43,15 @@ func NewQueryEngine(store *CachedStore) *QueryEngine {
 
 // Query executes a LogQL query and is kept for backward compatibility.
 func (q *QueryEngine) Query(ctx context.Context, queryStr string) ([]LogRecord, error) {
-	return q.QueryLogs(ctx, queryStr, 0)
+	return q.QueryLogs(ctx, queryStr, "", time.Time{}, time.Time{}, 0)
 }
 
 // QueryLogs executes a LogQL query over the log chunks.
 // limit 0 means no limit.
-func (q *QueryEngine) QueryLogs(ctx context.Context, queryStr string, limit int) ([]LogRecord, error) {
+func (q *QueryEngine) QueryLogs(ctx context.Context, queryStr, service string, from, to time.Time, limit int) ([]LogRecord, error) {
+	observer := beginQueryPathObservation(SignalLogs)
+	defer observer.finish()
+
 	// 1. Parse Query using Loki's logql syntax
 	expr, err := syntax.ParseExpr(queryStr)
 	if err != nil {
@@ -66,44 +80,39 @@ func (q *QueryEngine) QueryLogs(ctx context.Context, queryStr string, limit int)
 		}
 	}
 	extract(expr)
+	if service != "" {
+		if serviceFilter != "" && serviceFilter != service {
+			return []LogRecord{}, nil
+		}
+		serviceFilter = service
+	}
 
 	// 2. Fetch all metadata manifests (Time Pruning)
+	listStart := time.Now()
 	chunkIDs, err := q.store.ListChunks(ctx, "chunks/logs/")
+	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list chunks: %w", err)
+	}
+	observer.addChunksListed(len(chunkIDs))
+
+	candidates, err := q.logCandidates(ctx, chunkIDs, serviceFilter, from, to, observer)
+	if err != nil {
+		return nil, err
 	}
 
 	var results []LogRecord
 
-	for _, chunkID := range chunkIDs {
-		if limit > 0 && len(results) >= limit {
+	for _, candidate := range candidates {
+		if limit > 0 && len(results) >= limit && candidate.cutoffMax.Before(results[limit-1].Timestamp) {
 			break
 		}
-		// Load Metadata
-		manifestPath := filepath.Join("chunks", string(SignalLogs), chunkID, "metadata.json")
-		rc, err := q.store.remote.Read(ctx, manifestPath)
-		if err != nil {
-			if errors.Is(err, ErrGhostChunk) {
-				// Handle "Ghost Chunks" silently
-				continue
-			}
-			return nil, err
-		}
-
-		var manifest ChunkManifest
-		if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
-			rc.Close()
-			return nil, err
-		}
-		rc.Close()
-
-		// (Time pruning would happen here comparing manifest.MinTime / MaxTime)
 
 		// 3. Free-Text Phase (Bluge)
 		var validRows *roaring.Bitmap
 
 		if textFilter != "" {
-			indexPath := filepath.Join("chunks", string(SignalLogs), chunkID, "text.index.tar.gz")
+			indexPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, "text.index.tar.gz")
 
 			// Trigger local cache download if necessary
 			localIndexPath, err := q.store.GetLocalIndexPath(ctx, indexPath)
@@ -145,9 +154,9 @@ func (q *QueryEngine) QueryLogs(ctx context.Context, queryStr string, limit int)
 		}
 
 		// 4. Structured Phase (Parquet)
-		parquetPath := filepath.Join("chunks", string(SignalLogs), chunkID, "data.parquet")
+		parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, "data.parquet")
 
-		chunkResults, err := q.readParquet(ctx, parquetPath, validRows, serviceFilter)
+		chunkResults, err := q.readParquet(ctx, parquetPath, validRows, serviceFilter, from, to, observer)
 		if err != nil {
 			if errors.Is(err, ErrGhostChunk) {
 				continue
@@ -156,29 +165,30 @@ func (q *QueryEngine) QueryLogs(ctx context.Context, queryStr string, limit int)
 		}
 
 		results = append(results, chunkResults...)
+		if limit > 0 && len(results) > limit {
+			sort.Slice(results, func(i, j int) bool {
+				return results[i].Timestamp.After(results[j].Timestamp)
+			})
+			results = results[:limit]
+		}
 	}
 
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Timestamp.After(results[j].Timestamp)
+	})
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
 	}
+	observer.addReturnedRecords(len(results))
 	return results, nil
 }
 
-func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *roaring.Bitmap, serviceFilter string) ([]LogRecord, error) {
-	rc, err := q.store.remote.Read(ctx, path)
+func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *roaring.Bitmap, serviceFilter string, from, to time.Time, observer *queryPathObserver) ([]LogRecord, error) {
+	rdr, rc, err := q.openSignalParquet(ctx, path, observer)
 	if err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(rc)
-	rc.Close()
-	if err != nil {
-		return nil, err
-	}
-
-	rdr, err := file.NewParquetReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("open parquet: %w", err)
-	}
+	defer rc.Close()
 	defer rdr.Close()
 
 	var records []LogRecord
@@ -233,12 +243,19 @@ func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *r
 			if validRows != nil && !validRows.ContainsInt(i) {
 				continue
 			}
+			ts := time.Unix(0, tsBuf[i])
+			if !from.IsZero() && ts.Before(from) {
+				continue
+			}
+			if !to.IsZero() && ts.After(to) {
+				continue
+			}
 			svc := string(svcBuf[i])
 			if serviceFilter != "" && svc != serviceFilter {
 				continue
 			}
 			records = append(records, LogRecord{
-				Timestamp:  time.Unix(0, tsBuf[i]),
+				Timestamp:  ts,
 				Level:      string(lvlBuf[i]),
 				Service:    svc,
 				TraceID:    string(traceBuf[i]),
@@ -249,39 +266,64 @@ func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *r
 	return records, nil
 }
 
-// QueryMetrics returns metric data points matching metricName in the given time range.
-func (q *QueryEngine) QueryMetrics(ctx context.Context, metricName string, from, to time.Time) ([]MetricRecord, error) {
-	chunkIDs, err := q.store.ListChunks(ctx, "chunks/metrics/")
-	if err != nil {
-		return nil, fmt.Errorf("failed to list metric chunks: %w", err)
-	}
+func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, service string, from, to time.Time, observer *queryPathObserver) ([]candidateChunk, error) {
+	pruneStart := time.Now()
+	defer observer.observeStage("manifest_pruning", pruneStart)
 
-	var results []MetricRecord
+	candidates := make([]candidateChunk, 0, len(chunkIDs))
 	for _, chunkID := range chunkIDs {
-		manifestPath := filepath.Join("chunks", string(SignalMetrics), chunkID, "metadata.json")
-		rc, err := q.store.remote.Read(ctx, manifestPath)
+		manifest, err := q.store.ReadManifest(ctx, SignalLogs, chunkID)
 		if err != nil {
 			if errors.Is(err, ErrGhostChunk) {
+				observer.addChunksPruned("ghost_chunk", 1)
 				continue
 			}
 			return nil, err
 		}
-		var manifest ChunkManifest
-		if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
-			rc.Close()
-			return nil, err
-		}
-		rc.Close()
-
-		// Time-range pruning
 		if !to.IsZero() && manifest.MinTime.After(to) {
+			observer.addChunksPruned("after_range", 1)
 			continue
 		}
 		if !from.IsZero() && manifest.MaxTime.Before(from) {
+			observer.addChunksPruned("before_range", 1)
 			continue
 		}
+		if service != "" && !manifestContains(manifest.Services, service) {
+			observer.addChunksPruned("service_mismatch", 1)
+			continue
+		}
+		candidates = append(candidates, candidateChunk{chunkID: chunkID, manifest: manifest, cutoffMax: manifest.MaxTime})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].manifest.MaxTime.After(candidates[j].manifest.MaxTime)
+	})
+	return candidates, nil
+}
 
-		points, err := q.readMetricParquet(ctx, filepath.Join("chunks", string(SignalMetrics), chunkID, "data.parquet"), metricName, from, to)
+// QueryMetrics returns metric data points matching the given query in the time range.
+func (q *QueryEngine) QueryMetrics(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
+	observer := beginQueryPathObservation(SignalMetrics)
+	defer observer.finish()
+
+	listStart := time.Now()
+	chunkIDs, err := q.store.ListChunks(ctx, "chunks/metrics/")
+	observer.observeStage("chunk_listing", listStart)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list metric chunks: %w", err)
+	}
+	observer.addChunksListed(len(chunkIDs))
+	compiledMatchers, err := compileMetricMatchers(query.LabelMatchers)
+	if err != nil {
+		return nil, err
+	}
+	candidates, err := q.metricCandidates(ctx, chunkIDs, query, compiledMatchers, from, to, observer)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []MetricRecord
+	for _, candidate := range candidates {
+		points, err := q.readMetricParquet(ctx, filepath.Join("chunks", string(SignalMetrics), candidate.chunkID, "data.parquet"), query, compiledMatchers, from, to, observer)
 		if err != nil {
 			if errors.Is(err, ErrGhostChunk) {
 				continue
@@ -290,24 +332,56 @@ func (q *QueryEngine) QueryMetrics(ctx context.Context, metricName string, from,
 		}
 		results = append(results, points...)
 	}
+	observer.addReturnedRecords(len(results))
 	return results, nil
 }
 
-func (q *QueryEngine) readMetricParquet(ctx context.Context, path, metricName string, from, to time.Time) ([]MetricRecord, error) {
-	rc, err := q.store.remote.Read(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	data, err := io.ReadAll(rc)
-	rc.Close()
-	if err != nil {
-		return nil, err
-	}
+func (q *QueryEngine) metricCandidates(ctx context.Context, chunkIDs []string, query MetricQuery, compiledMatchers []compiledMetricMatcher, from, to time.Time, observer *queryPathObserver) ([]candidateChunk, error) {
+	pruneStart := time.Now()
+	defer observer.observeStage("manifest_pruning", pruneStart)
 
-	rdr, err := file.NewParquetReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("open parquet: %w", err)
+	candidates := make([]candidateChunk, 0, len(chunkIDs))
+	for _, chunkID := range chunkIDs {
+		manifest, err := q.store.ReadManifest(ctx, SignalMetrics, chunkID)
+		if err != nil {
+			if errors.Is(err, ErrGhostChunk) {
+				observer.addChunksPruned("ghost_chunk", 1)
+				continue
+			}
+			return nil, err
+		}
+
+		if !to.IsZero() && manifest.MinTime.After(to) {
+			observer.addChunksPruned("after_range", 1)
+			continue
+		}
+		if !from.IsZero() && manifest.MaxTime.Before(from) {
+			observer.addChunksPruned("before_range", 1)
+			continue
+		}
+		if query.MetricName != "" && !manifestContains(manifest.MetricNames, query.MetricName) {
+			observer.addChunksPruned("metric_mismatch", 1)
+			continue
+		}
+		if query.Service != "" && !manifestContains(manifest.Services, query.Service) {
+			observer.addChunksPruned("service_mismatch", 1)
+			continue
+		}
+		if !manifestMatchesMetricLabels(manifest, compiledMatchers) {
+			observer.addChunksPruned("label_mismatch", 1)
+			continue
+		}
+		candidates = append(candidates, candidateChunk{chunkID: chunkID, manifest: manifest, cutoffMax: manifest.MaxTime})
 	}
+	return candidates, nil
+}
+
+func (q *QueryEngine) readMetricParquet(ctx context.Context, path string, query MetricQuery, matchers []compiledMetricMatcher, from, to time.Time, observer *queryPathObserver) ([]MetricRecord, error) {
+	rdr, rc, err := q.openSignalParquet(ctx, path, observer)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
 	defer rdr.Close()
 
 	var records []MetricRecord
@@ -366,17 +440,24 @@ func (q *QueryEngine) readMetricParquet(ctx context.Context, path, metricName st
 			if !to.IsZero() && ts.After(to) {
 				continue
 			}
+			svc := string(svcBuf[i])
+			if query.Service != "" && svc != query.Service {
+				continue
+			}
 			name := string(nameBuf[i])
-			if metricName != "" && name != metricName {
+			if query.MetricName != "" && name != query.MetricName {
 				continue
 			}
 			var labels map[string]string
-			if len(lblBuf[i]) > 0 {
+			if len(lblBuf[i]) > 0 || len(matchers) > 0 {
 				json.Unmarshal(lblBuf[i], &labels) //nolint:errcheck
+			}
+			if !metricLabelsMatch(name, svc, labels, matchers) {
+				continue
 			}
 			records = append(records, MetricRecord{
 				Timestamp:  ts,
-				Service:    string(svcBuf[i]),
+				Service:    svc,
 				MetricName: name,
 				Value:      valBuf[i],
 				Labels:     labels,
@@ -388,39 +469,28 @@ func (q *QueryEngine) readMetricParquet(ctx context.Context, path, metricName st
 
 // QueryTraces returns trace spans matching the given traceID and/or service in the time range.
 func (q *QueryEngine) QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]SpanRecord, error) {
+	observer := beginQueryPathObservation(SignalTraces)
+	defer observer.finish()
+
+	listStart := time.Now()
 	chunkIDs, err := q.store.ListChunks(ctx, "chunks/traces/")
+	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list trace chunks: %w", err)
 	}
+	observer.addChunksListed(len(chunkIDs))
+	candidates, err := q.traceCandidates(ctx, chunkIDs, traceID, service, from, to, observer)
+	if err != nil {
+		return nil, err
+	}
 
 	var results []SpanRecord
-	for _, chunkID := range chunkIDs {
-		if limit > 0 && len(results) >= limit {
+	for _, candidate := range candidates {
+		if limit > 0 && len(results) >= limit && candidate.cutoffMax.Before(results[limit-1].Timestamp) {
 			break
 		}
-		manifestPath := filepath.Join("chunks", string(SignalTraces), chunkID, "metadata.json")
-		rc, err := q.store.remote.Read(ctx, manifestPath)
-		if err != nil {
-			if errors.Is(err, ErrGhostChunk) {
-				continue
-			}
-			return nil, err
-		}
-		var manifest ChunkManifest
-		if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
-			rc.Close()
-			return nil, err
-		}
-		rc.Close()
 
-		if !to.IsZero() && manifest.MinTime.After(to) {
-			continue
-		}
-		if !from.IsZero() && manifest.MaxTime.Before(from) {
-			continue
-		}
-
-		spans, err := q.readTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), chunkID, "data.parquet"), traceID, service, from, to, limit-len(results))
+		spans, err := q.readTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, "data.parquet"), traceID, service, from, to, limit-len(results), observer)
 		if err != nil {
 			if errors.Is(err, ErrGhostChunk) {
 				continue
@@ -428,25 +498,67 @@ func (q *QueryEngine) QueryTraces(ctx context.Context, traceID, service string, 
 			return nil, err
 		}
 		results = append(results, spans...)
+		if limit > 0 && len(results) > limit {
+			sort.Slice(results, func(i, j int) bool {
+				return results[i].Timestamp.After(results[j].Timestamp)
+			})
+			results = results[:limit]
+		}
 	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Timestamp.After(results[j].Timestamp)
+	})
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	observer.addReturnedRecords(len(results))
 	return results, nil
 }
 
-func (q *QueryEngine) readTraceParquet(ctx context.Context, path, traceID, service string, from, to time.Time, remaining int) ([]SpanRecord, error) {
-	rc, err := q.store.remote.Read(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	data, err := io.ReadAll(rc)
-	rc.Close()
-	if err != nil {
-		return nil, err
-	}
+func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, traceID, service string, from, to time.Time, observer *queryPathObserver) ([]candidateChunk, error) {
+	pruneStart := time.Now()
+	defer observer.observeStage("manifest_pruning", pruneStart)
 
-	rdr, err := file.NewParquetReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("open parquet: %w", err)
+	candidates := make([]candidateChunk, 0, len(chunkIDs))
+	for _, chunkID := range chunkIDs {
+		manifest, err := q.store.ReadManifest(ctx, SignalTraces, chunkID)
+		if err != nil {
+			if errors.Is(err, ErrGhostChunk) {
+				observer.addChunksPruned("ghost_chunk", 1)
+				continue
+			}
+			return nil, err
+		}
+		if !to.IsZero() && manifest.MinTime.After(to) {
+			observer.addChunksPruned("after_range", 1)
+			continue
+		}
+		if !from.IsZero() && manifest.MaxTime.Before(from) {
+			observer.addChunksPruned("before_range", 1)
+			continue
+		}
+		if service != "" && !manifestContains(manifest.Services, service) {
+			observer.addChunksPruned("service_mismatch", 1)
+			continue
+		}
+		if traceID != "" && !traceBloomMayContain(manifest.TraceBloom, traceID) {
+			observer.addChunksPruned("trace_bloom_miss", 1)
+			continue
+		}
+		candidates = append(candidates, candidateChunk{chunkID: chunkID, manifest: manifest, cutoffMax: manifest.MaxTime})
 	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].manifest.MaxTime.After(candidates[j].manifest.MaxTime)
+	})
+	return candidates, nil
+}
+
+func (q *QueryEngine) readTraceParquet(ctx context.Context, path, traceID, service string, from, to time.Time, remaining int, observer *queryPathObserver) ([]SpanRecord, error) {
+	rdr, rc, err := q.openSignalParquet(ctx, path, observer)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
 	defer rdr.Close()
 
 	var records []SpanRecord
@@ -552,4 +664,121 @@ func (q *QueryEngine) readTraceParquet(ctx context.Context, path, traceID, servi
 		}
 	}
 	return records, nil
+}
+
+func (q *QueryEngine) openSignalParquet(ctx context.Context, path string, observer *queryPathObserver) (*file.Reader, io.ReadSeekCloser, error) {
+	openStart := time.Now()
+	rc, err := q.store.remote.Read(ctx, path)
+	if err != nil {
+		observer.observeStage("parquet_open", openStart)
+		observer.addParquetOpen("error")
+		return nil, nil, err
+	}
+
+	rdr, err := openParquetReader(rc)
+	observer.observeStage("parquet_open", openStart)
+	if err != nil {
+		observer.addParquetOpen("error")
+		rc.Close()
+		return nil, nil, fmt.Errorf("open parquet: %w", err)
+	}
+	observer.addParquetOpen("success")
+	return rdr, rc, nil
+}
+
+func openParquetReader(reader io.ReadSeekCloser) (*file.Reader, error) {
+	if seekable, ok := reader.(parquet.ReaderAtSeeker); ok {
+		return file.NewParquetReader(seekable)
+	}
+
+	return nil, fmt.Errorf("reader does not support parquet seeking")
+}
+
+func compileMetricMatchers(matchers []MetricLabelMatcher) ([]compiledMetricMatcher, error) {
+	compiled := make([]compiledMetricMatcher, 0, len(matchers))
+	for _, matcher := range matchers {
+		matchType, err := metricMatcherTypeToProm(matcher.Type)
+		if err != nil {
+			return nil, err
+		}
+		promMatcher, err := labels.NewMatcher(matchType, matcher.Name, matcher.Value)
+		if err != nil {
+			return nil, err
+		}
+		compiled = append(compiled, compiledMetricMatcher{matcher: promMatcher, name: matcher.Name})
+	}
+	return compiled, nil
+}
+
+func metricMatcherTypeToProm(matchType MetricMatchType) (labels.MatchType, error) {
+	switch matchType {
+	case "", MetricMatchEqual:
+		return labels.MatchEqual, nil
+	case MetricMatchNotEqual:
+		return labels.MatchNotEqual, nil
+	case MetricMatchRegexp:
+		return labels.MatchRegexp, nil
+	case MetricMatchNotRegexp:
+		return labels.MatchNotRegexp, nil
+	default:
+		return labels.MatchEqual, fmt.Errorf("unsupported metric matcher type %q", matchType)
+	}
+}
+
+func manifestContains(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func manifestMatchesMetricLabels(manifest ChunkManifest, matchers []compiledMetricMatcher) bool {
+	for _, matcher := range matchers {
+		if matcher.matcher.Type != labels.MatchEqual {
+			continue
+		}
+		if matcher.name == labels.MetricName || matcher.name == "service" {
+			continue
+		}
+		values := manifest.MetricLabelValues[matcher.name]
+		if len(values) == 0 || !manifestContains(values, matcher.matcher.Value) {
+			return false
+		}
+	}
+	return true
+}
+
+func metricLabelsMatch(metricName, service string, values map[string]string, matchers []compiledMetricMatcher) bool {
+	for _, matcher := range matchers {
+		var value string
+		switch matcher.name {
+		case labels.MetricName:
+			value = metricName
+		case "service":
+			value = service
+		default:
+			value = values[matcher.name]
+		}
+		if !matcher.matcher.Matches(value) {
+			return false
+		}
+	}
+	return true
+}
+
+func traceBloomMayContain(bloom []byte, traceID string) bool {
+	if len(bloom) == 0 || traceID == "" {
+		return true
+	}
+	indexes := bloomIndexes(traceID, len(bloom)*8, 4)
+	for _, idx := range indexes {
+		byteIdx := idx / 8
+		bitIdx := idx % 8
+		if bloom[byteIdx]&(1<<bitIdx) == 0 {
+			return false
+		}
+	}
+	return true
 }
