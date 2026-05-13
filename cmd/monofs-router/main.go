@@ -226,6 +226,8 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(
+		grpc.MaxRecvMsgSize(256*1024*1024),
+		grpc.MaxSendMsgSize(256*1024*1024),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second, // Allow pings every 5s (prevents too_many_pings)

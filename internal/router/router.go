@@ -174,12 +174,14 @@ type guardianClientState struct {
 
 // nodeState tracks a backend node's state.
 type nodeState struct {
-	info            *pb.NodeInfo
-	externalAddress string // External address for host clients (e.g., localhost:9001)
-	lastSeen        time.Time
-	conn            *grpc.ClientConn
-	client          pb.MonoFSClient
-	kvsStatus       *pb.KVSNodeStatus
+	info                     *pb.NodeInfo
+	externalAddress          string // External address for host clients (e.g., localhost:9001)
+	lastSeen                 time.Time
+	conn                     *grpc.ClientConn
+	client                   pb.MonoFSClient
+	kvsStatus                *pb.KVSNodeStatus
+	lastHealthCheckError     string
+	healthCheckFailureLogged bool
 
 	// NEW: Staging and failover state
 	status           NodeStatus
@@ -1103,7 +1105,7 @@ func (r *Router) anyHealthyNodeClient() (pb.MonoFSClient, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for _, state := range r.nodes {
-		if state.info.Healthy && state.status == NodeActive {
+		if state != nil && state.info != nil && state.info.Healthy && state.status == NodeActive && state.client != nil {
 			return state.client, nil
 		}
 	}
@@ -1116,7 +1118,7 @@ func (r *Router) allHealthyNodeClients() []pb.MonoFSClient {
 	defer r.mu.RUnlock()
 	var clients []pb.MonoFSClient
 	for _, state := range r.nodes {
-		if state.info.Healthy && state.status == NodeActive {
+		if state != nil && state.info != nil && state.info.Healthy && state.status == NodeActive && state.client != nil {
 			clients = append(clients, state.client)
 		}
 	}
@@ -1419,7 +1421,12 @@ func (r *Router) checkAllNodes() {
 			cancel()
 
 			if err != nil {
-				r.logger.Warn("health check failed", "node_id", nodeID, "error", err, "was_healthy", state.info.Healthy)
+				errText := err.Error()
+				if !state.healthCheckFailureLogged || state.lastHealthCheckError != errText {
+					r.logger.Warn("health check failed", "node_id", nodeID, "error", err, "was_healthy", state.info.Healthy)
+					state.healthCheckFailureLogged = true
+					state.lastHealthCheckError = errText
+				}
 				// Close stale connection
 				if state.conn != nil {
 					state.conn.Close()
@@ -1440,6 +1447,8 @@ func (r *Router) checkAllNodes() {
 					}
 				}
 			} else {
+				state.healthCheckFailureLogged = false
+				state.lastHealthCheckError = ""
 				state.lastSeen = now
 
 				// Update file count and disk usage from node info

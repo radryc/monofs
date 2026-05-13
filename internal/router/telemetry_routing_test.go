@@ -249,3 +249,32 @@ func TestQueryMetricsMergesDistributedResults(t *testing.T) {
 		t.Fatalf("merged metric count = %d, want 2", len(records))
 	}
 }
+
+func TestQueryMetricsSkipsHealthyNodeWithoutClient(t *testing.T) {
+	router, servers, cleanup := newTelemetryRouterHarness(t, "node-a")
+	defer cleanup()
+
+	router.nodes["node-missing-client"] = &nodeState{
+		info: &pb.NodeInfo{
+			NodeId:  "node-missing-client",
+			Address: "missing:9000",
+			Healthy: true,
+			Weight:  1,
+		},
+		status: NodeActive,
+	}
+	servers["node-a"].metricResults = []byte(`[{"service":"doctor","metric_name":"requests","value":1}]`)
+
+	resp, err := router.QueryMetrics(context.Background(), &pb.QueryMetricsRequest{MetricName: "requests"})
+	if err != nil {
+		t.Fatalf("QueryMetrics() error = %v", err)
+	}
+
+	var records []map[string]any
+	if err := json.Unmarshal(resp.GetResultsJson(), &records); err != nil {
+		t.Fatalf("unmarshal merged metrics: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("merged metric count = %d, want 1", len(records))
+	}
+}

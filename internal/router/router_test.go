@@ -1,12 +1,26 @@
 package router
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"google.golang.org/grpc"
 )
+
+type failingHealthCheckNodeServer struct {
+	pb.UnimplementedMonoFSServer
+}
+
+func (s *failingHealthCheckNodeServer) GetNodeInfo(context.Context, *pb.NodeInfoRequest) (*pb.NodeInfoResponse, error) {
+	return nil, errors.New("boom")
+}
 
 func TestDefaultRouterConfig(t *testing.T) {
 	cfg := DefaultRouterConfig()
@@ -299,6 +313,56 @@ func TestHeartbeatRestoresHealth(t *testing.T) {
 	// Should be healthy again
 	if router.HealthyNodeCount() != 1 {
 		t.Errorf("expected 1 healthy node after heartbeat, got %d", router.HealthyNodeCount())
+	}
+}
+
+func TestHealthCheckFailureLogDeduplicatedUntilRecovery(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	server := grpc.NewServer()
+	pb.RegisterMonoFSServer(server, &failingHealthCheckNodeServer{})
+	defer server.Stop()
+
+	go func() {
+		_ = server.Serve(listener)
+	}()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	cfg := DefaultRouterConfig()
+	cfg.UnhealthyThreshold = time.Hour
+	router := NewRouter(cfg, logger)
+	router.RegisterNodeStatic("node1", listener.Addr().String(), 100)
+
+	router.checkAllNodes()
+	router.checkAllNodes()
+
+	if got := strings.Count(buf.String(), "health check failed"); got != 1 {
+		t.Fatalf("expected 1 deduplicated health-check warning, got %d logs:\n%s", got, buf.String())
+	}
+
+	router.mu.RLock()
+	state := router.nodes["node1"]
+	router.mu.RUnlock()
+	if state == nil {
+		t.Fatal("expected node state to exist")
+	}
+	if !state.healthCheckFailureLogged {
+		t.Fatal("expected failure state to stay latched while node is still failing")
+	}
+
+	state.healthCheckFailureLogged = false
+	state.lastHealthCheckError = ""
+	buf.Reset()
+	router.checkAllNodes()
+
+	if got := strings.Count(buf.String(), "health check failed"); got != 1 {
+		t.Fatalf("expected warning to log again after recovery reset, got %d logs:\n%s", got, buf.String())
 	}
 }
 

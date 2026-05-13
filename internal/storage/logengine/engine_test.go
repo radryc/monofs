@@ -133,3 +133,81 @@ func TestLogEngine_QueryLogsRespectsTimeRange(t *testing.T) {
 		t.Fatalf("QueryLogs() returned %q, want newer event", got)
 	}
 }
+
+func TestLogEngine_QueryMetricsMetricNameDiscoveryUsesManifestMetadata(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_metric_discovery_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	backend := NewMockS3Store(filepath.Join(tmpDir, "remote"))
+	engine := New(backend, Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	if err := engine.IngestMetrics(ctx, "chunk-old", []MetricRecord{{
+		Timestamp:  base.Add(-2 * time.Hour),
+		Service:    "api",
+		MetricName: "old_metric_total",
+		Value:      1,
+		Labels:     map[string]string{"env": "prod"},
+	}}); err != nil {
+		t.Fatalf("IngestMetrics(chunk-old) error = %v", err)
+	}
+	if err := engine.IngestMetrics(ctx, "chunk-new-a", []MetricRecord{{
+		Timestamp:  base.Add(-20 * time.Minute),
+		Service:    "api",
+		MetricName: "requests_total",
+		Value:      1,
+		Labels:     map[string]string{"env": "prod"},
+	}}); err != nil {
+		t.Fatalf("IngestMetrics(chunk-new-a) error = %v", err)
+	}
+	if err := engine.IngestMetrics(ctx, "chunk-new-b", []MetricRecord{
+		{
+			Timestamp:  base.Add(-5 * time.Minute),
+			Service:    "api",
+			MetricName: "requests_total",
+			Value:      2,
+			Labels:     map[string]string{"env": "prod"},
+		},
+		{
+			Timestamp:  base.Add(-5 * time.Minute),
+			Service:    "api",
+			MetricName: "latency_seconds",
+			Value:      0.2,
+			Labels:     map[string]string{"env": "prod"},
+		},
+	}); err != nil {
+		t.Fatalf("IngestMetrics(chunk-new-b) error = %v", err)
+	}
+
+	results, err := engine.QueryMetrics(ctx, MetricQuery{
+		LabelMatchers: []MetricLabelMatcher{{
+			Name:  metricDiscoveryMatcherName,
+			Value: metricDiscoveryModeNames,
+			Type:  MetricMatchEqual,
+		}},
+	}, base.Add(-30*time.Minute), base)
+	if err != nil {
+		t.Fatalf("QueryMetrics(discovery) error = %v", err)
+	}
+
+	got := make([]string, 0, len(results))
+	for _, result := range results {
+		got = append(got, result.MetricName)
+	}
+	want := []string{"latency_seconds", "requests_total"}
+	if len(got) != len(want) {
+		t.Fatalf("QueryMetrics(discovery) returned %v, want %v", got, want)
+	}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Fatalf("QueryMetrics(discovery) returned %v, want %v", got, want)
+		}
+	}
+}
