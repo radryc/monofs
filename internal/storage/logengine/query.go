@@ -34,6 +34,11 @@ type compiledMetricMatcher struct {
 	name    string
 }
 
+const (
+	metricDiscoveryMatcherName = "__doctor_discovery__"
+	metricDiscoveryModeNames   = "metric_names"
+)
+
 // NewQueryEngine creates a new QueryEngine.
 func NewQueryEngine(store *CachedStore) *QueryEngine {
 	return &QueryEngine{
@@ -302,6 +307,11 @@ func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, serv
 
 // QueryMetrics returns metric data points matching the given query in the time range.
 func (q *QueryEngine) QueryMetrics(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
+	query, discoveryMode := stripMetricDiscoveryMatchers(query)
+	if discoveryMode == metricDiscoveryModeNames {
+		return q.discoverMetricNames(ctx, query, from, to)
+	}
+
 	observer := beginQueryPathObservation(SignalMetrics)
 	defer observer.finish()
 
@@ -332,6 +342,49 @@ func (q *QueryEngine) QueryMetrics(ctx context.Context, query MetricQuery, from,
 		}
 		results = append(results, points...)
 	}
+	observer.addReturnedRecords(len(results))
+	return results, nil
+}
+
+func (q *QueryEngine) discoverMetricNames(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
+	observer := beginQueryPathObservation(SignalMetrics)
+	defer observer.finish()
+
+	listStart := time.Now()
+	chunkIDs, err := q.store.ListChunks(ctx, "chunks/metrics/")
+	observer.observeStage("chunk_listing", listStart)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list metric chunks: %w", err)
+	}
+	observer.addChunksListed(len(chunkIDs))
+
+	compiledMatchers, err := compileMetricMatchers(query.LabelMatchers)
+	if err != nil {
+		return nil, err
+	}
+	candidates, err := q.metricCandidates(ctx, chunkIDs, query, compiledMatchers, from, to, observer)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{})
+	results := make([]MetricRecord, 0)
+	for _, candidate := range candidates {
+		for _, name := range candidate.manifest.MetricNames {
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			results = append(results, MetricRecord{MetricName: name})
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].MetricName < results[j].MetricName
+	})
 	observer.addReturnedRecords(len(results))
 	return results, nil
 }
@@ -723,6 +776,27 @@ func metricMatcherTypeToProm(matchType MetricMatchType) (labels.MatchType, error
 	default:
 		return labels.MatchEqual, fmt.Errorf("unsupported metric matcher type %q", matchType)
 	}
+}
+
+func stripMetricDiscoveryMatchers(query MetricQuery) (MetricQuery, string) {
+	if len(query.LabelMatchers) == 0 {
+		return query, ""
+	}
+
+	filtered := query
+	filtered.LabelMatchers = make([]MetricLabelMatcher, 0, len(query.LabelMatchers))
+	mode := ""
+	for _, matcher := range query.LabelMatchers {
+		if matcher.Name == metricDiscoveryMatcherName && matcher.Type == MetricMatchEqual {
+			mode = matcher.Value
+			continue
+		}
+		filtered.LabelMatchers = append(filtered.LabelMatchers, matcher)
+	}
+	if len(filtered.LabelMatchers) == 0 {
+		filtered.LabelMatchers = nil
+	}
+	return filtered, mode
 }
 
 func manifestContains(values []string, wanted string) bool {

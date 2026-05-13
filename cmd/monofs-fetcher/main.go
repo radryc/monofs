@@ -387,46 +387,9 @@ func main() {
 		_ = shutdownCtx // Satisfy linter
 	}()
 
-	// Start stats reporter
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				stats, _ := service.GetStats(ctx, nil)
-				if stats != nil {
-					logger.Info("fetcher stats",
-						"total_requests", stats.TotalRequests,
-						"active_fetches", stats.ActiveFetches,
-						"queued_prefetches", stats.QueuedPrefetches,
-						"cache_hit_rate", fmt.Sprintf("%.2f%%", stats.CacheHitRate*100),
-						"bytes_served", formatBytes(stats.BytesServed),
-					)
-				}
-			}
-		}
-	}()
-
 	logger.Info("fetcher ready", "address", addr)
 	if err := grpcServer.Serve(listener); err != nil {
 		logger.Error("server error", "error", err)
 		os.Exit(1)
 	}
-}
-
-func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
