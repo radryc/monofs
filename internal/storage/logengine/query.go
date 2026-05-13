@@ -69,6 +69,64 @@ func (h *spanRecordMinHeap) Pop() any {
 	return item
 }
 
+type logChunkCursor struct {
+	records []LogRecord
+	index   int
+}
+
+func (c *logChunkCursor) current() LogRecord {
+	return c.records[c.index]
+}
+
+type logChunkCursorHeap []*logChunkCursor
+
+func (h logChunkCursorHeap) Len() int { return len(h) }
+
+func (h logChunkCursorHeap) Less(i, j int) bool {
+	return h[i].current().Timestamp.After(h[j].current().Timestamp)
+}
+
+func (h logChunkCursorHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *logChunkCursorHeap) Push(x any) { *h = append(*h, x.(*logChunkCursor)) }
+
+func (h *logChunkCursorHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
+type spanChunkCursor struct {
+	records []SpanRecord
+	index   int
+}
+
+func (c *spanChunkCursor) current() SpanRecord {
+	return c.records[c.index]
+}
+
+type spanChunkCursorHeap []*spanChunkCursor
+
+func (h spanChunkCursorHeap) Len() int { return len(h) }
+
+func (h spanChunkCursorHeap) Less(i, j int) bool {
+	return h[i].current().Timestamp.After(h[j].current().Timestamp)
+}
+
+func (h spanChunkCursorHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *spanChunkCursorHeap) Push(x any) { *h = append(*h, x.(*spanChunkCursor)) }
+
+func (h *spanChunkCursorHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
 type compiledMetricMatcher struct {
 	matcher *labels.Matcher
 	name    string
@@ -217,36 +275,12 @@ func (q *QueryEngine) StreamLogs(ctx context.Context, queryStr, service string, 
 		return emitQueryResults(results, yield)
 	}
 
-	results := make([]LogRecord, 0)
-	for _, candidate := range candidates {
-		validRows, err := q.logValidRows(ctx, candidate.chunkID, textFilters)
-		if err != nil {
-			if errors.Is(err, ErrGhostChunk) {
-				continue
-			}
-			return err
-		}
-		if validRows != nil && validRows.IsEmpty() {
-			continue
-		}
-
-		parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, "data.parquet")
-		if err := q.scanLogParquet(ctx, parquetPath, validRows, compiled, from, to, observer, func(record LogRecord) error {
-			results = append(results, record)
-			return nil
-		}); err != nil {
-			if errors.Is(err, ErrGhostChunk) {
-				continue
-			}
-			return err
-		}
+	returned, err := q.emitMergedLogChunks(ctx, candidates, compiled, textFilters, from, to, observer, yield)
+	if err != nil {
+		return err
 	}
-
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Timestamp.After(results[j].Timestamp)
-	})
-	observer.addReturnedRecords(len(results))
-	return emitQueryResults(results, yield)
+	observer.addReturnedRecords(returned)
+	return nil
 }
 
 func (q *QueryEngine) logValidRows(ctx context.Context, chunkID string, textFilters []string) (*roaring.Bitmap, error) {
@@ -284,6 +318,71 @@ func (q *QueryEngine) logValidRows(ctx context.Context, chunkID string, textFilt
 		return nil, err
 	}
 	return validRows, nil
+}
+
+func (q *QueryEngine) collectLogChunkRecords(ctx context.Context, candidate candidateChunk, compiled compiledLogQuery, textFilters []string, from, to time.Time, observer *queryPathObserver) ([]LogRecord, error) {
+	validRows, err := q.logValidRows(ctx, candidate.chunkID, textFilters)
+	if err != nil {
+		return nil, err
+	}
+	if validRows != nil && validRows.IsEmpty() {
+		return nil, nil
+	}
+
+	parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, "data.parquet")
+	records := make([]LogRecord, 0)
+	if err := q.scanLogParquet(ctx, parquetPath, validRows, compiled, from, to, observer, func(record LogRecord) error {
+		records = append(records, record)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Timestamp.After(records[j].Timestamp)
+	})
+	return records, nil
+}
+
+func (q *QueryEngine) emitMergedLogChunks(ctx context.Context, candidates []candidateChunk, compiled compiledLogQuery, textFilters []string, from, to time.Time, observer *queryPathObserver, yield func(LogRecord) error) (int, error) {
+	active := make(logChunkCursorHeap, 0)
+	heap.Init(&active)
+	nextCandidate := 0
+	returned := 0
+
+	for {
+		for nextCandidate < len(candidates) {
+			if active.Len() > 0 && candidates[nextCandidate].cutoffMax.Before(active[0].current().Timestamp) {
+				break
+			}
+
+			records, err := q.collectLogChunkRecords(ctx, candidates[nextCandidate], compiled, textFilters, from, to, observer)
+			nextCandidate++
+			if err != nil {
+				if errors.Is(err, ErrGhostChunk) {
+					continue
+				}
+				return 0, err
+			}
+			if len(records) == 0 {
+				continue
+			}
+			heap.Push(&active, &logChunkCursor{records: records})
+		}
+
+		if active.Len() == 0 {
+			return returned, nil
+		}
+
+		cursor := heap.Pop(&active).(*logChunkCursor)
+		if err := yield(cursor.current()); err != nil {
+			return 0, err
+		}
+		returned++
+		cursor.index++
+		if cursor.index < len(cursor.records) {
+			heap.Push(&active, cursor)
+		}
+	}
 }
 
 func (q *QueryEngine) scanLogParquet(ctx context.Context, path string, validRows *roaring.Bitmap, compiled compiledLogQuery, from, to time.Time, observer *queryPathObserver, yield func(LogRecord) error) error {
@@ -803,24 +902,12 @@ func (q *QueryEngine) StreamTraces(ctx context.Context, traceID, service string,
 		return emitQueryResults(results, yield)
 	}
 
-	results := make([]SpanRecord, 0)
-	for _, candidate := range candidates {
-		if err := q.scanTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, "data.parquet"), traceID, service, from, to, observer, func(record SpanRecord) error {
-			results = append(results, record)
-			return nil
-		}); err != nil {
-			if errors.Is(err, ErrGhostChunk) {
-				continue
-			}
-			return err
-		}
+	returned, err := q.emitMergedTraceChunks(ctx, candidates, traceID, service, from, to, observer, yield)
+	if err != nil {
+		return err
 	}
-
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Timestamp.After(results[j].Timestamp)
-	})
-	observer.addReturnedRecords(len(results))
-	return emitQueryResults(results, yield)
+	observer.addReturnedRecords(returned)
+	return nil
 }
 
 func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, traceID, service string, from, to time.Time, observer *queryPathObserver) ([]candidateChunk, error) {
@@ -859,6 +946,62 @@ func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, tr
 		return candidates[i].manifest.MaxTime.After(candidates[j].manifest.MaxTime)
 	})
 	return candidates, nil
+}
+
+func (q *QueryEngine) collectTraceChunkRecords(ctx context.Context, candidate candidateChunk, traceID, service string, from, to time.Time, observer *queryPathObserver) ([]SpanRecord, error) {
+	records := make([]SpanRecord, 0)
+	if err := q.scanTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, "data.parquet"), traceID, service, from, to, observer, func(record SpanRecord) error {
+		records = append(records, record)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Timestamp.After(records[j].Timestamp)
+	})
+	return records, nil
+}
+
+func (q *QueryEngine) emitMergedTraceChunks(ctx context.Context, candidates []candidateChunk, traceID, service string, from, to time.Time, observer *queryPathObserver, yield func(SpanRecord) error) (int, error) {
+	active := make(spanChunkCursorHeap, 0)
+	heap.Init(&active)
+	nextCandidate := 0
+	returned := 0
+
+	for {
+		for nextCandidate < len(candidates) {
+			if active.Len() > 0 && candidates[nextCandidate].cutoffMax.Before(active[0].current().Timestamp) {
+				break
+			}
+
+			records, err := q.collectTraceChunkRecords(ctx, candidates[nextCandidate], traceID, service, from, to, observer)
+			nextCandidate++
+			if err != nil {
+				if errors.Is(err, ErrGhostChunk) {
+					continue
+				}
+				return 0, err
+			}
+			if len(records) == 0 {
+				continue
+			}
+			heap.Push(&active, &spanChunkCursor{records: records})
+		}
+
+		if active.Len() == 0 {
+			return returned, nil
+		}
+
+		cursor := heap.Pop(&active).(*spanChunkCursor)
+		if err := yield(cursor.current()); err != nil {
+			return 0, err
+		}
+		returned++
+		cursor.index++
+		if cursor.index < len(cursor.records) {
+			heap.Push(&active, cursor)
+		}
+	}
 }
 
 func (q *QueryEngine) scanTraceParquet(ctx context.Context, path, traceID, service string, from, to time.Time, observer *queryPathObserver, yield func(SpanRecord) error) error {

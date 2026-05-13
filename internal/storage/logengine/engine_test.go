@@ -253,6 +253,74 @@ func TestLogEngine_QueryLogsSupportsRegexAndNegativeLineFilters(t *testing.T) {
 	}
 }
 
+func TestLogEngine_QueryLogsUnlimitedNewestFirstAcrossOverlappingChunks(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_log_merge_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	backend := NewMockS3Store(filepath.Join(tmpDir, "remote"))
+	engine := New(backend, Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	if err := engine.IngestLogs(ctx, "chunk-a", []LogRecord{
+		{
+			Timestamp:  base.Add(-15 * time.Minute),
+			Level:      "info",
+			Service:    "payment",
+			TraceID:    "trace-a1",
+			RawMessage: "a-older",
+		},
+		{
+			Timestamp:  base.Add(-5 * time.Minute),
+			Level:      "info",
+			Service:    "payment",
+			TraceID:    "trace-a2",
+			RawMessage: "a-newer",
+		},
+	}); err != nil {
+		t.Fatalf("IngestLogs(chunk-a) error = %v", err)
+	}
+	if err := engine.IngestLogs(ctx, "chunk-b", []LogRecord{
+		{
+			Timestamp:  base.Add(-10 * time.Minute),
+			Level:      "info",
+			Service:    "payment",
+			TraceID:    "trace-b1",
+			RawMessage: "b-older",
+		},
+		{
+			Timestamp:  base.Add(-1 * time.Minute),
+			Level:      "info",
+			Service:    "payment",
+			TraceID:    "trace-b2",
+			RawMessage: "b-newest",
+		},
+	}); err != nil {
+		t.Fatalf("IngestLogs(chunk-b) error = %v", err)
+	}
+
+	results, err := engine.QueryLogs(ctx, `{service="payment"}`, "", base.Add(-30*time.Minute), base, 0)
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("QueryLogs() returned %d records, want 4", len(results))
+	}
+	got := []string{results[0].RawMessage, results[1].RawMessage, results[2].RawMessage, results[3].RawMessage}
+	want := []string{"b-newest", "a-newer", "b-older", "a-older"}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Fatalf("QueryLogs() order = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestLogEngine_QueryMetricsMetricNameDiscoveryUsesManifestMetadata(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "logengine_metric_discovery_test")
 	if err != nil {
@@ -460,5 +528,81 @@ func TestLogEngine_QueryTracesRespectsLimitAndNewestOrder(t *testing.T) {
 	}
 	if results[0].SpanID != "span-newest" || results[1].SpanID != "span-newer" {
 		t.Fatalf("QueryTraces() order = [%s %s], want [span-newest span-newer]", results[0].SpanID, results[1].SpanID)
+	}
+}
+
+func TestLogEngine_QueryTracesUnlimitedNewestFirstAcrossOverlappingChunks(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_trace_merge_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	backend := NewMockS3Store(filepath.Join(tmpDir, "remote"))
+	engine := New(backend, Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	if err := engine.IngestTraces(ctx, "chunk-a", []SpanRecord{
+		{
+			Timestamp:  base.Add(-20 * time.Minute),
+			EndTime:    base.Add(-20*time.Minute + time.Second),
+			TraceID:    "trace-a1",
+			SpanID:     "span-a1",
+			Service:    "doctor",
+			Name:       "a-older",
+			Attributes: map[string]string{"env": "prod"},
+		},
+		{
+			Timestamp:  base.Add(-6 * time.Minute),
+			EndTime:    base.Add(-6*time.Minute + time.Second),
+			TraceID:    "trace-a2",
+			SpanID:     "span-a2",
+			Service:    "doctor",
+			Name:       "a-newer",
+			Attributes: map[string]string{"env": "prod"},
+		},
+	}); err != nil {
+		t.Fatalf("IngestTraces(chunk-a) error = %v", err)
+	}
+	if err := engine.IngestTraces(ctx, "chunk-b", []SpanRecord{
+		{
+			Timestamp:  base.Add(-12 * time.Minute),
+			EndTime:    base.Add(-12*time.Minute + time.Second),
+			TraceID:    "trace-b1",
+			SpanID:     "span-b1",
+			Service:    "doctor",
+			Name:       "b-older",
+			Attributes: map[string]string{"env": "prod"},
+		},
+		{
+			Timestamp:  base.Add(-2 * time.Minute),
+			EndTime:    base.Add(-2*time.Minute + time.Second),
+			TraceID:    "trace-b2",
+			SpanID:     "span-b2",
+			Service:    "doctor",
+			Name:       "b-newest",
+			Attributes: map[string]string{"env": "prod"},
+		},
+	}); err != nil {
+		t.Fatalf("IngestTraces(chunk-b) error = %v", err)
+	}
+
+	results, err := engine.QueryTraces(ctx, "", "doctor", base.Add(-30*time.Minute), base, 0)
+	if err != nil {
+		t.Fatalf("QueryTraces() error = %v", err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("QueryTraces() returned %d records, want 4", len(results))
+	}
+	got := []string{results[0].SpanID, results[1].SpanID, results[2].SpanID, results[3].SpanID}
+	want := []string{"span-b2", "span-a2", "span-b1", "span-a1"}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Fatalf("QueryTraces() order = %v, want %v", got, want)
+		}
 	}
 }
