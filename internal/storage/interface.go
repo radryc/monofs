@@ -259,7 +259,7 @@ type StorageBackend interface {
 	// Ingest writes a batch of data (e.g., structured logs) to the backend.
 	Ingest(ctx context.Context, id string, data []byte) error
 
-	// Query executes a search/query against the stored data (e.g., LogQL) and returns results.
+	// Query executes a search/query against the stored data (e.g., a MonoFS log query) and returns results.
 	Query(ctx context.Context, queryStr string) ([]byte, error)
 
 	// Close shuts down the backend and releases all resources.

@@ -29,13 +29,10 @@ type ClientConfig struct {
 	ExtraOpts []grpc.DialOption
 }
 
-// DefaultConfig returns a ClientConfig with sensible defaults matching
-// current MonoFS usage patterns.
+// DefaultConfig returns a ClientConfig with conservative defaults.
+// Message size limits are left at the gRPC defaults unless callers opt in.
 func DefaultConfig() ClientConfig {
-	return ClientConfig{
-		MaxRecvMsgSize: 256 * 1024 * 1024, // 256MB - matches common usage in client/sharded.go
-		MaxSendMsgSize: 256 * 1024 * 1024, // 256MB
-	}
+	return ClientConfig{}
 }
 
 // NewClient creates a new gRPC client connection with the specified configuration.

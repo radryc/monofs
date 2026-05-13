@@ -5,10 +5,14 @@ package main
 
 import (
 	"fmt"
-	"github.com/grafana/loki/v3/pkg/logql/syntax"
+
+	"github.com/radryc/monofs/internal/storage/logquery"
 )
 
 func main() {
-	var f syntax.WalkFn = func(e interface{}) {}
-	fmt.Printf("%T\n", f)
+	parsed, err := logquery.Parse(`{service="payment"} |= "timeout"`)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%T\n", parsed.Matchers)
 }

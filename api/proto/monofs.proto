@@ -58,6 +58,9 @@ service MonoFSRouter {
     rpc SubscribeGuardianChanges(SubscribeGuardianChangesRequest) returns (stream GuardianChangeEvent);
 
     // Doctor Partition operations — telemetry ingest and query
+    rpc StreamQueryLogs(QueryLogsRequest) returns (stream QueryResultItem);
+    rpc StreamQueryMetrics(QueryMetricsRequest) returns (stream QueryResultItem);
+    rpc StreamQueryTraces(QueryTracesRequest) returns (stream QueryResultItem);
     rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
     rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
     rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
@@ -110,6 +113,7 @@ service MonoFS {
     rpc RegisterRepository(RegisterRepositoryRequest) returns (RegisterRepositoryResponse);
     
     // Failover and replication RPCs
+    rpc StreamRepositoryFiles(GetRepositoryFilesRequest) returns (stream RepositoryFileItem);
     rpc GetRepositoryFiles(GetRepositoryFilesRequest) returns (GetRepositoryFilesResponse);
     rpc SyncMetadataFromNode(SyncMetadataFromNodeRequest) returns (SyncMetadataFromNodeResponse);
     rpc ClearFailoverCache(ClearFailoverCacheRequest) returns (ClearFailoverCacheResponse);
@@ -138,6 +142,9 @@ service MonoFS {
     rpc GetPredictorStats(PredictorStatsRequest) returns (PredictorStatsResponse);
 
     // Doctor Partition operations — telemetry ingest and query
+    rpc StreamQueryLogs(QueryLogsRequest) returns (stream QueryResultItem);
+    rpc StreamQueryMetrics(QueryMetricsRequest) returns (stream QueryResultItem);
+    rpc StreamQueryTraces(QueryTracesRequest) returns (stream QueryResultItem);
     rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
     rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
     rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
@@ -447,6 +454,10 @@ message GetRepositoryFilesRequest {
 message GetRepositoryFilesResponse {
     repeated string files = 1;  // File paths owned by this node
     string node_id = 2;
+}
+
+message RepositoryFileItem {
+    string file_path = 1;
 }
 
 message SyncMetadataFromNodeRequest {
@@ -1046,6 +1057,10 @@ message QueryTracesRequest {
 
 message QueryTracesResponse {
     bytes results_json = 1;
+}
+
+message QueryResultItem {
+    bytes item_json = 1;
 }
 
 // LogEntry is a single log record for ingest.

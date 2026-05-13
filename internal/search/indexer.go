@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	grafanaregexp "github.com/grafana/regexp"
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/index"
 	"github.com/sourcegraph/zoekt/query"
@@ -587,7 +586,7 @@ func (i *Indexer) Search(ctx context.Context, req SearchRequest) (*SearchResults
 
 		if targetDisplayPath != "" {
 			// Exact match on repository name
-			repoQ := &query.Repo{Regexp: grafanaregexp.MustCompile(regexp.QuoteMeta(targetDisplayPath))}
+			repoQ := query.NewRepoSet(targetDisplayPath)
 			q = query.NewAnd(q, repoQ)
 		} else {
 			// Repository not found in our mapping, don't return anything

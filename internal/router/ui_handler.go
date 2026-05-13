@@ -532,9 +532,7 @@ func (r *Router) buildDependenciesData() *DependenciesData {
 			defer func() { <-sem }()
 
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			resp, err := state.client.GetRepositoryFiles(ctx, &pb.GetRepositoryFilesRequest{
-				StorageId: storageID,
-			})
+			files, err := streamRepositoryFiles(ctx, state.client, storageID)
 			cancel()
 
 			if err != nil {
@@ -546,7 +544,7 @@ func (r *Router) buildDependenciesData() *DependenciesData {
 			resMu.Lock()
 			results = append(results, nodeResult{
 				nodeID: state.info.NodeId,
-				files:  resp.Files,
+				files:  files,
 			})
 			resMu.Unlock()
 		}()

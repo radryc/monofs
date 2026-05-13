@@ -134,6 +134,125 @@ func TestLogEngine_QueryLogsRespectsTimeRange(t *testing.T) {
 	}
 }
 
+func TestLogEngine_QueryLogsSupportsSelectorOperators(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_matchers_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	backend := NewMockS3Store(filepath.Join(tmpDir, "remote"))
+	engine := New(backend, Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+
+	logs := []LogRecord{
+		{
+			Timestamp:  time.Now(),
+			Level:      "error",
+			Service:    "payment",
+			TraceID:    "trc-123",
+			RawMessage: "connection timeout to database",
+		},
+		{
+			Timestamp:  time.Now(),
+			Level:      "info",
+			Service:    "payment",
+			TraceID:    "trc-124",
+			RawMessage: "connection timeout but recovered",
+		},
+		{
+			Timestamp:  time.Now(),
+			Level:      "error",
+			Service:    "billing",
+			TraceID:    "trc-125",
+			RawMessage: "connection timeout to external service",
+		},
+	}
+
+	if err := engine.IngestLogs(ctx, "chunk-matchers", logs); err != nil {
+		t.Fatalf("IngestLogs() error = %v", err)
+	}
+
+	results, err := engine.QueryLogs(ctx, `{service="payment",level!="info",trace_id=~"trc-12[34]"}`, "", time.Time{}, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("QueryLogs() returned %d records, want 1", len(results))
+	}
+	if got := results[0].TraceID; got != "trc-123" {
+		t.Fatalf("QueryLogs() returned trace_id %q, want trc-123", got)
+	}
+}
+
+func TestLogEngine_QueryLogsSupportsRegexAndNegativeLineFilters(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_linefilters_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	backend := NewMockS3Store(filepath.Join(tmpDir, "remote"))
+	engine := New(backend, Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+
+	logs := []LogRecord{
+		{
+			Timestamp:  time.Now(),
+			Level:      "error",
+			Service:    "payment",
+			TraceID:    "trc-123",
+			RawMessage: "connection timeout to database",
+		},
+		{
+			Timestamp:  time.Now(),
+			Level:      "error",
+			Service:    "payment",
+			TraceID:    "trc-124",
+			RawMessage: "connection timeout but ignored by retry loop",
+		},
+		{
+			Timestamp:  time.Now(),
+			Level:      "info",
+			Service:    "payment",
+			TraceID:    "trc-125",
+			RawMessage: "payment processed successfully",
+		},
+	}
+
+	if err := engine.IngestLogs(ctx, "chunk-linefilters", logs); err != nil {
+		t.Fatalf("IngestLogs() error = %v", err)
+	}
+
+	results, err := engine.QueryLogs(ctx, `{service="payment"} != "ignored" !~ "successfully"`, "", time.Time{}, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("QueryLogs() returned %d records, want 1", len(results))
+	}
+	if got := results[0].RawMessage; got != "connection timeout to database" {
+		t.Fatalf("QueryLogs() returned %q, want database timeout record", got)
+	}
+
+	results, err = engine.QueryLogs(ctx, `{service="payment"} |~ "processed.*successfully"`, "", time.Time{}, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("QueryLogs() regex error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("QueryLogs() regex returned %d records, want 1", len(results))
+	}
+	if got := results[0].TraceID; got != "trc-125" {
+		t.Fatalf("QueryLogs() regex returned trace_id %q, want trc-125", got)
+	}
+}
+
 func TestLogEngine_QueryMetricsMetricNameDiscoveryUsesManifestMetadata(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "logengine_metric_discovery_test")
 	if err != nil {
@@ -209,5 +328,137 @@ func TestLogEngine_QueryMetricsMetricNameDiscoveryUsesManifestMetadata(t *testin
 		if got[idx] != want[idx] {
 			t.Fatalf("QueryMetrics(discovery) returned %v, want %v", got, want)
 		}
+	}
+}
+
+func TestLogEngine_QueryMetricsFiltersByMetricNameServiceAndLabels(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_metric_query_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	backend := NewMockS3Store(filepath.Join(tmpDir, "remote"))
+	engine := New(backend, Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	if err := engine.IngestMetrics(ctx, "chunk-metrics", []MetricRecord{
+		{
+			Timestamp:  base.Add(-10 * time.Minute),
+			Service:    "api",
+			MetricName: "requests_total",
+			Value:      2,
+			Labels:     map[string]string{"env": "prod", "pod": "a"},
+		},
+		{
+			Timestamp:  base.Add(-8 * time.Minute),
+			Service:    "api",
+			MetricName: "requests_total",
+			Value:      3,
+			Labels:     map[string]string{"env": "stage", "pod": "b"},
+		},
+		{
+			Timestamp:  base.Add(-7 * time.Minute),
+			Service:    "worker",
+			MetricName: "requests_total",
+			Value:      4,
+			Labels:     map[string]string{"env": "prod", "pod": "c"},
+		},
+		{
+			Timestamp:  base.Add(-6 * time.Minute),
+			Service:    "api",
+			MetricName: "latency_seconds",
+			Value:      0.5,
+			Labels:     map[string]string{"env": "prod", "pod": "a"},
+		},
+	}); err != nil {
+		t.Fatalf("IngestMetrics(chunk-metrics) error = %v", err)
+	}
+
+	results, err := engine.QueryMetrics(ctx, MetricQuery{
+		MetricName: "requests_total",
+		Service:    "api",
+		LabelMatchers: []MetricLabelMatcher{{
+			Name:  "env",
+			Value: "prod",
+			Type:  MetricMatchEqual,
+		}},
+	}, base.Add(-30*time.Minute), base)
+	if err != nil {
+		t.Fatalf("QueryMetrics() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("QueryMetrics() returned %d records, want 1", len(results))
+	}
+	if got := results[0].Value; got != 2 {
+		t.Fatalf("QueryMetrics() value = %v, want 2", got)
+	}
+	if got := results[0].Labels["pod"]; got != "a" {
+		t.Fatalf("QueryMetrics() pod label = %q, want a", got)
+	}
+}
+
+func TestLogEngine_QueryTracesRespectsLimitAndNewestOrder(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_trace_query_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	backend := NewMockS3Store(filepath.Join(tmpDir, "remote"))
+	engine := New(backend, Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	if err := engine.IngestTraces(ctx, "chunk-old", []SpanRecord{{
+		Timestamp:  base.Add(-2 * time.Hour),
+		EndTime:    base.Add(-2*time.Hour + time.Second),
+		TraceID:    "trace-old",
+		SpanID:     "span-old",
+		Service:    "doctor",
+		Name:       "older",
+		Attributes: map[string]string{"env": "prod"},
+	}}); err != nil {
+		t.Fatalf("IngestTraces(chunk-old) error = %v", err)
+	}
+	if err := engine.IngestTraces(ctx, "chunk-new", []SpanRecord{
+		{
+			Timestamp:  base.Add(-10 * time.Minute),
+			EndTime:    base.Add(-10*time.Minute + time.Second),
+			TraceID:    "trace-newer",
+			SpanID:     "span-newer",
+			Service:    "doctor",
+			Name:       "newer",
+			Attributes: map[string]string{"env": "prod"},
+		},
+		{
+			Timestamp:  base.Add(-5 * time.Minute),
+			EndTime:    base.Add(-5*time.Minute + time.Second),
+			TraceID:    "trace-newest",
+			SpanID:     "span-newest",
+			Service:    "doctor",
+			Name:       "newest",
+			Attributes: map[string]string{"env": "prod"},
+		},
+	}); err != nil {
+		t.Fatalf("IngestTraces(chunk-new) error = %v", err)
+	}
+
+	results, err := engine.QueryTraces(ctx, "", "doctor", base.Add(-3*time.Hour), base, 2)
+	if err != nil {
+		t.Fatalf("QueryTraces() error = %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("QueryTraces() returned %d records, want 2", len(results))
+	}
+	if results[0].SpanID != "span-newest" || results[1].SpanID != "span-newer" {
+		t.Fatalf("QueryTraces() order = [%s %s], want [span-newest span-newer]", results[0].SpanID, results[1].SpanID)
 	}
 }
