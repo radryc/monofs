@@ -2,7 +2,9 @@ package fuse
 
 import (
 	"context"
+	"io"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -24,29 +26,16 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 		parts := splitPath(n.path)
 		if len(parts) == 5 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" && parts[4] == "results.json" {
 			sessionID := parts[3]
-			localPath, err := n.sessionMgr.GetLocalPath("doctor/v1/query/" + sessionID + "/statement")
+			statementPath, err := n.sessionMgr.GetLocalPath("doctor/v1/query/" + sessionID + "/statement")
 			if err == nil {
-				queryBytes, err := os.ReadFile(localPath)
+				resultsPath, err := n.sessionMgr.GetLocalPath(n.path)
 				if err == nil {
 					ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 					defer cancel()
-					res, err := n.client.QueryLogs(ctx, string(queryBytes))
-					if err == nil {
-						end := int(off) + len(dest)
-						if end > len(res) {
-							end = len(res)
-						}
-						if int(off) >= len(res) {
-							n.client.RecordOperation()
-							return fuse.ReadResultData(nil), 0
-						}
-						n.client.RecordOperation()
-						n.client.RecordBytesRead(int64(end - int(off)))
-						return fuse.ReadResultData(res[off:end]), 0
+					if err := n.ensureDoctorQueryResults(ctx, statementPath, resultsPath); err == nil {
+						return n.readLocalFileRange(resultsPath, dest, off)
 					}
 					n.logger.Warn("read: QueryLogs RPC failed", "error", err)
-				} else {
-					n.logger.Warn("read: failed to read local statement file", "error", err)
 				}
 			}
 		}
@@ -161,4 +150,66 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 	n.client.RecordOperation()
 	n.client.RecordBytesRead(bytesRead)
 	return fuse.ReadResultData(content[off:end]), 0
+}
+
+func (n *MonoNode) ensureDoctorQueryResults(ctx context.Context, statementPath, resultsPath string) error {
+	statementInfo, err := os.Stat(statementPath)
+	if err != nil {
+		return err
+	}
+	if resultsInfo, err := os.Stat(resultsPath); err == nil && !resultsInfo.ModTime().Before(statementInfo.ModTime()) {
+		return nil
+	}
+
+	queryBytes, err := os.ReadFile(statementPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(resultsPath), 0755); err != nil {
+		return err
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(resultsPath), "results-*.json")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	if err := n.client.WriteQueryLogs(ctx, string(queryBytes), tmpFile); err != nil {
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, resultsPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (n *MonoNode) readLocalFileRange(path string, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	file, err := os.Open(path)
+	if err != nil {
+		n.logger.Warn("read: open local query results failed", "path", path, "error", err)
+		return nil, syscall.EIO
+	}
+	defer file.Close()
+
+	nread, err := file.ReadAt(dest, off)
+	if err != nil && err != io.EOF {
+		n.logger.Warn("read: local query results read failed", "path", path, "error", err)
+		return nil, syscall.EIO
+	}
+	if nread <= 0 {
+		n.client.RecordOperation()
+		return fuse.ReadResultData(nil), 0
+	}
+
+	n.client.RecordOperation()
+	n.client.RecordBytesRead(int64(nread))
+	return fuse.ReadResultData(dest[:nread]), 0
 }

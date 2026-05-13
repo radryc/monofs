@@ -3,6 +3,7 @@ package client
 
 import (
 	"context"
+	"io"
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fsstat"
@@ -17,6 +18,7 @@ type MonoFSClient interface {
 	Read(ctx context.Context, path string, offset, size int64) ([]byte, error)
 	StatFS(ctx context.Context) (fsstat.Snapshot, error)
 	QueryLogs(ctx context.Context, query string) ([]byte, error)
+	WriteQueryLogs(ctx context.Context, query string, writer io.Writer) error
 	Close() error
 	// Metrics tracking
 	RecordOperation()

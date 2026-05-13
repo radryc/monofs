@@ -1,24 +1,28 @@
 package logengine
 
 import (
+	"container/heap"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/RoaringBitmap/roaring"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/blugelabs/bluge"
-	"github.com/grafana/loki/v3/pkg/logql/syntax"
 	"github.com/prometheus/prometheus/model/labels"
+
+	"github.com/radryc/monofs/internal/storage/logquery"
 )
 
-// QueryEngine handles parsing and executing LogQL queries against the storage.
+// QueryEngine handles parsing and executing MonoFS log queries against the storage.
 type QueryEngine struct {
 	store *CachedStore
 }
@@ -29,9 +33,61 @@ type candidateChunk struct {
 	cutoffMax time.Time
 }
 
+type logRecordMinHeap []LogRecord
+
+func (h logRecordMinHeap) Len() int { return len(h) }
+
+func (h logRecordMinHeap) Less(i, j int) bool { return h[i].Timestamp.Before(h[j].Timestamp) }
+
+func (h logRecordMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *logRecordMinHeap) Push(x any) { *h = append(*h, x.(LogRecord)) }
+
+func (h *logRecordMinHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
+type spanRecordMinHeap []SpanRecord
+
+func (h spanRecordMinHeap) Len() int { return len(h) }
+
+func (h spanRecordMinHeap) Less(i, j int) bool { return h[i].Timestamp.Before(h[j].Timestamp) }
+
+func (h spanRecordMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *spanRecordMinHeap) Push(x any) { *h = append(*h, x.(SpanRecord)) }
+
+func (h *spanRecordMinHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
 type compiledMetricMatcher struct {
 	matcher *labels.Matcher
 	name    string
+}
+
+type compiledLogMatcher struct {
+	matcher logquery.Matcher
+	regex   *regexp.Regexp
+}
+
+type compiledLineFilter struct {
+	filter logquery.LineFilter
+	regex  *regexp.Regexp
+}
+
+type compiledLogQuery struct {
+	query       logquery.Query
+	matchers    []compiledLogMatcher
+	lineFilters []compiledLineFilter
 }
 
 const (
@@ -46,157 +102,198 @@ func NewQueryEngine(store *CachedStore) *QueryEngine {
 	}
 }
 
-// Query executes a LogQL query and is kept for backward compatibility.
+// Query executes a MonoFS log query and is kept for backward compatibility.
 func (q *QueryEngine) Query(ctx context.Context, queryStr string) ([]LogRecord, error) {
 	return q.QueryLogs(ctx, queryStr, "", time.Time{}, time.Time{}, 0)
 }
 
-// QueryLogs executes a LogQL query over the log chunks.
+func collectQueryResults[T any](stream func(func(T) error) error) ([]T, error) {
+	results := make([]T, 0)
+	if err := stream(func(record T) error {
+		results = append(results, record)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func emitQueryResults[T any](records []T, yield func(T) error) error {
+	for _, record := range records {
+		if err := yield(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// QueryLogs executes a MonoFS log query over the log chunks.
 // limit 0 means no limit.
 func (q *QueryEngine) QueryLogs(ctx context.Context, queryStr, service string, from, to time.Time, limit int) ([]LogRecord, error) {
+	return collectQueryResults(func(yield func(LogRecord) error) error {
+		return q.StreamLogs(ctx, queryStr, service, from, to, limit, yield)
+	})
+}
+
+// StreamLogs executes a MonoFS log query and yields matching log records.
+// limit 0 means no limit.
+func (q *QueryEngine) StreamLogs(ctx context.Context, queryStr, service string, from, to time.Time, limit int, yield func(LogRecord) error) error {
 	observer := beginQueryPathObservation(SignalLogs)
 	defer observer.finish()
 
-	// 1. Parse Query using Loki's logql syntax
-	expr, err := syntax.ParseExpr(queryStr)
+	// 1. Parse the MonoFS-compatible query subset.
+	parsed, err := logquery.Parse(queryStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse LogQL: %w", err)
+		return fmt.Errorf("failed to parse log query: %w", err)
 	}
-
-	var textFilter string
-	var serviceFilter string
-
-	var extract func(e syntax.Expr)
-	extract = func(e syntax.Expr) {
-		switch node := e.(type) {
-		case *syntax.PipelineExpr:
-			extract(node.Left)
-			for _, stage := range node.MultiStages {
-				if lf, ok := stage.(*syntax.LineFilterExpr); ok {
-					textFilter = lf.Match
-				}
-			}
-		case *syntax.MatchersExpr:
-			for _, m := range node.Matchers() {
-				if m.Name == "service" && m.Type == labels.MatchEqual {
-					serviceFilter = m.Value
-				}
-			}
-		}
-	}
-	extract(expr)
 	if service != "" {
-		if serviceFilter != "" && serviceFilter != service {
-			return []LogRecord{}, nil
-		}
-		serviceFilter = service
+		parsed.Matchers = append(parsed.Matchers, logquery.Matcher{Name: "service", Op: "=", Value: service})
 	}
+	compiled, err := compileLogQuery(parsed)
+	if err != nil {
+		return fmt.Errorf("failed to compile log query: %w", err)
+	}
+
+	textFilters := compiled.PositiveLineContainsFilters()
+	serviceFilter := compiled.ServiceEquals()
 
 	// 2. Fetch all metadata manifests (Time Pruning)
 	listStart := time.Now()
 	chunkIDs, err := q.store.ListChunks(ctx, "chunks/logs/")
 	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list chunks: %w", err)
+		return fmt.Errorf("failed to list chunks: %w", err)
 	}
 	observer.addChunksListed(len(chunkIDs))
 
 	candidates, err := q.logCandidates(ctx, chunkIDs, serviceFilter, from, to, observer)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var results []LogRecord
+	if limit > 0 {
+		top := make(logRecordMinHeap, 0, limit)
+		heap.Init(&top)
+		for _, candidate := range candidates {
+			if top.Len() >= limit && candidate.cutoffMax.Before(top[0].Timestamp) {
+				break
+			}
 
-	for _, candidate := range candidates {
-		if limit > 0 && len(results) >= limit && candidate.cutoffMax.Before(results[limit-1].Timestamp) {
-			break
-		}
-
-		// 3. Free-Text Phase (Bluge)
-		var validRows *roaring.Bitmap
-
-		if textFilter != "" {
-			indexPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, "text.index.tar.gz")
-
-			// Trigger local cache download if necessary
-			localIndexPath, err := q.store.GetLocalIndexPath(ctx, indexPath)
+			validRows, err := q.logValidRows(ctx, candidate.chunkID, textFilters)
 			if err != nil {
 				if errors.Is(err, ErrGhostChunk) {
 					continue
 				}
-				return nil, err
+				return err
 			}
-
-			// Query Bluge
-			config := bluge.DefaultConfig(localIndexPath)
-			reader, err := bluge.OpenReader(config)
-			if err != nil {
-				return nil, err
-			}
-
-			blugeQuery := bluge.NewMatchQuery(textFilter).SetField("raw_message")
-			req := bluge.NewTopNSearch(10000, blugeQuery)
-
-			documentMatchIterator, err := reader.Search(ctx, req)
-			if err != nil {
-				reader.Close()
-				return nil, err
-			}
-
-			validRows = roaring.New()
-			match, err := documentMatchIterator.Next()
-			for err == nil && match != nil {
-				validRows.Add(uint32(match.Number))
-				match, err = documentMatchIterator.Next()
-			}
-			reader.Close()
-
-			if validRows.IsEmpty() {
-				// No matches in this chunk
+			if validRows != nil && validRows.IsEmpty() {
 				continue
+			}
+
+			parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, "data.parquet")
+			if err := q.scanLogParquet(ctx, parquetPath, validRows, compiled, from, to, observer, func(record LogRecord) error {
+				if top.Len() < limit {
+					heap.Push(&top, record)
+					return nil
+				}
+				if record.Timestamp.After(top[0].Timestamp) {
+					top[0] = record
+					heap.Fix(&top, 0)
+				}
+				return nil
+			}); err != nil {
+				if errors.Is(err, ErrGhostChunk) {
+					continue
+				}
+				return err
 			}
 		}
 
-		// 4. Structured Phase (Parquet)
-		parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, "data.parquet")
+		results := append([]LogRecord(nil), top...)
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].Timestamp.After(results[j].Timestamp)
+		})
+		observer.addReturnedRecords(len(results))
+		return emitQueryResults(results, yield)
+	}
 
-		chunkResults, err := q.readParquet(ctx, parquetPath, validRows, serviceFilter, from, to, observer)
+	results := make([]LogRecord, 0)
+	for _, candidate := range candidates {
+		validRows, err := q.logValidRows(ctx, candidate.chunkID, textFilters)
 		if err != nil {
 			if errors.Is(err, ErrGhostChunk) {
 				continue
 			}
-			return nil, err
+			return err
+		}
+		if validRows != nil && validRows.IsEmpty() {
+			continue
 		}
 
-		results = append(results, chunkResults...)
-		if limit > 0 && len(results) > limit {
-			sort.Slice(results, func(i, j int) bool {
-				return results[i].Timestamp.After(results[j].Timestamp)
-			})
-			results = results[:limit]
+		parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, "data.parquet")
+		if err := q.scanLogParquet(ctx, parquetPath, validRows, compiled, from, to, observer, func(record LogRecord) error {
+			results = append(results, record)
+			return nil
+		}); err != nil {
+			if errors.Is(err, ErrGhostChunk) {
+				continue
+			}
+			return err
 		}
 	}
 
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Timestamp.After(results[j].Timestamp)
 	})
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
 	observer.addReturnedRecords(len(results))
-	return results, nil
+	return emitQueryResults(results, yield)
 }
 
-func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *roaring.Bitmap, serviceFilter string, from, to time.Time, observer *queryPathObserver) ([]LogRecord, error) {
-	rdr, rc, err := q.openSignalParquet(ctx, path, observer)
+func (q *QueryEngine) logValidRows(ctx context.Context, chunkID string, textFilters []string) (*roaring.Bitmap, error) {
+	if len(textFilters) == 0 {
+		return nil, nil
+	}
+
+	indexPath := filepath.Join("chunks", string(SignalLogs), chunkID, "text.index.tar.gz")
+	localIndexPath, err := q.store.GetLocalIndexPath(ctx, indexPath)
 	if err != nil {
 		return nil, err
+	}
+
+	config := bluge.DefaultConfig(localIndexPath)
+	reader, err := bluge.OpenReader(config)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	blugeQuery := buildBlugeLineFilterQuery(textFilters)
+	searchReq := bluge.NewTopNSearch(10000, blugeQuery)
+	documentMatchIterator, err := reader.Search(ctx, searchReq)
+	if err != nil {
+		return nil, err
+	}
+
+	validRows := roaring.New()
+	match, err := documentMatchIterator.Next()
+	for err == nil && match != nil {
+		validRows.Add(uint32(match.Number))
+		match, err = documentMatchIterator.Next()
+	}
+	if err != nil {
+		return nil, err
+	}
+	return validRows, nil
+}
+
+func (q *QueryEngine) scanLogParquet(ctx context.Context, path string, validRows *roaring.Bitmap, compiled compiledLogQuery, from, to time.Time, observer *queryPathObserver, yield func(LogRecord) error) error {
+	rdr, rc, err := q.openSignalParquet(ctx, path, observer)
+	if err != nil {
+		return err
 	}
 	defer rc.Close()
 	defer rdr.Close()
 
-	var records []LogRecord
 	for rgIdx := 0; rgIdx < rdr.NumRowGroups(); rgIdx++ {
 		rg := rdr.RowGroup(rgIdx)
 		n := int(rg.NumRows())
@@ -207,7 +304,7 @@ func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *r
 		// col 0: timestamp (int64 UnixNano)
 		tsCol, err := rg.Column(0)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		tsBuf := make([]int64, n)
 		tsCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), tsBuf, nil, nil) //nolint:errcheck
@@ -215,7 +312,7 @@ func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *r
 		// col 1: level (ByteArray)
 		lvlCol, err := rg.Column(1)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		lvlBuf := make([]parquet.ByteArray, n)
 		lvlCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), lvlBuf, nil, nil) //nolint:errcheck
@@ -223,7 +320,7 @@ func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *r
 		// col 2: service (ByteArray)
 		svcCol, err := rg.Column(2)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		svcBuf := make([]parquet.ByteArray, n)
 		svcCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), svcBuf, nil, nil) //nolint:errcheck
@@ -231,7 +328,7 @@ func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *r
 		// col 3: trace_id (ByteArray)
 		traceCol, err := rg.Column(3)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		traceBuf := make([]parquet.ByteArray, n)
 		traceCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), traceBuf, nil, nil) //nolint:errcheck
@@ -239,7 +336,7 @@ func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *r
 		// col 4: raw_message (ByteArray)
 		msgCol, err := rg.Column(4)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		msgBuf := make([]parquet.ByteArray, n)
 		msgCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), msgBuf, nil, nil) //nolint:errcheck
@@ -255,20 +352,132 @@ func (q *QueryEngine) readParquet(ctx context.Context, path string, validRows *r
 			if !to.IsZero() && ts.After(to) {
 				continue
 			}
-			svc := string(svcBuf[i])
-			if serviceFilter != "" && svc != serviceFilter {
-				continue
-			}
-			records = append(records, LogRecord{
+			record := LogRecord{
 				Timestamp:  ts,
 				Level:      string(lvlBuf[i]),
-				Service:    svc,
+				Service:    string(svcBuf[i]),
 				TraceID:    string(traceBuf[i]),
 				RawMessage: string(msgBuf[i]),
-			})
+			}
+			if !compiled.matchesRecord(record) {
+				continue
+			}
+			if err := yield(record); err != nil {
+				return err
+			}
 		}
 	}
-	return records, nil
+	return nil
+}
+
+func compileLogQuery(query logquery.Query) (compiledLogQuery, error) {
+	compiled := compiledLogQuery{
+		query:       query,
+		matchers:    make([]compiledLogMatcher, 0, len(query.Matchers)),
+		lineFilters: make([]compiledLineFilter, 0, len(query.LineFilters)),
+	}
+	for _, matcher := range query.Matchers {
+		compiledMatcher := compiledLogMatcher{matcher: matcher}
+		if matcher.Op == "=~" || matcher.Op == "!~" {
+			re, err := regexp.Compile(matcher.Value)
+			if err != nil {
+				return compiledLogQuery{}, fmt.Errorf("invalid matcher regexp for %s: %w", matcher.Name, err)
+			}
+			compiledMatcher.regex = re
+		}
+		compiled.matchers = append(compiled.matchers, compiledMatcher)
+	}
+	for _, filter := range query.LineFilters {
+		compiledFilter := compiledLineFilter{filter: filter}
+		if filter.Op == "|~" || filter.Op == "!~" {
+			re, err := regexp.Compile(filter.Value)
+			if err != nil {
+				return compiledLogQuery{}, fmt.Errorf("invalid line filter regexp: %w", err)
+			}
+			compiledFilter.regex = re
+		}
+		compiled.lineFilters = append(compiled.lineFilters, compiledFilter)
+	}
+	return compiled, nil
+}
+
+func (q compiledLogQuery) ServiceEquals() string {
+	return q.query.ServiceEquals()
+}
+
+func (q compiledLogQuery) PositiveLineContainsFilters() []string {
+	return q.query.PositiveLineContainsFilters()
+}
+
+func (q compiledLogQuery) matchesRecord(record LogRecord) bool {
+	for _, matcher := range q.matchers {
+		value, found := logRecordField(record, matcher.matcher.Name)
+		if !matchesLogMatcher(value, found, matcher) {
+			return false
+		}
+	}
+	for _, filter := range q.lineFilters {
+		if !matchesLineFilter(record.RawMessage, filter) {
+			return false
+		}
+	}
+	return true
+}
+
+func logRecordField(record LogRecord, name string) (string, bool) {
+	switch name {
+	case "service":
+		return record.Service, true
+	case "level", "severity_text":
+		return record.Level, true
+	case "trace_id":
+		return record.TraceID, record.TraceID != ""
+	case "body", "raw_message":
+		return record.RawMessage, true
+	default:
+		return "", false
+	}
+}
+
+func matchesLogMatcher(value string, found bool, matcher compiledLogMatcher) bool {
+	switch matcher.matcher.Op {
+	case "=":
+		return found && value == matcher.matcher.Value
+	case "!=":
+		return !found || value != matcher.matcher.Value
+	case "=~":
+		return found && matcher.regex != nil && matcher.regex.MatchString(value)
+	case "!~":
+		return !found || matcher.regex == nil || !matcher.regex.MatchString(value)
+	default:
+		return false
+	}
+}
+
+func matchesLineFilter(message string, filter compiledLineFilter) bool {
+	switch filter.filter.Op {
+	case "|=":
+		return strings.Contains(message, filter.filter.Value)
+	case "!=":
+		return !strings.Contains(message, filter.filter.Value)
+	case "|~":
+		return filter.regex != nil && filter.regex.MatchString(message)
+	case "!~":
+		return filter.regex == nil || !filter.regex.MatchString(message)
+	default:
+		return false
+	}
+}
+
+func buildBlugeLineFilterQuery(filters []string) bluge.Query {
+	if len(filters) == 1 {
+		return bluge.NewMatchQuery(filters[0]).SetField("raw_message")
+	}
+	query := bluge.NewBooleanQuery()
+	for _, filter := range filters {
+		query.AddMust(bluge.NewMatchQuery(filter).SetField("raw_message"))
+	}
+	return query
 }
 
 func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, service string, from, to time.Time, observer *queryPathObserver) ([]candidateChunk, error) {
@@ -307,9 +516,20 @@ func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, serv
 
 // QueryMetrics returns metric data points matching the given query in the time range.
 func (q *QueryEngine) QueryMetrics(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
+	return collectQueryResults(func(yield func(MetricRecord) error) error {
+		return q.StreamMetrics(ctx, query, from, to, yield)
+	})
+}
+
+// StreamMetrics yields metric data points matching the given query in the time range.
+func (q *QueryEngine) StreamMetrics(ctx context.Context, query MetricQuery, from, to time.Time, yield func(MetricRecord) error) error {
 	query, discoveryMode := stripMetricDiscoveryMatchers(query)
 	if discoveryMode == metricDiscoveryModeNames {
-		return q.discoverMetricNames(ctx, query, from, to)
+		results, err := q.discoverMetricNames(ctx, query, from, to)
+		if err != nil {
+			return err
+		}
+		return emitQueryResults(results, yield)
 	}
 
 	observer := beginQueryPathObservation(SignalMetrics)
@@ -319,31 +539,35 @@ func (q *QueryEngine) QueryMetrics(ctx context.Context, query MetricQuery, from,
 	chunkIDs, err := q.store.ListChunks(ctx, "chunks/metrics/")
 	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list metric chunks: %w", err)
+		return fmt.Errorf("failed to list metric chunks: %w", err)
 	}
 	observer.addChunksListed(len(chunkIDs))
 	compiledMatchers, err := compileMetricMatchers(query.LabelMatchers)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	candidates, err := q.metricCandidates(ctx, chunkIDs, query, compiledMatchers, from, to, observer)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var results []MetricRecord
+	returned := 0
 	for _, candidate := range candidates {
-		points, err := q.readMetricParquet(ctx, filepath.Join("chunks", string(SignalMetrics), candidate.chunkID, "data.parquet"), query, compiledMatchers, from, to, observer)
-		if err != nil {
+		if err := q.scanMetricParquet(ctx, filepath.Join("chunks", string(SignalMetrics), candidate.chunkID, "data.parquet"), query, compiledMatchers, from, to, observer, func(record MetricRecord) error {
+			if err := yield(record); err != nil {
+				return err
+			}
+			returned++
+			return nil
+		}); err != nil {
 			if errors.Is(err, ErrGhostChunk) {
 				continue
 			}
-			return nil, err
+			return err
 		}
-		results = append(results, points...)
 	}
-	observer.addReturnedRecords(len(results))
-	return results, nil
+	observer.addReturnedRecords(returned)
+	return nil
 }
 
 func (q *QueryEngine) discoverMetricNames(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
@@ -429,15 +653,14 @@ func (q *QueryEngine) metricCandidates(ctx context.Context, chunkIDs []string, q
 	return candidates, nil
 }
 
-func (q *QueryEngine) readMetricParquet(ctx context.Context, path string, query MetricQuery, matchers []compiledMetricMatcher, from, to time.Time, observer *queryPathObserver) ([]MetricRecord, error) {
+func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query MetricQuery, matchers []compiledMetricMatcher, from, to time.Time, observer *queryPathObserver, yield func(MetricRecord) error) error {
 	rdr, rc, err := q.openSignalParquet(ctx, path, observer)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rc.Close()
 	defer rdr.Close()
 
-	var records []MetricRecord
 	for rgIdx := 0; rgIdx < rdr.NumRowGroups(); rgIdx++ {
 		rg := rdr.RowGroup(rgIdx)
 		n := int(rg.NumRows())
@@ -448,7 +671,7 @@ func (q *QueryEngine) readMetricParquet(ctx context.Context, path string, query 
 		// col 0: timestamp (int64 UnixNano)
 		tsCol, err := rg.Column(0)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		tsBuf := make([]int64, n)
 		tsCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), tsBuf, nil, nil) //nolint:errcheck
@@ -456,7 +679,7 @@ func (q *QueryEngine) readMetricParquet(ctx context.Context, path string, query 
 		// col 1: service (ByteArray)
 		svcCol, err := rg.Column(1)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		svcBuf := make([]parquet.ByteArray, n)
 		svcCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), svcBuf, nil, nil) //nolint:errcheck
@@ -464,7 +687,7 @@ func (q *QueryEngine) readMetricParquet(ctx context.Context, path string, query 
 		// col 2: metric_name (ByteArray)
 		nameCol, err := rg.Column(2)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		nameBuf := make([]parquet.ByteArray, n)
 		nameCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), nameBuf, nil, nil) //nolint:errcheck
@@ -472,7 +695,7 @@ func (q *QueryEngine) readMetricParquet(ctx context.Context, path string, query 
 		// col 3: value (float64)
 		valCol, err := rg.Column(3)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		valBuf := make([]float64, n)
 		valCol.(*file.Float64ColumnChunkReader).ReadBatch(int64(n), valBuf, nil, nil) //nolint:errcheck
@@ -480,7 +703,7 @@ func (q *QueryEngine) readMetricParquet(ctx context.Context, path string, query 
 		// col 4: labels_json (ByteArray)
 		lblCol, err := rg.Column(4)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		lblBuf := make([]parquet.ByteArray, n)
 		lblCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), lblBuf, nil, nil) //nolint:errcheck
@@ -508,20 +731,29 @@ func (q *QueryEngine) readMetricParquet(ctx context.Context, path string, query 
 			if !metricLabelsMatch(name, svc, labels, matchers) {
 				continue
 			}
-			records = append(records, MetricRecord{
+			if err := yield(MetricRecord{
 				Timestamp:  ts,
 				Service:    svc,
 				MetricName: name,
 				Value:      valBuf[i],
 				Labels:     labels,
-			})
+			}); err != nil {
+				return err
+			}
 		}
 	}
-	return records, nil
+	return nil
 }
 
 // QueryTraces returns trace spans matching the given traceID and/or service in the time range.
 func (q *QueryEngine) QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]SpanRecord, error) {
+	return collectQueryResults(func(yield func(SpanRecord) error) error {
+		return q.StreamTraces(ctx, traceID, service, from, to, limit, yield)
+	})
+}
+
+// StreamTraces yields trace spans matching the given traceID and/or service in the time range.
+func (q *QueryEngine) StreamTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int, yield func(SpanRecord) error) error {
 	observer := beginQueryPathObservation(SignalTraces)
 	defer observer.finish()
 
@@ -529,43 +761,66 @@ func (q *QueryEngine) QueryTraces(ctx context.Context, traceID, service string, 
 	chunkIDs, err := q.store.ListChunks(ctx, "chunks/traces/")
 	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list trace chunks: %w", err)
+		return fmt.Errorf("failed to list trace chunks: %w", err)
 	}
 	observer.addChunksListed(len(chunkIDs))
 	candidates, err := q.traceCandidates(ctx, chunkIDs, traceID, service, from, to, observer)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var results []SpanRecord
-	for _, candidate := range candidates {
-		if limit > 0 && len(results) >= limit && candidate.cutoffMax.Before(results[limit-1].Timestamp) {
-			break
+	if limit > 0 {
+		top := make(spanRecordMinHeap, 0, limit)
+		heap.Init(&top)
+		for _, candidate := range candidates {
+			if top.Len() >= limit && candidate.cutoffMax.Before(top[0].Timestamp) {
+				break
+			}
+
+			if err := q.scanTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, "data.parquet"), traceID, service, from, to, observer, func(record SpanRecord) error {
+				if top.Len() < limit {
+					heap.Push(&top, record)
+					return nil
+				}
+				if record.Timestamp.After(top[0].Timestamp) {
+					top[0] = record
+					heap.Fix(&top, 0)
+				}
+				return nil
+			}); err != nil {
+				if errors.Is(err, ErrGhostChunk) {
+					continue
+				}
+				return err
+			}
 		}
 
-		spans, err := q.readTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, "data.parquet"), traceID, service, from, to, limit-len(results), observer)
-		if err != nil {
+		results := append([]SpanRecord(nil), top...)
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].Timestamp.After(results[j].Timestamp)
+		})
+		observer.addReturnedRecords(len(results))
+		return emitQueryResults(results, yield)
+	}
+
+	results := make([]SpanRecord, 0)
+	for _, candidate := range candidates {
+		if err := q.scanTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, "data.parquet"), traceID, service, from, to, observer, func(record SpanRecord) error {
+			results = append(results, record)
+			return nil
+		}); err != nil {
 			if errors.Is(err, ErrGhostChunk) {
 				continue
 			}
-			return nil, err
-		}
-		results = append(results, spans...)
-		if limit > 0 && len(results) > limit {
-			sort.Slice(results, func(i, j int) bool {
-				return results[i].Timestamp.After(results[j].Timestamp)
-			})
-			results = results[:limit]
+			return err
 		}
 	}
+
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Timestamp.After(results[j].Timestamp)
 	})
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
 	observer.addReturnedRecords(len(results))
-	return results, nil
+	return emitQueryResults(results, yield)
 }
 
 func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, traceID, service string, from, to time.Time, observer *queryPathObserver) ([]candidateChunk, error) {
@@ -606,19 +861,15 @@ func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, tr
 	return candidates, nil
 }
 
-func (q *QueryEngine) readTraceParquet(ctx context.Context, path, traceID, service string, from, to time.Time, remaining int, observer *queryPathObserver) ([]SpanRecord, error) {
+func (q *QueryEngine) scanTraceParquet(ctx context.Context, path, traceID, service string, from, to time.Time, observer *queryPathObserver, yield func(SpanRecord) error) error {
 	rdr, rc, err := q.openSignalParquet(ctx, path, observer)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rc.Close()
 	defer rdr.Close()
 
-	var records []SpanRecord
 	for rgIdx := 0; rgIdx < rdr.NumRowGroups(); rgIdx++ {
-		if remaining > 0 && len(records) >= remaining {
-			break
-		}
 		rg := rdr.RowGroup(rgIdx)
 		n := int(rg.NumRows())
 		if n == 0 {
@@ -628,7 +879,7 @@ func (q *QueryEngine) readTraceParquet(ctx context.Context, path, traceID, servi
 		// col 0: timestamp (int64 UnixNano)
 		tsCol, err := rg.Column(0)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		tsBuf := make([]int64, n)
 		tsCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), tsBuf, nil, nil) //nolint:errcheck
@@ -636,7 +887,7 @@ func (q *QueryEngine) readTraceParquet(ctx context.Context, path, traceID, servi
 		// col 1: end_time (int64 UnixNano)
 		etCol, err := rg.Column(1)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		etBuf := make([]int64, n)
 		etCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), etBuf, nil, nil) //nolint:errcheck
@@ -653,37 +904,34 @@ func (q *QueryEngine) readTraceParquet(ctx context.Context, path, traceID, servi
 
 		traceIDs, err := readBytes(2)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		spanIDs, err := readBytes(3)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		parentSpanIDs, err := readBytes(4)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		services, err := readBytes(5)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		names, err := readBytes(6)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		statusCodes, err := readBytes(7)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		attrJSONs, err := readBytes(8)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		for i := 0; i < n; i++ {
-			if remaining > 0 && len(records) >= remaining {
-				break
-			}
 			ts := time.Unix(0, tsBuf[i])
 			if !from.IsZero() && ts.Before(from) {
 				continue
@@ -703,7 +951,7 @@ func (q *QueryEngine) readTraceParquet(ctx context.Context, path, traceID, servi
 			if len(attrJSONs[i]) > 0 {
 				json.Unmarshal(attrJSONs[i], &attrs) //nolint:errcheck
 			}
-			records = append(records, SpanRecord{
+			if err := yield(SpanRecord{
 				Timestamp:    ts,
 				EndTime:      time.Unix(0, etBuf[i]),
 				TraceID:      tid,
@@ -713,10 +961,12 @@ func (q *QueryEngine) readTraceParquet(ctx context.Context, path, traceID, servi
 				Name:         string(names[i]),
 				StatusCode:   string(statusCodes[i]),
 				Attributes:   attrs,
-			})
+			}); err != nil {
+				return err
+			}
 		}
 	}
-	return records, nil
+	return nil
 }
 
 func (q *QueryEngine) openSignalParquet(ctx context.Context, path string, observer *queryPathObserver) (*file.Reader, io.ReadSeekCloser, error) {

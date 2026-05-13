@@ -3,6 +3,7 @@ package fuse
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -71,6 +72,10 @@ func (m *pathMockClient) RecordError()            {}
 func (m *pathMockClient) IsGuardianVisible() bool { return false }
 func (m *pathMockClient) QueryLogs(ctx context.Context, query string) ([]byte, error) {
 	return nil, nil
+}
+func (m *pathMockClient) WriteQueryLogs(ctx context.Context, query string, writer io.Writer) error {
+	_, err := writer.Write(nil)
+	return err
 }
 
 // ---------------------------------------------------------------------------

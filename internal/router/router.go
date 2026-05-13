@@ -2,9 +2,11 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -580,7 +582,6 @@ func (r *Router) RegisterNode(nodeID, address string, weight uint32) error {
 	// Connect to the node to verify it's reachable
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
 	)
 	if err != nil {
 		return fmt.Errorf("connect to node %s: %w", nodeID, err)
@@ -918,12 +919,8 @@ func (r *Router) GetNodeForFile(ctx context.Context, req *pb.GetNodeForFileReque
 
 // QueryLogs implements pb.MonoFSRouterServer.
 func (r *Router) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
-	resultsJSON, err := r.fanoutJSONQuery(ctx, int(req.GetLimit()), "merge log results", func(client pb.MonoFSClient) ([]byte, error) {
-		resp, err := client.QueryLogs(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		return resp.GetResultsJson(), nil
+	resultsJSON, err := r.fanoutJSONQueryStream(ctx, int(req.GetLimit()), "merge log results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
+		return client.StreamQueryLogs(callCtx, req)
 	})
 	if err != nil {
 		return nil, err
@@ -931,14 +928,19 @@ func (r *Router) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 	return &pb.QueryLogsResponse{ResultsJson: resultsJSON}, nil
 }
 
+// StreamQueryLogs implements pb.MonoFSRouterServer.
+func (r *Router) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	return r.fanoutQueryItems(stream.Context(), int(req.GetLimit()), "stream log results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
+		return client.StreamQueryLogs(callCtx, req)
+	}, func(item []byte) error {
+		return stream.Send(&pb.QueryResultItem{ItemJson: append([]byte(nil), item...)})
+	})
+}
+
 // QueryMetrics implements pb.MonoFSRouterServer.
 func (r *Router) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
-	resultsJSON, err := r.fanoutJSONQuery(ctx, 0, "merge metric results", func(client pb.MonoFSClient) ([]byte, error) {
-		resp, err := client.QueryMetrics(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		return resp.GetResultsJson(), nil
+	resultsJSON, err := r.fanoutJSONQueryStream(ctx, 0, "merge metric results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
+		return client.StreamQueryMetrics(callCtx, req)
 	})
 	if err != nil {
 		return nil, err
@@ -946,22 +948,36 @@ func (r *Router) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 	return &pb.QueryMetricsResponse{ResultsJson: resultsJSON}, nil
 }
 
+// StreamQueryMetrics implements pb.MonoFSRouterServer.
+func (r *Router) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	return r.fanoutQueryItems(stream.Context(), 0, "stream metric results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
+		return client.StreamQueryMetrics(callCtx, req)
+	}, func(item []byte) error {
+		return stream.Send(&pb.QueryResultItem{ItemJson: append([]byte(nil), item...)})
+	})
+}
+
 // QueryTraces implements pb.MonoFSRouterServer.
 // It fans out to all healthy nodes and merges results so that traces
 // distributed across shards are always returned regardless of which node
 // holds the chunks.
 func (r *Router) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
-	resultsJSON, err := r.fanoutJSONQuery(ctx, int(req.GetLimit()), "merge trace results", func(client pb.MonoFSClient) ([]byte, error) {
-		resp, err := client.QueryTraces(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		return resp.GetResultsJson(), nil
+	resultsJSON, err := r.fanoutJSONQueryStream(ctx, int(req.GetLimit()), "merge trace results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
+		return client.StreamQueryTraces(callCtx, req)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &pb.QueryTracesResponse{ResultsJson: resultsJSON}, nil
+}
+
+// StreamQueryTraces implements pb.MonoFSRouterServer.
+func (r *Router) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	return r.fanoutQueryItems(stream.Context(), int(req.GetLimit()), "stream trace results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
+		return client.StreamQueryTraces(callCtx, req)
+	}, func(item []byte) error {
+		return stream.Send(&pb.QueryResultItem{ItemJson: append([]byte(nil), item...)})
+	})
 }
 
 // IngestLogs implements pb.MonoFSRouterServer.
@@ -991,65 +1007,144 @@ func (r *Router) IngestTraces(ctx context.Context, req *pb.IngestTracesRequest) 
 	return client.IngestTraces(ctx, req)
 }
 
-func (r *Router) fanoutJSONQuery(ctx context.Context, limit int, mergeErrPrefix string, query func(pb.MonoFSClient) ([]byte, error)) ([]byte, error) {
+func (r *Router) fanoutJSONQueryStream(ctx context.Context, limit int, mergeErrPrefix string, query func(context.Context, pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error)) ([]byte, error) {
+	var merged bytes.Buffer
+	items := 0
+	merged.WriteByte('[')
+	err := r.fanoutQueryItems(ctx, limit, mergeErrPrefix, query, func(item []byte) error {
+		if items > 0 {
+			merged.WriteByte(',')
+		}
+		merged.Write(item)
+		items++
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	merged.WriteByte(']')
+	return append([]byte(nil), merged.Bytes()...), nil
+}
+
+func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix string, query func(context.Context, pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error), handle func([]byte) error) error {
 	clients := r.allHealthyNodeClients()
 	if len(clients) == 0 {
-		return nil, fmt.Errorf("no healthy nodes available")
-	}
-	if len(clients) == 1 {
-		return query(clients[0])
+		return fmt.Errorf("no healthy nodes available")
 	}
 
-	type result struct {
-		payload []byte
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type streamEvent struct {
+		item    []byte
 		err     error
+		started bool
 	}
-	results := make(chan result, len(clients))
+	events := make(chan streamEvent, len(clients))
+	var wg sync.WaitGroup
 	for _, c := range clients {
+		wg.Add(1)
 		go func(cl pb.MonoFSClient) {
-			payload, err := query(cl)
-			results <- result{payload: payload, err: err}
+			defer wg.Done()
+
+			stream, err := query(ctx, cl)
+			if err != nil {
+				events <- streamEvent{err: err}
+				return
+			}
+			events <- streamEvent{started: true}
+
+			for {
+				item, err := stream.Recv()
+				if err == io.EOF {
+					return
+				}
+				if err != nil {
+					events <- streamEvent{err: err}
+					return
+				}
+				if item == nil || len(item.GetItemJson()) == 0 {
+					continue
+				}
+
+				select {
+				case events <- streamEvent{item: append([]byte(nil), item.GetItemJson()...)}:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}(c)
 	}
+	go func() {
+		wg.Wait()
+		close(events)
+	}()
 
 	var (
-		merged   []json.RawMessage
+		items    int
 		firstErr error
 		success  bool
 	)
-	for range clients {
-		res := <-results
-		if res.err != nil {
+	for event := range events {
+		if event.started {
+			success = true
+			continue
+		}
+		if event.err != nil {
+			if ctx.Err() != nil && limit > 0 && items >= limit {
+				continue
+			}
 			if firstErr == nil {
-				firstErr = res.err
+				firstErr = event.err
 			}
 			continue
 		}
-		success = true
-		var items []json.RawMessage
-		if err := json.Unmarshal(res.payload, &items); err != nil {
+		if !json.Valid(event.item) {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("%s: %w", mergeErrPrefix, err)
+				firstErr = fmt.Errorf("%s: invalid streamed json item", mergeErrPrefix)
 			}
 			continue
 		}
-		merged = append(merged, items...)
+
+		if limit > 0 && items >= limit {
+			cancel()
+			continue
+		}
+		if err := handle(event.item); err != nil {
+			cancel()
+			return err
+		}
+		items++
+		if limit > 0 && items >= limit {
+			cancel()
+		}
 	}
 
 	if !success && firstErr != nil {
-		return nil, firstErr
+		return firstErr
 	}
-	if limit > 0 && len(merged) > limit {
-		merged = merged[:limit]
-	}
-	if len(merged) == 0 {
-		return []byte("[]"), nil
-	}
-	out, err := json.Marshal(merged)
+	return nil
+}
+
+func streamRepositoryFiles(ctx context.Context, client pb.MonoFSClient, storageID string) ([]string, error) {
+	stream, err := client.StreamRepositoryFiles(ctx, &pb.GetRepositoryFilesRequest{StorageId: storageID})
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", mergeErrPrefix, err)
+		return nil, err
 	}
-	return out, nil
+
+	files := make([]string, 0)
+	for {
+		item, err := stream.Recv()
+		if err == io.EOF {
+			return files, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if item != nil && item.GetFilePath() != "" {
+			files = append(files, item.GetFilePath())
+		}
+	}
 }
 
 func telemetryShardKey(signal, chunkID string) string {
@@ -1390,7 +1485,6 @@ func (r *Router) checkAllNodes() {
 		if state.client == nil && state.conn == nil {
 			conn, err := grpc.NewClient(state.info.Address,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
 			)
 			if err != nil {
 				r.logger.Debug("failed to connect to node", "node_id", nodeID, "error", err)
@@ -1677,9 +1771,7 @@ func (r *Router) syncFailoverCache(failedNodeID, backupNodeID string, backupClie
 
 		for sourceID, client := range sourceClients {
 			listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			filesResp, err := client.GetRepositoryFiles(listCtx, &pb.GetRepositoryFilesRequest{
-				StorageId: storageID,
-			})
+			files, err := streamRepositoryFiles(listCtx, client, storageID)
 			listCancel()
 
 			if err != nil {
@@ -1691,7 +1783,7 @@ func (r *Router) syncFailoverCache(failedNodeID, backupNodeID string, backupClie
 			}
 
 			// Filter: only files that HRW assigns to the failed node
-			for _, filePath := range filesResp.Files {
+			for _, filePath := range files {
 				key := storageID + ":" + filePath
 				targetNode := sharder.GetNode(key)
 				if targetNode != nil && targetNode.ID == failedNodeID {
@@ -2129,9 +2221,7 @@ func (r *Router) recoverNode(nodeID string, missingRepos, incompleteRepos []stri
 
 		for sourceID, sourceState := range sourceNodes {
 			listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			filesResp, err := sourceState.client.GetRepositoryFiles(listCtx, &pb.GetRepositoryFilesRequest{
-				StorageId: storageID,
-			})
+			files, err := streamRepositoryFiles(listCtx, sourceState.client, storageID)
 			listCancel()
 
 			if err != nil {
@@ -2143,7 +2233,7 @@ func (r *Router) recoverNode(nodeID string, missingRepos, incompleteRepos []stri
 			}
 
 			// Identify files that should belong to target node according to HRW
-			for _, filePath := range filesResp.Files {
+			for _, filePath := range files {
 				key := storageID + ":" + filePath
 				targetNode := sharder.GetNode(key)
 
@@ -2460,9 +2550,7 @@ func (r *Router) onboardNewNode(nodeID string) {
 		allFiles := make(map[string]string) // filePath -> sourceNodeID
 		for sourceNodeID, sourceState := range existingNodes {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			filesResp, err := sourceState.client.GetRepositoryFiles(ctx, &pb.GetRepositoryFilesRequest{
-				StorageId: repoID,
-			})
+			files, err := streamRepositoryFiles(ctx, sourceState.client, repoID)
 			cancel()
 
 			if err != nil {
@@ -2473,7 +2561,7 @@ func (r *Router) onboardNewNode(nodeID string) {
 				continue
 			}
 
-			for _, filePath := range filesResp.Files {
+			for _, filePath := range files {
 				allFiles[filePath] = sourceNodeID
 			}
 		}
@@ -2719,9 +2807,7 @@ func (r *Router) rebalanceRepository(storageID string) {
 
 	for nodeID, state := range nodeStates {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		filesResp, err := state.client.GetRepositoryFiles(ctx, &pb.GetRepositoryFilesRequest{
-			StorageId: storageID,
-		})
+		files, err := streamRepositoryFiles(ctx, state.client, storageID)
 		cancel()
 
 		if err != nil {
@@ -2732,7 +2818,7 @@ func (r *Router) rebalanceRepository(storageID string) {
 			continue
 		}
 
-		for _, filePath := range filesResp.Files {
+		for _, filePath := range files {
 			allFiles[filePath] = nodeID
 		}
 	}

@@ -1097,6 +1097,27 @@ func (s *Server) recordAccessForPredictor(ctx context.Context, storageID, filePa
 // RecordAccess handles prediction and prefetching internally
 
 // QueryLogs implements the Doctor partition log query.
+func (s *Server) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	from := time.Unix(0, req.FromUnixNano).UTC()
+	to := time.Unix(0, req.ToUnixNano).UTC()
+	if req.FromUnixNano == 0 {
+		from = time.Time{}
+	}
+	if req.ToUnixNano == 0 {
+		to = time.Time{}
+	}
+	if err := backend.StreamLogs(stream.Context(), req.Query, req.Service, from, to, int(req.Limit), func(record logengine.LogRecord) error {
+		return streamQueryResult(record, stream.Send, "stream logs")
+	}); err != nil {
+		return status.Errorf(codes.Internal, "query logs failed: %v", err)
+	}
+	return nil
+}
+
 func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
 	backend, err := s.doctorBackendOrErr()
 	if err != nil {
@@ -1122,6 +1143,31 @@ func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 }
 
 // QueryMetrics implements the Doctor partition metric query.
+func (s *Server) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	from := time.Unix(0, req.FromUnixNano).UTC()
+	to := time.Unix(0, req.ToUnixNano).UTC()
+	if req.FromUnixNano == 0 {
+		from = time.Time{}
+	}
+	if req.ToUnixNano == 0 {
+		to = time.Time{}
+	}
+	if err := backend.StreamMetrics(stream.Context(), logengine.MetricQuery{
+		MetricName:    req.MetricName,
+		Service:       req.GetService(),
+		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
+	}, from, to, func(record logengine.MetricRecord) error {
+		return streamQueryResult(record, stream.Send, "stream metrics")
+	}); err != nil {
+		return status.Errorf(codes.Internal, "query metrics failed: %v", err)
+	}
+	return nil
+}
+
 func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
 	backend, err := s.doctorBackendOrErr()
 	if err != nil {
@@ -1182,6 +1228,27 @@ func protoMetricMatcherType(matchType pb.MetricLabelMatcherType) logengine.Metri
 }
 
 // QueryTraces implements the Doctor partition trace query.
+func (s *Server) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	from := time.Unix(0, req.FromUnixNano).UTC()
+	to := time.Unix(0, req.ToUnixNano).UTC()
+	if req.FromUnixNano == 0 {
+		from = time.Time{}
+	}
+	if req.ToUnixNano == 0 {
+		to = time.Time{}
+	}
+	if err := backend.StreamTraces(stream.Context(), req.TraceId, req.Service, from, to, int(req.Limit), func(record logengine.SpanRecord) error {
+		return streamQueryResult(record, stream.Send, "stream traces")
+	}); err != nil {
+		return status.Errorf(codes.Internal, "query traces failed: %v", err)
+	}
+	return nil
+}
+
 func (s *Server) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
 	backend, err := s.doctorBackendOrErr()
 	if err != nil {
@@ -1204,6 +1271,14 @@ func (s *Server) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
 	return &pb.QueryTracesResponse{ResultsJson: b}, nil
+}
+
+func streamQueryResult[T any](record T, send func(*pb.QueryResultItem) error, action string) error {
+	itemJSON, err := marshalJSON(record)
+	if err != nil {
+		return status.Errorf(codes.Internal, "%s: marshal: %v", action, err)
+	}
+	return send(&pb.QueryResultItem{ItemJson: itemJSON})
 }
 
 // IngestLogs implements the Doctor partition log ingest.

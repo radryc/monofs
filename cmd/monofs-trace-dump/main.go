@@ -312,25 +312,42 @@ func dumpTraces(ctx context.Context, cfg config, window timeWindow) ([]logengine
 		Limit:        int32(cfg.limit),
 	}
 
-	var resp *pb.QueryTracesResponse
+	var recv func() (*pb.QueryResultItem, error)
 	switch strings.ToLower(strings.TrimSpace(cfg.api)) {
 	case "router":
-		resp, err = pb.NewMonoFSRouterClient(conn).QueryTraces(ctx, req)
+		stream, streamErr := pb.NewMonoFSRouterClient(conn).StreamQueryTraces(ctx, req)
+		if streamErr != nil {
+			return nil, fmt.Errorf("query traces: %w", streamErr)
+		}
+		recv = stream.Recv
 	case "server", "monofs", "node":
-		resp, err = pb.NewMonoFSClient(conn).QueryTraces(ctx, req)
+		stream, streamErr := pb.NewMonoFSClient(conn).StreamQueryTraces(ctx, req)
+		if streamErr != nil {
+			return nil, fmt.Errorf("query traces: %w", streamErr)
+		}
+		recv = stream.Recv
 	default:
 		return nil, fmt.Errorf("unsupported --api %q, want router or server", cfg.api)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("query traces: %w", err)
-	}
 
 	spans := make([]logengine.SpanRecord, 0)
-	if len(resp.GetResultsJson()) == 0 {
-		return spans, nil
-	}
-	if err := json.Unmarshal(resp.GetResultsJson(), &spans); err != nil {
-		return nil, fmt.Errorf("decode trace response: %w", err)
+	for {
+		item, err := recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("query traces: %w", err)
+		}
+		if item == nil || len(item.GetItemJson()) == 0 {
+			continue
+		}
+
+		var span logengine.SpanRecord
+		if err := json.Unmarshal(item.GetItemJson(), &span); err != nil {
+			return nil, fmt.Errorf("decode trace response: %w", err)
+		}
+		spans = append(spans, span)
 	}
 	sortSpans(spans)
 	return spans, nil

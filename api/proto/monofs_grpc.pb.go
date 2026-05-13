@@ -43,6 +43,9 @@ const (
 	MonoFSRouter_ListGuardianVersions_FullMethodName     = "/monofs.MonoFSRouter/ListGuardianVersions"
 	MonoFSRouter_GetGuardianVersion_FullMethodName       = "/monofs.MonoFSRouter/GetGuardianVersion"
 	MonoFSRouter_SubscribeGuardianChanges_FullMethodName = "/monofs.MonoFSRouter/SubscribeGuardianChanges"
+	MonoFSRouter_StreamQueryLogs_FullMethodName          = "/monofs.MonoFSRouter/StreamQueryLogs"
+	MonoFSRouter_StreamQueryMetrics_FullMethodName       = "/monofs.MonoFSRouter/StreamQueryMetrics"
+	MonoFSRouter_StreamQueryTraces_FullMethodName        = "/monofs.MonoFSRouter/StreamQueryTraces"
 	MonoFSRouter_QueryLogs_FullMethodName                = "/monofs.MonoFSRouter/QueryLogs"
 	MonoFSRouter_QueryMetrics_FullMethodName             = "/monofs.MonoFSRouter/QueryMetrics"
 	MonoFSRouter_QueryTraces_FullMethodName              = "/monofs.MonoFSRouter/QueryTraces"
@@ -103,6 +106,9 @@ type MonoFSRouterClient interface {
 	GetGuardianVersion(ctx context.Context, in *GetGuardianVersionRequest, opts ...grpc.CallOption) (*GetGuardianVersionResponse, error)
 	SubscribeGuardianChanges(ctx context.Context, in *SubscribeGuardianChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GuardianChangeEvent], error)
 	// Doctor Partition operations — telemetry ingest and query
+	StreamQueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error)
+	StreamQueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error)
+	StreamQueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error)
 	QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error)
 	QueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (*QueryMetricsResponse, error)
 	QueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (*QueryTracesResponse, error)
@@ -386,6 +392,63 @@ func (c *monoFSRouterClient) SubscribeGuardianChanges(ctx context.Context, in *S
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type MonoFSRouter_SubscribeGuardianChangesClient = grpc.ServerStreamingClient[GuardianChangeEvent]
 
+func (c *monoFSRouterClient) StreamQueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[2], MonoFSRouter_StreamQueryLogs_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[QueryLogsRequest, QueryResultItem]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_StreamQueryLogsClient = grpc.ServerStreamingClient[QueryResultItem]
+
+func (c *monoFSRouterClient) StreamQueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[3], MonoFSRouter_StreamQueryMetrics_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[QueryMetricsRequest, QueryResultItem]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_StreamQueryMetricsClient = grpc.ServerStreamingClient[QueryResultItem]
+
+func (c *monoFSRouterClient) StreamQueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[4], MonoFSRouter_StreamQueryTraces_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[QueryTracesRequest, QueryResultItem]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_StreamQueryTracesClient = grpc.ServerStreamingClient[QueryResultItem]
+
 func (c *monoFSRouterClient) QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(QueryLogsResponse)
@@ -498,7 +561,7 @@ func (c *monoFSRouterClient) GetWhitelistStatus(ctx context.Context, in *GetWhit
 
 func (c *monoFSRouterClient) SubscribeToChanges(ctx context.Context, in *SubscribeChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ChangeEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[2], MonoFSRouter_SubscribeToChanges_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[5], MonoFSRouter_SubscribeToChanges_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -561,6 +624,9 @@ type MonoFSRouterServer interface {
 	GetGuardianVersion(context.Context, *GetGuardianVersionRequest) (*GetGuardianVersionResponse, error)
 	SubscribeGuardianChanges(*SubscribeGuardianChangesRequest, grpc.ServerStreamingServer[GuardianChangeEvent]) error
 	// Doctor Partition operations — telemetry ingest and query
+	StreamQueryLogs(*QueryLogsRequest, grpc.ServerStreamingServer[QueryResultItem]) error
+	StreamQueryMetrics(*QueryMetricsRequest, grpc.ServerStreamingServer[QueryResultItem]) error
+	StreamQueryTraces(*QueryTracesRequest, grpc.ServerStreamingServer[QueryResultItem]) error
 	QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error)
 	QueryMetrics(context.Context, *QueryMetricsRequest) (*QueryMetricsResponse, error)
 	QueryTraces(context.Context, *QueryTracesRequest) (*QueryTracesResponse, error)
@@ -657,6 +723,15 @@ func (UnimplementedMonoFSRouterServer) GetGuardianVersion(context.Context, *GetG
 }
 func (UnimplementedMonoFSRouterServer) SubscribeGuardianChanges(*SubscribeGuardianChangesRequest, grpc.ServerStreamingServer[GuardianChangeEvent]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeGuardianChanges not implemented")
+}
+func (UnimplementedMonoFSRouterServer) StreamQueryLogs(*QueryLogsRequest, grpc.ServerStreamingServer[QueryResultItem]) error {
+	return status.Error(codes.Unimplemented, "method StreamQueryLogs not implemented")
+}
+func (UnimplementedMonoFSRouterServer) StreamQueryMetrics(*QueryMetricsRequest, grpc.ServerStreamingServer[QueryResultItem]) error {
+	return status.Error(codes.Unimplemented, "method StreamQueryMetrics not implemented")
+}
+func (UnimplementedMonoFSRouterServer) StreamQueryTraces(*QueryTracesRequest, grpc.ServerStreamingServer[QueryResultItem]) error {
+	return status.Error(codes.Unimplemented, "method StreamQueryTraces not implemented")
 }
 func (UnimplementedMonoFSRouterServer) QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method QueryLogs not implemented")
@@ -1133,6 +1208,39 @@ func _MonoFSRouter_SubscribeGuardianChanges_Handler(srv interface{}, stream grpc
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type MonoFSRouter_SubscribeGuardianChangesServer = grpc.ServerStreamingServer[GuardianChangeEvent]
 
+func _MonoFSRouter_StreamQueryLogs_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(QueryLogsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(MonoFSRouterServer).StreamQueryLogs(m, &grpc.GenericServerStream[QueryLogsRequest, QueryResultItem]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_StreamQueryLogsServer = grpc.ServerStreamingServer[QueryResultItem]
+
+func _MonoFSRouter_StreamQueryMetrics_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(QueryMetricsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(MonoFSRouterServer).StreamQueryMetrics(m, &grpc.GenericServerStream[QueryMetricsRequest, QueryResultItem]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_StreamQueryMetricsServer = grpc.ServerStreamingServer[QueryResultItem]
+
+func _MonoFSRouter_StreamQueryTraces_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(QueryTracesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(MonoFSRouterServer).StreamQueryTraces(m, &grpc.GenericServerStream[QueryTracesRequest, QueryResultItem]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_StreamQueryTracesServer = grpc.ServerStreamingServer[QueryResultItem]
+
 func _MonoFSRouter_QueryLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(QueryLogsRequest)
 	if err := dec(in); err != nil {
@@ -1494,6 +1602,21 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 		{
+			StreamName:    "StreamQueryLogs",
+			Handler:       _MonoFSRouter_StreamQueryLogs_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "StreamQueryMetrics",
+			Handler:       _MonoFSRouter_StreamQueryMetrics_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "StreamQueryTraces",
+			Handler:       _MonoFSRouter_StreamQueryTraces_Handler,
+			ServerStreams: true,
+		},
+		{
 			StreamName:    "SubscribeToChanges",
 			Handler:       _MonoFSRouter_SubscribeToChanges_Handler,
 			ServerStreams: true,
@@ -1515,6 +1638,7 @@ const (
 	MonoFS_IngestFileBatch_FullMethodName          = "/monofs.MonoFS/IngestFileBatch"
 	MonoFS_IngestReplicaBatch_FullMethodName       = "/monofs.MonoFS/IngestReplicaBatch"
 	MonoFS_RegisterRepository_FullMethodName       = "/monofs.MonoFS/RegisterRepository"
+	MonoFS_StreamRepositoryFiles_FullMethodName    = "/monofs.MonoFS/StreamRepositoryFiles"
 	MonoFS_GetRepositoryFiles_FullMethodName       = "/monofs.MonoFS/GetRepositoryFiles"
 	MonoFS_SyncMetadataFromNode_FullMethodName     = "/monofs.MonoFS/SyncMetadataFromNode"
 	MonoFS_ClearFailoverCache_FullMethodName       = "/monofs.MonoFS/ClearFailoverCache"
@@ -1527,6 +1651,9 @@ const (
 	MonoFS_DeleteDirectoryRecursive_FullMethodName = "/monofs.MonoFS/DeleteDirectoryRecursive"
 	MonoFS_BuildDirectoryIndexes_FullMethodName    = "/monofs.MonoFS/BuildDirectoryIndexes"
 	MonoFS_GetPredictorStats_FullMethodName        = "/monofs.MonoFS/GetPredictorStats"
+	MonoFS_StreamQueryLogs_FullMethodName          = "/monofs.MonoFS/StreamQueryLogs"
+	MonoFS_StreamQueryMetrics_FullMethodName       = "/monofs.MonoFS/StreamQueryMetrics"
+	MonoFS_StreamQueryTraces_FullMethodName        = "/monofs.MonoFS/StreamQueryTraces"
 	MonoFS_QueryLogs_FullMethodName                = "/monofs.MonoFS/QueryLogs"
 	MonoFS_QueryMetrics_FullMethodName             = "/monofs.MonoFS/QueryMetrics"
 	MonoFS_QueryTraces_FullMethodName              = "/monofs.MonoFS/QueryTraces"
@@ -1563,6 +1690,7 @@ type MonoFSClient interface {
 	// RegisterRepository registers repository metadata on a node (called before file ingestion)
 	RegisterRepository(ctx context.Context, in *RegisterRepositoryRequest, opts ...grpc.CallOption) (*RegisterRepositoryResponse, error)
 	// Failover and replication RPCs
+	StreamRepositoryFiles(ctx context.Context, in *GetRepositoryFilesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RepositoryFileItem], error)
 	GetRepositoryFiles(ctx context.Context, in *GetRepositoryFilesRequest, opts ...grpc.CallOption) (*GetRepositoryFilesResponse, error)
 	SyncMetadataFromNode(ctx context.Context, in *SyncMetadataFromNodeRequest, opts ...grpc.CallOption) (*SyncMetadataFromNodeResponse, error)
 	ClearFailoverCache(ctx context.Context, in *ClearFailoverCacheRequest, opts ...grpc.CallOption) (*ClearFailoverCacheResponse, error)
@@ -1583,6 +1711,9 @@ type MonoFSClient interface {
 	// Predictor statistics (access pattern learning and prefetching)
 	GetPredictorStats(ctx context.Context, in *PredictorStatsRequest, opts ...grpc.CallOption) (*PredictorStatsResponse, error)
 	// Doctor Partition operations — telemetry ingest and query
+	StreamQueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error)
+	StreamQueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error)
+	StreamQueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error)
 	QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error)
 	QueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (*QueryMetricsResponse, error)
 	QueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (*QueryTracesResponse, error)
@@ -1740,6 +1871,25 @@ func (c *monoFSClient) RegisterRepository(ctx context.Context, in *RegisterRepos
 	return out, nil
 }
 
+func (c *monoFSClient) StreamRepositoryFiles(ctx context.Context, in *GetRepositoryFilesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RepositoryFileItem], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFS_ServiceDesc.Streams[3], MonoFS_StreamRepositoryFiles_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[GetRepositoryFilesRequest, RepositoryFileItem]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFS_StreamRepositoryFilesClient = grpc.ServerStreamingClient[RepositoryFileItem]
+
 func (c *monoFSClient) GetRepositoryFiles(ctx context.Context, in *GetRepositoryFilesRequest, opts ...grpc.CallOption) (*GetRepositoryFilesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetRepositoryFilesResponse)
@@ -1860,6 +2010,63 @@ func (c *monoFSClient) GetPredictorStats(ctx context.Context, in *PredictorStats
 	return out, nil
 }
 
+func (c *monoFSClient) StreamQueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFS_ServiceDesc.Streams[4], MonoFS_StreamQueryLogs_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[QueryLogsRequest, QueryResultItem]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFS_StreamQueryLogsClient = grpc.ServerStreamingClient[QueryResultItem]
+
+func (c *monoFSClient) StreamQueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFS_ServiceDesc.Streams[5], MonoFS_StreamQueryMetrics_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[QueryMetricsRequest, QueryResultItem]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFS_StreamQueryMetricsClient = grpc.ServerStreamingClient[QueryResultItem]
+
+func (c *monoFSClient) StreamQueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFS_ServiceDesc.Streams[6], MonoFS_StreamQueryTraces_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[QueryTracesRequest, QueryResultItem]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFS_StreamQueryTracesClient = grpc.ServerStreamingClient[QueryResultItem]
+
 func (c *monoFSClient) QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(QueryLogsResponse)
@@ -1948,6 +2155,7 @@ type MonoFSServer interface {
 	// RegisterRepository registers repository metadata on a node (called before file ingestion)
 	RegisterRepository(context.Context, *RegisterRepositoryRequest) (*RegisterRepositoryResponse, error)
 	// Failover and replication RPCs
+	StreamRepositoryFiles(*GetRepositoryFilesRequest, grpc.ServerStreamingServer[RepositoryFileItem]) error
 	GetRepositoryFiles(context.Context, *GetRepositoryFilesRequest) (*GetRepositoryFilesResponse, error)
 	SyncMetadataFromNode(context.Context, *SyncMetadataFromNodeRequest) (*SyncMetadataFromNodeResponse, error)
 	ClearFailoverCache(context.Context, *ClearFailoverCacheRequest) (*ClearFailoverCacheResponse, error)
@@ -1968,6 +2176,9 @@ type MonoFSServer interface {
 	// Predictor statistics (access pattern learning and prefetching)
 	GetPredictorStats(context.Context, *PredictorStatsRequest) (*PredictorStatsResponse, error)
 	// Doctor Partition operations — telemetry ingest and query
+	StreamQueryLogs(*QueryLogsRequest, grpc.ServerStreamingServer[QueryResultItem]) error
+	StreamQueryMetrics(*QueryMetricsRequest, grpc.ServerStreamingServer[QueryResultItem]) error
+	StreamQueryTraces(*QueryTracesRequest, grpc.ServerStreamingServer[QueryResultItem]) error
 	QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error)
 	QueryMetrics(context.Context, *QueryMetricsRequest) (*QueryMetricsResponse, error)
 	QueryTraces(context.Context, *QueryTracesRequest) (*QueryTracesResponse, error)
@@ -2020,6 +2231,9 @@ func (UnimplementedMonoFSServer) IngestReplicaBatch(context.Context, *IngestRepl
 func (UnimplementedMonoFSServer) RegisterRepository(context.Context, *RegisterRepositoryRequest) (*RegisterRepositoryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RegisterRepository not implemented")
 }
+func (UnimplementedMonoFSServer) StreamRepositoryFiles(*GetRepositoryFilesRequest, grpc.ServerStreamingServer[RepositoryFileItem]) error {
+	return status.Error(codes.Unimplemented, "method StreamRepositoryFiles not implemented")
+}
 func (UnimplementedMonoFSServer) GetRepositoryFiles(context.Context, *GetRepositoryFilesRequest) (*GetRepositoryFilesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRepositoryFiles not implemented")
 }
@@ -2055,6 +2269,15 @@ func (UnimplementedMonoFSServer) BuildDirectoryIndexes(context.Context, *BuildDi
 }
 func (UnimplementedMonoFSServer) GetPredictorStats(context.Context, *PredictorStatsRequest) (*PredictorStatsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetPredictorStats not implemented")
+}
+func (UnimplementedMonoFSServer) StreamQueryLogs(*QueryLogsRequest, grpc.ServerStreamingServer[QueryResultItem]) error {
+	return status.Error(codes.Unimplemented, "method StreamQueryLogs not implemented")
+}
+func (UnimplementedMonoFSServer) StreamQueryMetrics(*QueryMetricsRequest, grpc.ServerStreamingServer[QueryResultItem]) error {
+	return status.Error(codes.Unimplemented, "method StreamQueryMetrics not implemented")
+}
+func (UnimplementedMonoFSServer) StreamQueryTraces(*QueryTracesRequest, grpc.ServerStreamingServer[QueryResultItem]) error {
+	return status.Error(codes.Unimplemented, "method StreamQueryTraces not implemented")
 }
 func (UnimplementedMonoFSServer) QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method QueryLogs not implemented")
@@ -2286,6 +2509,17 @@ func _MonoFS_RegisterRepository_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFS_StreamRepositoryFiles_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(GetRepositoryFilesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(MonoFSServer).StreamRepositoryFiles(m, &grpc.GenericServerStream[GetRepositoryFilesRequest, RepositoryFileItem]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFS_StreamRepositoryFilesServer = grpc.ServerStreamingServer[RepositoryFileItem]
+
 func _MonoFS_GetRepositoryFiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetRepositoryFilesRequest)
 	if err := dec(in); err != nil {
@@ -2501,6 +2735,39 @@ func _MonoFS_GetPredictorStats_Handler(srv interface{}, ctx context.Context, dec
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _MonoFS_StreamQueryLogs_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(QueryLogsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(MonoFSServer).StreamQueryLogs(m, &grpc.GenericServerStream[QueryLogsRequest, QueryResultItem]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFS_StreamQueryLogsServer = grpc.ServerStreamingServer[QueryResultItem]
+
+func _MonoFS_StreamQueryMetrics_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(QueryMetricsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(MonoFSServer).StreamQueryMetrics(m, &grpc.GenericServerStream[QueryMetricsRequest, QueryResultItem]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFS_StreamQueryMetricsServer = grpc.ServerStreamingServer[QueryResultItem]
+
+func _MonoFS_StreamQueryTraces_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(QueryTracesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(MonoFSServer).StreamQueryTraces(m, &grpc.GenericServerStream[QueryTracesRequest, QueryResultItem]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFS_StreamQueryTracesServer = grpc.ServerStreamingServer[QueryResultItem]
 
 func _MonoFS_QueryLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(QueryLogsRequest)
@@ -2741,6 +3008,26 @@ var MonoFS_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "Write",
 			Handler:       _MonoFS_Write_Handler,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "StreamRepositoryFiles",
+			Handler:       _MonoFS_StreamRepositoryFiles_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "StreamQueryLogs",
+			Handler:       _MonoFS_StreamQueryLogs_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "StreamQueryMetrics",
+			Handler:       _MonoFS_StreamQueryMetrics_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "StreamQueryTraces",
+			Handler:       _MonoFS_StreamQueryTraces_Handler,
+			ServerStreams: true,
 		},
 	},
 	Metadata: "api/proto/monofs.proto",

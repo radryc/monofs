@@ -66,9 +66,14 @@ func (e *LogEngine) Ingest(ctx context.Context, id string, data []byte) error {
 	return nil
 }
 
-// QueryLogs executes a LogQL query and returns the matching log records.
+// QueryLogs executes a MonoFS log query and returns the matching log records.
 func (e *LogEngine) QueryLogs(ctx context.Context, queryStr, service string, from, to time.Time, limit int) ([]LogRecord, error) {
 	return e.query.QueryLogs(ctx, queryStr, service, from, to, limit)
+}
+
+// StreamLogs executes a MonoFS log query and yields matching log records.
+func (e *LogEngine) StreamLogs(ctx context.Context, queryStr, service string, from, to time.Time, limit int, yield func(LogRecord) error) error {
+	return e.query.StreamLogs(ctx, queryStr, service, from, to, limit, yield)
 }
 
 // QueryMetrics returns metric data points matching the given query and time range.
@@ -76,12 +81,22 @@ func (e *LogEngine) QueryMetrics(ctx context.Context, query MetricQuery, from, t
 	return e.query.QueryMetrics(ctx, query, from, to)
 }
 
+// StreamMetrics yields metric data points matching the given query and time range.
+func (e *LogEngine) StreamMetrics(ctx context.Context, query MetricQuery, from, to time.Time, yield func(MetricRecord) error) error {
+	return e.query.StreamMetrics(ctx, query, from, to, yield)
+}
+
 // QueryTraces returns trace spans matching traceID and/or service in the given time range.
 func (e *LogEngine) QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]SpanRecord, error) {
 	return e.query.QueryTraces(ctx, traceID, service, from, to, limit)
 }
 
-// Query executes a LogQL query and returns the result as raw JSON bytes (for gRPC compat).
+// StreamTraces yields trace spans matching traceID and/or service in the given time range.
+func (e *LogEngine) StreamTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int, yield func(SpanRecord) error) error {
+	return e.query.StreamTraces(ctx, traceID, service, from, to, limit, yield)
+}
+
+// Query executes a MonoFS log query and returns the result as raw JSON bytes (for gRPC compat).
 func (e *LogEngine) Query(ctx context.Context, queryStr string) ([]byte, error) {
 	logs, err := e.query.QueryLogs(ctx, queryStr, "", time.Time{}, time.Time{}, 0)
 	if err != nil {

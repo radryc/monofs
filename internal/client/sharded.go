@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -122,10 +123,6 @@ func NewShardedClient(ctx context.Context, cfg ShardedClientConfig) (*ShardedCli
 	// Connect to router
 	routerConn, err := grpc.NewClient(cfg.RouterAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(256*1024*1024),
-			grpc.MaxCallSendMsgSize(256*1024*1024),
-		),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connect to router: %w", err)
@@ -245,10 +242,6 @@ func (sc *ShardedClient) attemptConnection() {
 	// Try to connect to router
 	routerConn, err := grpc.NewClient(sc.routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(256*1024*1024),
-			grpc.MaxCallSendMsgSize(256*1024*1024),
-		),
 	)
 	if err != nil {
 		sc.mu.Lock()
@@ -433,10 +426,6 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 			}
 			conn, err := grpc.NewClient(node.Address,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpc.WithDefaultCallOptions(
-					grpc.MaxCallRecvMsgSize(256*1024*1024),
-					grpc.MaxCallSendMsgSize(256*1024*1024),
-				),
 			)
 			if err != nil {
 				// Log error but continue with other nodes
@@ -1999,24 +1988,62 @@ func (sc *ShardedClient) DeleteBlobs(ctx context.Context, paths []string) (*Dele
 	return result, nil
 }
 
-// QueryLogs delegates LogQL queries directly to the MonoFSRouter.
+// QueryLogs delegates log queries directly to the MonoFSRouter.
 func (sc *ShardedClient) QueryLogs(ctx context.Context, query string) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := sc.WriteQueryLogs(ctx, query, &buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// WriteQueryLogs streams log query results from the router and writes a JSON array to writer.
+func (sc *ShardedClient) WriteQueryLogs(ctx context.Context, query string, writer io.Writer) error {
 	sc.mu.RLock()
 	routerClient := sc.routerClient
 	sc.mu.RUnlock()
 
 	if routerClient == nil {
-		return nil, fmt.Errorf("no router connection")
+		return fmt.Errorf("no router connection")
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, sc.rpcTimeout)
 	defer cancel()
 
-	resp, err := routerClient.QueryLogs(callCtx, &pb.QueryLogsRequest{
+	stream, err := routerClient.StreamQueryLogs(callCtx, &pb.QueryLogsRequest{
 		Query: query,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("QueryLogs failed: %w", err)
+		return fmt.Errorf("StreamQueryLogs failed: %w", err)
 	}
-	return resp.ResultsJson, nil
+	if _, err := io.WriteString(writer, "["); err != nil {
+		return fmt.Errorf("write query logs prefix: %w", err)
+	}
+
+	first := true
+	for {
+		item, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("StreamQueryLogs recv failed: %w", err)
+		}
+		if item == nil || len(item.GetItemJson()) == 0 {
+			continue
+		}
+		if !first {
+			if _, err := io.WriteString(writer, ","); err != nil {
+				return fmt.Errorf("write query logs separator: %w", err)
+			}
+		}
+		if _, err := writer.Write(item.GetItemJson()); err != nil {
+			return fmt.Errorf("write query logs item: %w", err)
+		}
+		first = false
+	}
+	if _, err := io.WriteString(writer, "]"); err != nil {
+		return fmt.Errorf("write query logs suffix: %w", err)
+	}
+	return nil
 }

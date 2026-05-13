@@ -6,12 +6,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/grafana/loki/v3/pkg/logql/syntax"
+
+	"github.com/radryc/monofs/internal/storage/logquery"
 )
 
 func main() {
 	q := `{service="payment"} |= "connection timeout"`
-	expr, err := syntax.ParseExpr(q)
+	expr, err := logquery.Parse(q)
 	if err != nil {
 		panic(err)
 	}

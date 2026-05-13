@@ -3,6 +3,7 @@ package fuse
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"syscall"
 	"testing"
@@ -109,6 +110,11 @@ func (m *mockClient) IsGuardianVisible() bool {
 
 func (m *mockClient) QueryLogs(ctx context.Context, query string) ([]byte, error) {
 	return nil, nil
+}
+
+func (m *mockClient) WriteQueryLogs(ctx context.Context, query string, writer io.Writer) error {
+	_, err := writer.Write(nil)
+	return err
 }
 
 func TestStatfsUsesClientSnapshot(t *testing.T) {

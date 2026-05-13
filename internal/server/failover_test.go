@@ -9,7 +9,35 @@ import (
 
 	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"google.golang.org/grpc/metadata"
 )
+
+type repositoryFileCollector struct {
+	ctx   context.Context
+	files []string
+}
+
+func (c *repositoryFileCollector) Send(item *pb.RepositoryFileItem) error {
+	c.files = append(c.files, item.GetFilePath())
+	return nil
+}
+
+func (c *repositoryFileCollector) SetHeader(metadata.MD) error { return nil }
+
+func (c *repositoryFileCollector) SendHeader(metadata.MD) error { return nil }
+
+func (c *repositoryFileCollector) SetTrailer(metadata.MD) {}
+
+func (c *repositoryFileCollector) Context() context.Context {
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
+}
+
+func (c *repositoryFileCollector) SendMsg(any) error { return nil }
+
+func (c *repositoryFileCollector) RecvMsg(any) error { return nil }
 
 // TestGetRepositoryFiles tests retrieving files owned by a node.
 func TestGetRepositoryFiles(t *testing.T) {
@@ -109,6 +137,57 @@ func TestGetRepositoryFilesEmpty(t *testing.T) {
 
 	if len(resp.Files) != 0 {
 		t.Errorf("expected 0 files, got %d", len(resp.Files))
+	}
+}
+
+func TestStreamRepositoryFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	gitCache := filepath.Join(tmpDir, "git")
+
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer server.Close()
+
+	ctx := context.Background()
+	storageID := "test-storage-stream"
+	_, err = server.RegisterRepository(ctx, &pb.RegisterRepositoryRequest{
+		StorageId:   storageID,
+		DisplayPath: "github.com/test/repo",
+		Source:      "https://github.com/test/repo.git",
+	})
+	if err != nil {
+		t.Fatalf("failed to register repository: %v", err)
+	}
+
+	files := []string{"README.md", "src/main.go", "src/utils.go"}
+	for _, file := range files {
+		_, err := server.IngestFile(ctx, &pb.IngestFileRequest{
+			Metadata: &pb.FileMetadata{
+				Path:        file,
+				StorageId:   storageID,
+				DisplayPath: "github.com/test/repo",
+				Size:        100,
+				Mode:        0644,
+				Mtime:       time.Now().Unix(),
+				BlobHash:    "abc123",
+				Ref:         "main",
+				Source:      "https://github.com/test/repo.git",
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to ingest file %s: %v", file, err)
+		}
+	}
+
+	collector := &repositoryFileCollector{ctx: context.Background()}
+	if err := server.StreamRepositoryFiles(&pb.GetRepositoryFilesRequest{StorageId: storageID}, collector); err != nil {
+		t.Fatalf("StreamRepositoryFiles failed: %v", err)
+	}
+	if len(collector.files) != len(files) {
+		t.Fatalf("streamed file count = %d, want %d", len(collector.files), len(files))
 	}
 }
 
