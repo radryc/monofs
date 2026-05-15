@@ -102,4 +102,47 @@ var (
 		Name:      "guardian_version_store_file_bytes",
 		Help:      "Current size in bytes of the guardian_versions.json state snapshot file.",
 	})
+
+	routerWorkspaceSyncJobsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "workspace_sync_jobs_total",
+		Help:      "Total workspace sync jobs by action and result.",
+	}, []string{"action", "result"})
+
+	routerWorkspaceSyncActiveJobs = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "workspace_sync_active_jobs",
+		Help:      "Currently active workspace sync jobs by action.",
+	}, []string{"action"})
+
+	routerWorkspaceSyncDurationSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "workspace_sync_duration_seconds",
+		Help:      "Duration of workspace sync jobs by action and result.",
+		Buckets:   prometheus.DefBuckets,
+	}, []string{"action", "result"})
+
+	routerWorkspaceSyncRepositoriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "workspace_sync_repositories_total",
+		Help:      "Total repository outcomes observed during workspace sync jobs.",
+	}, []string{"action", "result"})
+
+	routerWorkspaceSyncConflictsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "workspace_sync_conflicts_total",
+		Help:      "Total workspace sync conflicts by action and reason.",
+	}, []string{"action", "reason"})
+
+	routerWorkspaceSyncReingestTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "workspace_sync_reingest_total",
+		Help:      "Total repository re-ingest attempts triggered by workspace refresh.",
+	}, []string{"result"})
 )

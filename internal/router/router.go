@@ -114,6 +114,10 @@ type Router struct {
 	fetcherRetryStop    chan struct{}
 	fetcherRetryRunning bool
 
+	// Workspace sync jobs
+	workspaceSyncMu   sync.RWMutex
+	workspaceSyncJobs map[string]*workspaceSyncJobEntry
+
 	// Connected FUSE clients
 	clients     map[string]*clientState // clientID -> state
 	clientsMu   sync.RWMutex
@@ -301,6 +305,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		guardianLogicalChangeSubs: make(map[uint64]*guardianLogicalChangeSubscriber),
 		topologySnapshots:         make(map[int64][]sharding.Node),
 		pendingIndexRebuilds:      make(map[string]map[string]bool),
+		workspaceSyncJobs:         make(map[string]*workspaceSyncJobEntry),
 		failoverTimers:            make(map[string]*time.Timer),
 		failoverStartTimes:        make(map[string]time.Time),
 		config:                    cfg,

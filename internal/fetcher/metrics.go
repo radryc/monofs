@@ -62,4 +62,40 @@ var (
 		Name:      "store_blob_bytes_total",
 		Help:      "Total bytes written as individual blobs on the fetcher.",
 	})
+
+	fetcherGitSyncJobsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "fetcher",
+		Name:      "git_sync_jobs_total",
+		Help:      "Total git sync jobs handled by the fetcher sync worker.",
+	}, []string{"action", "result"})
+
+	fetcherGitSyncActiveJobs = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "fetcher",
+		Name:      "git_sync_active_jobs",
+		Help:      "Currently active git sync jobs on the fetcher.",
+	})
+
+	fetcherGitSyncDurationSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "monofs",
+		Subsystem: "fetcher",
+		Name:      "git_sync_duration_seconds",
+		Help:      "Duration of git sync jobs by action and result.",
+		Buckets:   prometheus.DefBuckets,
+	}, []string{"action", "result"})
+
+	fetcherGitSyncRemoteOpsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "fetcher",
+		Name:      "git_sync_remote_ops_total",
+		Help:      "Total remote Git operations attempted by the sync worker.",
+	}, []string{"op", "result"})
+
+	fetcherGitSyncConflictsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "fetcher",
+		Name:      "git_sync_conflicts_total",
+		Help:      "Total sync conflicts detected by the fetcher sync worker.",
+	}, []string{"action", "reason"})
 )

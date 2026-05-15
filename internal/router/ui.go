@@ -65,6 +65,8 @@ func (r *Router) ServeHTTP() http.Handler {
 
 	// API routes
 	mux.HandleFunc("/api/ingest", r.handleIngest)
+	mux.HandleFunc("/api/workspace-sync/jobs", r.handleWorkspaceSyncJobsAPI)
+	mux.HandleFunc("/api/workspace-sync/jobs/", r.handleWorkspaceSyncJobsAPI)
 	mux.HandleFunc("/api/status", r.handleStatus)
 	mux.HandleFunc("/api/repositories", r.handleRepositoriesList)
 	mux.HandleFunc("/api/routers", r.handleRouters)
