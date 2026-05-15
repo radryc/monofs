@@ -6,12 +6,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	gogit "github.com/go-git/go-git/v6"
 	pb "github.com/radryc/monofs/api/proto"
+	monogit "github.com/radryc/monofs/internal/git"
 	blob "github.com/radryc/monofs/internal/storage/blob"
+	"github.com/go-git/go-git/v6/plumbing"
 	"google.golang.org/grpc"
 )
 
@@ -23,10 +28,12 @@ type loggerAccessor interface {
 // Service implements the BlobFetcher gRPC service.
 type Service struct {
 	pb.UnimplementedBlobFetcherServer
+	pb.UnimplementedRepoSyncWorkerServer
 
 	fetcherID string
 	registry  *Registry
 	logger    *slog.Logger
+	repoMgr   *monogit.RepoManager
 
 	// Prefetch queue
 	prefetchQueue chan *prefetchJob
@@ -37,6 +44,12 @@ type Service struct {
 	totalRequests  atomic.Int64
 	bytesServed    atomic.Int64
 	activeRequests atomic.Int64
+	syncTotalJobs  atomic.Int64
+	syncActiveJobs atomic.Int64
+	syncDoneJobs   atomic.Int64
+	syncFailedJobs atomic.Int64
+	syncProbes     atomic.Int64
+	syncProbeFails atomic.Int64
 
 	// Configuration
 	config ServiceConfig
@@ -57,6 +70,9 @@ type ServiceConfig struct {
 
 	// StreamChunkSize for streaming responses.
 	StreamChunkSize int
+
+	// SyncRepoCacheDir stores temporary Git mirrors used by refresh probes.
+	SyncRepoCacheDir string
 }
 
 func DefaultServiceConfig() ServiceConfig {
@@ -65,6 +81,7 @@ func DefaultServiceConfig() ServiceConfig {
 		PrefetchQueueSize:    1000,
 		MaxConcurrentFetches: 20,
 		StreamChunkSize:      64 * 1024, // 64KB
+		SyncRepoCacheDir:     "",
 	}
 }
 
@@ -76,11 +93,18 @@ type prefetchJob struct {
 // NewService creates a new fetcher service.
 func NewService(fetcherID string, registry *Registry, config ServiceConfig, logger *slog.Logger) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
+	var repoMgr *monogit.RepoManager
+	if config.SyncRepoCacheDir != "" {
+		if err := os.MkdirAll(config.SyncRepoCacheDir, 0755); err == nil {
+			repoMgr, _ = monogit.NewRepoManager(config.SyncRepoCacheDir)
+		}
+	}
 
 	s := &Service{
 		fetcherID:     fetcherID,
 		registry:      registry,
 		logger:        logger,
+		repoMgr:       repoMgr,
 		prefetchQueue: make(chan *prefetchJob, config.PrefetchQueueSize),
 		config:        config,
 		startTime:     time.Now(),
@@ -100,6 +124,7 @@ func NewService(fetcherID string, registry *Registry, config ServiceConfig, logg
 // RegisterService registers the fetcher service with a gRPC server.
 func (s *Service) RegisterService(server *grpc.Server) {
 	pb.RegisterBlobFetcherServer(server, s)
+	pb.RegisterRepoSyncWorkerServer(server, s)
 }
 
 // FetchBlob handles synchronous blob fetch requests.
@@ -405,8 +430,171 @@ func (s *Service) GetStats(ctx context.Context, req *pb.FetcherStatsRequest) (*p
 	if resp.CacheHits+resp.CacheMisses > 0 {
 		resp.CacheHitRate = float64(resp.CacheHits) / float64(resp.CacheHits+resp.CacheMisses)
 	}
+	resp.SyncWorker = s.syncWorkerStats()
 
 	return resp, nil
+}
+
+func (s *Service) ProbeWorkspaceRefresh(req *pb.ProbeWorkspaceRefreshRequest, stream pb.RepoSyncWorker_ProbeWorkspaceRefreshServer) error {
+	start := time.Now()
+	resultLabel := "succeeded"
+	s.syncTotalJobs.Add(1)
+	s.syncActiveJobs.Add(1)
+	fetcherGitSyncActiveJobs.Inc()
+	defer s.syncActiveJobs.Add(-1)
+	defer fetcherGitSyncActiveJobs.Dec()
+	defer func() {
+		fetcherGitSyncDurationSeconds.WithLabelValues("refresh", resultLabel).Observe(time.Since(start).Seconds())
+	}()
+
+	ctx := stream.Context()
+	jobFailed := false
+	for _, repo := range req.GetRepositories() {
+		s.syncProbes.Add(1)
+		fetcherGitSyncRemoteOpsTotal.WithLabelValues("probe_refresh", "started").Inc()
+		progress := s.probeWorkspaceRepository(ctx, repo)
+		if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED ||
+			progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_TRANSIENT_ERROR ||
+			progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_AUTH_FAILED {
+			jobFailed = true
+			s.syncProbeFails.Add(1)
+			fetcherGitSyncRemoteOpsTotal.WithLabelValues("probe_refresh", "failed").Inc()
+		} else {
+			fetcherGitSyncRemoteOpsTotal.WithLabelValues("probe_refresh", "succeeded").Inc()
+		}
+		if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_DIVERGED || progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_MISSING_BRANCH {
+			fetcherGitSyncConflictsTotal.WithLabelValues("refresh", strings.ToLower(strings.TrimPrefix(progress.GetStatus().String(), "REPO_SYNC_STATUS_"))).Inc()
+		}
+		if err := stream.Send(progress); err != nil {
+			jobFailed = true
+			resultLabel = "failed"
+			s.syncProbeFails.Add(1)
+			s.syncFailedJobs.Add(1)
+			fetcherGitSyncJobsTotal.WithLabelValues("refresh", "failed").Inc()
+			return err
+		}
+	}
+
+	s.syncDoneJobs.Add(1)
+	if jobFailed {
+		resultLabel = "failed"
+		s.syncFailedJobs.Add(1)
+		fetcherGitSyncJobsTotal.WithLabelValues("refresh", "failed").Inc()
+		return nil
+	}
+	fetcherGitSyncJobsTotal.WithLabelValues("refresh", "succeeded").Inc()
+	return nil
+}
+
+func (s *Service) GetSyncWorkerStats(ctx context.Context, req *pb.SyncWorkerStatsRequest) (*pb.SyncWorkerStatsResponse, error) {
+	return &pb.SyncWorkerStatsResponse{Stats: s.syncWorkerStats()}, nil
+}
+
+func (s *Service) syncWorkerStats() *pb.SyncWorkerStats {
+	stats := &pb.SyncWorkerStats{
+		TotalJobs:             s.syncTotalJobs.Load(),
+		ActiveJobs:            s.syncActiveJobs.Load(),
+		CompletedJobs:         s.syncDoneJobs.Load(),
+		FailedJobs:            s.syncFailedJobs.Load(),
+		RefreshProbes:         s.syncProbes.Load(),
+		RefreshProbeFailures:  s.syncProbeFails.Load(),
+	}
+	if s.repoMgr != nil {
+		if entries, err := os.ReadDir(s.config.SyncRepoCacheDir); err == nil {
+			stats.GitCacheEntries = int64(len(entries))
+		}
+	}
+	return stats
+}
+
+func (s *Service) probeWorkspaceRepository(ctx context.Context, repo *pb.WorkspaceRepositoryRef) *pb.RepoSyncProgress {
+	progress := &pb.RepoSyncProgress{Repository: repo}
+	if repo == nil {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = "repository is required"
+		return progress
+	}
+	if s.repoMgr == nil {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = "sync worker git cache is not configured"
+		return progress
+	}
+	if repo.GetRepoUrl() == "" {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = "repo_url is required"
+		return progress
+	}
+
+	branch := repo.GetBranch()
+	if branch == "" {
+		branch = "main"
+	}
+	repoID := repo.GetStorageId()
+	if repoID == "" {
+		repoID = repo.GetDisplayPath()
+	}
+
+	gitRepo, err := s.repoMgr.CloneOrOpen(ctx, repo.GetRepoUrl(), repoID, branch)
+	if err != nil {
+		progress.Status = mapRepoSyncError(err)
+		progress.Message = err.Error()
+		return progress
+	}
+
+	remoteCommit, err := resolveRepoBranchCommit(gitRepo, branch)
+	if err != nil {
+		progress.Status = mapRepoSyncError(err)
+		progress.Message = err.Error()
+		return progress
+	}
+	progress.RemoteCommit = remoteCommit
+
+	if repo.GetBaseCommit() == "" {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_TRANSIENT_ERROR
+		progress.Message = "base_commit is required"
+		return progress
+	}
+	if remoteCommit == repo.GetBaseCommit() {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED
+		progress.Message = "upstream branch unchanged"
+		return progress
+	}
+
+	progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_ADVANCED
+	progress.Message = "upstream branch advanced"
+	return progress
+}
+
+func resolveRepoBranchCommit(repo *gogit.Repository, branch string) (string, error) {
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branch), true)
+	if err == nil {
+		return ref.Hash().String(), nil
+	}
+	ref, err = repo.Reference(plumbing.NewRemoteReferenceName("origin", branch), true)
+	if err == nil {
+		return ref.Hash().String(), nil
+	}
+	return "", err
+}
+
+func mapRepoSyncError(err error) pb.RepoSyncStatus {
+	if err == nil {
+		return pb.RepoSyncStatus_REPO_SYNC_STATUS_UNSPECIFIED
+	}
+	if err == plumbing.ErrReferenceNotFound {
+		return pb.RepoSyncStatus_REPO_SYNC_STATUS_MISSING_BRANCH
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "authentication") || strings.Contains(message, "authorization") || strings.Contains(message, "access denied"):
+		return pb.RepoSyncStatus_REPO_SYNC_STATUS_AUTH_FAILED
+	case strings.Contains(message, "not found") && strings.Contains(message, "reference"):
+		return pb.RepoSyncStatus_REPO_SYNC_STATUS_MISSING_BRANCH
+	case strings.Contains(message, "timeout") || strings.Contains(message, "temporary") || strings.Contains(message, "connection"):
+		return pb.RepoSyncStatus_REPO_SYNC_STATUS_TRANSIENT_ERROR
+	default:
+		return pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+	}
 }
 
 // prefetchWorker processes prefetch jobs in the background.

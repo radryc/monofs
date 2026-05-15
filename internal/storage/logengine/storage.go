@@ -21,6 +21,7 @@ import (
 const (
 	chunkListCacheTTL = 10 * time.Second
 	manifestCacheTTL  = time.Minute
+	cacheSweepInterval = 30 * time.Second
 )
 
 type chunkListCacheEntry struct {
@@ -54,6 +55,7 @@ type CachedStore struct {
 	mu        sync.RWMutex
 	chunks    map[string]chunkListCacheEntry
 	manifests map[string]manifestCacheEntry
+	nextSweep time.Time
 }
 
 // NewCachedStore creates a new CachedStore.
@@ -63,7 +65,25 @@ func NewCachedStore(remote ObjectStoreBackend, localDir string) *CachedStore {
 		localDir:  localDir,
 		chunks:    make(map[string]chunkListCacheEntry),
 		manifests: make(map[string]manifestCacheEntry),
+		nextSweep: time.Now().Add(cacheSweepInterval),
 	}
+}
+
+func (c *CachedStore) pruneExpiredLocked(now time.Time) {
+	if !c.nextSweep.IsZero() && now.Before(c.nextSweep) {
+		return
+	}
+	for prefix, entry := range c.chunks {
+		if !now.Before(entry.expiresAt) {
+			delete(c.chunks, prefix)
+		}
+	}
+	for path, entry := range c.manifests {
+		if !now.Before(entry.expiresAt) {
+			delete(c.manifests, path)
+		}
+	}
+	c.nextSweep = now.Add(cacheSweepInterval)
 }
 
 // Write passes through to the remote storage.
@@ -89,6 +109,13 @@ func (c *CachedStore) ListChunks(ctx context.Context, prefix string) ([]string, 
 	if ok && now.Before(entry.expiresAt) {
 		return append([]string(nil), entry.chunkIDs...), nil
 	}
+	if ok {
+		c.mu.Lock()
+		if staleEntry, staleOK := c.chunks[normalizedPrefix]; staleOK && !now.Before(staleEntry.expiresAt) {
+			delete(c.chunks, normalizedPrefix)
+		}
+		c.mu.Unlock()
+	}
 
 	chunkIDs, err := c.remote.ListChunks(ctx, normalizedPrefix)
 	if err != nil {
@@ -97,6 +124,7 @@ func (c *CachedStore) ListChunks(ctx context.Context, prefix string) ([]string, 
 	sort.Strings(chunkIDs)
 
 	c.mu.Lock()
+	c.pruneExpiredLocked(now)
 	c.chunks[normalizedPrefix] = chunkListCacheEntry{
 		chunkIDs:  append([]string(nil), chunkIDs...),
 		expiresAt: now.Add(chunkListCacheTTL),
@@ -117,6 +145,13 @@ func (c *CachedStore) ReadManifest(ctx context.Context, signal Signal, chunkID s
 	if ok && now.Before(entry.expiresAt) {
 		return entry.manifest, nil
 	}
+	if ok {
+		c.mu.Lock()
+		if staleEntry, staleOK := c.manifests[manifestPath]; staleOK && !now.Before(staleEntry.expiresAt) {
+			delete(c.manifests, manifestPath)
+		}
+		c.mu.Unlock()
+	}
 
 	rc, err := c.remote.Read(ctx, manifestPath)
 	if err != nil {
@@ -130,6 +165,7 @@ func (c *CachedStore) ReadManifest(ctx context.Context, signal Signal, chunkID s
 	}
 
 	c.mu.Lock()
+	c.pruneExpiredLocked(now)
 	c.manifests[manifestPath] = manifestCacheEntry{
 		manifest:  manifest,
 		expiresAt: now.Add(manifestCacheTTL),
