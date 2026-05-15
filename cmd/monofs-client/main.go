@@ -238,6 +238,9 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("virtual monorepo mode enabled")
+		if commitMgr != nil {
+			commitMgr.SetWorkspaceManifest(root.WorkspaceManifest())
+		}
 	}
 	if socketHandler != nil {
 		socketHandler.SetRootNode(root)
