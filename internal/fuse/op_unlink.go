@@ -13,6 +13,9 @@ func (n *MonoNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if n.sessionMgr == nil {
 		return syscall.EROFS
 	}
+	if n.isWorkspaceReadOnlyPath() {
+		return syscall.EROFS
+	}
 
 	// Root-level deletion is not supported - must be within a repository
 	if n.path == "" {
@@ -28,6 +31,9 @@ func (n *MonoNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 
 	targetPath := n.path + "/" + name
+	if isWorkspaceReadOnlyPath(targetPath) {
+		return syscall.EROFS
+	}
 
 	// If there's a local copy, remove it
 	if n.sessionMgr.HasLocalOverride(targetPath) {

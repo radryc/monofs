@@ -45,19 +45,20 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 		return 0
 	}
 
-	if errno, handled := n.getattrSyntheticWorkspaceFile(out); handled {
+	if errno, handled := n.getattrSyntheticWorkspacePath(ctx, out); handled {
 		return errno
 	}
 	if n.shouldHideWorkspacePath(n.path) {
 		n.logger.Debug("getattr: hiding workspace path", "path", n.path)
 		return syscall.ENOENT
 	}
+	backendPath := n.backendPath()
 
 	// Check overlay — single source of truth for local changes.
 	// If tracked in overlay, use it directly; never fall through to backend.
-	if n.sessionMgr != nil {
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
 		parts := splitPath(n.path)
-		
+
 		// DOCTOR VIRTUAL FILE INTERCEPT
 		if len(parts) == 5 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" && parts[4] == "results.json" {
 			now := uint64(time.Now().Unix())
@@ -73,7 +74,7 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 			out.SetTimeout(attrTimeout())
 			return 0
 		}
-		
+
 		state := n.sessionMgr.GetPathState(n.path)
 
 		// User root directory at filesystem root
@@ -134,10 +135,10 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 
 	// Try cache first if available
 	if n.cache != nil {
-		if attr, err := n.cache.GetAttr(n.path); err == nil {
+		if attr, err := n.cache.GetAttr(backendPath); err == nil {
 			n.logger.Debug("getattr cache hit", "path", n.path)
 			mode := attr.Mode
-			if n.sessionMgr != nil && !isDependencyPath(n.path) {
+			if n.sessionMgr != nil && !isDependencyPath(n.path) && !n.isWorkspaceSystemViewPath() {
 				mode = addWriteBits(mode)
 			}
 			out.Mode = mode
@@ -161,18 +162,18 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 	// Query backend with retry for transient failures.
 	// Getattr is called frequently by the kernel to revalidate cached attrs;
 	// a single transient failure should not surface as EIO.
-	resp, err := n.client.GetAttr(ctx, n.path)
+	resp, err := n.client.GetAttr(ctx, backendPath)
 	for attempt := 1; err != nil && attempt <= maxMetadataRetries; attempt++ {
-		n.logger.Debug("getattr retry", "path", n.path, "attempt", attempt, "error", err)
+		n.logger.Debug("getattr retry", "path", n.path, "backend_path", backendPath, "attempt", attempt, "error", err)
 		select {
 		case <-ctx.Done():
 			return syscall.EINTR
 		case <-time.After(retryDelay(attempt - 1)):
 		}
-		resp, err = n.client.GetAttr(ctx, n.path)
+		resp, err = n.client.GetAttr(ctx, backendPath)
 	}
 	if err != nil {
-		n.logger.Debug("getattr failed after retries", "path", n.path, "error", err)
+		n.logger.Debug("getattr failed after retries", "path", n.path, "backend_path", backendPath, "error", err)
 		n.updateBackendError(err)
 		return n.recordAndConvertError(err)
 	}
@@ -186,7 +187,7 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 
 	// Update cache if available
 	if n.cache != nil {
-		_ = n.cache.PutAttr(n.path, &cache.AttrEntry{
+		_ = n.cache.PutAttr(backendPath, &cache.AttrEntry{
 			Ino:   resp.Ino,
 			Mode:  resp.Mode,
 			Size:  resp.Size,
@@ -200,7 +201,7 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 	}
 
 	mode := resp.Mode
-	if n.sessionMgr != nil && !isDependencyPath(n.path) {
+	if n.sessionMgr != nil && !isDependencyPath(n.path) && !n.isWorkspaceSystemViewPath() {
 		mode = addWriteBits(mode)
 	}
 	out.Mode = mode

@@ -19,6 +19,10 @@ func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 		n.logger.Warn("mkdir: no session manager, read-only mode")
 		return nil, syscall.EROFS
 	}
+	if n.isWorkspaceReadOnlyPath() {
+		n.logger.Warn("mkdir: read-only workspace path", "path", n.path)
+		return nil, syscall.EROFS
+	}
 
 	// Ensure session exists
 	if _, err := n.sessionMgr.StartSession(); err != nil {
@@ -58,6 +62,10 @@ func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 	}
 
 	newPath := n.path + "/" + name
+	if isWorkspaceReadOnlyPath(newPath) {
+		n.logger.Warn("mkdir: read-only workspace target", "path", newPath)
+		return nil, syscall.EROFS
+	}
 	if n.shouldHideWorkspacePath(newPath) {
 		n.logger.Warn("mkdir: reserved virtual monorepo path", "path", newPath)
 		return nil, syscall.EPERM

@@ -19,6 +19,10 @@ func (n *MonoNode) Symlink(ctx context.Context, target, name string, out *fuse.E
 		n.logger.Warn("symlink: no session manager, read-only mode")
 		return nil, syscall.EROFS
 	}
+	if n.isWorkspaceReadOnlyPath() {
+		n.logger.Warn("symlink: read-only workspace path", "path", n.path)
+		return nil, syscall.EROFS
+	}
 
 	// Root-level symlinks are not supported
 	if n.path == "" {
@@ -33,6 +37,10 @@ func (n *MonoNode) Symlink(ctx context.Context, target, name string, out *fuse.E
 	}
 
 	newPath := n.path + "/" + name
+	if isWorkspaceReadOnlyPath(newPath) {
+		n.logger.Warn("symlink: read-only workspace target", "path", newPath)
+		return nil, syscall.EROFS
+	}
 	if n.shouldHideWorkspacePath(newPath) {
 		n.logger.Warn("symlink: reserved virtual monorepo path", "path", newPath)
 		return nil, syscall.EPERM

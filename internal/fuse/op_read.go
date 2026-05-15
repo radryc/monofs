@@ -21,8 +21,28 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 	if mfh, ok := f.(*monofsFileHandle); ok {
 		return mfh.Read(ctx, dest, off)
 	}
+	if content, errno, ok := n.loadSyntheticWorkspaceFileContent(ctx, n.path); ok {
+		if errno != 0 {
+			return nil, errno
+		}
+		n.mu.Lock()
+		n.content = content
+		n.size = uint64(len(content))
+		n.mu.Unlock()
+		end := int(off) + len(dest)
+		if end > len(content) {
+			end = len(content)
+		}
+		if int(off) >= len(content) {
+			n.client.RecordOperation()
+			return fuse.ReadResultData(nil), 0
+		}
+		n.client.RecordOperation()
+		n.client.RecordBytesRead(int64(end - int(off)))
+		return fuse.ReadResultData(content[off:end]), 0
+	}
 
-	if n.sessionMgr != nil {
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
 		parts := splitPath(n.path)
 		if len(parts) == 5 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" && parts[4] == "results.json" {
 			sessionID := parts[3]
@@ -47,7 +67,7 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 	// If the file is tracked in overlay, read from disk directly.
 	// This handles the case where go-fuse dispatches to the node's Read
 	// instead of the file handle's Read (e.g. after a re-open).
-	if n.sessionMgr != nil && n.sessionMgr.HasLocalOverride(n.path) {
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() && n.sessionMgr.HasLocalOverride(n.path) {
 		localPath, err := n.sessionMgr.GetLocalPath(n.path)
 		if err == nil {
 			n.logger.Debug("read: serving from overlay", "path", n.path, "local", localPath)
@@ -80,7 +100,7 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 		// For paths under user root directories (e.g. .deps/), the backend
 		// doesn't know about these files. Don't waste time routing reads
 		// across the cluster — they will always fail with NotFound.
-		if n.sessionMgr != nil {
+		if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
 			parts := splitPath(n.path)
 			if len(parts) > 1 && n.sessionMgr.IsUserRootDir(parts[0]) {
 				n.logger.Debug("read: content nil for user root dir path, returning EIO", "path", n.path)
@@ -93,7 +113,7 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 		var err error
 
 		for attempt := 0; attempt < maxRetries; attempt++ {
-			content, err = n.client.Read(ctx, n.path, 0, 0)
+			content, err = n.client.Read(ctx, n.backendPath(), 0, 0)
 			if err == nil {
 				// Normalise nil → empty slice so we never store nil in
 				// n.content again. The backend returns nil for zero-byte

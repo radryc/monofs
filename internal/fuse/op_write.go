@@ -33,6 +33,10 @@ func (n *MonoNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off
 		n.logger.Warn("write: no session manager, read-only mode")
 		return 0, syscall.EROFS
 	}
+	if n.isWorkspaceReadOnlyPath() {
+		n.logger.Warn("write: read-only workspace path", "path", n.path)
+		return 0, syscall.EROFS
+	}
 
 	// Ensure local copy exists (short-circuits if already on disk)
 	if err := n.ensureLocalCopy(ctx); err != nil {

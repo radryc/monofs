@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,13 +19,17 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	defer n.recoverPanic("Readdir")
 	n.client.RecordOperation()
 	n.logger.Debug("readdir", "path", n.path)
+	if strings.Trim(n.path, "/") == syntheticWorkspaceControlPath {
+		return fs.NewListDirStream(n.syntheticWorkspaceControlEntries()), 0
+	}
 	if n.shouldHideWorkspacePath(n.path) {
 		n.logger.Debug("readdir: hiding workspace path", "path", n.path)
 		return nil, syscall.ENOENT
 	}
+	backendPath := n.backendPath()
 
 	// Check if this is a user-created root directory (or subdirectory of one)
-	if n.sessionMgr != nil && n.path != "" {
+	if n.sessionMgr != nil && n.path != "" && !n.isWorkspaceSystemViewPath() {
 		parts := splitPath(n.path)
 		if len(parts) >= 1 && n.sessionMgr.IsUserRootDir(parts[0]) {
 			// This is a user directory - only return local overlay entries
@@ -37,7 +42,7 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 	// Try cache first if available
 	if n.cache != nil {
-		if entries, err := n.cache.GetDir(n.path); err == nil {
+		if entries, err := n.cache.GetDir(backendPath); err == nil {
 			n.logger.Debug("readdir cache hit", "path", n.path, "count", len(entries))
 			// Convert cache entries to fuse entries
 			dirEntries := make([]fuse.DirEntry, len(entries))
@@ -64,11 +69,13 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 				}
 			}
 			// Still need to merge overlay even for cached results
-			if n.sessionMgr != nil {
+			if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
 				overlay := NewOverlayManager(n.sessionMgr)
 				dirEntries = overlay.MergeReadDir(dirEntries, n.path)
 			}
-			dirEntries = n.filterWorkspaceDirEntries(dirEntries)
+			if !n.isWorkspaceSystemViewPath() {
+				dirEntries = n.filterWorkspaceDirEntries(dirEntries)
+			}
 			return fs.NewListDirStream(dirEntries), 0
 		}
 		n.logger.Debug("readdir cache miss", "path", n.path)
@@ -93,11 +100,11 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// go mod verify computes directory hashes and an incomplete listing
 	// produces a "dir has been modified" error.
 	n.logger.Debug("readdir calling backend rpc", "path", n.path)
-	backendEntries, err := n.client.ReadDir(ctx, n.path)
+	backendEntries, err := n.client.ReadDir(ctx, backendPath)
 	if err != nil {
 		// Invalidate the dir cache for this path so we don't serve stale data.
 		if n.cache != nil {
-			n.cache.Invalidate(n.path)
+			n.cache.Invalidate(backendPath)
 		}
 		n.logger.Info("readdir: retrying after error",
 			"path", n.path, "first_error", err)
@@ -121,7 +128,7 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		// cancelled ctx would cause an immediate second failure.
 		retryCtx, retryCancel := context.WithTimeout(context.Background(), readdirTimeout)
 		defer retryCancel()
-		backendEntries, err = n.client.ReadDir(retryCtx, n.path)
+		backendEntries, err = n.client.ReadDir(retryCtx, backendPath)
 	}
 	if err != nil {
 		n.logger.Debug("readdir failed", "path", n.path, "error", err)
@@ -208,11 +215,11 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 	// Update cache if available
 	if n.cache != nil {
-		_ = n.cache.PutDir(n.path, cacheEntries)
+		_ = n.cache.PutDir(backendPath, cacheEntries)
 	}
 
 	// Merge local overlay changes if session manager is available
-	if n.sessionMgr != nil {
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
 		overlay := NewOverlayManager(n.sessionMgr)
 		dirEntries = overlay.MergeReadDir(dirEntries, n.path)
 
@@ -231,7 +238,9 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			return dirEntries[i].Name < dirEntries[j].Name
 		})
 	}
-	dirEntries = n.filterWorkspaceDirEntries(dirEntries)
+	if !n.isWorkspaceSystemViewPath() {
+		dirEntries = n.filterWorkspaceDirEntries(dirEntries)
+	}
 
 	n.logger.Debug("readdir complete", "path", n.path, "count", len(dirEntries))
 

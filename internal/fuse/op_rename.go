@@ -20,6 +20,10 @@ func (n *MonoNode) Rename(ctx context.Context, name string, newParent fs.InodeEm
 		n.logger.Warn("rename: no session manager, read-only mode")
 		return syscall.EROFS
 	}
+	if n.isWorkspaceReadOnlyPath() {
+		n.logger.Warn("rename: read-only workspace path", "path", n.path)
+		return syscall.EROFS
+	}
 
 	// Root-level rename is not supported - must be within a repository
 	if n.path == "" {
@@ -46,6 +50,10 @@ func (n *MonoNode) Rename(ctx context.Context, name string, newParent fs.InodeEm
 	oldPath := n.path + "/" + name
 
 	newPath := newParentPath + "/" + newName
+	if isWorkspaceReadOnlyPath(oldPath) || isWorkspaceReadOnlyPath(newPath) {
+		n.logger.Warn("rename: read-only workspace target", "old_path", oldPath, "new_path", newPath)
+		return syscall.EROFS
+	}
 	if n.shouldHideWorkspacePath(newPath) {
 		n.logger.Warn("rename: reserved virtual monorepo path", "path", newPath)
 		return syscall.EPERM

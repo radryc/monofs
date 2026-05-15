@@ -21,6 +21,10 @@ func (n *MonoNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 		n.logger.Warn("setattr: no session manager, read-only mode")
 		return syscall.EROFS
 	}
+	if n.isWorkspaceReadOnlyPath() {
+		n.logger.Warn("setattr: read-only workspace path", "path", n.path)
+		return syscall.EROFS
+	}
 
 	// Ensure session exists for any setattr mutation
 	if _, err := n.sessionMgr.StartSession(); err != nil {
