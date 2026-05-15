@@ -153,19 +153,19 @@ type SessionRequest struct {
 
 // SessionResponse is sent to CLI
 type SessionResponse struct {
-	Success        bool           `json:"success"`
-	SessionID      string         `json:"session_id,omitempty"`
-	CreatedAt      string         `json:"created_at,omitempty"`
-	Changes        int            `json:"changes,omitempty"`
-	BlobChanges    int            `json:"blob_changes,omitempty"`
-	ExcludedChanges int           `json:"excluded_changes,omitempty"`
-	Message        string         `json:"message,omitempty"`
-	Error          string         `json:"error,omitempty"`
-	ChangeList     []ChangeInfo   `json:"change_list,omitempty"`
-	BlobChangeList []ChangeInfo   `json:"blob_change_list,omitempty"`
-	DepsInfo       *BlobsInfoData `json:"blobs_info,omitempty"`
-	DiffData       []FileDiff     `json:"diff_data,omitempty"`
-	BlobDiffData   []FileDiff     `json:"blob_diff_data,omitempty"`
+	Success         bool           `json:"success"`
+	SessionID       string         `json:"session_id,omitempty"`
+	CreatedAt       string         `json:"created_at,omitempty"`
+	Changes         int            `json:"changes,omitempty"`
+	BlobChanges     int            `json:"blob_changes,omitempty"`
+	ExcludedChanges int            `json:"excluded_changes,omitempty"`
+	Message         string         `json:"message,omitempty"`
+	Error           string         `json:"error,omitempty"`
+	ChangeList      []ChangeInfo   `json:"change_list,omitempty"`
+	BlobChangeList  []ChangeInfo   `json:"blob_change_list,omitempty"`
+	DepsInfo        *BlobsInfoData `json:"blobs_info,omitempty"`
+	DiffData        []FileDiff     `json:"diff_data,omitempty"`
+	BlobDiffData    []FileDiff     `json:"blob_diff_data,omitempty"`
 }
 
 // FileDiff contains the unified diff for a single file.
@@ -174,7 +174,7 @@ type FileDiff struct {
 	ChangeType string `json:"change_type"` // create, modify, delete
 	Repository string `json:"repository,omitempty"`
 	StorageID  string `json:"storage_id,omitempty"`
-	Diff       string `json:"diff"`        // unified diff text
+	Diff       string `json:"diff"` // unified diff text
 }
 
 // BlobsInfoData contains dependency file information for the current session.
@@ -194,11 +194,11 @@ type BlobsToolInfo struct {
 
 // ChangeInfo represents a single change for display
 type ChangeInfo struct {
-	Type      string `json:"type"`
-	Path      string `json:"path"`
+	Type       string `json:"type"`
+	Path       string `json:"path"`
 	Repository string `json:"repository,omitempty"`
 	StorageID  string `json:"storage_id,omitempty"`
-	Timestamp string `json:"timestamp"`
+	Timestamp  string `json:"timestamp"`
 }
 
 type sessionChangeScope int
@@ -414,34 +414,34 @@ func (h *SessionSocketHandler) handleStatus(showBlobs bool) SessionResponse {
 			depCount++
 			if showBlobs {
 				depChangeList = append(depChangeList, ChangeInfo{
-					Type:      string(c.Type),
-					Path:      c.Path,
+					Type:       string(c.Type),
+					Path:       c.Path,
 					Repository: c.Repository,
 					StorageID:  c.StorageID,
-					Timestamp: c.Timestamp.Format("15:04:05"),
+					Timestamp:  c.Timestamp.Format("15:04:05"),
 				})
 			}
 			continue
 		}
 
 		changeList = append(changeList, ChangeInfo{
-			Type:      string(c.Type),
-			Path:      c.Path,
+			Type:       string(c.Type),
+			Path:       c.Path,
 			Repository: c.Repository,
 			StorageID:  c.StorageID,
-			Timestamp: c.Timestamp.Format("15:04:05"),
+			Timestamp:  c.Timestamp.Format("15:04:05"),
 		})
 	}
 
 	return SessionResponse{
-		Success:        true,
-		SessionID:      id,
-		CreatedAt:      createdAt.Format("2006-01-02 15:04:05"),
-		Changes:        len(changeList),
-		BlobChanges:    depCount,
+		Success:         true,
+		SessionID:       id,
+		CreatedAt:       createdAt.Format("2006-01-02 15:04:05"),
+		Changes:         len(changeList),
+		BlobChanges:     depCount,
 		ExcludedChanges: excludedCount,
-		ChangeList:     changeList,
-		BlobChangeList: depChangeList,
+		ChangeList:      changeList,
+		BlobChangeList:  depChangeList,
 	}
 }
 
@@ -913,13 +913,13 @@ func (h *SessionSocketHandler) handleDiff(filterPath string, showBlobs bool) Ses
 	}
 
 	return SessionResponse{
-		Success:      true,
-		SessionID:    session.ID,
-		Changes:      len(nonDepDiffs),
-		BlobChanges:  len(depDiffs),
+		Success:         true,
+		SessionID:       session.ID,
+		Changes:         len(nonDepDiffs),
+		BlobChanges:     len(depDiffs),
 		ExcludedChanges: excludedCount,
-		DiffData:     nonDepDiffs,
-		BlobDiffData: depDiffs,
+		DiffData:        nonDepDiffs,
+		BlobDiffData:    depDiffs,
 	}
 }
 
@@ -1204,9 +1204,13 @@ func (h *SessionSocketHandler) sendError(conn net.Conn, msg string) {
 }
 
 func formatCommitMessage(result *CommitResult) string {
-	if result.FilesFailed > 0 {
-		return fmt.Sprintf("Processed %d files: %d uploaded, %d failed",
-			result.FilesProcessed, result.FilesUploaded, result.FilesFailed)
+	repoSummary := ""
+	if result.Repositories > 0 {
+		repoSummary = fmt.Sprintf(" across %d repositories", result.Repositories)
 	}
-	return fmt.Sprintf("Successfully processed %d files", result.FilesProcessed)
+	if result.FilesFailed > 0 {
+		return fmt.Sprintf("Processed %d files%s: %d uploaded, %d failed",
+			result.FilesProcessed, repoSummary, result.FilesUploaded, result.FilesFailed)
+	}
+	return fmt.Sprintf("Successfully processed %d files%s", result.FilesProcessed, repoSummary)
 }

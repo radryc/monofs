@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -26,7 +27,7 @@ func TestCommitManagerRejectsDependencyChangesBeforeCommit(t *testing.T) {
 	}
 }
 
-func TestCommitManagerRejectsVirtualMonorepoPublishUntilImplemented(t *testing.T) {
+func TestCommitManagerCommitsVirtualMonorepoByRepository(t *testing.T) {
 	sessionMgr, err := NewSessionManager(t.TempDir(), testLogger())
 	if err != nil {
 		t.Fatalf("NewSessionManager() error = %v", err)
@@ -35,33 +36,67 @@ func TestCommitManagerRejectsVirtualMonorepoPublishUntilImplemented(t *testing.T
 	writeTrackedCommitFile(t, sessionMgr, "github.com/acme/guardian/README.md", "guardian repo\n", ChangeCreate)
 	writeTrackedCommitFile(t, sessionMgr, "github.com/acme/doctor/app.go", "doctor repo\n", ChangeCreate)
 
-	mockCli := &mockClient{
-		workspaceRepos: []monoclient.WorkspaceRepository{
-			{StorageID: "repo-monofs", DisplayPath: "github.com/acme/monofs"},
-			{StorageID: "repo-guardian", DisplayPath: "github.com/acme/guardian"},
-			{StorageID: "repo-doctor", DisplayPath: "github.com/acme/doctor"},
+	mockCli := &commitApplierMockClient{
+		mockClient: &mockClient{
+			workspaceRepos: []monoclient.WorkspaceRepository{
+				{StorageID: "repo-monofs", DisplayPath: "github.com/acme/monofs"},
+				{StorageID: "repo-guardian", DisplayPath: "github.com/acme/guardian"},
+				{StorageID: "repo-doctor", DisplayPath: "github.com/acme/doctor"},
+			},
 		},
 	}
 	commitMgr := NewCommitManager(sessionMgr, mockCli, testLogger())
 	commitMgr.SetWorkspaceManifest(NewWorkspaceManifest(mockCli))
 
-	_, err = commitMgr.CommitChanges(context.Background())
-	if err == nil {
-		t.Fatal("CommitChanges() error = nil, want virtual monorepo publish rejection")
+	result, err := commitMgr.CommitChanges(context.Background())
+	if err != nil {
+		t.Fatalf("CommitChanges() error = %v", err)
 	}
-	for _, want := range []string{
-		"virtual monorepo publish is not implemented yet",
-		"github.com/acme/monofs",
-		"github.com/acme/guardian",
-		"github.com/acme/doctor",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("CommitChanges() error = %q, want substring %q", err.Error(), want)
+	if !result.Success {
+		t.Fatalf("CommitChanges() success = false, errors = %v", result.Errors)
+	}
+	if result.FilesProcessed != 3 || result.FilesUploaded != 3 || result.FilesFailed != 0 {
+		t.Fatalf("CommitChanges() result = %+v, want processed/uploaded=3 and failed=0", result)
+	}
+	if result.Repositories != 3 {
+		t.Fatalf("CommitChanges() repositories = %d, want 3", result.Repositories)
+	}
+	if sessionMgr.GetCurrentSession() != nil {
+		t.Fatal("session should be archived after successful virtual monorepo commit")
+	}
+
+	gotRepos := make([]string, 0, len(mockCli.applied))
+	gotPaths := make([]string, 0, len(mockCli.applied))
+	for _, applied := range mockCli.applied {
+		gotRepos = append(gotRepos, applied.repo.DisplayPath)
+		for _, change := range applied.changes {
+			gotPaths = append(gotPaths, applied.repo.DisplayPath+":"+change.Path)
 		}
 	}
-	if sessionMgr.GetCurrentSession() == nil {
-		t.Fatal("session should remain active after rejected virtual monorepo commit")
+	sort.Strings(gotRepos)
+	sort.Strings(gotPaths)
+	if strings.Join(gotRepos, ",") != "github.com/acme/doctor,github.com/acme/guardian,github.com/acme/monofs" {
+		t.Fatalf("applied repos = %v", gotRepos)
 	}
+	if strings.Join(gotPaths, ",") != "github.com/acme/doctor:app.go,github.com/acme/guardian:README.md,github.com/acme/monofs:main.go" {
+		t.Fatalf("applied repo-relative paths = %v", gotPaths)
+	}
+}
+
+type commitApplierMockClient struct {
+	*mockClient
+	applied []appliedRepositoryChanges
+}
+
+type appliedRepositoryChanges struct {
+	repo    monoclient.WorkspaceRepository
+	changes []monoclient.RepositoryChange
+}
+
+func (m *commitApplierMockClient) ApplyRepositoryChanges(ctx context.Context, repo monoclient.WorkspaceRepository, changes []monoclient.RepositoryChange) (*monoclient.ApplyRepositoryChangesResult, error) {
+	copyChanges := append([]monoclient.RepositoryChange(nil), changes...)
+	m.applied = append(m.applied, appliedRepositoryChanges{repo: repo, changes: copyChanges})
+	return &monoclient.ApplyRepositoryChangesResult{FilesUpserted: len(changes)}, nil
 }
 
 func writeTrackedCommitFile(t *testing.T, sessionMgr *SessionManager, monofsPath, content string, changeType ChangeType) {
