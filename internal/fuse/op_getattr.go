@@ -45,6 +45,14 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 		return 0
 	}
 
+	if errno, handled := n.getattrSyntheticWorkspaceFile(out); handled {
+		return errno
+	}
+	if n.shouldHideWorkspacePath(n.path) {
+		n.logger.Debug("getattr: hiding workspace path", "path", n.path)
+		return syscall.ENOENT
+	}
+
 	// Check overlay — single source of truth for local changes.
 	// If tracked in overlay, use it directly; never fall through to backend.
 	if n.sessionMgr != nil {

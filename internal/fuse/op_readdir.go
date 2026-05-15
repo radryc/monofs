@@ -18,6 +18,10 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	defer n.recoverPanic("Readdir")
 	n.client.RecordOperation()
 	n.logger.Debug("readdir", "path", n.path)
+	if n.shouldHideWorkspacePath(n.path) {
+		n.logger.Debug("readdir: hiding workspace path", "path", n.path)
+		return nil, syscall.ENOENT
+	}
 
 	// Check if this is a user-created root directory (or subdirectory of one)
 	if n.sessionMgr != nil && n.path != "" {
@@ -26,7 +30,7 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			// This is a user directory - only return local overlay entries
 			n.logger.Debug("readdir: user directory", "path", n.path)
 			overlay := NewOverlayManager(n.sessionMgr)
-			dirEntries := overlay.MergeReadDir(nil, n.path)
+			dirEntries := n.filterWorkspaceDirEntries(overlay.MergeReadDir(nil, n.path))
 			return fs.NewListDirStream(dirEntries), 0
 		}
 	}
@@ -64,6 +68,7 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 				overlay := NewOverlayManager(n.sessionMgr)
 				dirEntries = overlay.MergeReadDir(dirEntries, n.path)
 			}
+			dirEntries = n.filterWorkspaceDirEntries(dirEntries)
 			return fs.NewListDirStream(dirEntries), 0
 		}
 		n.logger.Debug("readdir cache miss", "path", n.path)
@@ -139,6 +144,7 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 					Ino:  0xFFFFFFFF,
 				},
 			}
+			errorEntry = n.filterWorkspaceDirEntries(errorEntry)
 			return fs.NewListDirStream(errorEntry), 0
 		}
 		return nil, n.recordAndConvertError(err)
@@ -225,6 +231,7 @@ func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			return dirEntries[i].Name < dirEntries[j].Name
 		})
 	}
+	dirEntries = n.filterWorkspaceDirEntries(dirEntries)
 
 	n.logger.Debug("readdir complete", "path", n.path, "count", len(dirEntries))
 

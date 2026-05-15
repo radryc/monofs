@@ -28,6 +28,10 @@ func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 
 	// Handle root-level user directory creation
 	if n.path == "" {
+		if n.shouldHideWorkspaceChild(name) {
+			n.logger.Warn("mkdir: reserved virtual monorepo path", "path", name)
+			return nil, syscall.EPERM
+		}
 		if err := n.sessionMgr.CreateUserRootDir(name); err != nil {
 			n.logger.Error("mkdir: failed to create user root dir", "error", err)
 			return nil, syscall.EIO
@@ -54,6 +58,10 @@ func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 	}
 
 	newPath := n.path + "/" + name
+	if n.shouldHideWorkspacePath(newPath) {
+		n.logger.Warn("mkdir: reserved virtual monorepo path", "path", newPath)
+		return nil, syscall.EPERM
+	}
 
 	localPath, err := n.sessionMgr.GetLocalPath(newPath)
 	if err != nil {

@@ -52,9 +52,17 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		return nil, syscall.ENOENT
 	}
 
+	if inode, errno, handled := n.lookupSyntheticWorkspaceFile(ctx, name, out); handled {
+		return inode, errno
+	}
+
 	childPath := name
 	if n.path != "" {
 		childPath = n.path + "/" + name
+	}
+	if n.shouldHideWorkspacePath(childPath) {
+		n.logger.Debug("lookup: hiding workspace path", "path", childPath)
+		return nil, syscall.ENOENT
 	}
 
 	// Check overlay — single source of truth for local changes.

@@ -8,9 +8,12 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"strings"
 
+	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	pb "github.com/radryc/monofs/api/proto"
+	monoclient "github.com/radryc/monofs/internal/client"
 	"github.com/radryc/monofs/internal/fsstat"
 )
 
@@ -20,6 +23,7 @@ type mockClient struct {
 	failError  error
 	entries    []*pb.DirEntry
 	statfs     fsstat.Snapshot
+	workspaceRepos []monoclient.WorkspaceRepository
 }
 
 func (m *mockClient) Lookup(ctx context.Context, path string) (*pb.LookupResponse, error) {
@@ -115,6 +119,41 @@ func (m *mockClient) QueryLogs(ctx context.Context, query string) ([]byte, error
 func (m *mockClient) WriteQueryLogs(ctx context.Context, query string, writer io.Writer) error {
 	_, err := writer.Write(nil)
 	return err
+}
+
+func (m *mockClient) ListWorkspaceRepositories(ctx context.Context) ([]monoclient.WorkspaceRepository, error) {
+	return append([]monoclient.WorkspaceRepository(nil), m.workspaceRepos...), nil
+}
+
+func (m *mockClient) ResolveWorkspacePath(ctx context.Context, path string) (*monoclient.WorkspaceRepository, error) {
+	trimmed := strings.Trim(path, "/")
+	var match *monoclient.WorkspaceRepository
+	for i := range m.workspaceRepos {
+		repo := m.workspaceRepos[i]
+		if trimmed != repo.DisplayPath && !strings.HasPrefix(trimmed, repo.DisplayPath+"/") {
+			continue
+		}
+		if match == nil || len(repo.DisplayPath) > len(match.DisplayPath) {
+			candidate := repo
+			match = &candidate
+		}
+	}
+	if match == nil {
+		return nil, monoclient.ErrWorkspacePathNotFound
+	}
+	return match, nil
+}
+
+func collectDirEntryNames(stream fs.DirStream) []string {
+	var names []string
+	for stream.HasNext() {
+		entry, errno := stream.Next()
+		if errno != 0 {
+			break
+		}
+		names = append(names, entry.Name)
+	}
+	return names
 }
 
 func TestStatfsUsesClientSnapshot(t *testing.T) {
@@ -428,6 +467,144 @@ func TestUserRootDir_ProtectRepoDirectories(t *testing.T) {
 
 	// This distinction allows Rmdir to protect repo dirs
 	// (tested at integration level with actual FUSE mount)
+}
+
+
+func TestVirtualMonorepoRootFiltersNamespacesAndAddsGitignore(t *testing.T) {
+	root := NewRoot(&mockClient{
+		entries: []*pb.DirEntry{
+			{Name: "github.com", Mode: 0755 | uint32(syscall.S_IFDIR), Ino: 1},
+			{Name: "gitlab.com", Mode: 0755 | uint32(syscall.S_IFDIR), Ino: 2},
+			{Name: "dependency", Mode: 0755 | uint32(syscall.S_IFDIR), Ino: 3},
+			{Name: "guardian", Mode: 0755 | uint32(syscall.S_IFDIR), Ino: 4},
+			{Name: "guardian-system", Mode: 0755 | uint32(syscall.S_IFDIR), Ino: 5},
+		},
+	}, nil, testLogger())
+	if err := root.EnableVirtualMonorepo(); err != nil {
+		t.Fatalf("EnableVirtualMonorepo() error = %v", err)
+	}
+
+	stream, errno := root.Readdir(context.Background())
+	if errno != 0 {
+		t.Fatalf("Readdir() errno = %v", errno)
+	}
+
+	names := collectDirEntryNames(stream)
+	joined := strings.Join(names, ",")
+	if !strings.Contains(joined, syntheticGitignoreName) {
+		t.Fatalf("root listing missing %q: %v", syntheticGitignoreName, names)
+	}
+	if !strings.Contains(joined, "github.com") || !strings.Contains(joined, "gitlab.com") {
+		t.Fatalf("root listing missing expected source namespaces: %v", names)
+	}
+	for _, hidden := range []string{"dependency", "guardian", "guardian-system"} {
+		if strings.Contains(joined, hidden) {
+			t.Fatalf("root listing should hide %q: %v", hidden, names)
+		}
+	}
+}
+
+func TestVirtualMonorepoLookupHidesNestedGitAndServesSyntheticGitignore(t *testing.T) {
+	mockCli := &mockClient{}
+	root := NewRoot(mockCli, nil, testLogger())
+	if err := root.EnableVirtualMonorepo(); err != nil {
+		t.Fatalf("EnableVirtualMonorepo() error = %v", err)
+	}
+
+	var entryOut fuse.EntryOut
+	_, errno := root.Lookup(context.Background(), syntheticGitignoreName, &entryOut)
+	if errno != 0 {
+		t.Fatalf("Lookup(.gitignore) errno = %v", errno)
+	}
+	if got, want := entryOut.Size, uint64(len(monorepoGitignore)); got != want {
+		t.Fatalf("synthetic .gitignore size = %d, want %d", got, want)
+	}
+	content, ok := root.syntheticWorkspaceFileContent(syntheticGitignoreName)
+	if !ok {
+		t.Fatal("synthetic .gitignore content was not available")
+	}
+	if string(content) != monorepoGitignore {
+		t.Fatalf("synthetic .gitignore content = %q, want %q", string(content), monorepoGitignore)
+	}
+	child := root.newChild(syntheticGitignoreName, false, 0444|uint32(syscall.S_IFREG), uint64(len(content)))
+	child.content = content
+
+	var attrOut fuse.AttrOut
+	if errno := child.Getattr(context.Background(), nil, &attrOut); errno != 0 {
+		t.Fatalf("Getattr(.gitignore) errno = %v", errno)
+	}
+	if attrOut.Size != uint64(len(monorepoGitignore)) {
+		t.Fatalf("Getattr(.gitignore) size = %d, want %d", attrOut.Size, len(monorepoGitignore))
+	}
+
+	repoNode := root.newChild("github.com/acme/repo", true, 0755|uint32(syscall.S_IFDIR), 0)
+	_, errno = repoNode.Lookup(context.Background(), ".git", &entryOut)
+	if errno != syscall.ENOENT {
+		t.Fatalf("Lookup(.git) errno = %v, want %v", errno, syscall.ENOENT)
+	}
+}
+
+func TestVirtualMonorepoRejectsReservedWrites(t *testing.T) {
+	sessionMgr, err := NewSessionManager(t.TempDir(), testLogger())
+	if err != nil {
+		t.Fatalf("NewSessionManager() error = %v", err)
+	}
+
+	root := NewRootWithSession(&mockClient{}, nil, sessionMgr, testLogger())
+	if err := root.EnableVirtualMonorepo(); err != nil {
+		t.Fatalf("EnableVirtualMonorepo() error = %v", err)
+	}
+
+	var entryOut fuse.EntryOut
+	if _, errno := root.Mkdir(context.Background(), "dependency", 0755, &entryOut); errno != syscall.EPERM {
+		t.Fatalf("Mkdir(dependency) errno = %v, want %v", errno, syscall.EPERM)
+	}
+
+	repoNode := root.newChild("github.com/acme/repo", true, 0755|uint32(syscall.S_IFDIR), 0)
+	if _, _, _, errno := repoNode.Create(context.Background(), ".git", 0, 0644, &entryOut); errno != syscall.EPERM {
+		t.Fatalf("Create(.git) errno = %v, want %v", errno, syscall.EPERM)
+	}
+	if _, errno := repoNode.Mkdir(context.Background(), ".git", 0755, &entryOut); errno != syscall.EPERM {
+		t.Fatalf("Mkdir(.git) errno = %v, want %v", errno, syscall.EPERM)
+	}
+}
+
+func TestWorkspaceManifestResolvePath(t *testing.T) {
+	mockCli := &mockClient{
+		workspaceRepos: []monoclient.WorkspaceRepository{
+			{StorageID: "src-1", DisplayPath: "github.com/acme/repo"},
+			{StorageID: "sys-1", DisplayPath: "dependency/go/mod/cache"},
+		},
+	}
+	root := NewRoot(mockCli, nil, testLogger())
+	if err := root.EnableVirtualMonorepo(); err != nil {
+		t.Fatalf("EnableVirtualMonorepo() error = %v", err)
+	}
+
+	resolution, err := root.workspace.ResolvePath(context.Background(), "github.com/acme/repo/pkg/file.go")
+	if err != nil {
+		t.Fatalf("ResolvePath(source) error = %v", err)
+	}
+	if resolution.Repository == nil || resolution.Repository.StorageID != "src-1" {
+		t.Fatalf("ResolvePath(source) repository = %+v", resolution.Repository)
+	}
+	if !resolution.Included {
+		t.Fatalf("ResolvePath(source) should be included: %+v", resolution)
+	}
+
+	resolution, err = root.workspace.ResolvePath(context.Background(), "dependency/go/mod/cache/download")
+	if err != nil {
+		t.Fatalf("ResolvePath(system) error = %v", err)
+	}
+	if resolution.Repository == nil || resolution.Repository.StorageID != "sys-1" {
+		t.Fatalf("ResolvePath(system) repository = %+v", resolution.Repository)
+	}
+	if resolution.Included {
+		t.Fatalf("ResolvePath(system) should be excluded: %+v", resolution)
+	}
+	if resolution.ExclusionReason != WorkspaceExcludedSystemNamespace {
+		t.Fatalf("ResolvePath(system) reason = %q, want %q", resolution.ExclusionReason, WorkspaceExcludedSystemNamespace)
+	}
 }
 
 func TestSymlink_CreateAndRead(t *testing.T) {

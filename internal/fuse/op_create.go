@@ -43,6 +43,10 @@ func (n *MonoNode) Create(ctx context.Context, name string, flags uint32, mode u
 	}
 
 	newPath := n.path + "/" + name
+	if n.shouldHideWorkspacePath(newPath) {
+		n.logger.Warn("create: reserved virtual monorepo path", "path", newPath)
+		return nil, nil, 0, syscall.EPERM
+	}
 
 	localPath, err := n.sessionMgr.GetLocalPath(newPath)
 	if err != nil {

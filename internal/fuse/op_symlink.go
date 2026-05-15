@@ -33,6 +33,10 @@ func (n *MonoNode) Symlink(ctx context.Context, target, name string, out *fuse.E
 	}
 
 	newPath := n.path + "/" + name
+	if n.shouldHideWorkspacePath(newPath) {
+		n.logger.Warn("symlink: reserved virtual monorepo path", "path", newPath)
+		return nil, syscall.EPERM
+	}
 
 	// Create symlink in session
 	if err := n.sessionMgr.CreateSymlink(newPath, target); err != nil {
