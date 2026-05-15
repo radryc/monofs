@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -16,8 +17,29 @@ import (
 type CommitManager struct {
 	sessionMgr *SessionManager
 	client     client.MonoFSClient
+	workspace  *WorkspaceManifest
 	logger     *slog.Logger
 	mu         sync.Mutex
+}
+
+type commitChangeScope int
+
+const (
+	commitChangeWorkspace commitChangeScope = iota
+	commitChangeBlob
+	commitChangeExcluded
+)
+
+type classifiedCommitChange struct {
+	Change
+	Scope      commitChangeScope
+	Repository *client.WorkspaceRepository
+}
+
+type commitRepositoryGroup struct {
+	Key         string
+	DisplayPath string
+	Changes     []Change
 }
 
 // NewCommitManager creates a new commit manager
@@ -30,6 +52,11 @@ func NewCommitManager(sessionMgr *SessionManager, c client.MonoFSClient, logger 
 		client:     c,
 		logger:     logger.With("component", "commit"),
 	}
+}
+
+// SetWorkspaceManifest enables virtual-monorepo commit classification.
+func (cm *CommitManager) SetWorkspaceManifest(manifest *WorkspaceManifest) {
+	cm.workspace = manifest
 }
 
 // CommitResult represents the result of a commit operation
@@ -68,17 +95,43 @@ func (cm *CommitManager) CommitChanges(ctx context.Context) (*CommitResult, erro
 		return result, nil
 	}
 
-	// Filter out blob files — those are handled by push, not commit.
-	const depPrefix = "dependency/"
-	var filtered []Change
-	for _, c := range changes {
-		if len(c.Path) > len(depPrefix) && c.Path[:len(depPrefix)] == depPrefix {
-			continue
-		}
-		filtered = append(filtered, c)
+	classified, err := cm.classifyCommitChanges(ctx, changes)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(filtered) == 0 {
+	workspaceChanges := make([]Change, 0, len(classified))
+	blobCount := 0
+	excludedCount := 0
+	for _, change := range classified {
+		switch change.Scope {
+		case commitChangeBlob:
+			blobCount++
+		case commitChangeExcluded:
+			excludedCount++
+		case commitChangeWorkspace:
+			workspaceChanges = append(workspaceChanges, change.Change)
+		}
+	}
+
+	if blobCount > 0 {
+		return nil, fmt.Errorf("%d dependency changes pending; run monofs-session push first", blobCount)
+	}
+	if excludedCount > 0 {
+		return nil, fmt.Errorf("%d excluded changes pending outside the virtual monorepo; discard them or use the system view", excludedCount)
+	}
+
+	if cm.workspace != nil {
+		repoGroups := cm.groupChangesByRepository(classified)
+		return nil, fmt.Errorf(
+			"virtual monorepo publish is not implemented yet; %d workspace changes span %d repositories%s",
+			len(workspaceChanges),
+			len(repoGroups),
+			formatCommitRepositorySummary(repoGroups),
+		)
+	}
+
+	if len(workspaceChanges) == 0 {
 		cm.logger.Info("no non-blob changes to commit")
 		if err := cm.sessionMgr.CommitSession(); err != nil {
 			return nil, fmt.Errorf("archive session: %w", err)
@@ -88,7 +141,7 @@ func (cm *CommitManager) CommitChanges(ctx context.Context) (*CommitResult, erro
 
 	// Group changes by repository
 	repoChanges := make(map[string][]Change)
-	for _, c := range filtered {
+	for _, c := range workspaceChanges {
 		// Extract repo from path: github.com/user/repo/file.txt -> github.com/user/repo
 		parts := strings.SplitN(c.Path, "/", 4)
 		if len(parts) >= 3 {
@@ -129,6 +182,95 @@ func (cm *CommitManager) CommitChanges(ctx context.Context) (*CommitResult, erro
 	}
 
 	return result, nil
+}
+
+func (cm *CommitManager) classifyCommitChanges(ctx context.Context, changes []Change) ([]classifiedCommitChange, error) {
+	classified := make([]classifiedCommitChange, 0, len(changes))
+	for _, change := range changes {
+		item := classifiedCommitChange{Change: change}
+		if isDependencyPath(change.Path) {
+			item.Scope = commitChangeBlob
+			classified = append(classified, item)
+			continue
+		}
+		if cm.workspace == nil {
+			item.Scope = commitChangeWorkspace
+			classified = append(classified, item)
+			continue
+		}
+
+		resolution, err := cm.workspace.ResolvePath(ctx, change.Path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace path %q: %w", change.Path, err)
+		}
+		if resolution.Repository != nil {
+			repoCopy := *resolution.Repository
+			item.Repository = &repoCopy
+		}
+		if !resolution.Included {
+			item.Scope = commitChangeExcluded
+		} else {
+			item.Scope = commitChangeWorkspace
+		}
+		classified = append(classified, item)
+	}
+	return classified, nil
+}
+
+func (cm *CommitManager) groupChangesByRepository(changes []classifiedCommitChange) []commitRepositoryGroup {
+	groups := make(map[string]*commitRepositoryGroup)
+	for _, change := range changes {
+		if change.Scope != commitChangeWorkspace {
+			continue
+		}
+
+		key := "_root"
+		displayPath := "_root"
+		if change.Repository != nil {
+			key = change.Repository.StorageID
+			if key == "" {
+				key = change.Repository.DisplayPath
+			}
+			displayPath = change.Repository.DisplayPath
+		} else {
+			parts := strings.SplitN(change.Path, "/", 4)
+			if len(parts) >= 3 {
+				displayPath = strings.Join(parts[:3], "/")
+				key = displayPath
+			}
+		}
+
+		group := groups[key]
+		if group == nil {
+			group = &commitRepositoryGroup{Key: key, DisplayPath: displayPath}
+			groups[key] = group
+		}
+		group.Changes = append(group.Changes, change.Change)
+	}
+
+	out := make([]commitRepositoryGroup, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, *group)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].DisplayPath < out[j].DisplayPath
+	})
+	return out
+}
+
+func formatCommitRepositorySummary(groups []commitRepositoryGroup) string {
+	if len(groups) == 0 {
+		return ""
+	}
+	const maxRepos = 3
+	names := make([]string, 0, len(groups))
+	for _, group := range groups {
+		names = append(names, group.DisplayPath)
+	}
+	if len(names) > maxRepos {
+		return fmt.Sprintf(": %s and %d more", strings.Join(names[:maxRepos], ", "), len(names)-maxRepos)
+	}
+	return ": " + strings.Join(names, ", ")
 }
 
 // processChange handles a single file change

@@ -363,6 +363,11 @@ func (n *MonoNode) syntheticWorkspaceFileContent(path string) ([]byte, bool) {
 	return n.workspace.GitignoreContent(), true
 }
 
+// WorkspaceManifest returns the mounted virtual-monorepo manifest, if enabled.
+func (n *MonoNode) WorkspaceManifest() *WorkspaceManifest {
+	return n.workspace
+}
+
 func (n *MonoNode) lookupSyntheticWorkspaceFile(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno, bool) {
 	content, ok := n.syntheticWorkspaceFileContent(name)
 	if !ok || n.path != "" {
