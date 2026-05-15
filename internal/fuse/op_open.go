@@ -19,6 +19,14 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	if n.path == "FS_ERROR.txt" && len(n.content) > 0 {
 		return nil, fuse.FOPEN_KEEP_CACHE, 0
 	}
+	if content, ok := n.syntheticWorkspaceFileContent(n.path); ok {
+		if len(n.content) == 0 {
+			n.mu.Lock()
+			n.content = content
+			n.mu.Unlock()
+		}
+		return nil, fuse.FOPEN_KEEP_CACHE, 0
+	}
 
 	// Check if this is a write/create operation.
 	// O_CREAT on existing files comes through Open (not Create),

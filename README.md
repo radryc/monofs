@@ -46,7 +46,7 @@ MonoFS mounts all your repositories and Go modules as a single filesystem:
         └── services/                    # Git repository
 ```
 
-Navigate with `cd`. Read files instantly. Edit and commit changes back. Search across everything.
+Navigate with `cd`. Read files instantly. Edit through overlay sessions. Search across everything.
 
 ---
 
@@ -58,7 +58,7 @@ Navigate with `cd`. Read files instantly. Edit and commit changes back. Search a
 | **Distributed Storage** | Files spread across backend nodes for scalability |
 | **Automatic Failover** | Node failures handled transparently |
 | **Full-Text Search** | Search code across all repositories instantly |
-| **Write Support** | Edit files and commit changes back |
+| **Write Support** | Overlay-backed local edit sessions |
 | **Web Dashboard** | Monitor cluster health and manage repositories |
 | **Go Module Support** | Mount Go modules alongside Git repos |
 | **Streaming I/O** | Large files streamed in chunks - no size limit |
@@ -298,14 +298,14 @@ make mount-writable MOUNT_POINT=/tmp/monofs
 # Show diff of changes
 ./bin/monofs-session diff
 
-# Commit changes to backend
+# Finalize the local session state
 ./bin/monofs-session commit
 
 # Discard changes
 ./bin/monofs-session discard
 ```
 
-**Note:** Write support requires both `--writable` and `--overlay` flags. The overlay directory stores pending changes before commit.
+**Note:** Write support requires both `--writable` and `--overlay` flags. The overlay directory stores pending changes before commit. Repository publish back to upstream Git remotes is not implemented yet; see `docs/dev-backend-sync-plan.md` for the proposed design.
 
 ---
 

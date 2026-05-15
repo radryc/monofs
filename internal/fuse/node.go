@@ -51,6 +51,9 @@ type MonoNode struct {
 	// Session manager for write operations (can be nil for read-only)
 	sessionMgr *SessionManager
 
+	// Optional workspace projection for virtual monorepo mode.
+	workspace *WorkspaceManifest
+
 	// Logger for structured logging
 	logger *slog.Logger
 
@@ -130,6 +133,17 @@ func NewRootWithSession(c client.MonoFSClient, cache *cache.Cache, sessionMgr *S
 	}
 }
 
+// EnableVirtualMonorepo turns on the synthetic source-root projection for this
+// mounted tree. The underlying client must support workspace metadata.
+func (n *MonoNode) EnableVirtualMonorepo() error {
+	provider, ok := n.client.(client.WorkspaceMetadataProvider)
+	if !ok {
+		return fmt.Errorf("client does not support workspace metadata")
+	}
+	n.workspace = NewWorkspaceManifest(provider)
+	return nil
+}
+
 // =============================================================================
 // Shared helpers used by multiple op_*.go files
 // =============================================================================
@@ -164,6 +178,7 @@ func (n *MonoNode) newChild(name string, isDir bool, mode uint32, size uint64) *
 		client:     n.client,
 		cache:      n.cache,
 		sessionMgr: n.sessionMgr,
+		workspace:  n.workspace,
 		logger:     n.logger,
 	}
 }
@@ -320,6 +335,72 @@ func isDependencyPath(path string) bool {
 	const prefix = "dependency/"
 	return path == "dependency" ||
 		(len(path) > len(prefix) && path[:len(prefix)] == prefix)
+}
+
+func (n *MonoNode) virtualMonorepoEnabled() bool {
+	return n.workspace != nil
+}
+
+func (n *MonoNode) shouldHideWorkspacePath(path string) bool {
+	return n.workspace != nil && n.workspace.ShouldHidePath(path)
+}
+
+func (n *MonoNode) shouldHideWorkspaceChild(name string) bool {
+	return n.workspace != nil && n.workspace.ShouldHideChild(n.path, name)
+}
+
+func (n *MonoNode) filterWorkspaceDirEntries(entries []fuse.DirEntry) []fuse.DirEntry {
+	if n.workspace == nil {
+		return entries
+	}
+	return n.workspace.FilterDirEntries(n.path, entries)
+}
+
+func (n *MonoNode) syntheticWorkspaceFileContent(path string) ([]byte, bool) {
+	if n.workspace == nil || path != syntheticGitignoreName {
+		return nil, false
+	}
+	return n.workspace.GitignoreContent(), true
+}
+
+func (n *MonoNode) lookupSyntheticWorkspaceFile(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno, bool) {
+	content, ok := n.syntheticWorkspaceFileContent(name)
+	if !ok || n.path != "" {
+		return nil, 0, false
+	}
+
+	child := n.newChild(name, false, 0444|uint32(syscall.S_IFREG), uint64(len(content)))
+	child.content = content
+	out.Mode = 0444 | uint32(syscall.S_IFREG)
+	out.Size = uint64(len(content))
+	out.Ino = hashPathForNode(name)
+	out.Nlink = 1
+	out.SetAttrTimeout(attrTimeout())
+	out.SetEntryTimeout(attrTimeout())
+	if n.EmbeddedInode() == nil {
+		return nil, 0, true
+	}
+
+	return n.NewInode(ctx, child, fs.StableAttr{
+		Mode: fuse.S_IFREG,
+		Ino:  out.Ino,
+	}), 0, true
+}
+
+func (n *MonoNode) getattrSyntheticWorkspaceFile(out *fuse.AttrOut) (syscall.Errno, bool) {
+	content, ok := n.syntheticWorkspaceFileContent(n.path)
+	if !ok {
+		return 0, false
+	}
+
+	out.Mode = 0444 | uint32(syscall.S_IFREG)
+	out.Size = uint64(len(content))
+	out.Ino = hashPathForNode(n.path)
+	out.Nlink = 1
+	out.Uid = 1000
+	out.Gid = 1000
+	out.SetTimeout(attrTimeout())
+	return 0, true
 }
 
 // invalidateEntry invalidates the kernel dentry cache for a child name.

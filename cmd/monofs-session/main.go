@@ -33,6 +33,8 @@ type SessionRequest struct {
 type FileDiff struct {
 	Path       string `json:"path"`
 	ChangeType string `json:"change_type"`
+	Repository string `json:"repository,omitempty"`
+	StorageID  string `json:"storage_id,omitempty"`
 	Diff       string `json:"diff"`
 }
 
@@ -43,6 +45,7 @@ type SessionResponse struct {
 	CreatedAt      string         `json:"created_at,omitempty"`
 	Changes        int            `json:"changes,omitempty"`
 	BlobChanges    int            `json:"blob_changes,omitempty"`
+	ExcludedChanges int           `json:"excluded_changes,omitempty"`
 	Message        string         `json:"message,omitempty"`
 	Error          string         `json:"error,omitempty"`
 	ChangeList     []ChangeInfo   `json:"change_list,omitempty"`
@@ -77,6 +80,8 @@ type BlobFileInfo struct {
 type ChangeInfo struct {
 	Type      string `json:"type"`
 	Path      string `json:"path"`
+	Repository string `json:"repository,omitempty"`
+	StorageID  string `json:"storage_id,omitempty"`
 	Timestamp string `json:"timestamp"`
 }
 
@@ -362,6 +367,11 @@ func (sc *SessionCommand) showDiff(args []string) error {
 		if i > 0 {
 			fmt.Println()
 		}
+		if i == 0 || resp.DiffData[i-1].Repository != fd.Repository {
+			if fd.Repository != "" {
+				fmt.Printf("=== %s ===\n", fd.Repository)
+			}
+		}
 		if fd.Diff != "" {
 			fmt.Print(fd.Diff)
 		}
@@ -375,6 +385,11 @@ func (sc *SessionCommand) showDiff(args []string) error {
 		for i, fd := range resp.BlobDiffData {
 			if i > 0 {
 				fmt.Println()
+			}
+			if i == 0 || resp.BlobDiffData[i-1].Repository != fd.Repository {
+				if fd.Repository != "" {
+					fmt.Printf("=== %s ===\n", fd.Repository)
+				}
 			}
 			if fd.Diff != "" {
 				fmt.Print(fd.Diff)
@@ -441,13 +456,25 @@ func (sc *SessionCommand) showStatus(args []string) error {
 			fmt.Printf("Blobs:       %d file(s)  (use --deps to show, 'push' to upload)\n", resp.BlobChanges)
 		}
 	}
+	if resp.ExcludedChanges > 0 {
+		fmt.Printf("Excluded:    %d path(s) outside virtual monorepo\n", resp.ExcludedChanges)
+	}
 	fmt.Println()
 
 	if len(resp.ChangeList) > 0 {
 		fmt.Println("Pending Changes:")
+		lastRepo := ""
 		for _, change := range resp.ChangeList {
+			if change.Repository != "" && change.Repository != lastRepo {
+				fmt.Printf("  %s\n", change.Repository)
+				lastRepo = change.Repository
+			}
 			symbol := getChangeSymbol(change.Type)
-			fmt.Printf("  %s %s\n", symbol, change.Path)
+			indent := "  "
+			if change.Repository != "" {
+				indent = "    "
+			}
+			fmt.Printf("%s%s %s\n", indent, symbol, change.Path)
 		}
 	} else if resp.BlobChanges == 0 {
 		fmt.Println("No changes yet.")
@@ -456,9 +483,18 @@ func (sc *SessionCommand) showStatus(args []string) error {
 	if *showBlobs && len(resp.BlobChangeList) > 0 {
 		fmt.Println()
 		fmt.Println("Dependency Changes:")
+		lastRepo := ""
 		for _, change := range resp.BlobChangeList {
+			if change.Repository != "" && change.Repository != lastRepo {
+				fmt.Printf("  %s\n", change.Repository)
+				lastRepo = change.Repository
+			}
 			symbol := getChangeSymbol(change.Type)
-			fmt.Printf("  %s %s\n", symbol, change.Path)
+			indent := "  "
+			if change.Repository != "" {
+				indent = "    "
+			}
+			fmt.Printf("%s%s %s\n", indent, symbol, change.Path)
 		}
 	}
 

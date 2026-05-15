@@ -29,6 +29,7 @@ func main() {
 	overlayDir := flag.String("overlay", "", "Override default overlay storage location (~/.monofs/overlay)")
 	useExternalAddrs := flag.Bool("use-external-addrs", false, "Request router-advertised external node addresses (for host/WSL clients)")
 	writable := flag.Bool("writable", false, "Enable write support (changes stored client-side)")
+	virtualMonorepo := flag.Bool("virtual-monorepo", false, "Project a source-only workspace root that hides dependency, guardian, guardian-system, and nested .git paths")
 	debug := flag.Bool("debug", false, "Enable MonoFS layer DEBUG logs (written to --log-file if set, else stdout)")
 	fuseDebug := flag.Bool("fuse-debug", false, "Enable go-fuse C layer debug output (very verbose, written to <log-file>.fuse or stderr)")
 	logFile := flag.String("log-file", "", "Path for structured JSON log file (DEBUG+). Stdout always gets INFO+ text.")
@@ -77,6 +78,7 @@ func main() {
 		"overlay", *overlayDir,
 		"use_external_addrs", *useExternalAddrs,
 		"writable", *writable,
+		"virtual_monorepo", *virtualMonorepo,
 		"debug", *debug,
 		"fuse_debug", *fuseDebug,
 		"log_file", *logFile,
@@ -229,6 +231,16 @@ func main() {
 		root = monofuse.NewRootWithSession(c, cacheLayer, sessionMgr, logger.With("component", "fuse"))
 	} else {
 		root = monofuse.NewRoot(c, cacheLayer, logger.With("component", "fuse"))
+	}
+	if *virtualMonorepo {
+		if err := root.EnableVirtualMonorepo(); err != nil {
+			logger.Error("failed to enable virtual monorepo mode", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("virtual monorepo mode enabled")
+	}
+	if socketHandler != nil {
+		socketHandler.SetRootNode(root)
 	}
 
 	// Mount options

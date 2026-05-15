@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -157,6 +158,7 @@ type SessionResponse struct {
 	CreatedAt      string         `json:"created_at,omitempty"`
 	Changes        int            `json:"changes,omitempty"`
 	BlobChanges    int            `json:"blob_changes,omitempty"`
+	ExcludedChanges int           `json:"excluded_changes,omitempty"`
 	Message        string         `json:"message,omitempty"`
 	Error          string         `json:"error,omitempty"`
 	ChangeList     []ChangeInfo   `json:"change_list,omitempty"`
@@ -170,6 +172,8 @@ type SessionResponse struct {
 type FileDiff struct {
 	Path       string `json:"path"`
 	ChangeType string `json:"change_type"` // create, modify, delete
+	Repository string `json:"repository,omitempty"`
+	StorageID  string `json:"storage_id,omitempty"`
 	Diff       string `json:"diff"`        // unified diff text
 }
 
@@ -192,7 +196,24 @@ type BlobsToolInfo struct {
 type ChangeInfo struct {
 	Type      string `json:"type"`
 	Path      string `json:"path"`
+	Repository string `json:"repository,omitempty"`
+	StorageID  string `json:"storage_id,omitempty"`
 	Timestamp string `json:"timestamp"`
+}
+
+type sessionChangeScope int
+
+const (
+	sessionChangeWorkspace sessionChangeScope = iota
+	sessionChangeBlob
+	sessionChangeExcluded
+)
+
+type classifiedSessionChange struct {
+	Change
+	Scope      sessionChangeScope
+	Repository string
+	StorageID  string
 }
 
 // SetIngester attaches a dependency ingester so push pushes
@@ -363,7 +384,7 @@ func (h *SessionSocketHandler) handleStart() SessionResponse {
 }
 
 func (h *SessionSocketHandler) handleStatus(showBlobs bool) SessionResponse {
-	id, createdAt, changeCount, ok := h.sessionMgr.GetSessionInfo()
+	id, createdAt, _, ok := h.sessionMgr.GetSessionInfo()
 	if !ok {
 		return SessionResponse{
 			Success: false,
@@ -371,33 +392,32 @@ func (h *SessionSocketHandler) handleStatus(showBlobs bool) SessionResponse {
 		}
 	}
 
-	// Get change list and separate deps from other files
+	// Get change list and separate workspace-visible, dependency, and excluded files.
 	changes := h.sessionMgr.GetChanges()
+	classified := make([]classifiedSessionChange, 0, len(changes))
+	for _, c := range changes {
+		classified = append(classified, h.classifySessionChange(h.ctx, c))
+	}
+	sortClassifiedSessionChanges(classified)
+
 	var changeList []ChangeInfo
 	var depChangeList []ChangeInfo
+	excludedCount := 0
 	depCount := 0
-	const depPrefix = "dependency/"
 
-	for _, c := range changes {
-		isDep := len(c.Path) >= len(depPrefix) && c.Path[:len(depPrefix)] == depPrefix
-		if isDep {
+	for _, c := range classified {
+		switch c.Scope {
+		case sessionChangeExcluded:
+			excludedCount++
+			continue
+		case sessionChangeBlob:
 			depCount++
 			if showBlobs {
 				depChangeList = append(depChangeList, ChangeInfo{
 					Type:      string(c.Type),
 					Path:      c.Path,
-					Timestamp: c.Timestamp.Format("15:04:05"),
-				})
-			}
-			continue // don't list individual dep files in default status list
-		}
-		// also consider the 'dependency' directory itself as a dependency
-		if c.Path == "dependency" {
-			depCount++
-			if showBlobs {
-				depChangeList = append(depChangeList, ChangeInfo{
-					Type:      string(c.Type),
-					Path:      c.Path,
+					Repository: c.Repository,
+					StorageID:  c.StorageID,
 					Timestamp: c.Timestamp.Format("15:04:05"),
 				})
 			}
@@ -407,6 +427,8 @@ func (h *SessionSocketHandler) handleStatus(showBlobs bool) SessionResponse {
 		changeList = append(changeList, ChangeInfo{
 			Type:      string(c.Type),
 			Path:      c.Path,
+			Repository: c.Repository,
+			StorageID:  c.StorageID,
 			Timestamp: c.Timestamp.Format("15:04:05"),
 		})
 	}
@@ -415,8 +437,9 @@ func (h *SessionSocketHandler) handleStatus(showBlobs bool) SessionResponse {
 		Success:        true,
 		SessionID:      id,
 		CreatedAt:      createdAt.Format("2006-01-02 15:04:05"),
-		Changes:        changeCount - depCount,
+		Changes:        len(changeList),
 		BlobChanges:    depCount,
+		ExcludedChanges: excludedCount,
 		ChangeList:     changeList,
 		BlobChangeList: depChangeList,
 	}
@@ -738,9 +761,12 @@ func (h *SessionSocketHandler) handleDiff(filterPath string, showBlobs bool) Ses
 	}
 
 	var diffs []FileDiff
+	excludedCount := 0
 	ctx := h.ctx
 
 	for _, c := range changes {
+		classified := h.classifySessionChange(ctx, c)
+
 		// Skip non-file changes (mkdir, rmdir, symlink, etc.)
 		switch c.Type {
 		case ChangeCreate, ChangeModify, ChangeDelete:
@@ -753,10 +779,16 @@ func (h *SessionSocketHandler) handleDiff(filterPath string, showBlobs bool) Ses
 		if filterPath != "" && c.Path != filterPath {
 			continue
 		}
+		if classified.Scope == sessionChangeExcluded {
+			excludedCount++
+			continue
+		}
 
 		fd := FileDiff{
 			Path:       c.Path,
 			ChangeType: string(c.Type),
+			Repository: classified.Repository,
+			StorageID:  classified.StorageID,
 		}
 
 		switch c.Type {
@@ -861,10 +893,8 @@ func (h *SessionSocketHandler) handleDiff(filterPath string, showBlobs bool) Ses
 
 	// Separate dependency diffs from non-dependency diffs
 	var nonDepDiffs, depDiffs []FileDiff
-	const depPfx = "dependency/"
 	for _, fd := range diffs {
-		isDep := (len(fd.Path) >= len(depPfx) && fd.Path[:len(depPfx)] == depPfx) || fd.Path == "dependency"
-		if isDep {
+		if isDependencyPath(fd.Path) {
 			if showBlobs {
 				depDiffs = append(depDiffs, fd)
 			}
@@ -872,6 +902,8 @@ func (h *SessionSocketHandler) handleDiff(filterPath string, showBlobs bool) Ses
 			nonDepDiffs = append(nonDepDiffs, fd)
 		}
 	}
+	sortFileDiffs(nonDepDiffs)
+	sortFileDiffs(depDiffs)
 
 	if filterPath != "" && len(nonDepDiffs) == 0 && len(depDiffs) == 0 {
 		return SessionResponse{
@@ -885,9 +917,80 @@ func (h *SessionSocketHandler) handleDiff(filterPath string, showBlobs bool) Ses
 		SessionID:    session.ID,
 		Changes:      len(nonDepDiffs),
 		BlobChanges:  len(depDiffs),
+		ExcludedChanges: excludedCount,
 		DiffData:     nonDepDiffs,
 		BlobDiffData: depDiffs,
 	}
+}
+
+func (h *SessionSocketHandler) classifySessionChange(ctx context.Context, change Change) classifiedSessionChange {
+	classified := classifiedSessionChange{Change: change}
+	if isDependencyPath(change.Path) {
+		classified.Scope = sessionChangeBlob
+	}
+
+	if h.rootNode == nil || h.rootNode.workspace == nil {
+		if classified.Scope != sessionChangeBlob {
+			classified.Scope = sessionChangeWorkspace
+		}
+		return classified
+	}
+
+	resolution, err := h.rootNode.workspace.ResolvePath(ctx, change.Path)
+	if err != nil {
+		h.logger.Warn("workspace resolve failed for session change", "path", change.Path, "error", err)
+		if classified.Scope == sessionChangeBlob {
+			return classified
+		}
+		if h.rootNode.workspace.ShouldHidePath(change.Path) {
+			classified.Scope = sessionChangeExcluded
+			return classified
+		}
+		classified.Scope = sessionChangeWorkspace
+		return classified
+	}
+
+	if resolution.Repository != nil {
+		classified.Repository = resolution.Repository.DisplayPath
+		classified.StorageID = resolution.Repository.StorageID
+	}
+	if !resolution.Included {
+		if classified.Scope == sessionChangeBlob {
+			return classified
+		}
+		classified.Scope = sessionChangeExcluded
+		return classified
+	}
+
+	classified.Scope = sessionChangeWorkspace
+	return classified
+}
+
+func sortClassifiedSessionChanges(changes []classifiedSessionChange) {
+	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].Scope != changes[j].Scope {
+			return changes[i].Scope < changes[j].Scope
+		}
+		if changes[i].Repository != changes[j].Repository {
+			return changes[i].Repository < changes[j].Repository
+		}
+		if changes[i].Path != changes[j].Path {
+			return changes[i].Path < changes[j].Path
+		}
+		return changes[i].Type < changes[j].Type
+	})
+}
+
+func sortFileDiffs(diffs []FileDiff) {
+	sort.Slice(diffs, func(i, j int) bool {
+		if diffs[i].Repository != diffs[j].Repository {
+			return diffs[i].Repository < diffs[j].Repository
+		}
+		if diffs[i].Path != diffs[j].Path {
+			return diffs[i].Path < diffs[j].Path
+		}
+		return diffs[i].ChangeType < diffs[j].ChangeType
+	})
 }
 
 // collectBlobFiles reads all overlay dependency entries and returns them as

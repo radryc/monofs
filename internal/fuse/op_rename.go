@@ -46,6 +46,10 @@ func (n *MonoNode) Rename(ctx context.Context, name string, newParent fs.InodeEm
 	oldPath := n.path + "/" + name
 
 	newPath := newParentPath + "/" + newName
+	if n.shouldHideWorkspacePath(newPath) {
+		n.logger.Warn("rename: reserved virtual monorepo path", "path", newPath)
+		return syscall.EPERM
+	}
 
 	// Ensure local copy exists for the source
 	if err := n.ensureLocalCopyFor(ctx, oldPath); err != nil {
