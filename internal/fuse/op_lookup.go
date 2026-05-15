@@ -52,7 +52,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		return nil, syscall.ENOENT
 	}
 
-	if inode, errno, handled := n.lookupSyntheticWorkspaceFile(ctx, name, out); handled {
+	if inode, errno, handled := n.lookupSyntheticWorkspaceEntry(ctx, name, out); handled {
 		return inode, errno
 	}
 
@@ -60,6 +60,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	if n.path != "" {
 		childPath = n.path + "/" + name
 	}
+	backendChildPath := n.backendChildPath(name)
 	if n.shouldHideWorkspacePath(childPath) {
 		n.logger.Debug("lookup: hiding workspace path", "path", childPath)
 		return nil, syscall.ENOENT
@@ -68,7 +69,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	// Check overlay — single source of truth for local changes.
 	// If a file is tracked in overlay or exists on disk under a user root dir,
 	// we use it directly and never fall through to the backend.
-	if n.sessionMgr != nil {
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
 		// DOCTOR VIRTUAL FILE INTERCEPT
 		parts := splitPath(childPath)
 		if len(parts) == 5 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" && parts[4] == "results.json" {
@@ -151,10 +152,10 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 
 	// Try cache first if available
 	if n.cache != nil {
-		if attr, err := n.cache.GetAttr(childPath); err == nil {
+		if attr, err := n.cache.GetAttr(backendChildPath); err == nil {
 			n.logger.Debug("lookup cache hit", "path", childPath)
 			mode := attr.Mode
-			if n.sessionMgr != nil && !isDependencyPath(childPath) {
+			if n.sessionMgr != nil && !isDependencyPath(childPath) && !isWorkspaceSystemPath(childPath) {
 				mode = addWriteBits(mode)
 			}
 			isDir := mode&uint32(syscall.S_IFDIR) != 0
@@ -183,18 +184,18 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	// Query backend with retry for transient failures.
 	// Lookup is the most frequently called FUSE operation; a single transient
 	// network hiccup should not return EIO to userspace.
-	resp, err := n.client.Lookup(ctx, childPath)
+	resp, err := n.client.Lookup(ctx, backendChildPath)
 	for attempt := 1; err != nil && attempt <= maxMetadataRetries; attempt++ {
-		n.logger.Debug("lookup retry", "path", childPath, "attempt", attempt, "error", err)
+		n.logger.Debug("lookup retry", "path", childPath, "backend_path", backendChildPath, "attempt", attempt, "error", err)
 		select {
 		case <-ctx.Done():
 			return nil, syscall.EINTR
 		case <-time.After(retryDelay(attempt - 1)):
 		}
-		resp, err = n.client.Lookup(ctx, childPath)
+		resp, err = n.client.Lookup(ctx, backendChildPath)
 	}
 	if err != nil {
-		n.logger.Debug("lookup failed after retries", "path", childPath, "error", err)
+		n.logger.Debug("lookup failed after retries", "path", childPath, "backend_path", backendChildPath, "error", err)
 		n.updateBackendError(err)
 		return nil, n.recordAndConvertError(err)
 	}
@@ -208,7 +209,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 
 	// Update cache if available
 	if n.cache != nil {
-		_ = n.cache.PutAttr(childPath, &cache.AttrEntry{
+		_ = n.cache.PutAttr(backendChildPath, &cache.AttrEntry{
 			Ino:   resp.Ino,
 			Mode:  resp.Mode,
 			Size:  resp.Size,
@@ -222,7 +223,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	}
 
 	mode := resp.Mode
-	if n.sessionMgr != nil && !isDependencyPath(childPath) {
+	if n.sessionMgr != nil && !isDependencyPath(childPath) && !isWorkspaceSystemPath(childPath) {
 		mode = addWriteBits(mode)
 	}
 	isDir := mode&uint32(syscall.S_IFDIR) != 0

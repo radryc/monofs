@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -15,9 +16,15 @@ import (
 )
 
 const (
-	syntheticGitignoreName = ".gitignore"
-	workspaceManifestTTL   = 30 * time.Second
-	monorepoGitignore      = "/dependency/\n/guardian/\n/guardian-system/\n**/.git\n"
+	syntheticGitignoreName           = ".gitignore"
+	syntheticWorkspaceControlDirName = ".monofs"
+	syntheticWorkspaceSystemDirName  = "system"
+	syntheticWorkspaceManifestName   = "workspace.json"
+	syntheticWorkspaceControlPath    = ".monofs"
+	syntheticWorkspaceSystemPath     = ".monofs/system"
+	syntheticWorkspaceManifestPath   = ".monofs/workspace.json"
+	workspaceManifestTTL             = 30 * time.Second
+	monorepoGitignore                = "/dependency/\n/guardian/\n/guardian-system/\n/.monofs/\n**/.git\n"
 )
 
 // WorkspaceExclusionReason explains why a repository or path is hidden from
@@ -187,6 +194,13 @@ func (m *WorkspaceManifest) FilterDirEntries(path string, entries []fuse.DirEntr
 				Ino:  hashPathForNode(syntheticGitignoreName),
 			})
 		}
+		if _, exists := seen[syntheticWorkspaceControlDirName]; !exists {
+			filtered = append(filtered, fuse.DirEntry{
+				Name: syntheticWorkspaceControlDirName,
+				Mode: 0555 | uint32(syscall.S_IFDIR),
+				Ino:  hashPathForNode(syntheticWorkspaceControlPath),
+			})
+		}
 	}
 
 	sort.Slice(filtered, func(i, j int) bool {
@@ -203,6 +217,52 @@ func (m *WorkspaceManifest) GitignoreContent() []byte {
 	return []byte(monorepoGitignore)
 }
 
+func (m *WorkspaceManifest) JSONContent(ctx context.Context) ([]byte, error) {
+	if m == nil {
+		return []byte("{\"repositories\":[]}"), nil
+	}
+
+	entries, err := m.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	type manifestRepository struct {
+		StorageID       string                   `json:"storage_id"`
+		DisplayPath     string                   `json:"display_path"`
+		Source          string                   `json:"source,omitempty"`
+		Ref             string                   `json:"ref,omitempty"`
+		CommitHash      string                   `json:"commit_hash,omitempty"`
+		CommitTime      int64                    `json:"commit_time,omitempty"`
+		CommitMessage   string                   `json:"commit_message,omitempty"`
+		Included        bool                     `json:"included"`
+		ExclusionReason WorkspaceExclusionReason `json:"exclusion_reason,omitempty"`
+	}
+
+	doc := struct {
+		GeneratedAt  string               `json:"generated_at"`
+		Repositories []manifestRepository `json:"repositories"`
+	}{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	for _, entry := range entries {
+		doc.Repositories = append(doc.Repositories, manifestRepository{
+			StorageID:       entry.Repository.StorageID,
+			DisplayPath:     entry.Repository.DisplayPath,
+			Source:          entry.Repository.Source,
+			Ref:             entry.Repository.Ref,
+			CommitHash:      entry.Repository.CommitHash,
+			CommitTime:      entry.Repository.CommitTime,
+			CommitMessage:   entry.Repository.CommitMessage,
+			Included:        entry.Included,
+			ExclusionReason: entry.ExclusionReason,
+		})
+	}
+
+	return json.MarshalIndent(doc, "", "  ")
+}
+
 func joinWorkspacePath(parentPath, name string) string {
 	name = strings.Trim(name, "/")
 	if parentPath == "" {
@@ -211,9 +271,37 @@ func joinWorkspacePath(parentPath, name string) string {
 	return parentPath + "/" + name
 }
 
+func isWorkspaceSystemPath(path string) bool {
+	trimmed := strings.Trim(path, "/")
+	return trimmed == syntheticWorkspaceSystemPath || strings.HasPrefix(trimmed, syntheticWorkspaceSystemPath+"/")
+}
+
+func isWorkspaceReadOnlyPath(path string) bool {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == syntheticWorkspaceControlPath || trimmed == syntheticWorkspaceManifestPath {
+		return true
+	}
+	return isWorkspaceSystemPath(trimmed)
+}
+
+func backendPathForSystemView(path string) (string, bool) {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == syntheticWorkspaceSystemPath {
+		return "", true
+	}
+	prefix := syntheticWorkspaceSystemPath + "/"
+	if strings.HasPrefix(trimmed, prefix) {
+		return strings.TrimPrefix(trimmed, prefix), true
+	}
+	return "", false
+}
+
 func workspaceHiddenPath(path string) (WorkspaceExclusionReason, bool) {
 	trimmed := strings.Trim(path, "/")
 	if trimmed == "" {
+		return WorkspaceExcludedNone, false
+	}
+	if trimmed == syntheticWorkspaceControlPath || strings.HasPrefix(trimmed, syntheticWorkspaceControlPath+"/") {
 		return WorkspaceExcludedNone, false
 	}
 

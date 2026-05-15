@@ -20,6 +20,10 @@ func (n *MonoNode) Create(ctx context.Context, name string, flags uint32, mode u
 		n.logger.Warn("create: no session manager, read-only mode")
 		return nil, nil, 0, syscall.EROFS
 	}
+	if n.isWorkspaceReadOnlyPath() {
+		n.logger.Warn("create: read-only workspace path", "path", n.path)
+		return nil, nil, 0, syscall.EROFS
+	}
 
 	// Root-level file creation is not allowed - only directories can be created at root
 	if n.path == "" {
@@ -43,6 +47,10 @@ func (n *MonoNode) Create(ctx context.Context, name string, flags uint32, mode u
 	}
 
 	newPath := n.path + "/" + name
+	if isWorkspaceReadOnlyPath(newPath) {
+		n.logger.Warn("create: read-only workspace target", "path", newPath)
+		return nil, nil, 0, syscall.EROFS
+	}
 	if n.shouldHideWorkspacePath(newPath) {
 		n.logger.Warn("create: reserved virtual monorepo path", "path", newPath)
 		return nil, nil, 0, syscall.EPERM

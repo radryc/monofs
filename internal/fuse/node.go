@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -345,6 +346,29 @@ func (n *MonoNode) shouldHideWorkspacePath(path string) bool {
 	return n.workspace != nil && n.workspace.ShouldHidePath(path)
 }
 
+func (n *MonoNode) backendPath() string {
+	if backendPath, ok := backendPathForSystemView(n.path); ok {
+		return backendPath
+	}
+	return n.path
+}
+
+func (n *MonoNode) backendChildPath(name string) string {
+	childPath := joinWorkspacePath(n.path, name)
+	if backendPath, ok := backendPathForSystemView(childPath); ok {
+		return backendPath
+	}
+	return childPath
+}
+
+func (n *MonoNode) isWorkspaceSystemViewPath() bool {
+	return isWorkspaceSystemPath(n.path)
+}
+
+func (n *MonoNode) isWorkspaceReadOnlyPath() bool {
+	return isWorkspaceReadOnlyPath(n.path)
+}
+
 func (n *MonoNode) shouldHideWorkspaceChild(name string) bool {
 	return n.workspace != nil && n.workspace.ShouldHideChild(n.path, name)
 }
@@ -363,23 +387,67 @@ func (n *MonoNode) syntheticWorkspaceFileContent(path string) ([]byte, bool) {
 	return n.workspace.GitignoreContent(), true
 }
 
+func (n *MonoNode) loadSyntheticWorkspaceFileContent(ctx context.Context, path string) ([]byte, syscall.Errno, bool) {
+	trimmed := strings.Trim(path, "/")
+	if content, ok := n.syntheticWorkspaceFileContent(trimmed); ok {
+		return content, 0, true
+	}
+	if n.workspace == nil || trimmed != syntheticWorkspaceManifestPath {
+		return nil, 0, false
+	}
+	content, err := n.workspace.JSONContent(ctx)
+	if err != nil {
+		n.logger.Warn("workspace manifest generation failed", "path", trimmed, "error", err)
+		return nil, n.recordAndConvertError(err), true
+	}
+	return content, 0, true
+}
+
 // WorkspaceManifest returns the mounted virtual-monorepo manifest, if enabled.
 func (n *MonoNode) WorkspaceManifest() *WorkspaceManifest {
 	return n.workspace
 }
 
-func (n *MonoNode) lookupSyntheticWorkspaceFile(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno, bool) {
-	content, ok := n.syntheticWorkspaceFileContent(name)
-	if !ok || n.path != "" {
+func (n *MonoNode) lookupSyntheticWorkspaceEntry(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno, bool) {
+	if n.workspace == nil {
 		return nil, 0, false
+	}
+
+	childPath := joinWorkspacePath(n.path, name)
+	trimmed := strings.Trim(childPath, "/")
+	switch trimmed {
+	case syntheticWorkspaceControlPath, syntheticWorkspaceSystemPath:
+		child := n.newChild(name, true, 0555|uint32(syscall.S_IFDIR), 0)
+		out.Mode = 0555 | uint32(syscall.S_IFDIR)
+		out.Size = 0
+		out.Ino = hashPathForNode(trimmed)
+		out.Nlink = 2
+		out.Uid = 1000
+		out.Gid = 1000
+		out.SetAttrTimeout(attrTimeout())
+		out.SetEntryTimeout(attrTimeout())
+		if n.EmbeddedInode() == nil {
+			return nil, 0, true
+		}
+		return n.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFDIR, Ino: out.Ino}), 0, true
+	}
+
+	content, errno, ok := n.loadSyntheticWorkspaceFileContent(ctx, trimmed)
+	if !ok {
+		return nil, 0, false
+	}
+	if errno != 0 {
+		return nil, errno, true
 	}
 
 	child := n.newChild(name, false, 0444|uint32(syscall.S_IFREG), uint64(len(content)))
 	child.content = content
 	out.Mode = 0444 | uint32(syscall.S_IFREG)
 	out.Size = uint64(len(content))
-	out.Ino = hashPathForNode(name)
+	out.Ino = hashPathForNode(trimmed)
 	out.Nlink = 1
+	out.Uid = 1000
+	out.Gid = 1000
 	out.SetAttrTimeout(attrTimeout())
 	out.SetEntryTimeout(attrTimeout())
 	if n.EmbeddedInode() == nil {
@@ -392,20 +460,59 @@ func (n *MonoNode) lookupSyntheticWorkspaceFile(ctx context.Context, name string
 	}), 0, true
 }
 
-func (n *MonoNode) getattrSyntheticWorkspaceFile(out *fuse.AttrOut) (syscall.Errno, bool) {
-	content, ok := n.syntheticWorkspaceFileContent(n.path)
+func (n *MonoNode) getattrSyntheticWorkspacePath(ctx context.Context, out *fuse.AttrOut) (syscall.Errno, bool) {
+	trimmed := strings.Trim(n.path, "/")
+	switch trimmed {
+	case syntheticWorkspaceControlPath, syntheticWorkspaceSystemPath:
+		now := uint64(time.Now().Unix())
+		out.Mode = 0555 | uint32(syscall.S_IFDIR)
+		out.Size = 0
+		out.Ino = hashPathForNode(trimmed)
+		out.Nlink = 2
+		out.Mtime = now
+		out.Atime = now
+		out.Ctime = now
+		out.Uid = 1000
+		out.Gid = 1000
+		out.SetTimeout(attrTimeout())
+		return 0, true
+	}
+
+	content, errno, ok := n.loadSyntheticWorkspaceFileContent(ctx, trimmed)
 	if !ok {
 		return 0, false
+	}
+	if errno != 0 {
+		return errno, true
 	}
 
 	out.Mode = 0444 | uint32(syscall.S_IFREG)
 	out.Size = uint64(len(content))
-	out.Ino = hashPathForNode(n.path)
+	out.Ino = hashPathForNode(trimmed)
 	out.Nlink = 1
 	out.Uid = 1000
 	out.Gid = 1000
 	out.SetTimeout(attrTimeout())
 	return 0, true
+}
+
+func (n *MonoNode) syntheticWorkspaceControlEntries() []fuse.DirEntry {
+	entries := []fuse.DirEntry{
+		{
+			Name: syntheticWorkspaceSystemDirName,
+			Mode: 0555 | uint32(syscall.S_IFDIR),
+			Ino:  hashPathForNode(syntheticWorkspaceSystemPath),
+		},
+		{
+			Name: syntheticWorkspaceManifestName,
+			Mode: 0444 | uint32(syscall.S_IFREG),
+			Ino:  hashPathForNode(syntheticWorkspaceManifestPath),
+		},
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name < entries[j].Name
+	})
+	return entries
 }
 
 // invalidateEntry invalidates the kernel dentry cache for a child name.

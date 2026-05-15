@@ -19,12 +19,14 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	if n.path == "FS_ERROR.txt" && len(n.content) > 0 {
 		return nil, fuse.FOPEN_KEEP_CACHE, 0
 	}
-	if content, ok := n.syntheticWorkspaceFileContent(n.path); ok {
-		if len(n.content) == 0 {
-			n.mu.Lock()
-			n.content = content
-			n.mu.Unlock()
+	if content, errno, ok := n.loadSyntheticWorkspaceFileContent(ctx, n.path); ok {
+		if errno != 0 {
+			return nil, 0, errno
 		}
+		n.mu.Lock()
+		n.content = content
+		n.size = uint64(len(content))
+		n.mu.Unlock()
 		return nil, fuse.FOPEN_KEEP_CACHE, 0
 	}
 
@@ -34,6 +36,10 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	isWrite := flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND|syscall.O_TRUNC|syscall.O_CREAT) != 0
 
 	if isWrite {
+		if n.isWorkspaceReadOnlyPath() {
+			n.logger.Warn("open: write requested for read-only workspace path", "path", n.path)
+			return nil, 0, syscall.EROFS
+		}
 		// Handle write mode
 		if n.sessionMgr == nil {
 			n.logger.Warn("open: write requested but no session manager")
@@ -87,7 +93,7 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	// Stale-inode guard: after a Rename the kernel may still dispatch
 	// operations to the old inode whose path is now marked deleted.
 	// Return ENOENT immediately so callers see the file as gone.
-	if n.sessionMgr != nil {
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
 		state := n.sessionMgr.GetPathState(n.path)
 		if state.IsDeleted {
 			n.logger.Debug("open: path deleted in overlay", "path", n.path)
@@ -97,7 +103,7 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 	// Read mode: check overlay — if tracked locally, serve from overlay.
 	// Never fall through to backend for overlay-tracked files.
-	if n.sessionMgr != nil && n.sessionMgr.HasLocalOverride(n.path) {
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() && n.sessionMgr.HasLocalOverride(n.path) {
 		localPath, _ := n.sessionMgr.GetLocalPath(n.path)
 
 		f, err := os.OpenFile(localPath, os.O_RDONLY, 0)
@@ -116,7 +122,7 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	}
 
 	// DOCTOR VIRTUAL FILE INTERCEPT
-	if n.sessionMgr != nil {
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
 		parts := splitPath(n.path)
 		if len(parts) == 5 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" && parts[4] == "results.json" {
 			// Virtual file, no handle needed, read will be intercepted in op_read.go
@@ -127,7 +133,7 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	// Paths under user root dirs: backend doesn't know about these.
 	// Check disk directly — files may exist even if not tracked in DB yet
 	// (e.g. created by os.Rename between TrackChange calls).
-	if n.sessionMgr != nil {
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
 		parts := splitPath(n.path)
 		if len(parts) > 1 && n.sessionMgr.IsUserRootDir(parts[0]) {
 			localPath, err := n.sessionMgr.GetLocalPath(n.path)
@@ -157,7 +163,7 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		n.logger.Debug("open calling client.Read", "path", n.path, "size", n.size, "attempt", attempt+1)
-		content, err = n.client.Read(ctx, n.path, 0, 0) // 0, 0 means read entire file
+		content, err = n.client.Read(ctx, n.backendPath(), 0, 0) // 0, 0 means read entire file
 		n.logger.Debug("open client.Read returned", "path", n.path, "content_len", len(content), "error", err)
 
 		if err == nil {
@@ -222,7 +228,7 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	// short window. This prevents the kernel from serving stale page-cache
 	// content that was cached from the pre-push overlay. Without this,
 	// go mod verify may read stale content and compute the wrong hash.
-	if isDependencyPath(n.path) && n.sessionMgr != nil && n.sessionMgr.DepsPushedRecently() {
+	if isDependencyPath(n.path) && n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() && n.sessionMgr.DepsPushedRecently() {
 		n.logger.Debug("open: forcing DIRECT_IO for dependency path after recent push", "path", n.path)
 		return nil, fuse.FOPEN_DIRECT_IO, 0
 	}
