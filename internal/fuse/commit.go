@@ -9,8 +9,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/radryc/monofs/internal/client"
+	"github.com/radryc/monofs/internal/sharding"
 )
 
 // CommitManager handles pushing local changes to the backend
@@ -39,7 +41,12 @@ type classifiedCommitChange struct {
 type commitRepositoryGroup struct {
 	Key         string
 	DisplayPath string
+	Repository  *client.WorkspaceRepository
 	Changes     []Change
+}
+
+type repositoryChangeApplier interface {
+	ApplyRepositoryChanges(ctx context.Context, repo client.WorkspaceRepository, changes []client.RepositoryChange) (*client.ApplyRepositoryChangesResult, error)
 }
 
 // NewCommitManager creates a new commit manager
@@ -62,6 +69,7 @@ func (cm *CommitManager) SetWorkspaceManifest(manifest *WorkspaceManifest) {
 // CommitResult represents the result of a commit operation
 type CommitResult struct {
 	Success        bool              // Overall success
+	Repositories   int               // Number of repositories affected
 	FilesProcessed int               // Number of files processed
 	FilesUploaded  int               // Number of files successfully uploaded
 	FilesFailed    int               // Number of files that failed
@@ -121,22 +129,67 @@ func (cm *CommitManager) CommitChanges(ctx context.Context) (*CommitResult, erro
 		return nil, fmt.Errorf("%d excluded changes pending outside the virtual monorepo; discard them or use the system view", excludedCount)
 	}
 
-	if cm.workspace != nil {
-		repoGroups := cm.groupChangesByRepository(classified)
-		return nil, fmt.Errorf(
-			"virtual monorepo publish is not implemented yet; %d workspace changes span %d repositories%s",
-			len(workspaceChanges),
-			len(repoGroups),
-			formatCommitRepositorySummary(repoGroups),
-		)
-	}
-
 	if len(workspaceChanges) == 0 {
 		cm.logger.Info("no non-blob changes to commit")
 		if err := cm.sessionMgr.CommitSession(); err != nil {
 			return nil, fmt.Errorf("archive session: %w", err)
 		}
 		return result, nil
+	}
+
+	repoGroups := cm.groupChangesByRepository(classified)
+	result.Repositories = len(repoGroups)
+	if applier, ok := cm.client.(repositoryChangeApplier); ok {
+		for _, repoGroup := range repoGroups {
+			result.FilesProcessed += len(repoGroup.Changes)
+
+			repo, err := cm.resolveCommitRepository(repoGroup)
+			if err != nil {
+				result.Success = false
+				for _, change := range repoGroup.Changes {
+					result.FilesFailed++
+					result.Errors[change.Path] = err.Error()
+				}
+				continue
+			}
+
+			repoChanges, err := cm.repositoryClientChanges(*repo, repoGroup.Changes)
+			if err != nil {
+				result.Success = false
+				for _, change := range repoGroup.Changes {
+					result.FilesFailed++
+					result.Errors[change.Path] = err.Error()
+				}
+				continue
+			}
+
+			if len(repoChanges) > 0 {
+				if _, err := applier.ApplyRepositoryChanges(ctx, *repo, repoChanges); err != nil {
+					result.Success = false
+					for _, change := range repoGroup.Changes {
+						result.FilesFailed++
+						result.Errors[change.Path] = err.Error()
+					}
+					continue
+				}
+			}
+
+			result.FilesUploaded += len(repoGroup.Changes)
+		}
+
+		if err := cm.sessionMgr.CommitSession(); err != nil {
+			cm.logger.Warn("failed to archive session", "error", err)
+		}
+		return result, nil
+	}
+
+	if cm.workspace != nil {
+		return nil, fmt.Errorf(
+			"virtual monorepo publish is not implemented yet; %d workspace changes span %d repositories%s",
+			len(workspaceChanges),
+			len(repoGroups),
+			formatCommitRepositorySummary(repoGroups),
+		)
 	}
 
 	// Group changes by repository
@@ -243,6 +296,15 @@ func (cm *CommitManager) groupChangesByRepository(changes []classifiedCommitChan
 		group := groups[key]
 		if group == nil {
 			group = &commitRepositoryGroup{Key: key, DisplayPath: displayPath}
+			if change.Repository != nil {
+				repoCopy := *change.Repository
+				group.Repository = &repoCopy
+			} else if displayPath != "_root" {
+				group.Repository = &client.WorkspaceRepository{
+					StorageID:   sharding.GenerateStorageID(displayPath),
+					DisplayPath: displayPath,
+				}
+			}
 			groups[key] = group
 		}
 		group.Changes = append(group.Changes, change.Change)
@@ -271,6 +333,91 @@ func formatCommitRepositorySummary(groups []commitRepositoryGroup) string {
 		return fmt.Sprintf(": %s and %d more", strings.Join(names[:maxRepos], ", "), len(names)-maxRepos)
 	}
 	return ": " + strings.Join(names, ", ")
+}
+
+func (cm *CommitManager) resolveCommitRepository(group commitRepositoryGroup) (*client.WorkspaceRepository, error) {
+	if group.Repository != nil {
+		repoCopy := *group.Repository
+		if repoCopy.StorageID == "" && repoCopy.DisplayPath != "" {
+			repoCopy.StorageID = sharding.GenerateStorageID(repoCopy.DisplayPath)
+		}
+		return &repoCopy, nil
+	}
+	if group.DisplayPath == "" || group.DisplayPath == "_root" {
+		return nil, fmt.Errorf("cannot resolve repository for commit group %q", group.DisplayPath)
+	}
+	return &client.WorkspaceRepository{
+		StorageID:   sharding.GenerateStorageID(group.DisplayPath),
+		DisplayPath: group.DisplayPath,
+	}, nil
+}
+
+func (cm *CommitManager) repositoryClientChanges(repo client.WorkspaceRepository, changes []Change) ([]client.RepositoryChange, error) {
+	out := make([]client.RepositoryChange, 0, len(changes))
+	for _, change := range changes {
+		repoRelativePath, err := commitRepositoryRelativePath(repo.DisplayPath, change.Path)
+		if err != nil {
+			return nil, err
+		}
+
+		switch change.Type {
+		case ChangeCreate, ChangeModify:
+			content, mode, err := loadCommitLocalFile(change.LocalPath)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, client.RepositoryChange{
+				Kind:    client.RepositoryChangeUpsert,
+				Path:    repoRelativePath,
+				Content: content,
+				Mode:    mode,
+				Mtime:   time.Now().Unix(),
+			})
+		case ChangeDelete:
+			out = append(out, client.RepositoryChange{
+				Kind: client.RepositoryChangeDelete,
+				Path: repoRelativePath,
+			})
+		case ChangeMkdir, ChangeRmdir:
+			continue
+		case ChangeSymlink:
+			return nil, fmt.Errorf("symlink commits are not implemented for %q", change.Path)
+		default:
+			return nil, fmt.Errorf("unknown change type: %s", change.Type)
+		}
+	}
+	return out, nil
+}
+
+func commitRepositoryRelativePath(displayPath, fullPath string) (string, error) {
+	trimmedDisplayPath := strings.Trim(displayPath, "/")
+	trimmedFullPath := strings.Trim(fullPath, "/")
+	if trimmedDisplayPath == "" {
+		return "", fmt.Errorf("empty repository display path for %q", fullPath)
+	}
+	if trimmedFullPath == trimmedDisplayPath {
+		return "", fmt.Errorf("path %q does not name a file within repository %q", fullPath, displayPath)
+	}
+	prefix := trimmedDisplayPath + "/"
+	if !strings.HasPrefix(trimmedFullPath, prefix) {
+		return "", fmt.Errorf("path %q does not belong to repository %q", fullPath, displayPath)
+	}
+	return strings.TrimPrefix(trimmedFullPath, prefix), nil
+}
+
+func loadCommitLocalFile(localPath string) ([]byte, uint32, error) {
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read local file %q: %w", localPath, err)
+	}
+	info, err := os.Lstat(localPath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("stat local file %q: %w", localPath, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, 0, fmt.Errorf("symlink commits are not implemented for %q", localPath)
+	}
+	return content, uint32(info.Mode().Perm()), nil
 }
 
 // processChange handles a single file change
