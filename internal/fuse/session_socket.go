@@ -17,6 +17,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/pmezard/go-difflib/difflib"
 	"github.com/radryc/monofs/internal/cache"
+	monoclient "github.com/radryc/monofs/internal/client"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -26,8 +27,9 @@ type SessionSocketHandler struct {
 	socketPath string
 	sessionMgr *SessionManager
 	commitMgr  *CommitManager
-	ingester   BlobIngester    // optional, nil if not configured
-	deleter    BlobDeleter     // optional, nil if not configured
+	ingester   BlobIngester // optional, nil if not configured
+	deleter    BlobDeleter  // optional, nil if not configured
+	refresher  WorkspaceRefresher
 	diffReader DiffReader      // optional, for reading original file content
 	verifier   BackendVerifier // optional, for verifying backend has files before cleanup
 	attrCache  *cache.Cache    // optional, for invalidation after push
@@ -64,6 +66,16 @@ func (f BlobDeleterFunc) DeleteBlobs(ctx context.Context, paths []string) (*Blob
 type BlobDeleteResult struct {
 	FilesDeleted int
 	FilesFailed  int
+}
+
+type WorkspaceRefresher interface {
+	RefreshWorkspaceRepositories(ctx context.Context, repos []monoclient.WorkspaceRepository) (*monoclient.WorkspaceRefreshResult, error)
+}
+
+type WorkspaceRefresherFunc func(ctx context.Context, repos []monoclient.WorkspaceRepository) (*monoclient.WorkspaceRefreshResult, error)
+
+func (f WorkspaceRefresherFunc) RefreshWorkspaceRepositories(ctx context.Context, repos []monoclient.WorkspaceRepository) (*monoclient.WorkspaceRefreshResult, error) {
+	return f(ctx, repos)
 }
 
 // BackendVerifier verifies that files are accessible in the backend before
@@ -228,6 +240,12 @@ func (h *SessionSocketHandler) SetDeleter(d BlobDeleter) {
 	h.deleter = d
 }
 
+// SetWorkspaceRefresher attaches a workspace refresher so pull can re-ingest
+// the visible source repositories through the router.
+func (h *SessionSocketHandler) SetWorkspaceRefresher(r WorkspaceRefresher) {
+	h.refresher = r
+}
+
 // SetDiffReader attaches a reader for fetching original file content
 // from the cluster. Required for the diff command.
 func (h *SessionSocketHandler) SetDiffReader(dr DiffReader) {
@@ -343,6 +361,8 @@ func (h *SessionSocketHandler) handleConnection(conn net.Conn) {
 		resp = h.handleStatus(req.ShowBlobs)
 	case "commit":
 		resp = h.handleCommit()
+	case "pull", "refresh":
+		resp = h.handlePull()
 	case "discard":
 		resp = h.handleDiscard()
 	case "push", "push-blobs":
@@ -470,6 +490,58 @@ func (h *SessionSocketHandler) handleCommit() SessionResponse {
 		Success:   result.Success,
 		SessionID: result.SessionID,
 		Message:   message,
+	}
+}
+
+func (h *SessionSocketHandler) handlePull() SessionResponse {
+	if h.refresher == nil {
+		return SessionResponse{
+			Success: false,
+			Error:   "workspace refresh is not available",
+		}
+	}
+	if h.rootNode == nil || h.rootNode.WorkspaceManifest() == nil {
+		return SessionResponse{
+			Success: false,
+			Error:   "workspace refresh requires virtual monorepo mode",
+		}
+	}
+	if len(h.sessionMgr.GetChanges()) > 0 {
+		return SessionResponse{
+			Success: false,
+			Error:   "local changes pending; commit, discard, or push dependency changes before pull",
+		}
+	}
+
+	repos, err := h.collectPullRepositories(h.ctx)
+	if err != nil {
+		return SessionResponse{
+			Success: false,
+			Error:   err.Error(),
+		}
+	}
+	if len(repos) == 0 {
+		return SessionResponse{
+			Success: true,
+			Message: "No workspace repositories to refresh",
+		}
+	}
+
+	result, err := h.refresher.RefreshWorkspaceRepositories(h.ctx, repos)
+	if result != nil && result.Refreshed > 0 {
+		h.invalidateWorkspaceAfterPull(repos)
+	}
+	if err != nil {
+		return SessionResponse{
+			Success: false,
+			Error:   err.Error(),
+		}
+	}
+
+	return SessionResponse{
+		Success: true,
+		Changes: result.Refreshed,
+		Message: formatWorkspacePullMessage(result),
 	}
 }
 
@@ -1213,4 +1285,58 @@ func formatCommitMessage(result *CommitResult) string {
 			result.FilesProcessed, repoSummary, result.FilesUploaded, result.FilesFailed)
 	}
 	return fmt.Sprintf("Successfully processed %d files%s", result.FilesProcessed, repoSummary)
+}
+
+func formatWorkspacePullMessage(result *monoclient.WorkspaceRefreshResult) string {
+	if result == nil || result.Requested == 0 {
+		return "No workspace repositories to refresh"
+	}
+	if result.Failed > 0 {
+		return fmt.Sprintf("Refreshed %d of %d repositories; %d failed", result.Refreshed, result.Requested, result.Failed)
+	}
+	return fmt.Sprintf("Refreshed %d workspace repositories", result.Refreshed)
+}
+
+func (h *SessionSocketHandler) collectPullRepositories(ctx context.Context) ([]monoclient.WorkspaceRepository, error) {
+	manifest := h.rootNode.WorkspaceManifest()
+	entries, err := manifest.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list workspace repositories: %w", err)
+	}
+	repos := make([]monoclient.WorkspaceRepository, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.Included {
+			continue
+		}
+		repos = append(repos, entry.Repository)
+	}
+	return repos, nil
+}
+
+func (h *SessionSocketHandler) invalidateWorkspaceAfterPull(repos []monoclient.WorkspaceRepository) {
+	if h.rootNode != nil && h.rootNode.WorkspaceManifest() != nil {
+		h.rootNode.WorkspaceManifest().Invalidate()
+	}
+
+	if h.attrCache != nil {
+		h.attrCache.Invalidate("")
+		for _, repo := range repos {
+			h.attrCache.InvalidatePrefix(repo.DisplayPath)
+		}
+	}
+
+	if h.rootNode == nil {
+		return
+	}
+	namespaces := make(map[string]struct{})
+	for _, repo := range repos {
+		parts := splitN(repo.DisplayPath, "/", 2)
+		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+			namespaces[parts[0]] = struct{}{}
+		}
+	}
+	for namespace := range namespaces {
+		h.rootNode.invalidateEntry(namespace)
+	}
+	h.rootNode.invalidateEntry(syntheticWorkspaceControlDirName)
 }

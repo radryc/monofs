@@ -10,6 +10,7 @@ func TestSocketTimeoutForAction(t *testing.T) {
 
 	tests := map[string]time.Duration{
 		"status":     defaultSocketTimeout,
+		"pull":       pushSocketTimeout,
 		"push":       pushSocketTimeout,
 		"push-blobs": pushSocketTimeout,
 		"commit":     defaultSocketTimeout,

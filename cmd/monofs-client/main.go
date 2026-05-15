@@ -213,6 +213,14 @@ func main() {
 			},
 		))
 
+		// Wire workspace refresher so `monofs-session pull` re-ingests the
+		// included virtual-monorepo repositories through the router.
+		socketHandler.SetWorkspaceRefresher(monofuse.WorkspaceRefresherFunc(
+			func(ctx context.Context, repos []client.WorkspaceRepository) (*client.WorkspaceRefreshResult, error) {
+				return c.RefreshWorkspaceRepositories(ctx, repos)
+			},
+		))
+
 		// Wire attr cache so push can invalidate stale dependency entries.
 		if cacheLayer != nil {
 			socketHandler.SetAttrCache(cacheLayer)

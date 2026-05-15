@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -106,6 +107,66 @@ func TestSessionSocketDiffUsesWorkspaceManifest(t *testing.T) {
 	if len(resp.BlobDiffData) != 1 || !strings.HasPrefix(resp.BlobDiffData[0].Path, "dependency/") {
 		t.Fatalf("blob diff output = %+v, want one dependency diff", resp.BlobDiffData)
 	}
+}
+
+func TestSessionSocketPullRefreshesIncludedWorkspaceRepos(t *testing.T) {
+	handler, _ := newVirtualMonorepoSessionHandler(t)
+	refresher := &workspaceRefreshMock{
+		result: &monoclient.WorkspaceRefreshResult{Requested: 3, Refreshed: 3},
+	}
+	handler.SetWorkspaceRefresher(refresher)
+
+	resp := handler.handlePull()
+	if !resp.Success {
+		t.Fatalf("handlePull() error = %s", resp.Error)
+	}
+	if resp.Changes != 3 {
+		t.Fatalf("handlePull() Changes = %d, want 3", resp.Changes)
+	}
+	if len(refresher.calls) != 1 {
+		t.Fatalf("refresh calls = %d, want 1", len(refresher.calls))
+	}
+
+	got := make([]string, 0, len(refresher.calls[0]))
+	for _, repo := range refresher.calls[0] {
+		got = append(got, repo.DisplayPath)
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != "github.com/acme/doctor,github.com/acme/guardian,github.com/acme/monofs" {
+		t.Fatalf("pull repos = %v", got)
+	}
+}
+
+func TestSessionSocketPullRejectsDirtyWorkspace(t *testing.T) {
+	handler, sessionMgr := newVirtualMonorepoSessionHandler(t)
+	refresher := &workspaceRefreshMock{
+		result: &monoclient.WorkspaceRefreshResult{Requested: 3, Refreshed: 3},
+	}
+	handler.SetWorkspaceRefresher(refresher)
+	writeTrackedSessionFile(t, sessionMgr, "github.com/acme/monofs/main.go", "package main\n", ChangeModify)
+
+	resp := handler.handlePull()
+	if resp.Success {
+		t.Fatal("handlePull() success = true, want rejection for dirty workspace")
+	}
+	if !strings.Contains(resp.Error, "local changes pending") {
+		t.Fatalf("handlePull() error = %q, want pending-changes guidance", resp.Error)
+	}
+	if len(refresher.calls) != 0 {
+		t.Fatalf("refresh calls = %d, want 0", len(refresher.calls))
+	}
+}
+
+type workspaceRefreshMock struct {
+	result *monoclient.WorkspaceRefreshResult
+	err    error
+	calls  [][]monoclient.WorkspaceRepository
+}
+
+func (m *workspaceRefreshMock) RefreshWorkspaceRepositories(ctx context.Context, repos []monoclient.WorkspaceRepository) (*monoclient.WorkspaceRefreshResult, error) {
+	copyRepos := append([]monoclient.WorkspaceRepository(nil), repos...)
+	m.calls = append(m.calls, copyRepos)
+	return m.result, m.err
 }
 
 func newVirtualMonorepoSessionHandler(t *testing.T) (*SessionSocketHandler, *SessionManager) {
