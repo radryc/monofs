@@ -40,19 +40,19 @@ type FileDiff struct {
 
 // SessionResponse is received from the FUSE client
 type SessionResponse struct {
-	Success        bool           `json:"success"`
-	SessionID      string         `json:"session_id,omitempty"`
-	CreatedAt      string         `json:"created_at,omitempty"`
-	Changes        int            `json:"changes,omitempty"`
-	BlobChanges    int            `json:"blob_changes,omitempty"`
-	ExcludedChanges int           `json:"excluded_changes,omitempty"`
-	Message        string         `json:"message,omitempty"`
-	Error          string         `json:"error,omitempty"`
-	ChangeList     []ChangeInfo   `json:"change_list,omitempty"`
-	BlobChangeList []ChangeInfo   `json:"blob_change_list,omitempty"`
-	DepsInfo       *BlobsInfoData `json:"deps_info,omitempty"`
-	DiffData       []FileDiff     `json:"diff_data,omitempty"`
-	BlobDiffData   []FileDiff     `json:"blob_diff_data,omitempty"`
+	Success         bool           `json:"success"`
+	SessionID       string         `json:"session_id,omitempty"`
+	CreatedAt       string         `json:"created_at,omitempty"`
+	Changes         int            `json:"changes,omitempty"`
+	BlobChanges     int            `json:"blob_changes,omitempty"`
+	ExcludedChanges int            `json:"excluded_changes,omitempty"`
+	Message         string         `json:"message,omitempty"`
+	Error           string         `json:"error,omitempty"`
+	ChangeList      []ChangeInfo   `json:"change_list,omitempty"`
+	BlobChangeList  []ChangeInfo   `json:"blob_change_list,omitempty"`
+	DepsInfo        *BlobsInfoData `json:"deps_info,omitempty"`
+	DiffData        []FileDiff     `json:"diff_data,omitempty"`
+	BlobDiffData    []FileDiff     `json:"blob_diff_data,omitempty"`
 }
 
 // BlobsInfoData contains blob file information.
@@ -78,11 +78,11 @@ type BlobFileInfo struct {
 
 // ChangeInfo represents a single change for display
 type ChangeInfo struct {
-	Type      string `json:"type"`
-	Path      string `json:"path"`
+	Type       string `json:"type"`
+	Path       string `json:"path"`
 	Repository string `json:"repository,omitempty"`
 	StorageID  string `json:"storage_id,omitempty"`
-	Timestamp string `json:"timestamp"`
+	Timestamp  string `json:"timestamp"`
 }
 
 // SessionCommand handles write session management via Unix socket
@@ -150,6 +150,8 @@ func (sc *SessionCommand) Execute(args []string) error {
 		return sc.showStatus(args[1:])
 	case "commit":
 		return sc.commitSession()
+	case "pull":
+		return sc.pullWorkspace()
 	case "discard":
 		return sc.discardSession()
 	case "search":
@@ -179,6 +181,7 @@ Commands:
   status       Show current session status and pending changes
   diff [file]  Show unified diff between original and changed files
   commit       Push local changes to backend and archive session
+	pull         Re-ingest included workspace repositories from their upstream sources
   discard      Abandon all local changes and delete session
   blobs-info    Show blob files in the current session
   push          Package and upload blob files to storage backend
@@ -217,6 +220,9 @@ Examples:
 
   # Commit all changes to backend
   monofs-session commit
+
+	# Refresh the virtual workspace from upstream sources
+	monofs-session pull
 
   # Abandon all local changes
   monofs-session discard
@@ -320,9 +326,9 @@ func (sc *SessionCommand) sendRequest(req SessionRequest) (*SessionResponse, err
 
 func socketTimeoutForAction(action string) time.Duration {
 	switch action {
-	case "push", "push-blobs":
+	case "push", "push-blobs", "pull":
 		// Push keeps the socket open until upload, backend verification,
-		// and overlay cleanup all finish.
+		// overlay cleanup finish, and pull may re-ingest multiple repos.
 		return pushSocketTimeout
 	default:
 		return defaultSocketTimeout
@@ -515,6 +521,25 @@ func (sc *SessionCommand) commitSession() error {
 
 	fmt.Printf("✓ Session committed successfully\n")
 	fmt.Printf("  %s\n", resp.Message)
+
+	return nil
+}
+
+func (sc *SessionCommand) pullWorkspace() error {
+	fmt.Println("Refreshing workspace...")
+
+	resp, err := sc.sendCommand("pull")
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("pull failed: %s", resp.Error)
+	}
+
+	fmt.Printf("✓ Workspace refreshed\n")
+	if resp.Message != "" {
+		fmt.Printf("  %s\n", resp.Message)
+	}
 
 	return nil
 }

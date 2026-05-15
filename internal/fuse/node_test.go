@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
-	"strings"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -19,11 +19,13 @@ import (
 
 // mockClient implements MonoFSClient for testing
 type mockClient struct {
-	shouldFail bool
-	failError  error
-	entries    []*pb.DirEntry
-	statfs     fsstat.Snapshot
+	shouldFail     bool
+	failError      error
+	entries        []*pb.DirEntry
+	statfs         fsstat.Snapshot
 	workspaceRepos []monoclient.WorkspaceRepository
+	listCalls      int
+	resolveCalls   int
 }
 
 func (m *mockClient) Lookup(ctx context.Context, path string) (*pb.LookupResponse, error) {
@@ -122,10 +124,12 @@ func (m *mockClient) WriteQueryLogs(ctx context.Context, query string, writer io
 }
 
 func (m *mockClient) ListWorkspaceRepositories(ctx context.Context) ([]monoclient.WorkspaceRepository, error) {
+	m.listCalls++
 	return append([]monoclient.WorkspaceRepository(nil), m.workspaceRepos...), nil
 }
 
 func (m *mockClient) ResolveWorkspacePath(ctx context.Context, path string) (*monoclient.WorkspaceRepository, error) {
+	m.resolveCalls++
 	trimmed := strings.Trim(path, "/")
 	var match *monoclient.WorkspaceRepository
 	for i := range m.workspaceRepos {
@@ -469,7 +473,6 @@ func TestUserRootDir_ProtectRepoDirectories(t *testing.T) {
 	// (tested at integration level with actual FUSE mount)
 }
 
-
 func TestVirtualMonorepoRootFiltersNamespacesAndAddsGitignore(t *testing.T) {
 	root := NewRoot(&mockClient{
 		entries: []*pb.DirEntry{
@@ -604,6 +607,12 @@ func TestWorkspaceManifestResolvePath(t *testing.T) {
 	}
 	if resolution.ExclusionReason != WorkspaceExcludedSystemNamespace {
 		t.Fatalf("ResolvePath(system) reason = %q, want %q", resolution.ExclusionReason, WorkspaceExcludedSystemNamespace)
+	}
+	if mockCli.listCalls != 1 {
+		t.Fatalf("ListWorkspaceRepositories() calls = %d, want 1 cached lookup", mockCli.listCalls)
+	}
+	if mockCli.resolveCalls != 0 {
+		t.Fatalf("ResolveWorkspacePath() calls = %d, want 0", mockCli.resolveCalls)
 	}
 }
 

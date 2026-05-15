@@ -3,7 +3,6 @@ package fuse
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -137,15 +136,36 @@ func (m *WorkspaceManifest) ResolvePath(ctx context.Context, path string) (*Work
 		return resolution, nil
 	}
 
-	repo, err := m.provider.ResolveWorkspacePath(ctx, trimmed)
+	entries, err := m.List(ctx)
 	if err != nil {
-		if errors.Is(err, client.ErrWorkspacePathNotFound) {
-			return resolution, nil
-		}
 		return nil, err
 	}
 
-	resolution.Repository = repo
+	var match *WorkspaceManifestEntry
+	for i := range entries {
+		entry := entries[i]
+		displayPath := entry.Repository.DisplayPath
+		if trimmed != displayPath && !strings.HasPrefix(trimmed, displayPath+"/") {
+			continue
+		}
+		if match == nil || len(displayPath) > len(match.Repository.DisplayPath) {
+			candidate := entry
+			match = &candidate
+		}
+	}
+
+	if match == nil {
+		return resolution, nil
+	}
+
+	repo := match.Repository
+	resolution.Repository = &repo
+	if !match.Included {
+		resolution.Included = false
+		if resolution.ExclusionReason == WorkspaceExcludedNone {
+			resolution.ExclusionReason = match.ExclusionReason
+		}
+	}
 	return resolution, nil
 }
 
@@ -215,6 +235,16 @@ func (m *WorkspaceManifest) GitignoreContent() []byte {
 		return nil
 	}
 	return []byte(monorepoGitignore)
+}
+
+func (m *WorkspaceManifest) Invalidate() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.entries = nil
+	m.fetchedAt = time.Time{}
+	m.mu.Unlock()
 }
 
 func (m *WorkspaceManifest) JSONContent(ctx context.Context) ([]byte, error) {
