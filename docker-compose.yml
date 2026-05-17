@@ -1,0 +1,567 @@
+x-otel-syslog-logging: &otel-syslog-logging
+  logging:
+    driver: syslog
+    options:
+      syslog-address: "tcp://127.0.0.1:1514"
+      syslog-format: rfc5424micro
+      tag: "{{.Name}}"
+
+services:
+  # Fetcher 1 - External blob fetcher (packager archives + optional Git)
+  # Runs in DMZ with external network access
+  fetcher-a:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: fetcher
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    command:
+      - "--port=9200"
+      - "--cache-dir=/data/cache"
+      - "--max-cache-gb=20"
+      - "--cache-age-hours=2"
+      - "--prefetch-workers=4"
+      - "--log-level=info"
+    environment:
+      - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
+    volumes:
+      - fetcher-a-cache:/data/cache
+      - ./config:/etc/monofs:ro
+    networks:
+      - monofs-net
+      - monofs-external  # External network access
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9200"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+        reservations:
+          memory: 512M
+
+  # Fetcher 2 - Second fetcher instance for redundancy and load balancing
+  fetcher-b:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: fetcher
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    command:
+      - "--port=9200"
+      - "--cache-dir=/data/cache"
+      - "--max-cache-gb=20"
+      - "--cache-age-hours=2"
+      - "--prefetch-workers=4"
+      - "--log-level=info"
+    environment:
+      - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
+    volumes:
+      - fetcher-b-cache:/data/cache
+      - ./config:/etc/monofs:ro
+    networks:
+      - monofs-net
+      - monofs-external  # External network access
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9200"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+        reservations:
+          memory: 512M
+
+  # Search-index service - Zoekt-based code search
+  search-index:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: search
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    command:
+      - "--port=9100"
+      - "--index-dir=/data/indexes"
+      - "--cache-dir=/data/cache"
+      - "--workers=2"
+      - "--queue-size=20"
+      - "--router-addr=router-a:9090"
+    volumes:
+      - search-index-data:/data
+    networks:
+      - monofs-net
+      # No longer needs monofs-external - fetches files from storage nodes via router
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9100"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    # Note: No depends_on for router to avoid dependency cycle
+    # Search will retry connecting to router on startup
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4'
+        reservations:
+          memory: 2G
+
+  # HAProxy - Load balancer for routers
+  haproxy:
+    <<: *otel-syslog-logging
+    image: haproxy:2.9-alpine
+    ports:
+      - "9090:9090"
+      - "8080:8080"
+      - "8404:8404"  # HAProxy stats
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - monofs-net
+    depends_on:
+      - router-a
+      - router-b
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Router 1 - Primary cluster coordinator
+  router-a:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: router
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    command:
+      - "--port=9090"
+      - "--http-port=8080"
+      - "--router-name=router-a"
+      - "--cluster-id=monofs-cluster"
+      - "--peer-routers=${ROUTER_A_PEERS:-router-b=http://router-b:8080}"
+      - "--nodes=node-a=node-a:9000,node-b=node-b:9000,node-c=node-c:9000,node-d=node-d:9000,node-e=node-e:9000"
+      - "--weights=node-a=100,node-b=100,node-c=100,node-d=100,node-e=100"
+      - "--external-addrs=node-a=localhost:9001,node-b=localhost:9002,node-c=localhost:9003,node-d=localhost:9004,node-e=localhost:9005"
+      - "--search-addr=search-index:9100"
+      - "--fetcher-addrs=fetcher-a:9200,fetcher-b:9200"
+      - "--debug"
+    environment:
+      - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
+    networks:
+      - monofs-net
+    depends_on:
+      - node-a
+      - node-b
+      - node-c
+      - node-d
+      - node-e
+      - search-index
+      - fetcher-a
+      - fetcher-b
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Router 2 - Secondary cluster coordinator (backup failover)
+  router-b:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: router
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    command:
+      - "--port=9090"
+      - "--http-port=8080"
+      - "--router-name=router-b"
+      - "--cluster-id=monofs-cluster"
+      - "--peer-routers=${ROUTER_B_PEERS:-router-a=http://router-a:8080}"
+      - "--nodes=node-a=node-a:9000,node-b=node-b:9000,node-c=node-c:9000,node-d=node-d:9000,node-e=node-e:9000"
+      - "--weights=node-a=100,node-b=100,node-c=100,node-d=100,node-e=100"
+      - "--external-addrs=node-a=localhost:9001,node-b=localhost:9002,node-c=localhost:9003,node-d=localhost:9004,node-e=localhost:9005"
+      - "--search-addr=search-index:9100"
+      - "--fetcher-addrs=fetcher-a:9200,fetcher-b:9200"
+      - "--debug"
+    environment:
+      - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
+    networks:
+      - monofs-net
+    depends_on:
+      - node-a
+      - node-b
+      - node-c
+      - node-d
+      - node-e
+      - search-index
+      - fetcher-a
+      - fetcher-b
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend node 1
+  node-a:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: server
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "9001:9000"
+    command:
+      - "--addr=:9000"
+      - "--node-id=node-a"
+      - "--db-path=/data/db"
+      - "--logengine-dir=/data/logengine"
+      - "--git-cache=/data/git"
+      - "--kvs-data-dir=/data/kvs"
+      - "--kvs-api-addr=node-a:9000"
+      - "--kvs-raft-addr=node-a:7000"
+      - "--kvs-bootstrap"
+      - "--kvs-peer=node-b,node-b:9000,node-b:7000"
+      - "--kvs-peer=node-c,node-c:9000,node-c:7000"
+      - "--kvs-peer=node-d,node-d:9000,node-d:7000"
+      - "--kvs-peer=node-e,node-e:9000,node-e:7000"
+      - "--fetcher=fetcher-a:9200"
+      - "--fetcher=fetcher-b:9200"
+      - "--enable-prediction"
+      - "--debug"
+    volumes:
+      - node-a-data:/data
+    networks:
+      - monofs-net
+    depends_on:
+      - fetcher-a
+      - fetcher-b
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend node 2
+  node-b:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: server
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "9002:9000"
+    command:
+      - "--addr=:9000"
+      - "--node-id=node-b"
+      - "--db-path=/data/db"
+      - "--logengine-dir=/data/logengine"
+      - "--git-cache=/data/git"
+      - "--kvs-data-dir=/data/kvs"
+      - "--kvs-api-addr=node-b:9000"
+      - "--kvs-raft-addr=node-b:7000"
+      - "--kvs-peer=node-a,node-a:9000,node-a:7000"
+      - "--kvs-peer=node-c,node-c:9000,node-c:7000"
+      - "--kvs-peer=node-d,node-d:9000,node-d:7000"
+      - "--kvs-peer=node-e,node-e:9000,node-e:7000"
+      - "--fetcher=fetcher-a:9200"
+      - "--fetcher=fetcher-b:9200"
+      - "--enable-prediction"
+      - "--debug"
+    volumes:
+      - node-b-data:/data
+    networks:
+      - monofs-net
+    depends_on:
+      - fetcher-a
+      - fetcher-b
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend node 3
+  node-c:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: server
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "9003:9000"
+    command:
+      - "--addr=:9000"
+      - "--node-id=node-c"
+      - "--db-path=/data/db"
+      - "--logengine-dir=/data/logengine"
+      - "--git-cache=/data/git"
+      - "--kvs-data-dir=/data/kvs"
+      - "--kvs-api-addr=node-c:9000"
+      - "--kvs-raft-addr=node-c:7000"
+      - "--kvs-peer=node-a,node-a:9000,node-a:7000"
+      - "--kvs-peer=node-b,node-b:9000,node-b:7000"
+      - "--kvs-peer=node-d,node-d:9000,node-d:7000"
+      - "--kvs-peer=node-e,node-e:9000,node-e:7000"
+      - "--fetcher=fetcher-a:9200"
+      - "--fetcher=fetcher-b:9200"
+      - "--enable-prediction"
+      - "--debug"
+    volumes:
+      - node-c-data:/data
+    networks:
+      - monofs-net
+    depends_on:
+      - fetcher-a
+      - fetcher-b
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend node 4
+  node-d:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: server
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "9004:9000"
+    command:
+      - "--addr=:9000"
+      - "--node-id=node-d"
+      - "--db-path=/data/db"
+      - "--logengine-dir=/data/logengine"
+      - "--git-cache=/data/git"
+      - "--kvs-data-dir=/data/kvs"
+      - "--kvs-api-addr=node-d:9000"
+      - "--kvs-raft-addr=node-d:7000"
+      - "--kvs-peer=node-a,node-a:9000,node-a:7000"
+      - "--kvs-peer=node-b,node-b:9000,node-b:7000"
+      - "--kvs-peer=node-c,node-c:9000,node-c:7000"
+      - "--kvs-peer=node-e,node-e:9000,node-e:7000"
+      - "--fetcher=fetcher-a:9200"
+      - "--fetcher=fetcher-b:9200"
+      - "--enable-prediction"
+      - "--debug"
+    volumes:
+      - node-d-data:/data
+    networks:
+      - monofs-net
+    depends_on:
+      - fetcher-a
+      - fetcher-b
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend node 5
+  node-e:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: server
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "9005:9000"
+    command:
+      - "--addr=:9000"
+      - "--node-id=node-e"
+      - "--db-path=/data/db"
+      - "--logengine-dir=/data/logengine"
+      - "--git-cache=/data/git"
+      - "--kvs-data-dir=/data/kvs"
+      - "--kvs-api-addr=node-e:9000"
+      - "--kvs-raft-addr=node-e:7000"
+      - "--kvs-peer=node-a,node-a:9000,node-a:7000"
+      - "--kvs-peer=node-b,node-b:9000,node-b:7000"
+      - "--kvs-peer=node-c,node-c:9000,node-c:7000"
+      - "--kvs-peer=node-d,node-d:9000,node-d:7000"
+      - "--fetcher=fetcher-a:9200"
+      - "--fetcher=fetcher-b:9200"
+      - "--enable-prediction"
+      - "--debug"
+    volumes:
+      - node-e-data:/data
+    networks:
+      - monofs-net
+    depends_on:
+      - fetcher-a
+      - fetcher-b
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Interactive client 1 with SSH and auto-mount
+  client:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: client
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "2222:22"
+    environment:
+      - ROUTER_ADDR=haproxy:9090
+      - ENABLE_LOADTEST=true
+    volumes:
+      - client-logs:/var/log
+      - client-cache:/var/cache/monofs
+      - client-overlay:/home/monofs/.monofs/overlay
+    networks:
+      - monofs-net
+    depends_on:
+      - haproxy
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+
+  # Interactive client 2 with SSH and auto-mount
+  client2:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: client
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "2223:22"
+    environment:
+      - ROUTER_ADDR=haproxy:9090
+    volumes:
+      - client2-logs:/var/log
+      - client2-cache:/var/cache/monofs
+      - client2-overlay:/home/monofs/.monofs/overlay
+    networks:
+      - monofs-net
+    depends_on:
+      - haproxy
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+
+  # Interactive client 3 with SSH and auto-mount
+  client3:
+    <<: *otel-syslog-logging
+    build:
+      context: ..
+      dockerfile: monofs/Dockerfile
+      target: client
+      args:
+        VERSION: ${GIT_VERSION:-dev}
+        COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "2224:22"
+    environment:
+      - ROUTER_ADDR=haproxy:9090
+    volumes:
+      - client3-logs:/var/log
+      - client3-cache:/var/cache/monofs
+      - client3-overlay:/home/monofs/.monofs/overlay
+    networks:
+      - monofs-net
+    depends_on:
+      - haproxy
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+
+volumes:
+  fetcher-a-cache:
+  fetcher-b-cache:
+  node-a-data:
+  node-b-data:
+  node-c-data:
+  node-d-data:
+  node-e-data:
+  search-index-data:
+  client-logs:
+  client-cache:
+  client-overlay:
+  client2-logs:
+  client2-cache:
+  client2-overlay:
+  client3-logs:
+  client3-cache:
+  client3-overlay:
+
+networks:
+  monofs-net:
+    driver: bridge
+  monofs-external:
+    driver: bridge
+    # In production, this network would have external connectivity
+    # while monofs-net remains internal-only

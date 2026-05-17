@@ -1,0 +1,16 @@
+*
+!monofs/
+!monofs/**
+!kvs/
+!kvs/**monofs/.git/
+kvs/.git/
+monofs/bin/
+kvs/bin/
+monofs/monofs-client
+monofs/monofs-router
+monofs/monofs-server
+monofs/monofs-fetcher
+monofs/monofs-search
+monofs/monofs-admin
+monofs/monofs-session
+monofs/monofs-loadtest

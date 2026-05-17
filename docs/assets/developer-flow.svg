@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="88" y1="36" x2="1308" y2="812" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#081A2B"/>
+      <stop offset="0.54" stop-color="#0C2438"/>
+      <stop offset="1" stop-color="#11344E"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(264 174) rotate(29.5) scale(462 266)">
+      <stop stop-color="#77EEFF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#77EEFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1138 718) rotate(180) scale(452 304)">
+      <stop stop-color="#2E90BE" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#2E90BE" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#11324D"/>
+      <stop offset="1" stop-color="#0A2033"/>
+    </linearGradient>
+    <linearGradient id="cardSoft" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#0F2A43"/>
+      <stop offset="1" stop-color="#0A1D30"/>
+    </linearGradient>
+    <filter id="shadow" x="-40" y="-40" width="1480" height="900" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="16"/>
+      <feGaussianBlur stdDeviation="18"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.0117647 0 0 0 0 0.0627451 0 0 0 0 0.105882 0 0 0 0.42 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_1"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_1" result="shape"/>
+    </filter>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" fill="#81EEFF" fill-opacity="0.18"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 14 14" refX="11" refY="7" markerWidth="14" markerHeight="14" orient="auto-start-reverse">
+      <path d="M2 2L12 7L2 12V2Z" fill="#76EAFF"/>
+    </marker>
+    <style>
+      .tiny { fill: #8ADFF5; font: 600 14px 'Segoe UI', Arial, sans-serif; letter-spacing: 0.12em; text-transform: uppercase; }
+      .title { fill: #F5FCFF; font: 700 40px 'Segoe UI', Arial, sans-serif; }
+      .subtitle { fill: #B8D8E8; font: 500 19px 'Segoe UI', Arial, sans-serif; }
+      .step { fill: #81EEFF; font: 700 16px 'Segoe UI', Arial, sans-serif; letter-spacing: 0.08em; text-transform: uppercase; }
+      .cardTitle { fill: #F5FCFF; font: 700 24px 'Segoe UI', Arial, sans-serif; }
+      .cardBody { fill: #C6E4F0; font: 500 18px 'Segoe UI', Arial, sans-serif; }
+      .cmd { fill: #EAFBFF; font: 600 16px 'Consolas', 'SFMono-Regular', monospace; }
+      .note { fill: #8CCEE0; font: 500 16px 'Segoe UI', Arial, sans-serif; }
+      .footer { fill: #A8D5E4; font: 600 17px 'Segoe UI', Arial, sans-serif; }
+    </style>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <rect x="18" y="18" width="1364" height="784" rx="34" fill="url(#bg)"/>
+    <rect x="18" y="18" width="1364" height="784" rx="34" fill="url(#grid)" opacity="0.4"/>
+    <rect x="18" y="18" width="1364" height="784" rx="34" fill="url(#glowA)"/>
+    <rect x="18" y="18" width="1364" height="784" rx="34" fill="url(#glowB)"/>
+  </g>
+
+  <text x="72" y="92" class="tiny">MonoFS</text>
+  <text x="72" y="136" class="title">Developer workflow</text>
+  <text x="72" y="172" class="subtitle">Bootstrap the shared platform once, then iterate through a projected workspace with explicit publish and refresh steps.</text>
+
+  <g>
+    <rect x="58" y="226" width="384" height="168" rx="24" fill="url(#card)" stroke="#64DAFF" stroke-opacity="0.48" stroke-width="1.5"/>
+    <text x="88" y="264" class="step">Step 1</text>
+    <text x="88" y="304" class="cardTitle">Bootstrap the shared stack</text>
+    <text x="88" y="338" class="cardBody">Bring up MonoFS storage, bootstrap Guardian,</text>
+    <text x="88" y="364" class="cardBody">metrics-server, and the shared RBAC layer.</text>
+    <rect x="88" y="248" width="232" height="34" rx="17" fill="#123751" stroke="#2D6F8C"/>
+    <text x="108" y="271" class="cmd">../scripts/bootstrap.sh deploy</text>
+  </g>
+
+  <g>
+    <rect x="510" y="226" width="384" height="168" rx="24" fill="url(#cardSoft)" stroke="#3D6075" stroke-width="1.5"/>
+    <text x="540" y="264" class="step">Step 2</text>
+    <text x="540" y="304" class="cardTitle">Release the working partitions</text>
+    <text x="540" y="338" class="cardBody">Roll the parts developers need, such as</text>
+    <text x="540" y="364" class="cardBody">doctor and dev-workspace, or ship them all.</text>
+    <rect x="540" y="248" width="242" height="34" rx="17" fill="#123751" stroke="#2D6F8C"/>
+    <text x="560" y="271" class="cmd">../scripts/release --all</text>
+  </g>
+
+  <g>
+    <rect x="962" y="226" width="384" height="168" rx="24" fill="url(#cardSoft)" stroke="#3D6075" stroke-width="1.5"/>
+    <text x="992" y="264" class="step">Step 3</text>
+    <text x="992" y="304" class="cardTitle">Ingest repositories</text>
+    <text x="992" y="338" class="cardBody">Register upstream repositories so MonoFS can</text>
+    <text x="992" y="364" class="cardBody">serve them into the projected source workspace.</text>
+    <rect x="992" y="248" width="229" height="34" rx="17" fill="#123751" stroke="#2D6F8C"/>
+    <text x="1012" y="271" class="cmd">./bin/monofs-admin ingest</text>
+  </g>
+
+  <g>
+    <rect x="962" y="472" width="384" height="168" rx="24" fill="url(#card)" stroke="#64DAFF" stroke-opacity="0.48" stroke-width="1.5"/>
+    <text x="992" y="510" class="step">Step 4</text>
+    <text x="992" y="550" class="cardTitle">Mount the projected workspace</text>
+    <text x="992" y="584" class="cardBody">Use a writable virtual monorepo mount with</text>
+    <text x="992" y="610" class="cardBody">overlay state kept outside the mountpoint.</text>
+    <rect x="992" y="494" width="312" height="34" rx="17" fill="#123751" stroke="#2D6F8C"/>
+    <text x="1012" y="517" class="cmd">./bin/monofs-client --virtual-monorepo</text>
+  </g>
+
+  <g>
+    <rect x="510" y="472" width="384" height="168" rx="24" fill="url(#cardSoft)" stroke="#3D6075" stroke-width="1.5"/>
+    <text x="540" y="510" class="step">Step 5</text>
+    <text x="540" y="550" class="cardTitle">Develop in one source-first view</text>
+    <text x="540" y="584" class="cardBody">Edit, search, run tests, and inspect Git state</text>
+    <text x="540" y="610" class="cardBody">from the synthetic root of the mounted workspace.</text>
+    <rect x="540" y="494" width="211" height="34" rx="17" fill="#123751" stroke="#2D6F8C"/>
+    <text x="560" y="517" class="cmd">git status / rg / go test</text>
+  </g>
+
+  <g>
+    <rect x="58" y="472" width="384" height="168" rx="24" fill="url(#card)" stroke="#64DAFF" stroke-opacity="0.48" stroke-width="1.5"/>
+    <text x="88" y="510" class="step">Step 6</text>
+    <text x="88" y="550" class="cardTitle">Publish and refresh explicitly</text>
+    <text x="88" y="584" class="cardBody">Use session commands to publish source changes,</text>
+    <text x="88" y="610" class="cardBody">refresh upstream state, or push dependency data.</text>
+    <rect x="88" y="494" width="252" height="34" rx="17" fill="#123751" stroke="#2D6F8C"/>
+    <text x="108" y="517" class="cmd">monofs-session commit / pull</text>
+  </g>
+
+  <g>
+    <path d="M442 310H488" stroke="#76EAFF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <path d="M894 310H940" stroke="#76EAFF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <path d="M1154 394V450" stroke="#76EAFF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <path d="M962 556H916" stroke="#76EAFF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <path d="M510 556H464" stroke="#76EAFF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <path d="M250 472C250 434 340 422 498 422" stroke="#4AC0E1" stroke-opacity="0.4" stroke-width="3" stroke-linecap="round" stroke-dasharray="8 12"/>
+    <text x="280" y="448" class="note">repeat after each publish or pull</text>
+  </g>
+
+  <g>
+    <rect x="58" y="686" width="1288" height="78" rx="22" fill="#0A1D2F" stroke="#355C70" stroke-width="1.5"/>
+    <circle cx="96" cy="725" r="10" fill="#76EAFF"/>
+    <text x="118" y="717" class="footer">Keep overlay and workspace state outside the mountpoint.</text>
+    <text x="118" y="742" class="note">Source changes go through monofs-session commit. Dependency or blob-backed updates under dependency/** go through monofs-session push.</text>
+  </g>
+</svg>

@@ -1,0 +1,1279 @@
+syntax = "proto3";
+
+package monofs;
+
+option go_package = "github.com/radryc/monofs/api/proto";
+
+// MonoFSRouter is the coordinator service that provides cluster topology
+service MonoFSRouter {
+    // GetClusterInfo returns the list of backend nodes for sharding
+    rpc GetClusterInfo(ClusterInfoRequest) returns (ClusterInfoResponse);
+    
+    // Heartbeat for node health checking
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+    
+    // IngestRepository triggers repository ingestion across the cluster (streaming progress)
+    rpc IngestRepository(IngestRequest) returns (stream IngestProgress);
+    
+    // NotifyRepositoryIngested is called by nodes when they complete repository ingestion
+    rpc NotifyRepositoryIngested(NotifyRepositoryIngestedRequest) returns (NotifyRepositoryIngestedResponse);
+    
+    // DeleteRepository removes a repository from all nodes (cleanup from memory and disk)
+    rpc DeleteRepository(DeleteRepositoryRequest) returns (DeleteRepositoryResponse);
+    
+    // GetNodeForFile returns the correct node for a file with fallback support (handles rebalancing)
+    rpc GetNodeForFile(GetNodeForFileRequest) returns (GetNodeForFileResponse);
+    
+    // Client lifecycle management
+    rpc RegisterClient(RegisterClientRequest) returns (RegisterClientResponse);
+    rpc UnregisterClient(UnregisterClientRequest) returns (UnregisterClientResponse);
+    rpc ClientHeartbeat(ClientHeartbeatRequest) returns (ClientHeartbeatResponse);
+    rpc ListClients(ListClientsRequest) returns (ListClientsResponse);
+    
+    // Graceful failover
+    rpc RequestFailover(FailoverRequest) returns (FailoverResponse);
+    
+    // Get files owned by a specific node (used for failover sync)
+    rpc GetNodeFiles(GetNodeFilesRequest) returns (GetNodeFilesResponse);
+    
+    // Statistics and monitoring
+    rpc GetClusterStats(ClusterStatsRequest) returns (ClusterStatsResponse);
+    rpc GetNodeStats(NodeStatsRequest) returns (NodeStatsResponse);
+    
+    // Cluster maintenance
+    rpc DrainCluster(DrainClusterRequest) returns (DrainClusterResponse);
+    rpc UndrainCluster(UndrainClusterRequest) returns (UndrainClusterResponse);
+    
+    // Guardian partition management
+    rpc DeleteGuardianFile(DeleteGuardianFileRequest) returns (DeleteGuardianFileResponse);
+    rpc DeleteGuardianDirectory(DeleteGuardianDirectoryRequest) returns (DeleteGuardianDirectoryResponse);
+    // InjectGuardianPartition directly writes inline YAML files into the cluster
+    // for a guardian partition. The caller must supply a valid guardian_token.
+    // Files become immediately visible on all FUSE mounts at guardian/<partition>/.
+    rpc InjectGuardianPartition(InjectGuardianPartitionRequest) returns (InjectGuardianPartitionResponse);
+    rpc UpsertGuardianPaths(UpsertGuardianPathsRequest) returns (UpsertGuardianPathsResponse);
+    rpc DeleteGuardianPaths(DeleteGuardianPathsRequest) returns (DeleteGuardianPathsResponse);
+    rpc ListGuardianVersions(ListGuardianVersionsRequest) returns (ListGuardianVersionsResponse);
+    rpc GetGuardianVersion(GetGuardianVersionRequest) returns (GetGuardianVersionResponse);
+    rpc SubscribeGuardianChanges(SubscribeGuardianChangesRequest) returns (stream GuardianChangeEvent);
+
+    // Doctor Partition operations — telemetry ingest and query
+    rpc StreamQueryLogs(QueryLogsRequest) returns (stream QueryResultItem);
+    rpc StreamQueryMetrics(QueryMetricsRequest) returns (stream QueryResultItem);
+    rpc StreamQueryTraces(QueryTracesRequest) returns (stream QueryResultItem);
+    rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
+    rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
+    rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
+    rpc IngestLogs(IngestLogsRequest) returns (IngestLogsResponse);
+    rpc IngestMetrics(IngestMetricsRequest) returns (IngestMetricsResponse);
+    rpc IngestTraces(IngestTracesRequest) returns (IngestTracesResponse);
+
+    // Ingestion whitelist management
+    rpc AddWhitelistedClient(AddWhitelistedClientRequest) returns (AddWhitelistedClientResponse);
+    rpc RemoveWhitelistedClient(RemoveWhitelistedClientRequest) returns (RemoveWhitelistedClientResponse);
+    rpc ListWhitelistedClients(ListWhitelistedClientsRequest) returns (ListWhitelistedClientsResponse);
+    rpc SetWhitelistEnabled(SetWhitelistEnabledRequest) returns (SetWhitelistEnabledResponse);
+    rpc GetWhitelistStatus(GetWhitelistStatusRequest) returns (GetWhitelistStatusResponse);
+
+    // SubscribeToChanges streams file-change events for a storage ID.
+    // Used by Guardian to watch for intent and partition YAML mutations.
+    rpc SubscribeToChanges(SubscribeChangesRequest) returns (stream ChangeEvent);
+
+    // Workspace sync orchestration for virtual monorepo publish and refresh flows.
+    rpc UploadWorkspaceBundle(stream WorkspaceBundleChunk) returns (UploadWorkspaceBundleResponse);
+    rpc PublishWorkspace(PublishWorkspaceRequest) returns (stream WorkspaceSyncEvent);
+    rpc RefreshWorkspace(RefreshWorkspaceRequest) returns (stream WorkspaceSyncEvent);
+    rpc GetWorkspaceSyncJob(GetWorkspaceSyncJobRequest) returns (WorkspaceSyncJob);
+    rpc ListWorkspaceSyncJobs(ListWorkspaceSyncJobsRequest) returns (ListWorkspaceSyncJobsResponse);
+    rpc CancelWorkspaceSyncJob(CancelWorkspaceSyncJobRequest) returns (CancelWorkspaceSyncJobResponse);
+}
+
+// MonoFS is the backend node service for filesystem operations
+service MonoFS {
+    // Metadata operations (client caches these)
+    rpc Lookup(LookupRequest) returns (LookupResponse);
+    rpc GetAttr(GetAttrRequest) returns (GetAttrResponse);
+    rpc ReadDir(ReadDirRequest) returns (stream DirEntry);
+    
+    // Data operations
+    rpc Read(ReadRequest) returns (stream DataChunk);
+    
+    // Write operations
+    rpc Create(CreateRequest) returns (CreateResponse);
+    rpc Write(stream WriteRequest) returns (WriteResponse);
+    
+    // Authentication (stub for future mTLS)
+    rpc Authenticate(AuthRequest) returns (AuthResponse);
+    
+    // Node identification
+    rpc GetNodeInfo(NodeInfoRequest) returns (NodeInfoResponse);
+    
+    // IngestFile stores file metadata (called by router during ingestion)
+    rpc IngestFile(IngestFileRequest) returns (IngestFileResponse);
+    
+    // IngestFileBatch stores multiple file metadata in a single transaction (optimized for bulk ingestion)
+    rpc IngestFileBatch(IngestFileBatchRequest) returns (IngestFileBatchResponse);
+    
+    // IngestReplicaBatch stores replica metadata for failover (backup copies, not primary owner)
+    rpc IngestReplicaBatch(IngestReplicaBatchRequest) returns (IngestReplicaBatchResponse);
+    
+    // RegisterRepository registers repository metadata on a node (called before file ingestion)
+    rpc RegisterRepository(RegisterRepositoryRequest) returns (RegisterRepositoryResponse);
+    
+    // Failover and replication RPCs
+    rpc StreamRepositoryFiles(GetRepositoryFilesRequest) returns (stream RepositoryFileItem);
+    rpc GetRepositoryFiles(GetRepositoryFilesRequest) returns (GetRepositoryFilesResponse);
+    rpc SyncMetadataFromNode(SyncMetadataFromNodeRequest) returns (SyncMetadataFromNodeResponse);
+    rpc ClearFailoverCache(ClearFailoverCacheRequest) returns (ClearFailoverCacheResponse);
+    
+    // Repository discovery
+    rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
+    rpc GetRepositoryInfo(GetRepositoryInfoRequest) returns (GetRepositoryInfoResponse);
+    
+    // Onboarding status tracking
+    rpc GetOnboardingStatus(OnboardingStatusRequest) returns (OnboardingStatusResponse);
+    rpc MarkRepositoryOnboarded(MarkRepositoryOnboardedRequest) returns (MarkRepositoryOnboardedResponse);
+    
+    // Cleanup operations (called by router after rebalancing)
+    rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+    
+    // Delete entire repository from this node (all buckets)
+    rpc DeleteRepository(DeleteRepositoryOnNodeRequest) returns (DeleteRepositoryOnNodeResponse);
+    
+    // Delete a directory and all files within it recursively
+    rpc DeleteDirectoryRecursive(DeleteDirectoryRecursiveRequest) returns (DeleteDirectoryRecursiveResponse);
+    
+    // Build directory indexes in batch after ingestion (deferred for performance)
+    rpc BuildDirectoryIndexes(BuildDirectoryIndexesRequest) returns (BuildDirectoryIndexesResponse);
+
+    // Predictor statistics (access pattern learning and prefetching)
+    rpc GetPredictorStats(PredictorStatsRequest) returns (PredictorStatsResponse);
+
+    // Doctor Partition operations — telemetry ingest and query
+    rpc StreamQueryLogs(QueryLogsRequest) returns (stream QueryResultItem);
+    rpc StreamQueryMetrics(QueryMetricsRequest) returns (stream QueryResultItem);
+    rpc StreamQueryTraces(QueryTracesRequest) returns (stream QueryResultItem);
+    rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
+    rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
+    rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
+    rpc IngestLogs(IngestLogsRequest) returns (IngestLogsResponse);
+    rpc IngestMetrics(IngestMetricsRequest) returns (IngestMetricsResponse);
+    rpc IngestTraces(IngestTracesRequest) returns (IngestTracesResponse);
+}
+
+// Cluster topology messages
+message ClusterInfoRequest {
+    string client_id = 1;
+    bool use_external_addresses = 2;  // If true, return external (localhost:PORT) addresses for host clients
+}
+
+message ClusterInfoResponse {
+    repeated NodeInfo nodes = 1;
+    string cluster_id = 2;
+    int64 version = 3;        // Cluster config version for cache invalidation
+    bool guardian_visible = 4; // True if Guardian namespaces should be shown to clients
+}
+
+message NodeInfo {
+    string node_id = 1;       // Unique node identifier
+    string address = 2;       // host:port
+    uint32 weight = 3;        // Node weight for HRW (higher = more likely)
+    bool healthy = 4;
+    repeated string tags = 5; // Optional: region, zone, etc.
+    int64 total_files = 6;    // Total files owned by this node
+    map<string, string> metadata = 7; // Additional metadata (status, sync_progress, etc.)
+    int64 disk_used_bytes = 8;   // Disk space used by this node
+    int64 disk_total_bytes = 9;  // Total disk space available on this node
+    int64 disk_free_bytes = 10;  // Disk space free on filesystem
+}
+
+message HeartbeatRequest {
+    string node_id = 1;
+    int64 timestamp = 2;
+}
+
+message HeartbeatResponse {
+    bool acknowledged = 1;
+    int64 cluster_version = 2;
+}
+
+message NodeInfoRequest {}
+
+message NodeInfoResponse {
+    string node_id = 1;
+    string address = 2;
+    int64 uptime_seconds = 3;
+    uint64 files_served = 4;
+    int64 total_files = 5;  // Total files stored on this node
+    int64 disk_used_bytes = 6;   // Disk space used by data directory
+    int64 disk_total_bytes = 7;  // Total disk space available
+    int64 disk_free_bytes = 8;   // Disk space free on filesystem
+    KVSNodeStatus kvs = 9;       // Embedded KVS status for this node
+    LogEngineStats log_engine = 10; // Doctor telemetry log engine stats
+}
+
+message KVSNodeStatus {
+    bool enabled = 1;
+    bool healthy = 2;
+    string mode = 3;       // disabled, local, raft
+    string role = 4;       // local, leader, follower, candidate, shutdown, unknown
+    string leader_id = 5;
+    int32 peer_count = 6;
+    int64 key_count = 7;
+}
+
+message LookupRequest {
+    string parent_path = 1;
+    string name = 2;
+}
+
+message LookupResponse {
+    uint64 ino = 1;
+    uint32 mode = 2;
+    uint64 size = 3;
+    int64 mtime = 4;
+    bool found = 5;
+}
+
+message GetAttrRequest {
+    string path = 1;
+}
+
+message GetAttrResponse {
+    uint64 ino = 1;
+    uint32 mode = 2;
+    uint64 size = 3;
+    int64 mtime = 4;
+    int64 atime = 5;
+    int64 ctime = 6;
+    uint32 nlink = 7;
+    uint32 uid = 8;
+    uint32 gid = 9;
+    bool found = 10;
+}
+
+message ReadDirRequest {
+    string path = 1;
+}
+
+message DirEntry {
+    string name = 1;
+    uint32 mode = 2;
+    uint64 ino = 3;
+}
+
+message ReadRequest {
+    string path = 1;
+    int64 offset = 2;
+    int64 size = 3;
+}
+
+message DataChunk {
+    bytes data = 1;
+    int64 offset = 2;
+}
+
+message CreateRequest {
+    string parent_path = 1;
+    string name = 2;
+    uint32 mode = 3;
+    uint32 flags = 4;
+}
+
+message CreateResponse {
+    uint64 ino = 1;
+    uint64 fh = 2;
+    uint32 flags = 3;
+    bool success = 4;
+}
+
+message WriteRequest {
+    uint64 fh = 1;
+    bytes data = 2;
+    int64 offset = 3;
+}
+
+message WriteResponse {
+    uint32 size = 1;
+}
+
+message AuthRequest {
+    string token = 1;
+}
+
+message AuthResponse {
+    bool success = 1;
+    string session_id = 2;
+    int64 expires_at = 3;
+    string error_message = 4;
+}
+
+// Backend type enumerations
+enum IngestionType {
+    INGESTION_GIT = 0;   // Git repository
+    reserved 1;          // Was INGESTION_GO (removed)
+    INGESTION_S3 = 2;    // S3 bucket
+    INGESTION_FILE = 3;  // Local filesystem
+    INGESTION_GUARDIAN = 4; // Guardian partition
+}
+
+// SourceType identifies the data source backend.
+// Canonical type identifier used across the entire system.
+enum SourceType {
+    SOURCE_TYPE_UNKNOWN = 0;
+    SOURCE_TYPE_GIT = 1;          // Git repository (GitHub, GitLab, etc.)
+    reserved 2;                   // Was SOURCE_TYPE_GOMOD (removed)
+    SOURCE_TYPE_S3 = 3;           // S3-compatible object storage
+    SOURCE_TYPE_HTTP = 4;         // Generic HTTP/HTTPS URL
+    SOURCE_TYPE_OCI = 5;          // OCI registry (container images)
+    SOURCE_TYPE_BLOB = 6;         // Packager-based blob archive store
+}
+
+// Repository ingestion messages
+message IngestRequest {
+    string source = 1;      // Source identifier: Git URL, Go module path, S3 bucket, etc.
+    string ref = 2;         // Reference: branch for Git, version for Go, prefix for S3 (optional)
+    string source_id = 3;   // Custom display identifier (optional, auto-generated if empty)
+    
+    // Backend configuration
+    IngestionType ingestion_type = 4;  // Type of source (git, go, s3, etc.)
+    SourceType fetch_type = 5;           // Where to fetch blob content
+    map<string, string> ingestion_config = 6;  // Backend-specific config
+    map<string, string> fetch_config = 7;      // Fetch backend config
+    bool replicate_data = 8;           // If true, copy blobs to fetch backend during ingestion
+}
+
+message IngestProgress {
+    enum Stage {
+        CLONING = 0;
+        REGISTERING = 1;
+        INGESTING = 2;
+        COMPLETED = 3;
+        FAILED = 4;
+    }
+    Stage stage = 1;
+    string message = 2;
+    int64 files_processed = 3;
+    int64 total_files = 4;      // 0 if unknown
+    string current_file = 5;     // Currently processing file
+    bool success = 6;            // Only set in COMPLETED/FAILED stage
+    
+    // Data replication progress (if replicate_data=true)
+    int64 bytes_transferred = 7;
+    int64 total_bytes = 8;
+}
+
+message FileMetadata {
+    string path = 1;
+    reserved 2;                // Was: repo_id (removed)
+    string ref = 3;            // Reference: branch for Git, version for Go, prefix for S3
+    uint64 size = 4;
+    int64 mtime = 5;
+    uint32 mode = 6;
+    string blob_hash = 7;      // Content hash for lazy fetching (Git blob hash, SHA256, etc.)
+    string source = 8;         // Source identifier (Git URL, Go module path, S3 bucket)
+    string storage_id = 9;     // SHA-256 hash of display_path (internal storage key)
+    string display_path = 10;  // User-visible repository path (e.g., "github_com/owner/repo" or "myrepo")
+    
+    // Backend information
+    IngestionType source_type = 11;  // Where metadata came from
+    SourceType fetch_type = 12;      // Where to fetch blob content
+    map<string, string> backend_metadata = 13;  // Backend-specific metadata
+    
+    // Inline content for files that don't have an external fetch backend
+    // (e.g. dependency files uploaded by clients). When present, the server
+    // stores this alongside the metadata so that Read can serve it directly
+    // without going through a fetcher.
+    bytes inline_content = 14;
+}
+
+message IngestFileRequest {
+    FileMetadata metadata = 1;
+}
+
+message IngestFileResponse {
+    bool success = 1;
+}
+
+message IngestFileBatchRequest {
+    repeated FileMetadata files = 1;  // Batch of files to ingest
+    string storage_id = 2;             // Common storage_id for all files
+    string display_path = 3;           // Common display_path for all files
+    string source = 4;                 // Common source for all files
+    string ref = 5;                    // Common ref for all files
+}
+
+message IngestFileBatchResponse {
+    bool success = 1;
+    int64 files_ingested = 2;
+    int64 files_failed = 3;
+    string error_message = 4;
+}
+
+// IngestReplicaBatch stores replica metadata for failover purposes.
+// Replicas are backup copies stored on secondary nodes for instant failover.
+// Unlike primary data (bucketOwnedFiles), replicas are stored in bucketReplicaFiles.
+message IngestReplicaBatchRequest {
+    repeated FileMetadata files = 1;  // Files to store as replicas
+    string storage_id = 2;            // Common storage_id for all files
+    string display_path = 3;          // Common display_path for all files
+    string primary_node_id = 4;       // Node ID of the primary owner
+    string source = 5;                // Common source for all files
+    string ref = 6;                   // Common ref for all files
+}
+
+message IngestReplicaBatchResponse {
+    bool success = 1;
+    int64 files_replicated = 2;
+    int64 files_failed = 3;
+    string error_message = 4;
+}
+
+message RegisterRepositoryRequest {
+    string storage_id = 1;   // SHA-256 hash of display path (global identifier)
+    string display_path = 2; // User-visible path (e.g., "github_com/owner/repo" or "myrepo")
+    string source = 3;       // Source identifier (Git URL, Go module path, S3 bucket, etc.)
+    
+    // Backend configuration
+    IngestionType ingestion_type = 4;
+    SourceType fetch_type = 5;
+    map<string, string> ingestion_config = 6;
+    map<string, string> fetch_config = 7;
+    
+    // Commit information (for Git repositories)
+    string commit_hash = 8;    // Git commit hash
+    int64 commit_time = 9;     // Commit timestamp (Unix)
+    string commit_message = 10; // Commit message
+    
+    // Guardian metadata
+    string guardian_url = 11;   // Guardian partition URL (set for guardian repos)
+}
+
+message RegisterRepositoryResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Failover and replication messages
+message GetRepositoryFilesRequest {
+    string storage_id = 1;  // SHA-256 repo hash
+}
+
+message GetRepositoryFilesResponse {
+    repeated string files = 1;  // File paths owned by this node
+    string node_id = 2;
+}
+
+message RepositoryFileItem {
+    string file_path = 1;
+}
+
+message SyncMetadataFromNodeRequest {
+    string source_node_id = 1;  // The failed node whose files we need to sync
+    string target_node_id = 2;  // This node (backup node)
+    repeated FileInfo files = 3; // List of files owned by the failed node
+}
+
+message SyncMetadataFromNodeResponse {
+    bool success = 1;
+    int64 files_synced = 2;
+    string message = 3;
+}
+
+message ClearFailoverCacheRequest {
+    string recovered_node_id = 1;  // Node that recovered from failure
+}
+
+message ClearFailoverCacheResponse {
+    bool success = 1;
+    int64 entries_cleared = 2;
+    string message = 3;
+}
+
+message ListRepositoriesRequest {}
+
+message ListRepositoriesResponse {
+    repeated string repository_ids = 1;
+}
+
+message GetRepositoryInfoRequest {
+    string storage_id = 1;
+}
+
+message GetRepositoryInfoResponse {
+    string storage_id = 1;
+    string display_path = 2;
+    string source = 3;
+    string ref = 4;
+    string commit_hash = 5;
+    int64 commit_time = 6;
+    string commit_message = 7;
+    string guardian_url = 8;   // Guardian partition URL (set for guardian repos)
+}
+
+// Onboarding status messages
+message OnboardingStatusRequest {
+    string node_id = 1;
+}
+
+message OnboardingStatusResponse {
+    // Map of storage_id -> onboarded (true/false)
+    map<string, bool> repositories = 1;
+}
+
+message MarkRepositoryOnboardedRequest {
+    string storage_id = 1;
+}
+
+message MarkRepositoryOnboardedResponse {
+    bool success = 1;
+}
+
+message NotifyRepositoryIngestedRequest {
+    string storage_id = 1;
+    string display_path = 2;
+    string source = 3;
+}
+
+message NotifyRepositoryIngestedResponse {
+    bool success = 1;
+}
+
+message DeleteRepositoryRequest {
+    string storage_id = 1;  // Repository storage ID to delete
+}
+
+message DeleteRepositoryResponse {
+    bool success = 1;
+    string message = 2;
+    int64 files_deleted = 3;  // Number of files deleted from all nodes
+}
+
+// Node routing messages (for rebalancing support)
+message GetNodeForFileRequest {
+    string storage_id = 1;
+    string file_path = 2;
+}
+
+message GetNodeForFileResponse {
+    string node_id = 1;
+    repeated string fallback_node_ids = 2;  // Fallback nodes during rebalancing
+    int64 cache_ttl_seconds = 3;             // How long client can cache this routing
+    string rebalance_state = 4;              // "stable", "rebalancing", "dual-active"
+}
+
+// Cleanup messages (for rebalancing)
+message DeleteFileRequest {
+    string storage_id = 1;
+    string file_path = 2;
+}
+
+message DeleteFileResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Build directory indexes after ingestion
+message BuildDirectoryIndexesRequest {
+    string storage_id = 1;
+}
+
+message BuildDirectoryIndexesResponse {
+    bool success = 1;
+    int64 directories_indexed = 2;
+    string message = 3;
+}
+
+enum WorkspaceSyncAction {
+    WORKSPACE_SYNC_ACTION_UNSPECIFIED = 0;
+    WORKSPACE_SYNC_ACTION_REFRESH = 1;
+    WORKSPACE_SYNC_ACTION_PUBLISH = 2;
+}
+
+enum WorkspaceSyncState {
+    WORKSPACE_SYNC_STATE_UNSPECIFIED = 0;
+    WORKSPACE_SYNC_STATE_QUEUED = 1;
+    WORKSPACE_SYNC_STATE_RUNNING = 2;
+    WORKSPACE_SYNC_STATE_SUCCEEDED = 3;
+    WORKSPACE_SYNC_STATE_FAILED = 4;
+    WORKSPACE_SYNC_STATE_CANCELLED = 5;
+}
+
+enum WorkspaceSyncEventType {
+    WORKSPACE_SYNC_EVENT_UNSPECIFIED = 0;
+    WORKSPACE_SYNC_EVENT_JOB_ACCEPTED = 1;
+    WORKSPACE_SYNC_EVENT_JOB_STARTED = 2;
+    WORKSPACE_SYNC_EVENT_REPOSITORY_STARTED = 3;
+    WORKSPACE_SYNC_EVENT_REPOSITORY_COMPLETED = 4;
+    WORKSPACE_SYNC_EVENT_REPOSITORY_CONFLICTED = 5;
+    WORKSPACE_SYNC_EVENT_REPOSITORY_FAILED = 6;
+    WORKSPACE_SYNC_EVENT_REINGEST_STARTED = 7;
+    WORKSPACE_SYNC_EVENT_REINGEST_COMPLETED = 8;
+    WORKSPACE_SYNC_EVENT_JOB_COMPLETED = 9;
+}
+
+enum WorkspaceSyncRepositoryStatus {
+    WORKSPACE_SYNC_REPOSITORY_STATUS_UNSPECIFIED = 0;
+    WORKSPACE_SYNC_REPOSITORY_STATUS_UNCHANGED = 1;
+    WORKSPACE_SYNC_REPOSITORY_STATUS_REFRESH_REQUIRED = 2;
+    WORKSPACE_SYNC_REPOSITORY_STATUS_REFRESHED = 3;
+    WORKSPACE_SYNC_REPOSITORY_STATUS_CONFLICT = 4;
+    WORKSPACE_SYNC_REPOSITORY_STATUS_FAILED = 5;
+    WORKSPACE_SYNC_REPOSITORY_STATUS_CANCELLED = 6;
+    WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED = 7;
+}
+
+message WorkspaceRepositoryRef {
+    string storage_id = 1;
+    string display_path = 2;
+    string repo_url = 3;
+    string branch = 4;
+    string base_commit = 5;
+}
+
+message WorkspaceBundleChunk {
+    string workspace_id = 1;
+    bytes data = 2;
+    bool is_last = 3;
+    string bundle_id = 4;
+}
+
+message UploadWorkspaceBundleResponse {
+    string bundle_id = 1;
+    string workspace_id = 2;
+    int64 bytes_received = 3;
+    int32 repository_count = 4;
+    int64 expires_at_unix = 5;
+}
+
+message PublishWorkspaceRequest {
+    string workspace_id = 1;
+    string bundle_id = 2;
+    string logical_commit_message = 3;
+    string author_name = 4;
+    string author_email = 5;
+    string requested_branch_strategy = 6;
+}
+
+message RefreshWorkspaceRequest {
+    string workspace_id = 1;
+    repeated WorkspaceRepositoryRef repositories = 2;
+    bool allow_fast_forward_only = 3;
+    bool reject_if_local_changes = 4;
+}
+
+message WorkspaceSyncSummary {
+    int32 repositories_total = 1;
+    int32 repositories_succeeded = 2;
+    int32 repositories_conflicted = 3;
+    int32 repositories_failed = 4;
+    int32 repositories_refreshed = 5;
+    int32 repositories_published = 6;
+}
+
+message WorkspaceSyncRepositoryResult {
+    string storage_id = 1;
+    string display_path = 2;
+    string repo_url = 3;
+    string branch = 4;
+    string base_commit = 5;
+    string remote_commit = 6;
+    WorkspaceSyncRepositoryStatus status = 7;
+    string message = 8;
+    string conflict_reason = 9;
+    string target_branch = 10;
+    string pushed_commit = 11;
+}
+
+message WorkspaceSyncJob {
+    string job_id = 1;
+    string workspace_id = 2;
+    WorkspaceSyncAction action = 3;
+    WorkspaceSyncState state = 4;
+    string requested_by_client_id = 5;
+    int64 created_at_unix = 6;
+    int64 started_at_unix = 7;
+    int64 finished_at_unix = 8;
+    WorkspaceSyncSummary summary = 9;
+    repeated WorkspaceSyncRepositoryResult repositories = 10;
+    string error_message = 11;
+    bool allow_fast_forward_only = 12;
+    bool reject_if_local_changes = 13;
+    string bundle_id = 14;
+    string logical_commit_message = 15;
+}
+
+message WorkspaceSyncEvent {
+    WorkspaceSyncEventType event_type = 1;
+    WorkspaceSyncJob job = 2;
+    WorkspaceSyncRepositoryResult repository = 3;
+    string message = 4;
+}
+
+message GetWorkspaceSyncJobRequest {
+    string job_id = 1;
+}
+
+message ListWorkspaceSyncJobsRequest {
+    WorkspaceSyncAction action = 1;
+    WorkspaceSyncState state = 2;
+    int32 limit = 3;
+}
+
+message ListWorkspaceSyncJobsResponse {
+    repeated WorkspaceSyncJob jobs = 1;
+}
+
+message CancelWorkspaceSyncJobRequest {
+    string job_id = 1;
+}
+
+message CancelWorkspaceSyncJobResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Node-level repository deletion (removes all data for a repository from one node)
+message DeleteRepositoryOnNodeRequest {
+    string storage_id = 1;
+}
+
+message DeleteRepositoryOnNodeResponse {
+    bool success = 1;
+    string message = 2;
+    int64 files_deleted = 3;
+    int64 dirs_deleted = 4;
+}
+
+// Client registration messages
+enum ClientState {
+    CLIENT_UNKNOWN = 0;
+    CLIENT_CONNECTED = 1;
+    CLIENT_STALE = 2;
+    CLIENT_DISCONNECTED = 3;
+}
+
+message RegisterClientRequest {
+    string client_id = 1;           // Unique client identifier (UUID)
+    string mount_point = 2;         // FUSE mount path
+    string hostname = 3;            // Client hostname
+    bool writable = 4;              // Write mode enabled
+    string version = 5;             // Client version
+    GuardianConfig guardian_config = 6; // Required for guardian-* client IDs
+}
+
+// GuardianConfig holds configuration for a guardian-capable client.
+message GuardianConfig {
+    string base_url = 1;       // Optional base URL of the guardian service/UI
+    string auth_token = 2;     // Authentication token for guardian operations
+    string principal_id = 3;   // Optional persistent principal ID (defaults to client_id)
+    string role = 4;           // Optional role: control-plane, cli, pusher
+    string display_name = 5;   // Optional human-friendly label
+}
+
+message RegisterClientResponse {
+    bool success = 1;
+    string message = 2;
+    int64 heartbeat_interval_ms = 3; // How often client should send heartbeat
+}
+
+message UnregisterClientRequest {
+    string client_id = 1;
+    string reason = 2;              // Optional reason for disconnection
+}
+
+message UnregisterClientResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message ClientHeartbeatRequest {
+    string client_id = 1;
+    int64 operations_count = 2;     // Total FUSE operations since mount
+    int64 bytes_read = 3;           // Total bytes read
+    int64 errors_count = 4;         // Total I/O errors since mount
+}
+
+message ClientHeartbeatResponse {
+    bool success = 1;
+    string message = 2;
+    bool should_register = 3;       // Client should re-register
+}
+
+message ListClientsRequest {}
+
+message ListClientsResponse {
+    repeated ClientInfo clients = 1;
+}
+
+message ClientInfo {
+    string client_id = 1;
+    string mount_point = 2;
+    string hostname = 3;
+    bool writable = 4;
+    string version = 5;
+    ClientState state = 6;          // Current client state
+    int64 connected_at = 7;         // Unix timestamp
+    int64 last_heartbeat = 8;       // Unix timestamp
+    int64 operations_count = 9;     // Total FUSE operations
+    int64 bytes_read = 10;          // Total bytes read
+    int64 errors_count = 11;        // Total I/O errors
+}
+
+// Graceful failover messages
+message FailoverRequest {
+    string source_node_id = 1;      // Node requesting failover
+    int64 timestamp = 2;            // Unix timestamp
+}
+
+message FailoverResponse {
+    bool success = 1;
+    string target_node_id = 2;      // Node that will take over
+    string message = 3;
+}
+
+// Statistics messages
+message ClusterStatsRequest {}
+
+message ClusterStatsResponse {
+    int32 total_nodes = 1;
+    int32 healthy_nodes = 2;
+    int32 unhealthy_nodes = 3;
+    int32 syncing_nodes = 4;
+    int64 total_repositories = 5;
+    int64 total_files = 6;
+    int64 total_size_bytes = 7;
+    int64 cluster_version = 8;
+    map<string, string> failovers = 9;  // source_node -> target_node
+}
+
+message NodeStatsRequest {}
+
+message NodeStatsResponse {
+    repeated NodeStatInfo nodes = 1;
+}
+
+message NodeStatInfo {
+    string node_id = 1;
+    string address = 2;
+    string status = 3;              // Active, Syncing, Staging, Unhealthy
+    bool healthy = 4;
+    int64 file_count = 5;
+    int64 used_space_bytes = 6;
+    int64 total_space_bytes = 7;
+    int64 free_space_bytes = 8;
+    repeated string backing_up_nodes = 9;  // Nodes this node is backing up
+    double sync_progress = 10;             // 0.0 to 1.0
+    int64 last_heartbeat = 11;             // Unix timestamp
+    KVSNodeStatus kvs = 12;
+    LogEngineStats log_engine = 13;
+}
+
+message LogEngineStats {
+    bool enabled = 1;
+    int64 log_chunks = 2;
+    int64 metric_chunks = 3;
+    int64 trace_chunks = 4;
+}
+
+// Cluster maintenance messages
+message DrainClusterRequest {
+    string reason = 1;              // Optional reason for draining
+    int64 timeout_seconds = 2;      // How long to wait for drain (0 = immediate)
+}
+
+message DrainClusterResponse {
+    bool success = 1;
+    string message = 2;
+    int64 drained_at = 3;           // Unix timestamp when drain mode activated
+}
+
+message UndrainClusterRequest {}
+
+message UndrainClusterResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Failover file tracking messages
+message GetNodeFilesRequest {
+    string node_id = 1;
+}
+
+message GetNodeFilesResponse {
+    repeated FileInfo files = 1;
+}
+
+message FileInfo {
+    string storage_id = 1;
+    string file_path = 2;
+    string display_path = 3;
+}
+
+// Predictor statistics messages
+message PredictorStatsRequest {}
+
+message PredictorStatsResponse {
+    string node_id = 1;
+    int32 markov_chains = 2;        // Number of active Markov chain entries
+    int32 directory_maps = 3;       // Number of directory locality maps
+    int64 predictions = 4;          // Total predictions made
+    int64 prefetches = 5;           // Total prefetch operations triggered
+    int64 prefetch_hits = 6;        // Prefetches that were later accessed (cache hits)
+    int64 prefetch_misses = 7;      // Prefetch requests that missed (from server counters)
+    double hit_rate = 8;            // Prefetch hit rate (0.0 to 1.0)
+    bool enabled = 9;               // Whether predictor is active
+}
+
+// Ingestion whitelist messages
+message AddWhitelistedClientRequest {
+    string client_id = 1;           // Client UUID to whitelist
+    string label = 2;               // Human-friendly label (optional)
+}
+
+message AddWhitelistedClientResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message RemoveWhitelistedClientRequest {
+    string client_id = 1;
+}
+
+message RemoveWhitelistedClientResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message ListWhitelistedClientsRequest {}
+
+message ListWhitelistedClientsResponse {
+    repeated WhitelistedClient clients = 1;
+    bool whitelist_enabled = 2;     // Whether whitelist enforcement is active
+}
+
+message WhitelistedClient {
+    string client_id = 1;
+    string label = 2;
+    int64 added_at = 3;             // Unix timestamp
+}
+
+message SetWhitelistEnabledRequest {
+    bool enabled = 1;
+}
+
+message SetWhitelistEnabledResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message GetWhitelistStatusRequest {}
+
+message GetWhitelistStatusResponse {
+    bool enabled = 1;
+    int32 whitelisted_count = 2;
+    repeated WhitelistedClient clients = 3;
+}
+
+// Delete a directory and all contents recursively on a single node
+message DeleteDirectoryRecursiveRequest {
+    string storage_id = 1;
+    string dir_path = 2;
+}
+
+message DeleteDirectoryRecursiveResponse {
+    bool success = 1;
+    string message = 2;
+    int64 files_deleted = 3;
+    int64 dirs_deleted = 4;
+}
+
+// Guardian file/directory deletion (router-level, fan-out to all nodes)
+message DeleteGuardianFileRequest {
+    string storage_id = 1;
+    string file_path = 2;
+    string token = 3;
+}
+
+message DeleteGuardianFileResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message DeleteGuardianDirectoryRequest {
+    string storage_id = 1;
+    string dir_path = 2;
+    string token = 3;
+}
+
+message DeleteGuardianDirectoryResponse {
+    bool success = 1;
+    string message = 2;
+    int64 files_deleted = 3;
+    int64 dirs_deleted = 4;
+}
+
+// ─── Guardian change-watch messages ──────────────────────────────────────────
+
+// ChangeType enumerates the kinds of file changes emitted by SubscribeToChanges.
+enum ChangeType {
+    CHANGE_TYPE_UNSPECIFIED = 0;
+    ADDED = 1;
+    MODIFIED = 2;
+    DELETED = 3;
+}
+
+// SubscribeChangesRequest configures a SubscribeToChanges stream.
+message SubscribeChangesRequest {
+    string storage_id = 1;
+    // Path prefixes to filter events (empty = all files under the storage ID).
+    repeated string path_prefixes = 2;
+    string client_id = 3;
+}
+
+// ChangeEvent is emitted on every file mutation within a watched storage ID.
+message ChangeEvent {
+    string storage_id = 1;
+    string file_path = 2;
+    ChangeType type = 3;
+    string new_blob_hash = 4;
+    string old_blob_hash = 5;
+    // inline_content carries raw file bytes for small files (< 64 KiB) so
+    // consumers can act on YAML content without an extra Read round-trip.
+    bytes inline_content = 6;
+}
+
+// InjectGuardianFile is a single file to be injected into a guardian partition.
+message InjectGuardianFile {
+    string path = 1;    // relative path within the partition (e.g. "partition.yaml", "intents/foo.yaml")
+    bytes content = 2;  // raw file content
+}
+
+// InjectGuardianPartitionRequest carries inline file content for a partition.
+message InjectGuardianPartitionRequest {
+    string guardian_token = 1;   // auth token of a registered guardian client
+    string partition_name = 2;   // partition name (no slashes)
+    repeated InjectGuardianFile files = 3;
+    string guardian_ui_url = 4;  // externally accessible URL of the guardian topology page for this partition (e.g. "http://guardian.example.com/topology?partition=foo")
+}
+
+// InjectGuardianPartitionResponse reports the result of an inline injection.
+message InjectGuardianPartitionResponse {
+    bool success = 1;
+    string storage_id = 2;   // SHA-256 of "guardian/<partition_name>"
+    string message = 3;
+    int32 files_ingested = 4;
+}
+
+message GuardianMutationContext {
+    string principal_id = 1;
+    string reason = 2;
+    string correlation_id = 3;
+}
+
+message GuardianPathWrite {
+    string logical_path = 1;
+    bytes content = 2;
+    string expected_version_id = 3; // empty = blind write, "absent" = create only
+}
+
+message GuardianPathDelete {
+    string logical_path = 1;
+    string expected_version_id = 2; // optional CAS guard
+}
+
+message GuardianFileVersion {
+    string logical_path = 1;
+    string display_path = 2;
+    string storage_id = 3;
+    string version_id = 4;
+    string batch_revision_id = 5;
+    string content_sha256 = 6;
+    int64 committed_at = 7;
+    bool tombstone = 8;
+    string principal_id = 9;
+    string reason = 10;
+}
+
+message UpsertGuardianPathsRequest {
+    string guardian_token = 1;
+    repeated GuardianPathWrite writes = 2;
+    GuardianMutationContext context = 3;
+}
+
+message UpsertGuardianPathsResponse {
+    bool success = 1;
+    string batch_revision_id = 2;
+    repeated GuardianFileVersion versions = 3;
+    string message = 4;
+}
+
+message DeleteGuardianPathsRequest {
+    string guardian_token = 1;
+    repeated GuardianPathDelete deletes = 2;
+    GuardianMutationContext context = 3;
+}
+
+message DeleteGuardianPathsResponse {
+    bool success = 1;
+    string batch_revision_id = 2;
+    repeated GuardianFileVersion tombstones = 3;
+    string message = 4;
+}
+
+message ListGuardianVersionsRequest {
+    string guardian_token = 1;
+    string logical_path = 2;
+    int32 page_size = 3;
+    string page_token = 4;
+}
+
+message ListGuardianVersionsResponse {
+    repeated GuardianFileVersion versions = 1;
+    string next_page_token = 2;
+}
+
+message GetGuardianVersionRequest {
+    string guardian_token = 1;
+    string logical_path = 2;
+    string version_id = 3;
+}
+
+message GetGuardianVersionResponse {
+    GuardianFileVersion version = 1;
+    bytes content = 2;
+}
+
+message SubscribeGuardianChangesRequest {
+    string guardian_token = 1;
+    repeated string logical_prefixes = 2;
+    bool include_inline_content = 3;
+    string cursor = 4;
+}
+
+message GuardianChangeEvent {
+    string logical_path = 1;
+    string display_path = 2;
+    string storage_id = 3;
+    ChangeType type = 4;
+    string version_id = 5;
+    string batch_revision_id = 6;
+    string content_sha256 = 7;
+    string principal_id = 8;
+    string correlation_id = 9;
+    int64 committed_at = 10;
+    bytes inline_content = 11;
+}
+
+// Doctor Partition operations
+message QueryLogsRequest {
+    string query = 1;
+    int64 from_unix_nano = 2;
+    int64 to_unix_nano = 3;
+    string service = 4;
+    int32 limit = 5;
+}
+
+message QueryLogsResponse {
+    bytes results_json = 1;
+}
+
+enum MetricLabelMatcherType {
+    METRIC_LABEL_MATCHER_TYPE_UNSPECIFIED = 0;
+    METRIC_LABEL_MATCHER_TYPE_EQUAL = 1;
+    METRIC_LABEL_MATCHER_TYPE_NOT_EQUAL = 2;
+    METRIC_LABEL_MATCHER_TYPE_REGEXP = 3;
+    METRIC_LABEL_MATCHER_TYPE_NOT_REGEXP = 4;
+}
+
+message MetricLabelMatcher {
+    string name = 1;
+    string value = 2;
+    MetricLabelMatcherType type = 3;
+}
+
+message QueryMetricsRequest {
+    string metric_name = 1;
+    int64 from_unix_nano = 2;
+    int64 to_unix_nano = 3;
+    string service = 4;
+    repeated MetricLabelMatcher label_matchers = 5;
+}
+
+message QueryMetricsResponse {
+    bytes results_json = 1;
+}
+
+message QueryTracesRequest {
+    string trace_id = 1;
+    string service = 2;
+    int64 from_unix_nano = 3;
+    int64 to_unix_nano = 4;
+    int32 limit = 5;
+}
+
+message QueryTracesResponse {
+    bytes results_json = 1;
+}
+
+message QueryResultItem {
+    bytes item_json = 1;
+}
+
+// LogEntry is a single log record for ingest.
+message LogEntry {
+    int64 timestamp_unix_nano = 1;
+    string level = 2;
+    string service = 3;
+    string trace_id = 4;
+    string raw_message = 5;
+}
+
+message IngestLogsRequest {
+    string chunk_id = 1;
+    repeated LogEntry logs = 2;
+}
+
+message IngestLogsResponse {
+    bool ok = 1;
+}
+
+// MetricEntry is a single metric data point for ingest.
+message MetricEntry {
+    int64 timestamp_unix_nano = 1;
+    string service = 2;
+    string metric_name = 3;
+    double value = 4;
+    map<string, string> labels = 5;
+}
+
+message IngestMetricsRequest {
+    string chunk_id = 1;
+    repeated MetricEntry metrics = 2;
+}
+
+message IngestMetricsResponse {
+    bool ok = 1;
+}
+
+// SpanEntry is a single trace span for ingest.
+message SpanEntry {
+    int64 start_unix_nano = 1;
+    int64 end_unix_nano = 2;
+    string trace_id = 3;
+    string span_id = 4;
+    string parent_span_id = 5;
+    string service = 6;
+    string name = 7;
+    string status_code = 8;
+    map<string, string> attributes = 9;
+}
+
+message IngestTracesRequest {
+    string chunk_id = 1;
+    repeated SpanEntry spans = 2;
+}
+
+message IngestTracesResponse {
+    bool ok = 1;
+}

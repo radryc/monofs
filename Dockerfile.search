@@ -1,0 +1,74 @@
+# Build stage
+FROM golang:1.25-alpine AS builder
+
+RUN apk add --no-cache git
+
+WORKDIR /app
+
+# Copy go mod files first for better caching
+COPY monofs/go.mod monofs/go.sum ./
+COPY kvs/go.mod kvs/go.sum /kvs/
+# Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
+RUN set -eu; \
+    tmp_output="$(mktemp)"; \
+    trap 'rm -f "$tmp_output"' EXIT; \
+    retryable_re='TLS handshake timeout|i/o timeout|connection reset by peer|connection refused|no such host|temporary failure in name resolution|context deadline exceeded|dial tcp|proxyconnect tcp|unexpected EOF|EOF|Client\.Timeout exceeded'; \
+    for attempt in 1 2 3; do \
+        if GONOSUMDB='*' GODEBUG=http2client=0 GOPROXY=https://proxy.golang.org,direct go mod download >"$tmp_output" 2>&1; then \
+            cat "$tmp_output"; \
+            exit 0; \
+        fi; \
+        cat "$tmp_output" >&2; \
+        if ! grep -Eq "$retryable_re" "$tmp_output"; then \
+            exit 1; \
+        fi; \
+        if [ "$attempt" -lt 3 ]; then \
+            echo "go mod download via proxy failed with a retryable network error (attempt ${attempt}/3); retrying..." >&2; \
+            sleep $((attempt * 5)); \
+        fi; \
+    done; \
+    echo "go mod download via proxy failed after 3 attempts; falling back to direct VCS fetches" >&2; \
+    if GONOSUMDB='*' GOSUMDB=off GODEBUG=http2client=0 GOPROXY=direct go mod download >"$tmp_output" 2>&1; then \
+        cat "$tmp_output"; \
+    else \
+        cat "$tmp_output" >&2; \
+        exit 1; \
+    fi
+
+# Copy source code from the monorepo root so the local kvs replace resolves in Docker too.
+COPY monofs/. .
+COPY kvs /kvs
+
+# Build the search binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o /monofs-search ./cmd/monofs-search
+
+# Runtime stage
+FROM alpine:3.21
+
+# Install git (needed for cloning repos during indexing), Go (needed for go mod download), and ca-certificates
+RUN apk add --no-cache git go ca-certificates tzdata
+
+# Create non-root user for security
+RUN addgroup -S monofs && adduser -S monofs -G monofs
+
+# Create directories for indexes and cache
+RUN mkdir -p /data/indexes /data/cache && chown -R monofs:monofs /data
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /monofs-search /app/monofs-search
+
+# Switch to non-root user
+USER monofs
+
+# Expose gRPC port
+EXPOSE 9100
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:9100/health || exit 1
+
+# Default command with resource-conscious defaults
+ENTRYPOINT ["/app/monofs-search"]
+CMD ["--port=9100", "--index-dir=/data/indexes", "--cache-dir=/data/cache", "--workers=2", "--queue-size=100"]

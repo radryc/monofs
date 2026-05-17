@@ -1,0 +1,135 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+coverage.out
+
+# Build artifacts
+bin/
+dist/
+build/
+
+# Bazel artifacts
+bazel-*
+.bazel-cache/
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.iml
+
+# Debug files
+debug
+debug.test
+__debug_bin
+
+# Temporary files
+*.tmp
+*.log
+
+# GitFS specific
+# Cache directories
+/tmp/gitfs-cache*
+*.cache
+/cache/
+/.cache/
+
+# FUSE mount points
+/mnt/gitfs*
+/tmp/gitfs-mount*
+/tmp/gitfs-e2e-test
+
+# Docker volumes and compose
+docker-compose.override.yml
+.env.local
+*.pid
+
+# Generated files (keep in repo but ignore local changes if needed)
+# Uncomment if you want to ignore generated proto files
+# api/proto/*.pb.go
+# api/proto/*_grpc.pb.go
+
+# Test artifacts
+*.test.log
+test-results/
+testdata/tmp/
+
+# NutsDB data files
+*.db
+*.db-lock
+nutsdb/
+
+# AI/tooling workspaces
+.agent/
+.agents/
+.claude/
+
+# Root-level and cmd/ built binaries (anchored to root so they don't match cmd/<name>/ source dirs)
+/monofs-admin
+/monofs-client
+/monofs-fetcher
+/monofs-router
+/monofs-server
+/monofs-session
+/monofs-search
+/monofs-loadtest
+cmd/*/monofs-*
+!cmd/monofs-session/
+!cmd/monofs-session/main_test.go
+cmd/monofs-admin/a
+cmd/monofs-admin/b
+
+# Kernel module build artifacts
+monofs-kmod/*.o
+monofs-kmod/*.ko
+monofs-kmod/*.mod
+monofs-kmod/*.mod.c
+monofs-kmod/*.symvers
+monofs-kmod/modules.order
+monofs-kmod/Module.symvers
+monofs-kmod/.*.cmd
+monofs-kmod/.tmp_versions/
+
+# OS specific
+Thumbs.DB
+Desktop.ini
+.Spotlight-V100
+.Trashes
+
+# Local development
+local/
+*.local
+.scratch/
+
+# Benchmark results
+*.bench
+benchmark-results/
+
+# Profiling data
+*.pprof
+*.prof
+cpu.prof
+mem.prof
+.env
+.kilocode
+monofs-trace-dump
+third_party/

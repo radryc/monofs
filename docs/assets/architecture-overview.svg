@@ -1,0 +1,178 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="860" viewBox="0 0 1400 860" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="106" y1="48" x2="1295" y2="860" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#081929"/>
+      <stop offset="0.52" stop-color="#0C2235"/>
+      <stop offset="1" stop-color="#13334B"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(252 172) rotate(39.6) scale(475 314)">
+      <stop stop-color="#62E5FF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#62E5FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1165 728) rotate(180) scale(462 327)">
+      <stop stop-color="#2C89B8" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#2C89B8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#0E2840"/>
+      <stop offset="1" stop-color="#0A1E31"/>
+    </linearGradient>
+    <linearGradient id="panelStrong" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#11314C"/>
+      <stop offset="1" stop-color="#0B2236"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#8AF0FF"/>
+      <stop offset="1" stop-color="#50C7FF"/>
+    </linearGradient>
+    <filter id="shadow" x="-40" y="-40" width="1480" height="940" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="16"/>
+      <feGaussianBlur stdDeviation="18"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.0117647 0 0 0 0 0.0666667 0 0 0 0 0.113725 0 0 0 0.46 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_1"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_1" result="shape"/>
+    </filter>
+    <filter id="softGlow" x="0" y="0" width="1400" height="860" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+      <feGaussianBlur stdDeviation="40" result="effect1_foregroundBlur_0_1"/>
+    </filter>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" fill="#8AF0FF" fill-opacity="0.18"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 14 14" refX="11" refY="7" markerWidth="14" markerHeight="14" orient="auto-start-reverse">
+      <path d="M2 2L12 7L2 12V2Z" fill="#73E7FF"/>
+    </marker>
+    <style>
+      .title { fill: #F4FCFF; font: 700 40px 'Segoe UI', Arial, sans-serif; }
+      .subtitle { fill: #B8D9E8; font: 500 19px 'Segoe UI', Arial, sans-serif; }
+      .card-title { fill: #F4FCFF; font: 700 25px 'Segoe UI', Arial, sans-serif; }
+      .card-body { fill: #C7E4F0; font: 500 18px 'Segoe UI', Arial, sans-serif; }
+      .chip { fill: #E9FAFF; font: 600 15px 'Segoe UI', Arial, sans-serif; }
+      .tiny { fill: #8ADFF5; font: 600 14px 'Segoe UI', Arial, sans-serif; letter-spacing: 0.12em; text-transform: uppercase; }
+      .label { fill: #89E7FF; font: 600 15px 'Segoe UI', Arial, sans-serif; }
+    </style>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <rect x="18" y="18" width="1364" height="824" rx="34" fill="url(#bg)"/>
+    <rect x="18" y="18" width="1364" height="824" rx="34" fill="url(#grid)" opacity="0.38"/>
+    <rect x="18" y="18" width="1364" height="824" rx="34" fill="url(#glowA)"/>
+    <rect x="18" y="18" width="1364" height="824" rx="34" fill="url(#glowB)"/>
+    <path d="M76 794C292 651 438 670 618 732C852 813 1072 805 1327 622" stroke="#79E7FF" stroke-opacity="0.12" stroke-width="2"/>
+    <path d="M120 146C309 261 432 252 595 219C823 171 1006 131 1270 234" stroke="#79E7FF" stroke-opacity="0.12" stroke-width="2"/>
+  </g>
+
+  <text x="76" y="92" class="tiny">MonoFS</text>
+  <text x="76" y="136" class="title">Architecture overview</text>
+  <text x="76" y="172" class="subtitle">A router-led control plane turns sharded storage, search, and publish orchestration into one projected source workspace.</text>
+
+  <g>
+    <rect x="64" y="214" width="290" height="118" rx="24" fill="url(#panel)" stroke="#2B5972" stroke-width="1.5"/>
+    <text x="92" y="256" class="card-title">Developers and automation</text>
+    <text x="92" y="289" class="card-body">Editors, shells, CI jobs, and service</text>
+    <text x="92" y="315" class="card-body">workflows consume MonoFS through clients.</text>
+  </g>
+
+  <g>
+    <rect x="64" y="378" width="290" height="126" rx="24" fill="url(#panelStrong)" stroke="#58D7FF" stroke-opacity="0.55" stroke-width="1.5"/>
+    <rect x="88" y="402" width="112" height="32" rx="16" fill="#11334A" stroke="#2B6D8D"/>
+    <text x="107" y="423" class="chip">FUSE mount</text>
+    <text x="92" y="457" class="card-title">monofs-client</text>
+    <text x="92" y="489" class="card-body">Projected workspace mount and writable</text>
+    <text x="92" y="515" class="card-body">overlay entry point.</text>
+  </g>
+
+  <g>
+    <rect x="64" y="536" width="290" height="154" rx="24" fill="url(#panel)" stroke="#2B5972" stroke-width="1.5"/>
+    <rect x="88" y="560" width="160" height="32" rx="16" fill="#11334A" stroke="#2B6D8D"/>
+    <text x="110" y="581" class="chip">Session and admin</text>
+    <text x="92" y="621" class="card-title">monofs-session, monofs-admin,</text>
+    <text x="92" y="651" class="card-title">and search clients</text>
+    <text x="92" y="681" class="card-body">Publish, refresh, ingest, status, and</text>
+    <text x="92" y="707" class="card-body">direct search operations.</text>
+  </g>
+
+  <g>
+    <path d="M354 441C392 441 396 394 436 394" stroke="#73E7FF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <path d="M354 611C404 611 392 448 436 448" stroke="#73E7FF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <path d="M210 332L210 360" stroke="#4CB7D9" stroke-opacity="0.8" stroke-width="3" stroke-linecap="round"/>
+    <path d="M210 332L210 516" stroke="#4CB7D9" stroke-opacity="0.24" stroke-width="3" stroke-linecap="round" stroke-dasharray="8 12"/>
+  </g>
+
+  <g>
+    <rect x="438" y="250" width="554" height="314" rx="28" fill="url(#panelStrong)" stroke="#6CE4FF" stroke-opacity="0.72" stroke-width="1.7"/>
+    <text x="472" y="298" class="card-title">Router control plane</text>
+    <text x="472" y="334" class="card-body">Coordinates the system instead of behaving like a single filesystem daemon.</text>
+
+    <rect x="472" y="370" width="196" height="44" rx="18" fill="#13344D" stroke="#2E708E"/>
+    <text x="507" y="398" class="chip">Cluster topology</text>
+
+    <rect x="688" y="370" width="220" height="44" rx="18" fill="#13344D" stroke="#2E708E"/>
+    <text x="728" y="398" class="chip">Client registration</text>
+
+    <rect x="472" y="432" width="252" height="44" rx="18" fill="#13344D" stroke="#2E708E"/>
+    <text x="500" y="460" class="chip">Workspace publish and refresh</text>
+
+    <rect x="744" y="432" width="210" height="44" rx="18" fill="#13344D" stroke="#2E708E"/>
+    <text x="781" y="460" class="chip">Search coordination</text>
+
+    <rect x="472" y="494" width="482" height="44" rx="18" fill="#13344D" stroke="#2E708E"/>
+    <text x="529" y="522" class="chip">UI surfaces plus doctor and guardian namespaces</text>
+  </g>
+
+  <g>
+    <path d="M992 408C1018 408 1018 342 1040 342" stroke="#73E7FF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <text x="1010" y="388" class="label">operational namespaces</text>
+  </g>
+
+  <g>
+    <rect x="1040" y="218" width="286" height="228" rx="26" fill="url(#panel)" stroke="#2B5972" stroke-width="1.5"/>
+    <text x="1072" y="262" class="card-title">Built-in namespaces</text>
+    <text x="1072" y="294" class="card-body">These are product surfaces, not ordinary repositories.</text>
+
+    <rect x="1072" y="324" width="222" height="40" rx="18" fill="#11334A" stroke="#2B6D8D"/>
+    <circle cx="1096" cy="344" r="7" fill="#73E7FF"/>
+    <text x="1114" y="349" class="chip">doctor: traces, logs, metrics, health</text>
+
+    <rect x="1072" y="376" width="224" height="40" rx="18" fill="#11334A" stroke="#2B6D8D"/>
+    <circle cx="1096" cy="396" r="7" fill="#73E7FF"/>
+    <text x="1114" y="401" class="chip">guardian: partitions and rollouts</text>
+
+    <rect x="1072" y="428" width="220" height="40" rx="18" fill="#11334A" stroke="#2B6D8D"/>
+    <circle cx="1096" cy="448" r="7" fill="#73E7FF"/>
+    <text x="1114" y="453" class="chip">guardian-system: queues and archives</text>
+  </g>
+
+  <g>
+    <path d="M598 564V618" stroke="#73E7FF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <path d="M716 564C716 598 799 598 830 618" stroke="#73E7FF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <path d="M830 564C830 592 1116 592 1116 618" stroke="#73E7FF" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <text x="545" y="606" class="label">read path</text>
+    <text x="764" y="606" class="label">publish and refresh</text>
+    <text x="1076" y="606" class="label">search</text>
+  </g>
+
+  <g>
+    <rect x="436" y="636" width="286" height="154" rx="24" fill="url(#panel)" stroke="#2B5972" stroke-width="1.5"/>
+    <text x="468" y="680" class="card-title">Backend storage nodes</text>
+    <text x="468" y="713" class="card-body">HRW-sharded repository metadata,</text>
+    <text x="468" y="739" class="card-body">directory and file reads, and namespace serving.</text>
+  </g>
+
+  <g>
+    <rect x="754" y="636" width="304" height="154" rx="24" fill="url(#panel)" stroke="#2B5972" stroke-width="1.5"/>
+    <text x="786" y="680" class="card-title">Fetcher tier</text>
+    <text x="786" y="713" class="card-body">External Git and blob access, staged</text>
+    <text x="786" y="739" class="card-body">workspace bundles, and publish or refresh jobs.</text>
+  </g>
+
+  <g>
+    <rect x="1090" y="636" width="236" height="154" rx="24" fill="url(#panel)" stroke="#2B5972" stroke-width="1.5"/>
+    <text x="1122" y="680" class="card-title">Search service</text>
+    <text x="1122" y="713" class="card-body">Separate indexing pipeline and</text>
+    <text x="1122" y="739" class="card-body">query surface outside the read loop.</text>
+  </g>
+</svg>
