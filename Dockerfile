@@ -59,6 +59,16 @@ RUN set -eu; \
 COPY . .
 COPY --from=router-ui-builder /ui/dist ./internal/router/ui/dist
 
+FROM node:22-slim AS router-ui-builder
+
+WORKDIR /app/internal/router/ui
+
+COPY internal/router/ui/package.json internal/router/ui/package-lock.json ./
+RUN npm ci
+
+COPY internal/router/ui/ ./
+RUN npm run build
+
 FROM builder AS server-builder
 
 ARG VERSION=dev
@@ -74,6 +84,8 @@ FROM builder AS router-builder
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
+
+COPY --from=router-ui-builder /app/internal/router/ui/dist /app/internal/router/ui/dist
 
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
