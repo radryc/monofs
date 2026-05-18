@@ -1,6 +1,8 @@
 # MonoFS VS Code Extension
 
-This extension wraps the MonoFS virtual-monorepo development loop inside VS Code. It is designed for the sibling checkout layout used by this workspace, where MonoFS lives next to `../scripts`.
+> Part of the **Strata** platform.
+
+This extension wraps the MonoFS virtual-monorepo development loop inside VS Code. It is designed for the sibling checkout layout used by this workspace, where MonoFS lives next to `../monotools`.
 
 ## Features
 

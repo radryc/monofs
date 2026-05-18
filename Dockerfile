@@ -6,10 +6,10 @@ WORKDIR /app
 # Install build dependencies
 RUN apk add --no-cache git
 
-# Copy module manifests from the monorepo root so the local replace directives stay valid.
+# Copy module manifests from the sibling workspace root so the local replace directives stay valid.
 COPY monofs/go.mod monofs/go.sum ./
-COPY kvs/go.mod kvs/go.sum ./third_party/ainfra/kvs/
-COPY cfg/go.mod cfg/go.sum ./third_party/ainfra/cfg/
+COPY kvs/go.mod kvs/go.sum /kvs/
+COPY cfg/go.mod cfg/go.sum /cfg/
 # Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
 RUN set -eu; \
     tmp_output="$(mktemp)"; \
@@ -39,8 +39,8 @@ RUN set -eu; \
 
 # Copy source after dependency download for better layer caching.
 COPY monofs/. .
-COPY kvs ./third_party/ainfra/kvs
-COPY cfg ./third_party/ainfra/cfg
+COPY kvs /kvs
+COPY cfg /cfg
 
 FROM builder AS server-builder
 

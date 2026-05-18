@@ -38,8 +38,8 @@ require (
 	google.golang.org/protobuf v1.36.11
 )
 
-replace github.com/rydzu/ainfra/kvs => ./third_party/ainfra/kvs
-replace github.com/rydzu/ainfra/cfg => ./third_party/ainfra/cfg
+replace github.com/rydzu/ainfra/kvs => ../kvs
+replace github.com/rydzu/ainfra/cfg => ../cfg
 
 require (
 	cel.dev/expr v0.25.1 // indirect
