@@ -19,8 +19,8 @@ This guide walks through the practical flow:
 From the sibling workspace layout:
 
 ```bash
-../scripts/bootstrap.sh deploy
-../scripts/bootstrap.sh stamp-urls
+mt-bootstrap deploy
+mt-bootstrap stamp-urls
 ```
 
 This brings up the MonoFS storage stack in `storage-k8s`, the bootstrap Guardian control plane in `guardian-configs`, and the shared cluster prerequisites used by the released partitions.
@@ -30,14 +30,14 @@ This brings up the MonoFS storage stack in `storage-k8s`, the bootstrap Guardian
 For a typical development setup:
 
 ```bash
-../scripts/release --partition doctor
-../scripts/release --partition dev-workspace
+mt-release --partition doctor
+mt-release --partition dev-workspace
 ```
 
 To roll the full application set in dependency order:
 
 ```bash
-../scripts/release --all
+mt-release --all
 ```
 
 ### 3. Make the router reachable from your workstation
@@ -45,7 +45,7 @@ To roll the full application set in dependency order:
 If your cluster already exposes a reachable router endpoint, use that. Otherwise, forward the MonoFS service locally:
 
 ```bash
-../scripts/lib/storage.sh port-forward
+mt-bootstrap port-forward
 ```
 
 That gives you local access to the router on `localhost:9090` and the HTTP surface on `localhost:8080`.
