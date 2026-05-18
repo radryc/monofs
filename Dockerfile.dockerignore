@@ -3,6 +3,8 @@ bin/
 *.log
 tmp/
 node_modules/
+internal/router/ui/node_modules/
+internal/router/ui/dist/
 vscode-monofs/
 monofs-client
 monofs-router
