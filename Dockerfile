@@ -21,12 +21,16 @@ ARG KVS_REF=caadee8dd6d809ba9e40cccb2e27e5ea44d068aa
 ARG CFG_REPO_URL=https://github.com/radryc/cfg.git
 ARG CFG_REF=cc88020cecc3fac5f1548cba12bec1fd2c1c958f
 
-# Copy Monofs manifests from the local build context and clone the replaced modules.
+# Copy Monofs manifests from the local build context and fetch only the pinned module revisions.
 COPY go.mod go.sum ./
-RUN git clone "$KVS_REPO_URL" /kvs && \
-    git -C /kvs checkout --detach "$KVS_REF" && \
-    git clone "$CFG_REPO_URL" /cfg && \
-    git -C /cfg checkout --detach "$CFG_REF"
+RUN git init /kvs && \
+    git -C /kvs remote add origin "$KVS_REPO_URL" && \
+    git -C /kvs fetch --depth 1 origin "$KVS_REF" && \
+    git -C /kvs checkout --detach FETCH_HEAD && \
+    git init /cfg && \
+    git -C /cfg remote add origin "$CFG_REPO_URL" && \
+    git -C /cfg fetch --depth 1 origin "$CFG_REF" && \
+    git -C /cfg checkout --detach FETCH_HEAD
 
 # Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
 RUN set -eu; \
