@@ -1,3 +1,13 @@
+FROM node:22-alpine AS router-ui-builder
+
+WORKDIR /ui
+
+COPY internal/router/ui/package.json internal/router/ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+COPY internal/router/ui/ ./
+RUN npm run build
+
 # Build stage
 FROM golang:1.25-alpine AS builder
 
@@ -47,6 +57,7 @@ RUN set -eu; \
 
 # Copy source after dependency download for better layer caching.
 COPY . .
+COPY --from=router-ui-builder /ui/dist ./internal/router/ui/dist
 
 FROM builder AS server-builder
 
