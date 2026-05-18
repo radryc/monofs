@@ -8,6 +8,7 @@ WORKDIR /app
 # Copy go mod files first for better caching
 COPY monofs/go.mod monofs/go.sum ./
 COPY kvs/go.mod kvs/go.sum /kvs/
+COPY cfg/go.mod cfg/go.sum /cfg/
 # Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
 RUN set -eu; \
     tmp_output="$(mktemp)"; \
@@ -35,9 +36,10 @@ RUN set -eu; \
         exit 1; \
     fi
 
-# Copy source code from the monorepo root so the local kvs replace resolves in Docker too.
+# Copy source code from the sibling workspace root so the local replace directives resolve in Docker too.
 COPY monofs/. .
 COPY kvs /kvs
+COPY cfg /cfg
 
 # Build the search binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o /monofs-search ./cmd/monofs-search

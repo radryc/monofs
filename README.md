@@ -17,6 +17,8 @@
 </p>
 <!-- markdownlint-enable MD033 -->
 
+> Part of the **Strata** platform.
+
 MonoFS is a distributed source workspace platform for serving repositories, dependency data, code search, publish workflows, and managed operational namespaces through one clustered system.
 
 The local FUSE mount is one client surface, not the whole product. MonoFS also includes a router control plane, sharded storage nodes, a writable overlay workflow, a fetcher tier for upstream Git and blob access, a search service, session tooling, and built-in namespaces such as `doctor` for observability data and `guardian` for partition and rollout control. The current release targets Linux and WSL-style environments where the FUSE client is available.
@@ -30,12 +32,12 @@ License: Apache-2.0. See [LICENSE](LICENSE).
 - A read path that serves repository content through a FUSE mount.
 - HRW (rendezvous) sharding across backend nodes.
 - Router-managed topology, failover, and cluster status.
-- Kubernetes bootstrap and partition release flows through the sibling `../scripts` operational entrypoints.
+- Kubernetes bootstrap and partition release flows through the sibling `../monotools` operational entrypoints.
 - Writable overlay sessions with publish and refresh through `monofs-session`.
 - Workspace publish through the router and fetcher sync path.
 - Full-text code search through `monofs-search`.
 - Built-in namespaces such as `doctor` for observability and `guardian` for deployment control, plus router UI surfaces.
-- Kubernetes bootstrap through the sibling `../scripts` repo, plus minimal local multi-node development targets.
+- Kubernetes bootstrap through the sibling `../monotools` repo, plus minimal local multi-node development targets.
 
 ## Current Limits
 
@@ -60,7 +62,8 @@ In raw namespace mounts these appear as part of the filesystem surface. In virtu
 - Cluster-admin access for the bootstrap flow, which creates namespaces, RBAC, and cluster prerequisites.
 - Docker with BuildKit for building and distributing images during bootstrap and release.
 - `guardianctl` on `PATH`, or `GUARDIANCTL_BIN` set to a built `guardianctl` binary.
-- Sibling checkouts of `monofs/`, `guardian/`, `doctor/`, `kvs/`, and `scripts/` if you are using the Kubernetes bootstrap flow described below.
+- Sibling checkouts of `kvs/` and `cfg/` next to `monofs/` for local builds, because `go.mod` uses local replaces for those repos.
+- Sibling checkouts of `guardian/`, `doctor/`, and `monotools/` alongside `monofs/` if you are using the Kubernetes bootstrap flow described below.
 - Linux or WSL with FUSE support if you want to mount the workspace locally.
 - Go 1.25.7.
 - `protoc` only if you need to regenerate protobufs.
@@ -87,6 +90,8 @@ Generated binaries are written to `bin/`.
 
 ```bash
 git clone https://github.com/radryc/monofs.git
+git clone https://github.com/radryc/kvs.git
+git clone https://github.com/radryc/cfg.git
 cd monofs
 make build
 ```
@@ -96,8 +101,8 @@ make build
 From the sibling workspace layout, use the operational bootstrap entrypoint:
 
 ```bash
-../scripts/bootstrap.sh deploy
-../scripts/bootstrap.sh stamp-urls
+mt-bootstrap deploy
+mt-bootstrap stamp-urls
 ```
 
 This brings up the phase-1 MonoFS storage stack in `storage-k8s`, the phase-2 Guardian control plane in `guardian-configs`, installs `metrics-server`, and applies the bootstrap RBAC needed by the released partitions.
@@ -107,14 +112,14 @@ This brings up the phase-1 MonoFS storage stack in `storage-k8s`, the phase-2 Gu
 Release individual partitions:
 
 ```bash
-../scripts/release --partition doctor
-../scripts/release --partition dev-workspace
+mt-release --partition doctor
+mt-release --partition dev-workspace
 ```
 
 Or release the whole stack in dependency order:
 
 ```bash
-../scripts/release --all
+mt-release --all
 ```
 
 ### 4. Ingest a Repository
@@ -131,7 +136,7 @@ Or release the whole stack in dependency order:
 If your cluster does not expose a directly reachable MonoFS endpoint, forward the storage service locally:
 
 ```bash
-../scripts/lib/storage.sh port-forward
+mt-bootstrap port-forward
 ```
 
 Then mount a local client against the forwarded or externally reachable router endpoint.
@@ -205,13 +210,13 @@ Example flow:
 
 ```bash
 # Bootstrap storage and control plane first.
-../scripts/bootstrap.sh deploy
-../scripts/bootstrap.sh stamp-urls
-../scripts/release --partition doctor
-../scripts/release --partition dev-workspace
+mt-bootstrap deploy
+mt-bootstrap stamp-urls
+mt-release --partition doctor
+mt-release --partition dev-workspace
 
 # Forward the storage service locally if needed.
-../scripts/lib/storage.sh port-forward
+mt-bootstrap port-forward
 
 # Build the local client binaries and keep a handle to them.
 make build
@@ -305,9 +310,9 @@ In practice there are two main runtime flows:
 
 | Command | Purpose |
 | --- | --- |
-| `../scripts/bootstrap.sh deploy` | Bootstrap MonoFS storage and Guardian control plane on Kubernetes |
-| `../scripts/bootstrap.sh stamp-urls` | Stamp resolved external Guardian and Doctor URLs into the partition templates |
-| `../scripts/release --all` | Release all application partitions in dependency order |
+| `mt-bootstrap deploy` | Bootstrap MonoFS storage and Guardian control plane on Kubernetes |
+| `mt-bootstrap stamp-urls` | Stamp resolved external Guardian and Doctor URLs into the partition templates |
+| `mt-release --all` | Release all application partitions in dependency order |
 | `make build` | Build all binaries into `bin/` |
 | `make run-cluster` | Run a minimal local MonoFS-only cluster without the Kubernetes stack |
 | `make test-unit` | Run unit tests |
@@ -339,5 +344,5 @@ In practice there are two main runtime flows:
 
 - Version information is injected at build time through linker flags.
 - The Kubernetes bootstrap flow creates the MonoFS storage stack in `storage-k8s` and the bootstrap Guardian control plane in `guardian-configs`.
-- `../scripts/bootstrap.sh deploy` is the operational entrypoint for bringing up the shared stack; `../scripts/release` handles per-partition rollout after bootstrap.
+- `mt-bootstrap deploy` is the operational entrypoint for bringing up the shared stack; `mt-release` handles per-partition rollout after bootstrap.
 - The search, `doctor`, `guardian`, and workspace-sync features are in the same repository and share the router control plane.

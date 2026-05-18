@@ -2,10 +2,15 @@
 !monofs/
 !monofs/**
 !kvs/
-!kvs/**monofs/.git/
+!kvs/**
+!cfg/
+!cfg/**
+monofs/.git/
 kvs/.git/
+cfg/.git/
 monofs/bin/
 kvs/bin/
+cfg/bin/
 monofs/monofs-client
 monofs/monofs-router
 monofs/monofs-server
