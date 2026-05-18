@@ -1,14 +1,22 @@
 # Build stage
 FROM golang:1.25-alpine AS builder
 
-RUN apk add --no-cache git
+RUN apk add --no-cache git ca-certificates
+
+ARG KVS_REPO_URL=https://github.com/radryc/kvs.git
+ARG KVS_REF=caadee8dd6d809ba9e40cccb2e27e5ea44d068aa
+ARG CFG_REPO_URL=https://github.com/radryc/cfg.git
+ARG CFG_REF=cc88020cecc3fac5f1548cba12bec1fd2c1c958f
 
 WORKDIR /app
 
-# Copy go mod files first for better caching
-COPY monofs/go.mod monofs/go.sum ./
-COPY kvs/go.mod kvs/go.sum /kvs/
-COPY cfg/go.mod cfg/go.sum /cfg/
+# Copy go mod files first for better caching, then clone the replaced modules.
+COPY go.mod go.sum ./
+RUN git clone "$KVS_REPO_URL" /kvs && \
+    git -C /kvs checkout --detach "$KVS_REF" && \
+    git clone "$CFG_REPO_URL" /cfg && \
+    git -C /cfg checkout --detach "$CFG_REF"
+
 # Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
 RUN set -eu; \
     tmp_output="$(mktemp)"; \
@@ -36,10 +44,8 @@ RUN set -eu; \
         exit 1; \
     fi
 
-# Copy source code from the sibling workspace root so the local replace directives resolve in Docker too.
-COPY monofs/. .
-COPY kvs /kvs
-COPY cfg /cfg
+# Copy source code from the local Monofs context.
+COPY . .
 
 # Build the search binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o /monofs-search ./cmd/monofs-search
