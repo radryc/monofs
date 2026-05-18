@@ -4,12 +4,20 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /app
 
 # Install build dependencies
-RUN apk add --no-cache git
+RUN apk add --no-cache git ca-certificates
 
-# Copy module manifests from the sibling workspace root so the local replace directives stay valid.
-COPY monofs/go.mod monofs/go.sum ./
-COPY kvs/go.mod kvs/go.sum /kvs/
-COPY cfg/go.mod cfg/go.sum /cfg/
+ARG KVS_REPO_URL=https://github.com/radryc/kvs.git
+ARG KVS_REF=caadee8dd6d809ba9e40cccb2e27e5ea44d068aa
+ARG CFG_REPO_URL=https://github.com/radryc/cfg.git
+ARG CFG_REF=cc88020cecc3fac5f1548cba12bec1fd2c1c958f
+
+# Copy Monofs manifests from the local build context and clone the replaced modules.
+COPY go.mod go.sum ./
+RUN git clone "$KVS_REPO_URL" /kvs && \
+    git -C /kvs checkout --detach "$KVS_REF" && \
+    git clone "$CFG_REPO_URL" /cfg && \
+    git -C /cfg checkout --detach "$CFG_REF"
+
 # Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
 RUN set -eu; \
     tmp_output="$(mktemp)"; \
@@ -38,9 +46,7 @@ RUN set -eu; \
     fi
 
 # Copy source after dependency download for better layer caching.
-COPY monofs/. .
-COPY kvs /kvs
-COPY cfg /cfg
+COPY . .
 
 FROM builder AS server-builder
 
@@ -180,8 +186,8 @@ RUN addgroup -S monofs && adduser -S monofs -G monofs
 RUN mkdir -p /data/cache/git /data/cache/blob /etc/monofs && chown -R monofs:monofs /data /etc/monofs
 
 COPY --from=fetcher-builder /bin/monofs-fetcher /usr/local/bin/monofs-fetcher
-COPY monofs/config/fetcher.json /etc/monofs/fetcher.json
-COPY monofs/docker/fetcher-entrypoint.sh /usr/local/bin/fetcher-entrypoint.sh
+COPY config/fetcher.json /etc/monofs/fetcher.json
+COPY docker/fetcher-entrypoint.sh /usr/local/bin/fetcher-entrypoint.sh
 RUN chmod +x /usr/local/bin/fetcher-entrypoint.sh
 
 USER monofs
