@@ -251,11 +251,12 @@ func (rs RebalanceState) String() string {
 
 // ingestedRepo tracks an ingested repository.
 type ingestedRepo struct {
-	repoID     string
-	repoURL    string
-	branch     string
-	filesCount int64
-	ingestedAt time.Time
+	repoID      string
+	repoURL     string
+	guardianURL string
+	branch      string
+	filesCount  int64
+	ingestedAt  time.Time
 
 	// Topology tracking for atomic rebalancing
 	topologyVersion   int64          // Topology version when ingested/last rebalanced
@@ -263,6 +264,17 @@ type ingestedRepo struct {
 	rebalanceState    RebalanceState // Current rebalancing state
 	rebalanceProgress float64        // 0.0 - 1.0
 	mu                sync.RWMutex   // Protects rebalance state
+}
+
+func trackedRepoRegisterRequest(storageID string, repo *ingestedRepo) *pb.RegisterRepositoryRequest {
+	req := &pb.RegisterRepositoryRequest{StorageId: storageID}
+	if repo == nil {
+		return req
+	}
+	req.DisplayPath = repo.repoID
+	req.Source = repo.repoURL
+	req.GuardianUrl = repo.guardianURL
+	return applyGuardianRepoStorageBackend(req)
 }
 
 // inProgressIngestion tracks an active ingestion.
@@ -1384,6 +1396,7 @@ func (r *Router) discoverClusterRepositories() {
 					discoveredRepos[storageID] = &ingestedRepo{
 						repoID:            infoResp.DisplayPath,
 						repoURL:           infoResp.Source,
+						guardianURL:       infoResp.GuardianUrl,
 						branch:            infoResp.Ref,
 						filesCount:        0, // Will be updated by health checks
 						ingestedAt:        time.Now(),
@@ -1995,11 +2008,7 @@ func (r *Router) handleEarlyRecovery(nodeID string) {
 
 		// Register the repository on the returning node (it doesn't know about it)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := state.client.RegisterRepository(ctx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
-			StorageId:   storageID,
-			DisplayPath: repo.repoID,
-			Source:      repo.repoURL,
-		}))
+		_, err := state.client.RegisterRepository(ctx, trackedRepoRegisterRequest(storageID, repo))
 		cancel()
 
 		if err != nil {
@@ -2168,11 +2177,7 @@ func (r *Router) recoverNode(nodeID string, missingRepos, incompleteRepos []stri
 			"repo_url", repoInfo.repoURL)
 
 		regCtx, regCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		regResp, err := targetState.client.RegisterRepository(regCtx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
-			StorageId:   storageID,
-			DisplayPath: repoInfo.repoID,
-			Source:      repoInfo.repoURL,
-		}))
+		regResp, err := targetState.client.RegisterRepository(regCtx, trackedRepoRegisterRequest(storageID, repoInfo))
 		regCancel()
 
 		if err != nil {
@@ -2486,12 +2491,13 @@ func (r *Router) onboardNewNode(nodeID string) {
 			"new_node", nodeID)
 
 		// STEP 1: Get repository metadata from router's tracking or query a node
-		var repoURL, displayPath string
+		var repoURL, displayPath, guardianURL string
 
 		r.mu.RLock()
 		if repoInfo, ok := r.ingestedRepos[repoID]; ok {
 			repoURL = repoInfo.repoURL
 			displayPath = repoInfo.repoID // displayPath stored in repoID field
+			guardianURL = repoInfo.guardianURL
 		}
 		r.mu.RUnlock()
 
@@ -2507,6 +2513,7 @@ func (r *Router) onboardNewNode(nodeID string) {
 				if err == nil {
 					repoURL = repoInfo.Source
 					displayPath = repoInfo.DisplayPath
+					guardianURL = repoInfo.GuardianUrl
 					r.logger.Info("retrieved repository metadata from node",
 						"repo", repoID,
 						"display_path", displayPath,
@@ -2524,10 +2531,10 @@ func (r *Router) onboardNewNode(nodeID string) {
 
 		// STEP 2: Register repository on new node before syncing files
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := newNode.client.RegisterRepository(ctx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
-			StorageId:   repoID,
-			DisplayPath: displayPath,
-			Source:      repoURL,
+		_, err := newNode.client.RegisterRepository(ctx, trackedRepoRegisterRequest(repoID, &ingestedRepo{
+			repoID:      displayPath,
+			repoURL:     repoURL,
+			guardianURL: guardianURL,
 		}))
 		cancel()
 

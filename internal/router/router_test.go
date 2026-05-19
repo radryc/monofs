@@ -215,6 +215,27 @@ func TestHeartbeatNonexistentNode(t *testing.T) {
 	}
 }
 
+func TestTrackedRepoRegisterRequestPreservesGuardianURL(t *testing.T) {
+	req := trackedRepoRegisterRequest("storage-1", &ingestedRepo{
+		repoID:      "guardian/demo",
+		repoURL:     "http://localhost:8090",
+		guardianURL: "http://localhost:8090",
+	})
+
+	if got := req.GetStorageId(); got != "storage-1" {
+		t.Fatalf("storage id = %q", got)
+	}
+	if got := req.GetDisplayPath(); got != "guardian/demo" {
+		t.Fatalf("display path = %q", got)
+	}
+	if got := req.GetSource(); got != "http://localhost:8090" {
+		t.Fatalf("source = %q", got)
+	}
+	if got := req.GetGuardianUrl(); got != "http://localhost:8090" {
+		t.Fatalf("guardian url = %q", got)
+	}
+}
+
 func TestVersionIncrement(t *testing.T) {
 	cfg := DefaultRouterConfig()
 	router := NewRouter(cfg, nil)

@@ -17,6 +17,17 @@ type repositoryProductLink struct {
 	URL   string
 }
 
+func repositoryProductStoredURL(displayPath, guardianURL, sourceURL string) string {
+	storedURL := strings.TrimSpace(guardianURL)
+	if storedURL != "" {
+		return storedURL
+	}
+	if repositoryProductKind(displayPath) == "guardian" && isHTTPURL(sourceURL) {
+		return strings.TrimSpace(sourceURL)
+	}
+	return ""
+}
+
 func (r *Router) repositoryUIBases() repositoryUIBases {
 	bases := repositoryUIBases{}
 
