@@ -31,7 +31,7 @@ func main() {
 	overlayDir := flag.String("overlay", "", "Override default overlay storage location (~/.monofs/overlay)")
 	useExternalAddrs := flag.Bool("use-external-addrs", false, "Request router-advertised external node addresses (for host/WSL clients)")
 	writable := flag.Bool("writable", false, "Enable write support (changes stored client-side)")
-	virtualMonorepo := flag.Bool("virtual-monorepo", false, "Project a source-only workspace root that hides dependency, guardian, guardian-system, and nested .git paths")
+	virtualMonorepo := flag.Bool("virtual-monorepo", false, "Project a source-first workspace root that keeps dependency visible but hides doctor, guardian, guardian-system, and nested .git paths")
 	debug := flag.Bool("debug", false, "Enable MonoFS layer DEBUG logs (written to --log-file if set, else stdout)")
 	fuseDebug := flag.Bool("fuse-debug", false, "Enable go-fuse C layer debug output (very verbose, written to <log-file>.fuse or stderr)")
 	logFile := flag.String("log-file", "", "Path for structured JSON log file (DEBUG+). Stdout always gets INFO+ text.")
@@ -76,6 +76,17 @@ func main() {
 	if err := validateClientPaths(*mountpoint, *overlayDir, *cacheDir, workspaceGitStateDir); err != nil {
 		logger.Error("invalid client path configuration", "error", err)
 		os.Exit(1)
+	}
+	visibleUID := uint32(os.Getuid())
+	visibleGID := uint32(os.Getgid())
+	if strings.TrimSpace(*overlayDir) != "" {
+		uid, gid, ownerErr := monofuse.ResolvePathOwner(*overlayDir)
+		if ownerErr != nil {
+			logger.Warn("failed to derive visible owner from overlay path; falling back to process owner", "overlay", *overlayDir, "error", ownerErr)
+		} else {
+			visibleUID = uid
+			visibleGID = gid
+		}
 	}
 
 	logger.Info("starting monofs-client",
@@ -247,6 +258,7 @@ func main() {
 	} else {
 		root = monofuse.NewRoot(c, cacheLayer, logger.With("component", "fuse"))
 	}
+	root.SetVisibleOwner(visibleUID, visibleGID)
 	if *virtualMonorepo {
 		if err := root.EnableVirtualMonorepo(); err != nil {
 			logger.Error("failed to enable virtual monorepo mode", "error", err)
@@ -260,6 +272,13 @@ func main() {
 		if commitMgr != nil {
 			commitMgr.SetWorkspaceManifest(root.WorkspaceManifest())
 		}
+		c.SetTopologyChangeHook(func() {
+			syncCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := root.SyncWorkspaceGitProjection(syncCtx); err != nil {
+				logger.Warn("workspace git projection sync failed after topology change", "error", err)
+			}
+		})
 	}
 	if socketHandler != nil {
 		socketHandler.SetRootNode(root)

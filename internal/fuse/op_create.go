@@ -97,8 +97,7 @@ func (n *MonoNode) Create(ctx context.Context, name string, flags uint32, mode u
 	out.Size = 0
 	out.Ino = stable.Ino
 	out.Nlink = 1
-	out.Uid = 1000
-	out.Gid = 1000
+	n.setEntryOwner(out)
 	out.SetEntryTimeout(overlayEntryTimeout())
 	out.SetAttrTimeout(overlayEntryTimeout())
 

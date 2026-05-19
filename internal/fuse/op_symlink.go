@@ -68,8 +68,7 @@ func (n *MonoNode) Symlink(ctx context.Context, target, name string, out *fuse.E
 	out.Size = uint64(len(target))
 	out.Ino = stable.Ino
 	out.Nlink = 1
-	out.Uid = 1000
-	out.Gid = 1000
+	n.setEntryOwner(out)
 	out.SetEntryTimeout(attrTimeout())
 	out.SetAttrTimeout(attrTimeout())
 

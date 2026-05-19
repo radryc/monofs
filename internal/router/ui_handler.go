@@ -145,7 +145,11 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 				if ingestedAt.IsZero() {
 					ingestedAt = time.Now()
 				}
-				productLink := buildRepositoryProductLink(repoInfo.DisplayPath, guardianURL, uiBases)
+				productLink := buildRepositoryProductLink(
+					repoInfo.DisplayPath,
+					repositoryProductStoredURL(repoInfo.DisplayPath, guardianURL, repoInfo.Source),
+					uiBases,
+				)
 
 				repoMu.Lock()
 				repoMap[storageID] = map[string]interface{}{
@@ -180,7 +184,11 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 	// Add in-progress ingestions first
 	for storageID, progress := range inProgressSnapshot {
 		progress.mu.RLock()
-		productLink := buildRepositoryProductLink(progress.repoID, "", uiBases)
+		productLink := buildRepositoryProductLink(
+			progress.repoID,
+			repositoryProductStoredURL(progress.repoID, "", progress.repoURL),
+			uiBases,
+		)
 		repoInfo := map[string]interface{}{
 			"storage_id":         storageID,
 			"repo_id":            progress.repoID,

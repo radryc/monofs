@@ -77,6 +77,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 			out.Mode = 0444 | uint32(syscall.S_IFREG)
 			out.Size = 0 // unknown until read
 			out.Ino = hashPathForNode(childPath)
+			n.setEntryOwner(out)
 			out.SetAttrTimeout(attrTimeout())
 			out.SetEntryTimeout(attrTimeout())
 			return n.NewInode(ctx, child, fs.StableAttr{
@@ -98,8 +99,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 			out.Mode = 0755 | fuse.S_IFDIR
 			out.Ino = stable.Ino
 			out.Nlink = 2
-			out.Uid = 1000
-			out.Gid = 1000
+			n.setEntryOwner(out)
 			out.SetEntryTimeout(attrTimeout())
 			out.SetAttrTimeout(attrTimeout())
 			n.logger.Debug("lookup: found user root directory", "name", name)
@@ -126,8 +126,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 			out.Size = uint64(len(target))
 			out.Ino = stable.Ino
 			out.Nlink = 1
-			out.Uid = 1000
-			out.Gid = 1000
+			n.setEntryOwner(out)
 			out.SetEntryTimeout(attrTimeout())
 			out.SetAttrTimeout(attrTimeout())
 			n.logger.Debug("lookup: found symlink", "path", childPath, "target", target)
@@ -217,8 +216,8 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 			Atime: resp.Mtime, // Use Mtime as default for Atime/Ctime
 			Ctime: resp.Mtime,
 			Nlink: 1,
-			Uid:   1000,
-			Gid:   1000,
+			Uid:   n.owner.uid,
+			Gid:   n.owner.gid,
 		})
 	}
 
@@ -234,8 +233,7 @@ func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	out.Mtime = uint64(resp.Mtime)
 	out.Atime = uint64(resp.Mtime)
 	out.Ctime = uint64(resp.Mtime)
-	out.Uid = 1000
-	out.Gid = 1000
+	n.setEntryOwner(out)
 	out.Nlink = 1
 	if isDir {
 		out.Nlink = 2

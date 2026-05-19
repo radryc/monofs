@@ -55,6 +55,7 @@ type MonoNode struct {
 	// Optional workspace projection for virtual monorepo mode.
 	workspace    *WorkspaceManifest
 	workspaceGit workspaceGitProjection
+	owner        nodeOwner
 
 	// Logger for structured logging
 	logger *slog.Logger
@@ -115,6 +116,7 @@ func NewRoot(c client.MonoFSClient, cache *cache.Cache, logger *slog.Logger) *Mo
 		mode:   0755 | uint32(syscall.S_IFDIR),
 		client: c,
 		cache:  cache,
+		owner:  currentProcessOwner(),
 		logger: logger.With("component", "fuse"),
 	}
 }
@@ -131,6 +133,7 @@ func NewRootWithSession(c client.MonoFSClient, cache *cache.Cache, sessionMgr *S
 		client:     c,
 		cache:      cache,
 		sessionMgr: sessionMgr,
+		owner:      currentProcessOwner(),
 		logger:     logger.With("component", "fuse"),
 	}
 }
@@ -153,7 +156,8 @@ func (n *MonoNode) EnableWorkspaceGitProjection(mountPoint, stateDir string) err
 	if n.workspace == nil {
 		return fmt.Errorf("workspace git projection requires virtual monorepo mode")
 	}
-	projection, err := NewWorkspaceGitProjection(mountPoint, stateDir, n.sessionMgr, n.logger)
+	uid, gid := n.ownerIDs()
+	projection, err := NewWorkspaceGitProjection(mountPoint, stateDir, n.sessionMgr, n.logger, uid, gid)
 	if err != nil {
 		return err
 	}
@@ -204,6 +208,7 @@ func (n *MonoNode) newChild(name string, isDir bool, mode uint32, size uint64) *
 		sessionMgr:   n.sessionMgr,
 		workspace:    n.workspace,
 		workspaceGit: n.workspaceGit,
+		owner:        n.owner,
 		logger:       n.logger,
 	}
 }
@@ -400,6 +405,16 @@ func (n *MonoNode) shouldHideWorkspaceChild(name string) bool {
 	return n.workspace != nil && n.workspace.ShouldHideChild(n.path, name)
 }
 
+func (n *MonoNode) shouldReserveWorkspaceRoot(name string) bool {
+	if n.workspace == nil {
+		return false
+	}
+	if name == syntheticWorkspaceGitName {
+		return true
+	}
+	return n.workspace.ShouldReserveRoot(name)
+}
+
 func (n *MonoNode) filterWorkspaceDirEntries(entries []fuse.DirEntry) []fuse.DirEntry {
 	if n.workspace == nil {
 		return entries
@@ -472,8 +487,7 @@ func (n *MonoNode) lookupSyntheticWorkspaceEntry(ctx context.Context, name strin
 		out.Size = 0
 		out.Ino = hashPathForNode(trimmed)
 		out.Nlink = 2
-		out.Uid = 1000
-		out.Gid = 1000
+		n.setEntryOwner(out)
 		out.SetAttrTimeout(attrTimeout())
 		out.SetEntryTimeout(attrTimeout())
 		if n.EmbeddedInode() == nil {
@@ -496,8 +510,7 @@ func (n *MonoNode) lookupSyntheticWorkspaceEntry(ctx context.Context, name strin
 	out.Size = uint64(len(content))
 	out.Ino = hashPathForNode(trimmed)
 	out.Nlink = 1
-	out.Uid = 1000
-	out.Gid = 1000
+	n.setEntryOwner(out)
 	out.SetAttrTimeout(attrTimeout())
 	out.SetEntryTimeout(attrTimeout())
 	if n.EmbeddedInode() == nil {
@@ -531,8 +544,7 @@ func (n *MonoNode) getattrSyntheticWorkspacePath(ctx context.Context, out *fuse.
 		out.Mtime = now
 		out.Atime = now
 		out.Ctime = now
-		out.Uid = 1000
-		out.Gid = 1000
+		n.setAttrOwner(out)
 		out.SetTimeout(attrTimeout())
 		return 0, true
 	}
@@ -549,8 +561,7 @@ func (n *MonoNode) getattrSyntheticWorkspacePath(ctx context.Context, out *fuse.
 	out.Size = uint64(len(content))
 	out.Ino = hashPathForNode(trimmed)
 	out.Nlink = 1
-	out.Uid = 1000
-	out.Gid = 1000
+	n.setAttrOwner(out)
 	out.SetTimeout(attrTimeout())
 	return 0, true
 }
@@ -608,8 +619,7 @@ func (n *MonoNode) lookupFromOverlay(ctx context.Context, name, childPath string
 	out.Mtime = uint64(attr.Mtime)
 	out.Atime = uint64(attr.Mtime)
 	out.Ctime = uint64(attr.Mtime)
-	out.Uid = 1000
-	out.Gid = 1000
+	n.setEntryOwner(out)
 	out.Nlink = 1
 	if attr.IsDir {
 		out.Nlink = 2
@@ -636,8 +646,7 @@ func (n *MonoNode) getattrFromOverlay(out *fuse.AttrOut) syscall.Errno {
 	out.Mtime = uint64(attr.Mtime)
 	out.Atime = uint64(attr.Mtime)
 	out.Ctime = uint64(attr.Mtime)
-	out.Uid = 1000
-	out.Gid = 1000
+	n.setAttrOwner(out)
 	out.Nlink = 1
 	if attr.IsDir {
 		out.Nlink = 2

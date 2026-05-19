@@ -158,7 +158,7 @@ type BlobFileInfo struct {
 
 // SessionRequest is received from CLI
 type SessionRequest struct {
-	Action                  string `json:"action"`         // start, status, commit, discard, push, blobs-info, diff
+	Action                  string `json:"action"`         // start, status, branch, commit, discard, push, blobs-info, diff
 	Path                    string `json:"path,omitempty"` // optional file path filter (for diff)
 	ShowBlobs               bool   `json:"show_blobs,omitempty"`
 	LogicalCommitMessage    string `json:"logical_commit_message,omitempty"`
@@ -179,6 +179,7 @@ type SessionResponse struct {
 	Error           string         `json:"error,omitempty"`
 	ChangeList      []ChangeInfo   `json:"change_list,omitempty"`
 	BlobChangeList  []ChangeInfo   `json:"blob_change_list,omitempty"`
+	WorkspaceRefs   []WorkspaceRef `json:"workspace_refs,omitempty"`
 	DepsInfo        *BlobsInfoData `json:"blobs_info,omitempty"`
 	DiffData        []FileDiff     `json:"diff_data,omitempty"`
 	BlobDiffData    []FileDiff     `json:"blob_diff_data,omitempty"`
@@ -215,6 +216,13 @@ type ChangeInfo struct {
 	Repository string `json:"repository,omitempty"`
 	StorageID  string `json:"storage_id,omitempty"`
 	Timestamp  string `json:"timestamp"`
+}
+
+// WorkspaceRef describes the authoritative tracked ref for one mounted repository.
+type WorkspaceRef struct {
+	DisplayPath string `json:"display_path"`
+	Ref         string `json:"ref,omitempty"`
+	CommitHash  string `json:"commit_hash,omitempty"`
 }
 
 type sessionChangeScope int
@@ -363,6 +371,8 @@ func (h *SessionSocketHandler) handleConnection(conn net.Conn) {
 		resp = h.handleStart()
 	case "status":
 		resp = h.handleStatus(req.ShowBlobs)
+	case "branch", "refs":
+		resp = h.handleBranch()
 	case "commit":
 		resp = h.handleCommit(req)
 	case "pull", "refresh":
@@ -466,6 +476,40 @@ func (h *SessionSocketHandler) handleStatus(showBlobs bool) SessionResponse {
 		ExcludedChanges: excludedCount,
 		ChangeList:      changeList,
 		BlobChangeList:  depChangeList,
+	}
+}
+
+func (h *SessionSocketHandler) handleBranch() SessionResponse {
+	if h.rootNode == nil || h.rootNode.WorkspaceManifest() == nil {
+		return SessionResponse{
+			Success: false,
+			Error:   "workspace ref info requires a virtual-monorepo mount",
+		}
+	}
+
+	entries, err := h.rootNode.WorkspaceManifest().List(h.ctx)
+	if err != nil {
+		return SessionResponse{
+			Success: false,
+			Error:   fmt.Sprintf("list workspace repositories: %v", err),
+		}
+	}
+
+	refs := make([]WorkspaceRef, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.Included {
+			continue
+		}
+		refs = append(refs, WorkspaceRef{
+			DisplayPath: entry.Repository.DisplayPath,
+			Ref:         entry.Repository.Ref,
+			CommitHash:  entry.Repository.CommitHash,
+		})
+	}
+
+	return SessionResponse{
+		Success:       true,
+		WorkspaceRefs: refs,
 	}
 }
 
