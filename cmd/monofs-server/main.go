@@ -24,7 +24,6 @@ import (
 	kvsgrpc "github.com/rydzu/ainfra/kvs/pkg/grpcserver"
 	"github.com/rydzu/ainfra/kvs/pkg/kvsapi"
 	"github.com/rydzu/ainfra/kvs/pkg/raftstore"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
@@ -175,7 +174,7 @@ func main() {
 
 	// Create gRPC server with raised message limits for inline dep blobs
 	grpcServer := grpc.NewServer(
-		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
 		grpc.MaxRecvMsgSize(256*1024*1024), // 256 MB
 		grpc.MaxSendMsgSize(256*1024*1024),
 	)

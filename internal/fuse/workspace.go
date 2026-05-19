@@ -24,7 +24,7 @@ const (
 	syntheticWorkspaceSystemPath     = ".monofs/system"
 	syntheticWorkspaceManifestPath   = ".monofs/workspace.json"
 	workspaceManifestTTL             = 30 * time.Second
-	monorepoGitignore                = "/.git\n/dependency/\n/guardian/\n/guardian-system/\n/.monofs/\n**/.git\n"
+	monorepoGitignore                = "/.git\n/dependency/\n/doctor/\n/guardian/\n/guardian-system/\n/.monofs/\n**/.git\n"
 )
 
 // WorkspaceExclusionReason explains why a repository or path is hidden from
@@ -38,7 +38,14 @@ const (
 )
 
 var hiddenWorkspaceRoots = map[string]WorkspaceExclusionReason{
+	"doctor":          WorkspaceExcludedSystemNamespace,
+	"guardian":        WorkspaceExcludedSystemNamespace,
+	"guardian-system": WorkspaceExcludedSystemNamespace,
+}
+
+var excludedWorkspaceRoots = map[string]WorkspaceExclusionReason{
 	"dependency":      WorkspaceExcludedSystemNamespace,
+	"doctor":          WorkspaceExcludedSystemNamespace,
 	"guardian":        WorkspaceExcludedSystemNamespace,
 	"guardian-system": WorkspaceExcludedSystemNamespace,
 }
@@ -99,7 +106,7 @@ func (m *WorkspaceManifest) List(ctx context.Context) ([]WorkspaceManifestEntry,
 
 	entries := make([]WorkspaceManifestEntry, 0, len(repos))
 	for _, repo := range repos {
-		reason, hidden := workspaceHiddenPath(repo.DisplayPath)
+		reason, hidden := workspaceExcludedPath(repo.DisplayPath)
 		entries = append(entries, WorkspaceManifestEntry{
 			Repository:      repo,
 			Included:        !hidden,
@@ -126,7 +133,7 @@ func (m *WorkspaceManifest) List(ctx context.Context) ([]WorkspaceManifestEntry,
 // that path is part of the projected source-root.
 func (m *WorkspaceManifest) ResolvePath(ctx context.Context, path string) (*WorkspacePathResolution, error) {
 	trimmed := strings.Trim(path, "/")
-	reason, hidden := workspaceHiddenPath(trimmed)
+	reason, hidden := workspaceExcludedPath(trimmed)
 	resolution := &WorkspacePathResolution{
 		Path:            trimmed,
 		Included:        !hidden,
@@ -176,6 +183,17 @@ func (m *WorkspaceManifest) ShouldHidePath(path string) bool {
 	}
 	_, hidden := workspaceHiddenPath(path)
 	return hidden
+}
+
+func (m *WorkspaceManifest) ShouldReserveRoot(name string) bool {
+	if m == nil {
+		return false
+	}
+	if name == syntheticWorkspaceControlDirName {
+		return true
+	}
+	_, reserved := workspaceExcludedPath(name)
+	return reserved
 }
 
 func (m *WorkspaceManifest) ShouldHideChild(parentPath, name string) bool {
@@ -328,6 +346,14 @@ func backendPathForSystemView(path string) (string, bool) {
 }
 
 func workspaceHiddenPath(path string) (WorkspaceExclusionReason, bool) {
+	return workspacePathExclusion(path, hiddenWorkspaceRoots)
+}
+
+func workspaceExcludedPath(path string) (WorkspaceExclusionReason, bool) {
+	return workspacePathExclusion(path, excludedWorkspaceRoots)
+}
+
+func workspacePathExclusion(path string, roots map[string]WorkspaceExclusionReason) (WorkspaceExclusionReason, bool) {
 	trimmed := strings.Trim(path, "/")
 	if trimmed == "" {
 		return WorkspaceExcludedNone, false
@@ -340,7 +366,7 @@ func workspaceHiddenPath(path string) (WorkspaceExclusionReason, bool) {
 	}
 
 	parts := strings.Split(trimmed, "/")
-	if reason, exists := hiddenWorkspaceRoots[parts[0]]; exists {
+	if reason, exists := roots[parts[0]]; exists {
 		return reason, true
 	}
 	for _, part := range parts {

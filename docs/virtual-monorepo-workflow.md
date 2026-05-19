@@ -94,7 +94,8 @@ Keep the overlay, cache, and workspace Git state outside the mountpoint. If the 
 In virtual-monorepo mode, the mount root is shaped for source development.
 
 - Repository content remains available at natural paths such as `github.com/acme/service-a`.
-- Root-level system namespaces such as `dependency/`, `guardian/`, and `guardian-system/` are hidden from the projected source root.
+- `dependency/` stays visible at the projected root so local build caches and pushed blob-backed artifacts remain reachable.
+- Root-level system namespaces such as `doctor/`, `guardian/`, and `guardian-system/` are hidden from the projected source root.
 - Nested repository `.git` directories are hidden throughout the mount.
 - MonoFS synthesizes a root `.git`, `.gitignore`, and `.monofs/workspace.json` so root-level Git tooling can work against the projected workspace.
 

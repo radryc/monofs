@@ -47,3 +47,21 @@ func TestBuildRepositoryProductLinkIgnoresUnmanagedRepos(t *testing.T) {
 		t.Fatalf("unexpected link = %+v", link)
 	}
 }
+
+func TestRepositoryProductStoredURLFallsBackToGuardianSource(t *testing.T) {
+	t.Parallel()
+
+	got := repositoryProductStoredURL("guardian/demo", "", "http://localhost:8090")
+	if got != "http://localhost:8090" {
+		t.Fatalf("stored url = %q", got)
+	}
+}
+
+func TestRepositoryProductStoredURLIgnoresUnmanagedSource(t *testing.T) {
+	t.Parallel()
+
+	got := repositoryProductStoredURL("github.com/acme/repo", "", "https://github.com/acme/repo")
+	if got != "" {
+		t.Fatalf("stored url = %q, want empty", got)
+	}
+}

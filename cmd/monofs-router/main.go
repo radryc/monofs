@@ -21,7 +21,6 @@ import (
 	"github.com/radryc/monofs/internal/storage"
 	gitstorage "github.com/radryc/monofs/internal/storage/git"
 	"github.com/radryc/monofs/internal/telemetry"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -228,7 +227,7 @@ func main() {
 	grpcServer := grpc.NewServer(
 		grpc.MaxRecvMsgSize(256*1024*1024),
 		grpc.MaxSendMsgSize(256*1024*1024),
-		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second, // Allow pings every 5s (prevents too_many_pings)
 			PermitWithoutStream: true,            // Allow pings even when no streams active

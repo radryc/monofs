@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	pb "github.com/radryc/monofs/api/proto"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/stats"
 )
 
 func TestWrapSlogHandlerAddsTraceContextToBaseLogs(t *testing.T) {
@@ -40,5 +42,36 @@ func TestWrapSlogHandlerAddsTraceContextToBaseLogs(t *testing.T) {
 	}
 	if !strings.Contains(output, "path=/repo/missing.txt") {
 		t.Fatalf("expected original attrs in log output, got %q", output)
+	}
+}
+
+func TestShouldInstrumentGRPCServerRPCExcludesDoctorIngestMethods(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		fullMethod string
+		want       bool
+	}{
+		{name: "server ingest logs", fullMethod: pb.MonoFS_IngestLogs_FullMethodName, want: false},
+		{name: "server ingest metrics", fullMethod: pb.MonoFS_IngestMetrics_FullMethodName, want: false},
+		{name: "server ingest traces", fullMethod: pb.MonoFS_IngestTraces_FullMethodName, want: false},
+		{name: "router ingest logs", fullMethod: pb.MonoFSRouter_IngestLogs_FullMethodName, want: false},
+		{name: "router ingest metrics", fullMethod: pb.MonoFSRouter_IngestMetrics_FullMethodName, want: false},
+		{name: "router ingest traces", fullMethod: pb.MonoFSRouter_IngestTraces_FullMethodName, want: false},
+		{name: "normal read rpc", fullMethod: pb.MonoFS_Read_FullMethodName, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &stats.RPCTagInfo{FullMethodName: tc.fullMethod}
+			if got := ShouldInstrumentGRPCServerRPC(info); got != tc.want {
+				t.Fatalf("ShouldInstrumentGRPCServerRPC(%q) = %v, want %v", tc.fullMethod, got, tc.want)
+			}
+		})
+	}
+
+	if got := ShouldInstrumentGRPCServerRPC(nil); !got {
+		t.Fatal("ShouldInstrumentGRPCServerRPC(nil) = false, want true")
 	}
 }

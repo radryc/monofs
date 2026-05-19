@@ -528,10 +528,11 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 		repoURLValue = group.displayPath
 	}
 	r.ingestedRepos[group.storageID] = &ingestedRepo{
-		repoID:     group.displayPath,
-		repoURL:    repoURLValue,
-		filesCount: int64(len(group.files)),
-		ingestedAt: time.Now(),
+		repoID:      group.displayPath,
+		repoURL:     repoURLValue,
+		guardianURL: repoURL,
+		filesCount:  int64(len(group.files)),
+		ingestedAt:  time.Now(),
 	}
 	r.mu.Unlock()
 	r.bumpNativeNamespaceGeneration("guardian upsert")

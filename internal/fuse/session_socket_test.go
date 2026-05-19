@@ -126,7 +126,6 @@ func TestSessionSocketPullRefreshesIncludedWorkspaceRepos(t *testing.T) {
 	if len(refresher.calls) != 1 {
 		t.Fatalf("refresh calls = %d, want 1", len(refresher.calls))
 	}
-
 	got := make([]string, 0, len(refresher.calls[0]))
 	for _, repo := range refresher.calls[0] {
 		got = append(got, repo.DisplayPath)
@@ -134,6 +133,34 @@ func TestSessionSocketPullRefreshesIncludedWorkspaceRepos(t *testing.T) {
 	sort.Strings(got)
 	if strings.Join(got, ",") != "github.com/acme/doctor,github.com/acme/guardian,github.com/acme/monofs" {
 		t.Fatalf("pull repos = %v", got)
+	}
+}
+
+func TestSessionSocketBranchListsIncludedWorkspaceRefs(t *testing.T) {
+	handler, _ := newVirtualMonorepoSessionHandler(t)
+
+	resp := handler.handleBranch()
+	if !resp.Success {
+		t.Fatalf("handleBranch() error = %s", resp.Error)
+	}
+	if len(resp.WorkspaceRefs) != 3 {
+		t.Fatalf("handleBranch() refs = %d, want 3", len(resp.WorkspaceRefs))
+	}
+
+	got := make([]string, 0, len(resp.WorkspaceRefs))
+	for _, ref := range resp.WorkspaceRefs {
+		if strings.HasPrefix(ref.DisplayPath, "dependency/") {
+			t.Fatalf("dependency repo leaked into branch output: %+v", ref)
+		}
+		got = append(got, ref.DisplayPath+"@"+ref.Ref+"#"+ref.CommitHash)
+	}
+	want := []string{
+		"github.com/acme/doctor@release/2026-05#ccccccc3",
+		"github.com/acme/guardian@main#bbbbbbb2",
+		"github.com/acme/monofs@main#aaaaaaa1",
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("handleBranch() refs = %v, want %v", got, want)
 	}
 }
 
@@ -178,10 +205,10 @@ func newVirtualMonorepoSessionHandler(t *testing.T) (*SessionSocketHandler, *Ses
 	}
 	root := NewRootWithSession(&mockClient{
 		workspaceRepos: []monoclient.WorkspaceRepository{
-			{StorageID: "repo-monofs", DisplayPath: "github.com/acme/monofs"},
-			{StorageID: "repo-guardian", DisplayPath: "github.com/acme/guardian"},
-			{StorageID: "repo-doctor", DisplayPath: "github.com/acme/doctor"},
-			{StorageID: "dep-cache", DisplayPath: "dependency/go/mod/cache"},
+			{StorageID: "repo-monofs", DisplayPath: "github.com/acme/monofs", Ref: "main", CommitHash: "aaaaaaa1"},
+			{StorageID: "repo-guardian", DisplayPath: "github.com/acme/guardian", Ref: "main", CommitHash: "bbbbbbb2"},
+			{StorageID: "repo-doctor", DisplayPath: "github.com/acme/doctor", Ref: "release/2026-05", CommitHash: "ccccccc3"},
+			{StorageID: "dep-cache", DisplayPath: "dependency/go/mod/cache", Ref: "blob", CommitHash: "ddddddd4"},
 		},
 	}, nil, sessionMgr, testLogger())
 	if err := root.EnableVirtualMonorepo(); err != nil {
