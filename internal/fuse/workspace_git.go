@@ -34,11 +34,12 @@ type WorkspaceGitProjection struct {
 	gitDir     string
 	sessionMgr *SessionManager
 	logger     *slog.Logger
+	owner      nodeOwner
 
 	mu sync.Mutex
 }
 
-func NewWorkspaceGitProjection(mountPoint, stateDir string, sessionMgr *SessionManager, logger *slog.Logger) (*WorkspaceGitProjection, error) {
+func NewWorkspaceGitProjection(mountPoint, stateDir string, sessionMgr *SessionManager, logger *slog.Logger, uid, gid uint32) (*WorkspaceGitProjection, error) {
 	if strings.TrimSpace(mountPoint) == "" {
 		return nil, fmt.Errorf("workspace git projection requires a mount point")
 	}
@@ -60,8 +61,16 @@ func NewWorkspaceGitProjection(mountPoint, stateDir string, sessionMgr *SessionM
 		mountPoint: mountPoint,
 		gitDir:     gitDir,
 		sessionMgr: sessionMgr,
+		owner:      nodeOwner{uid: uid, gid: gid},
 		logger:     logger.With("component", "workspace-git", "mount", mountPoint),
 	}, nil
+}
+
+func (p *WorkspaceGitProjection) SetOwner(uid, gid uint32) {
+	if p == nil {
+		return
+	}
+	p.owner = nodeOwner{uid: uid, gid: gid}
 }
 
 func workspaceGitProjectionKey(mountPoint string) string {
@@ -85,6 +94,9 @@ func (p *WorkspaceGitProjection) Sync(ctx context.Context) error {
 		return err
 	}
 	if err := p.writeInfoExclude(); err != nil {
+		return err
+	}
+	if err := p.ensureOwnership(); err != nil {
 		return err
 	}
 	if err := p.removeExcludedPathsFromIndex(ctx); err != nil {
@@ -131,7 +143,22 @@ func (p *WorkspaceGitProjection) ensureRepo(ctx context.Context) error {
 	if err := p.runGitBare(ctx, "init", "--bare", p.gitDir); err != nil {
 		return err
 	}
+	if err := p.ensureOwnership(); err != nil {
+		return err
+	}
 	return p.configureRepo(ctx)
+}
+
+func (p *WorkspaceGitProjection) ensureOwnership() error {
+	if p == nil {
+		return nil
+	}
+	for _, path := range []string{filepath.Dir(p.gitDir), p.gitDir} {
+		if err := ensurePathOwner(path, p.owner); err != nil {
+			return fmt.Errorf("ensure workspace git ownership for %q: %w", path, err)
+		}
+	}
+	return nil
 }
 
 func (p *WorkspaceGitProjection) configureRepo(ctx context.Context) error {

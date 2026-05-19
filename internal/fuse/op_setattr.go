@@ -122,8 +122,7 @@ func (n *MonoNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 	out.Mtime = now
 	out.Atime = now
 	out.Ctime = now
-	out.Uid = 1000
-	out.Gid = 1000
+	n.setAttrOwner(out)
 	out.Nlink = 1
 	out.SetTimeout(overlayEntryTimeout())
 	return 0

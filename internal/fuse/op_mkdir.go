@@ -32,7 +32,7 @@ func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 
 	// Handle root-level user directory creation
 	if n.path == "" {
-		if n.shouldHideWorkspaceChild(name) {
+		if n.shouldReserveWorkspaceRoot(name) {
 			n.logger.Warn("mkdir: reserved virtual monorepo path", "path", name)
 			return nil, syscall.EPERM
 		}
@@ -52,8 +52,7 @@ func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 		out.Mode = mode | fuse.S_IFDIR
 		out.Ino = stable.Ino
 		out.Nlink = 2
-		out.Uid = 1000
-		out.Gid = 1000
+		n.setEntryOwner(out)
 		out.SetEntryTimeout(attrTimeout())
 		out.SetAttrTimeout(attrTimeout())
 
@@ -102,8 +101,7 @@ func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 	out.Mode = mode | fuse.S_IFDIR
 	out.Ino = stable.Ino
 	out.Nlink = 2
-	out.Uid = 1000
-	out.Gid = 1000
+	n.setEntryOwner(out)
 	out.SetEntryTimeout(attrTimeout())
 	out.SetAttrTimeout(attrTimeout())
 

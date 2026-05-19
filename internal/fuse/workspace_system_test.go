@@ -56,7 +56,10 @@ func TestVirtualMonorepoSystemViewExposesHiddenNamespaces(t *testing.T) {
 	if !strings.Contains(joined, syntheticWorkspaceControlDirName) {
 		t.Fatalf("root listing missing %q: %v", syntheticWorkspaceControlDirName, names)
 	}
-	if strings.Contains(joined, "dependency") || strings.Contains(joined, "guardian") {
+	if !strings.Contains(joined, "dependency") {
+		t.Fatalf("root listing missing visible dependency namespace: %v", names)
+	}
+	if strings.Contains(joined, "doctor") || strings.Contains(joined, "guardian") {
 		t.Fatalf("hidden namespaces leaked into workspace root: %v", names)
 	}
 
@@ -130,20 +133,26 @@ func TestVirtualMonorepoWorkspaceManifestFile(t *testing.T) {
 	}
 
 	foundSource := false
-	foundExcluded := false
+	foundDependencyExcluded := false
+	foundDoctorExcluded := false
 	for _, repo := range doc.Repositories {
 		switch repo.DisplayPath {
 		case "github.com/acme/monofs":
 			foundSource = repo.Included
 		case "dependency/go/mod/cache":
-			foundExcluded = !repo.Included && repo.ExclusionReason == string(WorkspaceExcludedSystemNamespace)
+			foundDependencyExcluded = !repo.Included && repo.ExclusionReason == string(WorkspaceExcludedSystemNamespace)
+		case "doctor/v1":
+			foundDoctorExcluded = !repo.Included && repo.ExclusionReason == string(WorkspaceExcludedSystemNamespace)
 		}
 	}
 	if !foundSource {
 		t.Fatal("workspace manifest JSON missing included source repo")
 	}
-	if !foundExcluded {
+	if !foundDependencyExcluded {
 		t.Fatal("workspace manifest JSON missing excluded dependency repo")
+	}
+	if !foundDoctorExcluded {
+		t.Fatal("workspace manifest JSON missing excluded doctor namespace repo")
 	}
 }
 
@@ -213,6 +222,7 @@ func newWorkspaceViewMockClient() *workspaceViewMockClient {
 			{StorageID: "repo-monofs", DisplayPath: "github.com/acme/monofs", Source: "git@example/monofs", Ref: "main", CommitHash: "abc123"},
 			{StorageID: "repo-guardian", DisplayPath: "github.com/acme/guardian", Source: "git@example/guardian", Ref: "main", CommitHash: "def456"},
 			{StorageID: "repo-doctor", DisplayPath: "github.com/acme/doctor", Source: "git@example/doctor", Ref: "main", CommitHash: "ghi789"},
+			{StorageID: "doctor-managed", DisplayPath: "doctor/v1", Source: "system:doctor"},
 			{StorageID: "dep-cache", DisplayPath: "dependency/go/mod/cache", Source: "system:dependency"},
 		},
 	}

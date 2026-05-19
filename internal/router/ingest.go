@@ -68,6 +68,27 @@ func normalizeRepoID(repoURL string) string {
 	return strings.TrimSuffix(repoURL, ".git")
 }
 
+func reservedManagedDisplayPathConflict(displayPath string, ingestionType pb.IngestionType) error {
+	displayPath = strings.Trim(strings.TrimSpace(displayPath), "/")
+	if displayPath == "" || ingestionType == pb.IngestionType_INGESTION_GUARDIAN {
+		return nil
+	}
+
+	switch {
+	case displayPath == "guardian",
+		displayPath == "guardian-system",
+		displayPath == "doctor",
+		strings.HasPrefix(displayPath, "guardian/"),
+		strings.HasPrefix(displayPath, "doctor/"):
+		return fmt.Errorf(
+			"display path %q is reserved for managed guardian/doctor namespaces; use a full repo path such as github.com/owner/repo",
+			displayPath,
+		)
+	default:
+		return nil
+	}
+}
+
 // IngestRepository implements the IngestRepository RPC with streaming progress.
 func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_IngestRepositoryServer) error {
 	routerIngestRepositoriesTotal.Inc()
@@ -120,6 +141,9 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 	// Guardian partitions always live under guardian/ prefix
 	if req.IngestionType == pb.IngestionType_INGESTION_GUARDIAN {
 		displayPath = "guardian/" + req.SourceId
+	}
+	if err := reservedManagedDisplayPathConflict(displayPath, req.IngestionType); err != nil {
+		return err
 	}
 
 	// Step 2: Generate internal storage ID (SHA-256 hash)
