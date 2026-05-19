@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"testing"
 
+	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
 )
 
@@ -146,5 +147,69 @@ func TestStorageIDCollisionResistance(t *testing.T) {
 			t.Errorf("collision: %q and %q produce same storage ID", input, existing)
 		}
 		seen[storageID] = input
+	}
+}
+
+func TestReservedManagedDisplayPathConflict(t *testing.T) {
+	tests := []struct {
+		name          string
+		displayPath   string
+		ingestionType pb.IngestionType
+		wantErr       bool
+	}{
+		{
+			name:          "guardian root reserved",
+			displayPath:   "guardian",
+			ingestionType: pb.IngestionType_INGESTION_GIT,
+			wantErr:       true,
+		},
+		{
+			name:          "guardian partition reserved",
+			displayPath:   "guardian/dev-workspace",
+			ingestionType: pb.IngestionType_INGESTION_GIT,
+			wantErr:       true,
+		},
+		{
+			name:          "guardian system reserved",
+			displayPath:   "guardian-system",
+			ingestionType: pb.IngestionType_INGESTION_GIT,
+			wantErr:       true,
+		},
+		{
+			name:          "doctor root reserved",
+			displayPath:   "doctor",
+			ingestionType: pb.IngestionType_INGESTION_GIT,
+			wantErr:       true,
+		},
+		{
+			name:          "doctor version reserved",
+			displayPath:   "doctor/v1",
+			ingestionType: pb.IngestionType_INGESTION_GIT,
+			wantErr:       true,
+		},
+		{
+			name:          "guardian ingestion allowed",
+			displayPath:   "guardian/dev-workspace",
+			ingestionType: pb.IngestionType_INGESTION_GUARDIAN,
+			wantErr:       false,
+		},
+		{
+			name:          "normal repo allowed",
+			displayPath:   "github.com/radryc/guardian",
+			ingestionType: pb.IngestionType_INGESTION_GIT,
+			wantErr:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := reservedManagedDisplayPathConflict(tt.displayPath, tt.ingestionType)
+			if tt.wantErr && err == nil {
+				t.Fatalf("reservedManagedDisplayPathConflict(%q, %v) = nil, want error", tt.displayPath, tt.ingestionType)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("reservedManagedDisplayPathConflict(%q, %v) error = %v, want nil", tt.displayPath, tt.ingestionType, err)
+			}
+		})
 	}
 }

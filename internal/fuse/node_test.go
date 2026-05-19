@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -482,6 +483,7 @@ func TestVirtualMonorepoRootFiltersNamespacesAndAddsGitignore(t *testing.T) {
 			{Name: "dependency", Mode: 0755 | uint32(syscall.S_IFDIR), Ino: 3},
 			{Name: "guardian", Mode: 0755 | uint32(syscall.S_IFDIR), Ino: 4},
 			{Name: "guardian-system", Mode: 0755 | uint32(syscall.S_IFDIR), Ino: 5},
+			{Name: "doctor", Mode: 0755 | uint32(syscall.S_IFDIR), Ino: 6},
 		},
 	}, nil, testLogger())
 	if err := root.EnableVirtualMonorepo(); err != nil {
@@ -501,7 +503,10 @@ func TestVirtualMonorepoRootFiltersNamespacesAndAddsGitignore(t *testing.T) {
 	if !strings.Contains(joined, "github.com") || !strings.Contains(joined, "gitlab.com") {
 		t.Fatalf("root listing missing expected source namespaces: %v", names)
 	}
-	for _, hidden := range []string{"dependency", "guardian", "guardian-system"} {
+	if !strings.Contains(joined, "dependency") {
+		t.Fatalf("root listing missing visible dependency namespace: %v", names)
+	}
+	for _, hidden := range []string{"doctor", "guardian", "guardian-system"} {
 		if strings.Contains(joined, hidden) {
 			t.Fatalf("root listing should hide %q: %v", hidden, names)
 		}
@@ -545,6 +550,49 @@ func TestVirtualMonorepoServesSyntheticRootGitFile(t *testing.T) {
 	}
 	if got, want := entryOut.Size, uint64(len(content)); got != want {
 		t.Fatalf("Lookup(.git) size = %d, want %d", got, want)
+	}
+}
+
+func TestVisibleOwnerAppliesToRootAndSyntheticWorkspaceFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable not available")
+	}
+
+	const wantUID = 4242
+	const wantGID = 4343
+
+	root := NewRoot(&mockClient{}, nil, testLogger())
+	root.SetVisibleOwner(wantUID, wantGID)
+
+	var rootAttr fuse.AttrOut
+	if errno := root.Getattr(context.Background(), nil, &rootAttr); errno != 0 {
+		t.Fatalf("Getattr(root) errno = %v", errno)
+	}
+	if rootAttr.Uid != wantUID || rootAttr.Gid != wantGID {
+		t.Fatalf("Getattr(root) owner = (%d, %d), want (%d, %d)", rootAttr.Uid, rootAttr.Gid, wantUID, wantGID)
+	}
+
+	if err := root.EnableVirtualMonorepo(); err != nil {
+		t.Fatalf("EnableVirtualMonorepo() error = %v", err)
+	}
+	if err := root.EnableWorkspaceGitProjection(t.TempDir(), t.TempDir()); err != nil {
+		t.Fatalf("EnableWorkspaceGitProjection() error = %v", err)
+	}
+
+	var gitignoreOut fuse.EntryOut
+	if _, errno := root.Lookup(context.Background(), syntheticGitignoreName, &gitignoreOut); errno != 0 {
+		t.Fatalf("Lookup(.gitignore) errno = %v", errno)
+	}
+	if gitignoreOut.Uid != wantUID || gitignoreOut.Gid != wantGID {
+		t.Fatalf("Lookup(.gitignore) owner = (%d, %d), want (%d, %d)", gitignoreOut.Uid, gitignoreOut.Gid, wantUID, wantGID)
+	}
+
+	var gitOut fuse.EntryOut
+	if _, errno := root.Lookup(context.Background(), syntheticWorkspaceGitName, &gitOut); errno != 0 {
+		t.Fatalf("Lookup(.git) errno = %v", errno)
+	}
+	if gitOut.Uid != wantUID || gitOut.Gid != wantGID {
+		t.Fatalf("Lookup(.git) owner = (%d, %d), want (%d, %d)", gitOut.Uid, gitOut.Gid, wantUID, wantGID)
 	}
 }
 
@@ -610,6 +658,9 @@ func TestVirtualMonorepoRejectsReservedWrites(t *testing.T) {
 	if _, errno := root.Mkdir(context.Background(), "dependency", 0755, &entryOut); errno != syscall.EPERM {
 		t.Fatalf("Mkdir(dependency) errno = %v, want %v", errno, syscall.EPERM)
 	}
+	if _, errno := root.Mkdir(context.Background(), "doctor", 0755, &entryOut); errno != syscall.EPERM {
+		t.Fatalf("Mkdir(doctor) errno = %v, want %v", errno, syscall.EPERM)
+	}
 	if _, errno := root.Mkdir(context.Background(), syntheticWorkspaceGitName, 0755, &entryOut); errno != syscall.EPERM {
 		t.Fatalf("Mkdir(.git) errno = %v, want %v", errno, syscall.EPERM)
 	}
@@ -664,6 +715,54 @@ func TestWorkspaceManifestResolvePath(t *testing.T) {
 	}
 	if mockCli.resolveCalls != 0 {
 		t.Fatalf("ResolveWorkspacePath() calls = %d, want 0", mockCli.resolveCalls)
+	}
+}
+
+func TestVisibleOwnerAppliesToOverlayEntries(t *testing.T) {
+	const wantUID = 4242
+	const wantGID = 4343
+
+	sessionMgr, err := NewSessionManager(t.TempDir(), testLogger())
+	if err != nil {
+		t.Fatalf("NewSessionManager() error = %v", err)
+	}
+	root := NewRootWithSession(&pathMockClient{}, nil, sessionMgr, testLogger())
+	root.SetVisibleOwner(wantUID, wantGID)
+
+	if err := sessionMgr.CreateUserRootDir("scratch"); err != nil {
+		t.Fatalf("CreateUserRootDir() error = %v", err)
+	}
+
+	scratchNode := root.newChild("scratch", true, 0755|uint32(syscall.S_IFDIR), 0)
+	var scratchAttr fuse.AttrOut
+	if errno := scratchNode.Getattr(context.Background(), nil, &scratchAttr); errno != 0 {
+		t.Fatalf("Getattr(scratch) errno = %v", errno)
+	}
+	if scratchAttr.Uid != wantUID || scratchAttr.Gid != wantGID {
+		t.Fatalf("Getattr(scratch) owner = (%d, %d), want (%d, %d)", scratchAttr.Uid, scratchAttr.Gid, wantUID, wantGID)
+	}
+
+	localPath, err := sessionMgr.GetLocalPath("scratch/note.txt")
+	if err != nil {
+		t.Fatalf("GetLocalPath() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(localPath), err)
+	}
+	if err := os.WriteFile(localPath, []byte("note\n"), 0644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", localPath, err)
+	}
+	if err := sessionMgr.TrackChange(ChangeCreate, "scratch/note.txt", ""); err != nil {
+		t.Fatalf("TrackChange() error = %v", err)
+	}
+
+	fileNode := scratchNode.newChild("note.txt", false, 0644|uint32(syscall.S_IFREG), 0)
+	var fileAttr fuse.AttrOut
+	if errno := fileNode.Getattr(context.Background(), nil, &fileAttr); errno != 0 {
+		t.Fatalf("Getattr(scratch/note.txt) errno = %v", errno)
+	}
+	if fileAttr.Uid != wantUID || fileAttr.Gid != wantGID {
+		t.Fatalf("Getattr(scratch/note.txt) owner = (%d, %d), want (%d, %d)", fileAttr.Uid, fileAttr.Gid, wantUID, wantGID)
 	}
 }
 

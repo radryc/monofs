@@ -26,6 +26,7 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 		out.Size = uint64(len(errorMsg))
 		out.Ino = 0xFFFFFFFF
 		out.Nlink = 1
+		n.setAttrOwner(out)
 		out.SetTimeout(1 * time.Second)
 		return 0
 	}
@@ -39,8 +40,7 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 		out.Mtime = now
 		out.Atime = now
 		out.Ctime = now
-		out.Uid = 1000
-		out.Gid = 1000
+		n.setAttrOwner(out)
 		out.SetTimeout(attrTimeout())
 		return 0
 	}
@@ -68,8 +68,7 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 			out.Mtime = now
 			out.Atime = now
 			out.Ctime = now
-			out.Uid = 1000
-			out.Gid = 1000
+			n.setAttrOwner(out)
 			out.Ino = hashPathForNode(n.path)
 			out.SetTimeout(attrTimeout())
 			return 0
@@ -86,8 +85,7 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 			out.Mtime = now
 			out.Atime = now
 			out.Ctime = now
-			out.Uid = 1000
-			out.Gid = 1000
+			n.setAttrOwner(out)
 			out.Ino = hashPathForNode(n.path)
 			out.SetTimeout(attrTimeout())
 			n.logger.Debug("getattr: user root directory", "path", n.path)
@@ -109,8 +107,7 @@ func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 			out.Mtime = now
 			out.Atime = now
 			out.Ctime = now
-			out.Uid = 1000
-			out.Gid = 1000
+			n.setAttrOwner(out)
 			out.Ino = hashPathForNode(n.path)
 			out.SetTimeout(attrTimeout())
 			n.logger.Debug("getattr: symlink", "path", n.path, "target", state.SymlinkTarget)

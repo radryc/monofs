@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -27,7 +28,7 @@ func TestWorkspaceGitProjectionSyncCreatesCleanRepoAndTracksChanges(t *testing.T
 		t.Fatalf("WriteFile(main.go) error = %v", err)
 	}
 
-	projection, err := NewWorkspaceGitProjection(mountPoint, stateDir, nil, testLogger())
+	projection, err := NewWorkspaceGitProjection(mountPoint, stateDir, nil, testLogger(), uint32(os.Getuid()), uint32(os.Getgid()))
 	if err != nil {
 		t.Fatalf("NewWorkspaceGitProjection() error = %v", err)
 	}
@@ -92,7 +93,7 @@ func TestWorkspaceGitProjectionExcludesUserRootDirs(t *testing.T) {
 		t.Fatalf("WriteFile(.gitignore) error = %v", err)
 	}
 
-	projection, err := NewWorkspaceGitProjection(mountPoint, stateDir, sessionMgr, testLogger())
+	projection, err := NewWorkspaceGitProjection(mountPoint, stateDir, sessionMgr, testLogger(), uint32(os.Getuid()), uint32(os.Getgid()))
 	if err != nil {
 		t.Fatalf("NewWorkspaceGitProjection() error = %v", err)
 	}
@@ -107,6 +108,28 @@ func TestWorkspaceGitProjectionExcludesUserRootDirs(t *testing.T) {
 	}
 	if got := gitStatusShort(t, mountPoint); got != "" {
 		t.Fatalf("git status with excluded user dir = %q, want clean worktree", got)
+	}
+}
+
+func TestResolvePathOwnerReturnsNearestExistingAncestorOwner(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "missing", "overlay")
+
+	uid, gid, err := ResolvePathOwner(target)
+	if err != nil {
+		t.Fatalf("ResolvePathOwner() error = %v", err)
+	}
+
+	info, err := os.Stat(base)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", base, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("temp dir stat did not expose uid/gid")
+	}
+	if uid != stat.Uid || gid != stat.Gid {
+		t.Fatalf("ResolvePathOwner() = (%d, %d), want (%d, %d)", uid, gid, stat.Uid, stat.Gid)
 	}
 }
 
