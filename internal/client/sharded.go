@@ -66,6 +66,10 @@ type ShardedClient struct {
 
 	// Guardian visibility
 	guardianVisible bool
+
+	// Optional hook invoked after the client loads its first topology or when
+	// the router reports a newer cluster version.
+	topologyChangeHook func()
 }
 
 // ShardedClientConfig holds configuration for ShardedClient.
@@ -358,12 +362,12 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 	}
 
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
 
 	// Mark connected since we successfully talked to router
 	sc.connected = true
 	sc.lastError = nil
 	sc.guardianVisible = true
+	firstTopologyLoad := sc.hrw == nil
 
 	// Node health state comes exclusively from the router via UpdateNodeHealthFromProto().
 	// The router is the single source of truth for node health.
@@ -378,6 +382,7 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 	if topologyChanged {
 		sc.clusterVersion = resp.Version
 	}
+	shouldNotifyTopology := firstTopologyLoad || topologyChanged
 
 	// Log node health state after update
 	if sc.logger != nil {
@@ -408,6 +413,11 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 
 	// Only manage connections if topology changed (new/removed nodes)
 	if !topologyChanged {
+		hook := sc.topologyChangeHook
+		sc.mu.Unlock()
+		if shouldNotifyTopology && hook != nil {
+			hook()
+		}
 		return nil
 	}
 
@@ -456,7 +466,24 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 		}
 	}
 
+	hook := sc.topologyChangeHook
+	sc.mu.Unlock()
+	if shouldNotifyTopology && hook != nil {
+		hook()
+	}
+
 	return nil
+}
+
+// SetTopologyChangeHook installs a callback that runs after the client loads
+// its first topology and whenever the router reports a newer cluster version.
+func (sc *ShardedClient) SetTopologyChangeHook(hook func()) {
+	if sc == nil {
+		return
+	}
+	sc.mu.Lock()
+	sc.topologyChangeHook = hook
+	sc.mu.Unlock()
 }
 
 func splitDisplayPath(fullPath string) (displayPath, filePath string, ok bool) {

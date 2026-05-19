@@ -9,6 +9,7 @@ You use it after `monofs-client` has mounted a workspace with `--writable --over
 Most day-to-day work comes down to a small set of commands:
 
 - `status`: see what changed in the current overlay session
+- `branch`: inspect the authoritative tracked refs for the mounted repositories
 - `diff`: inspect the pending source changes
 - `commit`: publish source-repository changes upstream
 - `pull`: refresh the mounted workspace from upstream state
@@ -55,6 +56,7 @@ If a session contains both source edits and dependency changes, run `push` first
 ```bash
 ./bin/monofs-session start
 ./bin/monofs-session status
+./bin/monofs-session branch
 ./bin/monofs-session diff
 ./bin/monofs-session commit -m "Update search path"
 ./bin/monofs-session pull
@@ -94,6 +96,16 @@ Author fields fall back in this order:
 `commit` keeps the session active on failure and archives it only after a successful publish.
 
 If the mount is running in virtual-monorepo mode, a successful `direct` publish also refreshes the mounted workspace and re-baselines the synthetic root Git metadata so `git status` returns clean again.
+
+## Branch
+
+`branch` prints the authoritative tracked ref and base commit for each included repository in the mounted virtual workspace.
+
+```bash
+./bin/monofs-session branch
+```
+
+Use it when root Git is too synthetic for branch inspection, or when you want to confirm which upstream refs MonoFS will treat as the source of truth for publish and refresh.
 
 ## Branch Strategies
 

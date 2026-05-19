@@ -1025,6 +1025,7 @@ initComplete:
 	r.ingestedRepos[storageID] = &ingestedRepo{
 		repoID:            displayPath, // Store display path for UI
 		repoURL:           sourceURL,
+		guardianURL:       guardianURL,
 		branch:            ref,
 		filesCount:        filesIngested,
 		ingestedAt:        time.Now(),

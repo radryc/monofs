@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	pb "github.com/radryc/monofs/api/proto"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	apilog "go.opentelemetry.io/otel/log"
@@ -21,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"google.golang.org/grpc/stats"
 )
 
 type Handle struct {
@@ -34,6 +37,33 @@ var (
 	providerMu sync.RWMutex
 	provider   *sdklog.LoggerProvider
 )
+
+var excludedDoctorIngestMethods = map[string]struct{}{
+	pb.MonoFS_IngestLogs_FullMethodName:          {},
+	pb.MonoFS_IngestMetrics_FullMethodName:       {},
+	pb.MonoFS_IngestTraces_FullMethodName:        {},
+	pb.MonoFSRouter_IngestLogs_FullMethodName:    {},
+	pb.MonoFSRouter_IngestMetrics_FullMethodName: {},
+	pb.MonoFSRouter_IngestTraces_FullMethodName:  {},
+}
+
+// NewGRPCServerStatsHandler returns the standard server stats handler with
+// MonoFS-specific exclusions for doctor ingest RPCs. Without this filter, a
+// collector that exports back into MonoFS doctor can create a telemetry loop by
+// instrumenting the ingest RPCs themselves.
+func NewGRPCServerStatsHandler() stats.Handler {
+	return otelgrpc.NewServerHandler(otelgrpc.WithFilter(ShouldInstrumentGRPCServerRPC))
+}
+
+// ShouldInstrumentGRPCServerRPC reports whether a server-side gRPC request
+// should emit OpenTelemetry data.
+func ShouldInstrumentGRPCServerRPC(info *stats.RPCTagInfo) bool {
+	if info == nil {
+		return true
+	}
+	_, excluded := excludedDoctorIngestMethods[info.FullMethodName]
+	return !excluded
+}
 
 func Setup(ctx context.Context, cfg Config) (*Handle, error) {
 	if strings.TrimSpace(cfg.Endpoint) == "" {

@@ -272,6 +272,13 @@ func main() {
 		if commitMgr != nil {
 			commitMgr.SetWorkspaceManifest(root.WorkspaceManifest())
 		}
+		c.SetTopologyChangeHook(func() {
+			syncCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := root.SyncWorkspaceGitProjection(syncCtx); err != nil {
+				logger.Warn("workspace git projection sync failed after topology change", "error", err)
+			}
+		})
 	}
 	if socketHandler != nil {
 		socketHandler.SetRootNode(root)

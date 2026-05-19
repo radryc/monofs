@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
@@ -24,7 +25,7 @@ const (
 
 // SessionRequest is sent to the FUSE client
 type SessionRequest struct {
-	Action                  string `json:"action"` // start, status, commit, discard, diff
+	Action                  string `json:"action"` // start, status, branch, commit, discard, diff
 	Path                    string `json:"path,omitempty"`
 	ShowBlobs               bool   `json:"show_blobs,omitempty"`
 	LogicalCommitMessage    string `json:"logical_commit_message,omitempty"`
@@ -54,9 +55,17 @@ type SessionResponse struct {
 	Error           string         `json:"error,omitempty"`
 	ChangeList      []ChangeInfo   `json:"change_list,omitempty"`
 	BlobChangeList  []ChangeInfo   `json:"blob_change_list,omitempty"`
+	WorkspaceRefs   []WorkspaceRef `json:"workspace_refs,omitempty"`
 	DepsInfo        *BlobsInfoData `json:"deps_info,omitempty"`
 	DiffData        []FileDiff     `json:"diff_data,omitempty"`
 	BlobDiffData    []FileDiff     `json:"blob_diff_data,omitempty"`
+}
+
+// WorkspaceRef describes the authoritative tracked ref for one mounted repository.
+type WorkspaceRef struct {
+	DisplayPath string `json:"display_path"`
+	Ref         string `json:"ref,omitempty"`
+	CommitHash  string `json:"commit_hash,omitempty"`
 }
 
 // BlobsInfoData contains blob file information.
@@ -152,6 +161,8 @@ func (sc *SessionCommand) Execute(args []string) error {
 		return sc.startSession()
 	case "status":
 		return sc.showStatus(args[1:])
+	case "branch", "refs":
+		return sc.showBranches(args[1:])
 	case "commit":
 		return sc.commitSession(args[1:])
 	case "pull":
@@ -183,6 +194,7 @@ Usage: monofs-session [--socket <path>] <command>
 Commands:
   start        Start a new write session (or show current if active)
   status       Show current session status and pending changes
+	branch       Show tracked workspace refs for the mounted repositories
   diff [file]  Show unified diff between original and changed files
 	commit       Publish local workspace changes upstream and archive session
 	pull         Re-ingest included workspace repositories from their upstream sources
@@ -208,6 +220,9 @@ Examples:
 
   # Check what changes are pending
   monofs-session status
+
+	# Show authoritative tracked refs for the mounted repositories
+	monofs-session branch
 
   # Include blob file changes in status/diff
   monofs-session status --deps
@@ -472,6 +487,7 @@ func (sc *SessionCommand) showStatus(args []string) error {
 	fmt.Printf("Session ID: %s\n", resp.SessionID)
 	fmt.Printf("Created:    %s\n", resp.CreatedAt)
 	fmt.Printf("Changes:    %d file(s)\n", resp.Changes)
+	fmt.Printf("Authority:  monofs-session is the source of truth; root git is synthetic\n")
 	if resp.BlobChanges > 0 {
 		if *showBlobs {
 			fmt.Printf("Blobs:       %d file(s)  (use 'push' to upload)\n", resp.BlobChanges)
@@ -522,6 +538,42 @@ func (sc *SessionCommand) showStatus(args []string) error {
 	}
 
 	return nil
+}
+
+func (sc *SessionCommand) showBranches(args []string) error {
+	branchCmd := flag.NewFlagSet("branch", flag.ExitOnError)
+	if err := branchCmd.Parse(args); err != nil {
+		return err
+	}
+
+	resp, err := sc.sendCommand("branch")
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("failed to get workspace refs: %s", resp.Error)
+	}
+
+	fmt.Printf("Workspace Refs\n")
+	fmt.Printf("==============\n")
+	fmt.Printf("Authority:  monofs-session is the source of truth; root git is synthetic\n\n")
+
+	if len(resp.WorkspaceRefs) == 0 {
+		fmt.Println("No included workspace repositories are currently visible.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "BRANCH\tCOMMIT\tREPOSITORY")
+	for _, ref := range resp.WorkspaceRefs {
+		branch := firstNonEmpty(strings.TrimSpace(ref.Ref), "(unconfigured)")
+		commit := shortCommitHash(ref.CommitHash)
+		if commit == "" {
+			commit = "(unknown)"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\n", branch, commit, ref.DisplayPath)
+	}
+	return w.Flush()
 }
 
 func (sc *SessionCommand) commitSession(args []string) error {
@@ -620,6 +672,14 @@ func getChangeSymbol(changeType string) string {
 	default:
 		return "[?]"
 	}
+}
+
+func shortCommitHash(hash string) string {
+	hash = strings.TrimSpace(hash)
+	if len(hash) > 12 {
+		return hash[:12]
+	}
+	return hash
 }
 
 // showBlobsInfo displays blob file information for the current session.
