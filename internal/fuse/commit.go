@@ -2,6 +2,7 @@
 package fuse
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/client"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/workspacebundle"
@@ -18,11 +20,12 @@ import (
 
 // CommitManager handles pushing local changes to the backend
 type CommitManager struct {
-	sessionMgr *SessionManager
-	client     commitClient
-	workspace  *WorkspaceManifest
-	logger     *slog.Logger
-	mu         sync.Mutex
+	sessionMgr  *SessionManager
+	client      commitClient
+	workspace   *WorkspaceManifest
+	principalID string
+	logger      *slog.Logger
+	mu          sync.Mutex
 }
 
 type commitChangeScope int
@@ -54,10 +57,15 @@ type workspaceBundlePublisher interface {
 	PublishWorkspaceBundle(ctx context.Context, bundle *workspacebundle.Bundle, opts client.WorkspacePublishOptions) (*client.WorkspacePublishResult, error)
 }
 
+type workspaceCommitBundlePusher interface {
+	PushWorkspaceCommitBundle(ctx context.Context, bundle *workspacebundle.SourceCommitBundle) (*client.WorkspaceSourcePushResult, error)
+}
+
 type commitClient interface {
 	client.MonoFSClient
 	repositoryChangeApplier
 	workspaceBundlePublisher
+	workspaceCommitBundlePusher
 }
 
 type CommitOptions struct {
@@ -84,6 +92,14 @@ func (cm *CommitManager) SetWorkspaceManifest(manifest *WorkspaceManifest) {
 	cm.workspace = manifest
 }
 
+// SetPrincipalID records the mounted client identity used for local commits.
+func (cm *CommitManager) SetPrincipalID(principalID string) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	cm.principalID = strings.TrimSpace(principalID)
+}
+
 // CommitResult represents the result of a commit operation
 type CommitResult struct {
 	Success               bool              // Overall success
@@ -95,9 +111,20 @@ type CommitResult struct {
 	SessionID             string            // Committed session ID
 	Message               string
 	RefreshedRepositories []client.WorkspaceRepository
+	LocalCommitID         string
 }
 
-// CommitChanges pushes all local changes to the backend
+type PushResult struct {
+	Success       bool
+	SessionID     string
+	LogicalBranch string
+	PushedCommits int
+	Repositories  int
+	JobID         string
+	Message       string
+}
+
+// CommitChanges creates a new local virtual commit from the staged index.
 func (cm *CommitManager) CommitChanges(ctx context.Context, opts CommitOptions) (*CommitResult, error) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
@@ -113,124 +140,670 @@ func (cm *CommitManager) CommitChanges(ctx context.Context, opts CommitOptions) 
 		SessionID: session.ID,
 	}
 
-	changes := cm.sessionMgr.GetChanges()
-	if len(changes) == 0 {
-		cm.logger.Info("no changes to commit")
-		// Archive empty session
-		if err := cm.sessionMgr.CommitSession(); err != nil {
-			return nil, fmt.Errorf("archive session: %w", err)
-		}
-		return result, nil
+	stagedEntries, err := cm.sessionMgr.ListStagedEntries()
+	if err != nil {
+		return nil, fmt.Errorf("list staged entries: %w", err)
+	}
+	if len(stagedEntries) == 0 {
+		return nil, fmt.Errorf("no staged source changes; run monofs-session add or monofs-session rm first")
 	}
 
-	classified, err := cm.classifyCommitChanges(ctx, changes)
+	localCommit, filesProcessed, err := cm.buildLocalVirtualCommit(ctx, stagedEntries, opts)
+	if err != nil {
+		return nil, err
+	}
+	result.Repositories = len(localCommit.Repositories)
+	result.FilesProcessed = filesProcessed
+	result.LocalCommitID = localCommit.ID
+
+	if err := cm.sessionMgr.PutLocalVirtualCommit(localCommit); err != nil {
+		return nil, fmt.Errorf("persist local commit: %w", err)
+	}
+	if err := cm.advanceOverlayBaseline(stagedEntries); err != nil {
+		_ = cm.sessionMgr.DeleteLocalVirtualCommit(localCommit.ID)
+		return nil, err
+	}
+	if err := cm.sessionMgr.ClearStagedEntries(); err != nil {
+		return nil, fmt.Errorf("clear staged entries: %w", err)
+	}
+
+	return result, nil
+}
+
+func (cm *CommitManager) PushPendingLocalCommits(ctx context.Context) (*PushResult, error) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	session := cm.sessionMgr.GetCurrentSession()
+	if session == nil {
+		return nil, fmt.Errorf("no active session")
+	}
+
+	logicalBranch, found, err := cm.sessionMgr.GetCurrentLogicalBranch()
+	if err != nil {
+		return nil, fmt.Errorf("read current logical branch: %w", err)
+	}
+	if !found {
+		logicalBranch = ""
+	}
+
+	pendingCommits, err := cm.pendingLocalCommitsForBranch(logicalBranch)
+	if err != nil {
+		return nil, err
+	}
+	if len(pendingCommits) == 0 {
+		return nil, fmt.Errorf("no pending local commits on the current logical branch")
+	}
+
+	bundle, err := cm.buildSourceCommitBundle(ctx, cm.workspacePushWorkspaceID(session), logicalBranch, pendingCommits)
 	if err != nil {
 		return nil, err
 	}
 
-	workspaceChanges := make([]Change, 0, len(classified))
-	blobCount := 0
-	excludedCount := 0
-	for _, change := range classified {
-		switch change.Scope {
-		case commitChangeBlob:
-			blobCount++
-		case commitChangeExcluded:
-			excludedCount++
-		case commitChangeWorkspace:
-			workspaceChanges = append(workspaceChanges, change.Change)
-		}
+	pushResult, err := cm.client.PushWorkspaceCommitBundle(ctx, bundle)
+	if err != nil {
+		return nil, err
+	}
+	if pushResult == nil || pushResult.Job == nil {
+		return nil, fmt.Errorf("source push finished without a job summary")
 	}
 
-	if blobCount > 0 {
-		return nil, fmt.Errorf("%d dependency changes pending; run monofs-session push first", blobCount)
-	}
-	if excludedCount > 0 {
-		return nil, fmt.Errorf("%d excluded changes pending outside the virtual monorepo; discard them or use the system view", excludedCount)
-	}
-
-	if len(workspaceChanges) == 0 {
-		cm.logger.Info("no non-blob changes to commit")
-		if err := cm.sessionMgr.CommitSession(); err != nil {
-			return nil, fmt.Errorf("archive session: %w", err)
+	pushedAt := time.Now().UTC()
+	for _, commit := range pendingCommits {
+		commit.Pushed = true
+		commit.PushJobID = pushResult.Job.GetJobId()
+		commit.PushedAt = pushedAt
+		if err := cm.sessionMgr.PutLocalVirtualCommit(commit); err != nil {
+			return nil, fmt.Errorf("persist pushed local commit %q: %w", commit.ID, err)
 		}
-		return result, nil
+	}
+	if err := cm.recordSourcePushBranchMappings(logicalBranch, pushResult.Job.GetRepositories()); err != nil {
+		return nil, err
 	}
 
-	repoGroups := cm.groupChangesByRepository(classified)
-	result.Repositories = len(repoGroups)
-	if cm.workspace != nil {
-		bundle, filesProcessed, err := cm.buildWorkspaceBundle(session.ID, repoGroups)
-		if err != nil {
-			return nil, err
-		}
-		result.FilesProcessed = filesProcessed
+	repoCount := len(bundle.RepositoryRefs())
+	return &PushResult{
+		Success:       true,
+		SessionID:     session.ID,
+		LogicalBranch: logicalBranch,
+		PushedCommits: len(pendingCommits),
+		Repositories:  repoCount,
+		JobID:         pushResult.Job.GetJobId(),
+		Message:       formatSourcePushSummary(len(pendingCommits), repoCount, logicalBranch),
+	}, nil
+}
 
-		publishResult, err := cm.client.PublishWorkspaceBundle(ctx, bundle, client.WorkspacePublishOptions{
-			WorkspaceID:             session.ID,
-			LogicalCommitMessage:    opts.LogicalCommitMessage,
-			AuthorName:              opts.AuthorName,
-			AuthorEmail:             opts.AuthorEmail,
-			RequestedBranchStrategy: opts.RequestedBranchStrategy,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		result.FilesUploaded = filesProcessed
-		result.RefreshedRepositories = append(result.RefreshedRepositories, publishResult.RefreshedRepositories...)
-		if publishResult.Warning != "" {
-			result.Message = publishResult.Warning
-		}
-
-		if err := cm.sessionMgr.CommitSession(); err != nil {
-			return nil, fmt.Errorf("archive session: %w", err)
-		}
-		return result, nil
+func (cm *CommitManager) buildLocalVirtualCommit(ctx context.Context, stagedEntries []StagedIndexEntry, opts CommitOptions) (LocalVirtualCommit, int, error) {
+	repoGroups, err := cm.groupStagedEntriesByRepository(ctx, stagedEntries)
+	if err != nil {
+		return LocalVirtualCommit{}, 0, err
 	}
 
+	logicalBranch, foundLogicalBranch, err := cm.sessionMgr.GetCurrentLogicalBranch()
+	if err != nil {
+		return LocalVirtualCommit{}, 0, fmt.Errorf("read current logical branch: %w", err)
+	}
+	if !foundLogicalBranch {
+		logicalBranch = ""
+	}
+
+	localCommits, err := cm.sessionMgr.ListLocalVirtualCommits()
+	if err != nil {
+		return LocalVirtualCommit{}, 0, fmt.Errorf("list local commits: %w", err)
+	}
+
+	createdAt := time.Now().UTC()
+	commit := LocalVirtualCommit{
+		ID:            newLocalCommitID(),
+		ParentID:      latestLocalCommitID(localCommits, logicalBranch),
+		LogicalBranch: logicalBranch,
+		Message:       defaultLocalCommitMessage(opts.LogicalCommitMessage),
+		AuthorName:    strings.TrimSpace(opts.AuthorName),
+		AuthorEmail:   strings.TrimSpace(opts.AuthorEmail),
+		PrincipalID:   strings.TrimSpace(cm.principalID),
+		CreatedAt:     createdAt,
+		Repositories:  make([]LocalCommitRepository, 0, len(repoGroups)),
+	}
+
+	processed := 0
 	for _, repoGroup := range repoGroups {
-		result.FilesProcessed += len(repoGroup.Changes)
-
-		repo, err := cm.resolveCommitRepository(repoGroup)
-		if err != nil {
-			result.Success = false
-			for _, change := range repoGroup.Changes {
-				result.FilesFailed++
-				result.Errors[change.Path] = err.Error()
-			}
-			continue
+		repoCommit := LocalCommitRepository{
+			StorageID:   repoGroup.Repository.StorageID,
+			DisplayPath: repoGroup.Repository.DisplayPath,
+			RepoURL:     repoGroup.Repository.Source,
+			Branch:      repoGroup.Repository.Ref,
+			BaseCommit:  repoGroup.Repository.CommitHash,
+			Operations:  make([]LocalCommitOperation, 0, len(repoGroup.Entries)),
 		}
 
-		repoChanges, err := cm.repositoryClientChanges(*repo, repoGroup.Changes)
-		if err != nil {
-			result.Success = false
-			for _, change := range repoGroup.Changes {
-				result.FilesFailed++
-				result.Errors[change.Path] = err.Error()
+		for _, entry := range repoGroup.Entries {
+			op, err := localCommitOperationFromStagedEntry(repoGroup.Repository.DisplayPath, entry)
+			if err != nil {
+				return LocalVirtualCommit{}, 0, err
 			}
-			continue
+			repoCommit.Operations = append(repoCommit.Operations, op)
+			processed++
 		}
 
-		if len(repoChanges) > 0 {
-			if _, err := cm.client.ApplyRepositoryChanges(ctx, *repo, repoChanges); err != nil {
-				result.Success = false
-				for _, change := range repoGroup.Changes {
-					result.FilesFailed++
-					result.Errors[change.Path] = err.Error()
-				}
-				continue
+		sort.Slice(repoCommit.Operations, func(i, j int) bool {
+			if repoCommit.Operations[i].Path != repoCommit.Operations[j].Path {
+				return repoCommit.Operations[i].Path < repoCommit.Operations[j].Path
 			}
-		}
-
-		result.FilesUploaded += len(repoGroup.Changes)
+			return repoCommit.Operations[i].Kind < repoCommit.Operations[j].Kind
+		})
+		commit.Repositories = append(commit.Repositories, repoCommit)
 	}
 
-	if err := cm.sessionMgr.CommitSession(); err != nil {
-		cm.logger.Warn("failed to archive session", "error", err)
+	sort.Slice(commit.Repositories, func(i, j int) bool {
+		return commit.Repositories[i].DisplayPath < commit.Repositories[j].DisplayPath
+	})
+
+	return commit, processed, nil
+}
+
+func (cm *CommitManager) pendingLocalCommitsForBranch(logicalBranch string) ([]LocalVirtualCommit, error) {
+	localCommits, err := cm.sessionMgr.ListLocalVirtualCommits()
+	if err != nil {
+		return nil, fmt.Errorf("list local commits: %w", err)
+	}
+	sortLocalVirtualCommits(localCommits)
+	filtered := make([]LocalVirtualCommit, 0, len(localCommits))
+	for _, commit := range localCommits {
+		if commit.Pushed {
+			continue
+		}
+		if strings.TrimSpace(commit.LogicalBranch) != strings.TrimSpace(logicalBranch) {
+			continue
+		}
+		filtered = append(filtered, commit)
+	}
+	return filtered, nil
+}
+
+func (cm *CommitManager) workspacePushWorkspaceID(session *WriteSession) string {
+	if principalID := strings.TrimSpace(cm.principalID); principalID != "" {
+		return principalID
+	}
+	if session != nil {
+		return session.ID
+	}
+	return fmt.Sprintf("workspace-%d", time.Now().UnixNano())
+}
+
+func (cm *CommitManager) buildSourceCommitBundle(ctx context.Context, workspaceID, logicalBranch string, commits []LocalVirtualCommit) (*workspacebundle.SourceCommitBundle, error) {
+	repoMetadata, err := cm.workspaceRepositoryMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+	metadataByStorage := make(map[string]client.WorkspaceRepository, len(repoMetadata))
+	for _, repo := range repoMetadata {
+		if strings.TrimSpace(repo.StorageID) != "" {
+			metadataByStorage[repo.StorageID] = repo
+		}
 	}
 
-	return result, nil
+	bundle := &workspacebundle.SourceCommitBundle{
+		WorkspaceID:   workspaceID,
+		PrincipalID:   strings.TrimSpace(cm.principalID),
+		LogicalBranch: logicalBranch,
+		Commits:       make([]workspacebundle.SourceCommit, 0, len(commits)),
+	}
+	for _, commit := range commits {
+		sourceCommit := workspacebundle.SourceCommit{
+			ID:            commit.ID,
+			ParentID:      commit.ParentID,
+			Message:       commit.Message,
+			AuthorName:    commit.AuthorName,
+			AuthorEmail:   commit.AuthorEmail,
+			PrincipalID:   commit.PrincipalID,
+			CreatedAtUnix: commit.CreatedAt.Unix(),
+			Repositories:  make([]workspacebundle.SourceCommitRepository, 0, len(commit.Repositories)),
+		}
+		for _, repo := range commit.Repositories {
+			converted, err := sourceCommitRepositoryFromLocal(repo, repoMetadata, metadataByStorage)
+			if err != nil {
+				return nil, fmt.Errorf("build source push repository %q for commit %q: %w", repo.DisplayPath, commit.ID, err)
+			}
+			sourceCommit.Repositories = append(sourceCommit.Repositories, converted)
+		}
+		bundle.Commits = append(bundle.Commits, sourceCommit)
+	}
+	if err := bundle.Validate(); err != nil {
+		return nil, err
+	}
+	return bundle, nil
+}
+
+func sourceCommitRepositoryFromLocal(repo LocalCommitRepository, metadataByDisplayPath, metadataByStorage map[string]client.WorkspaceRepository) (workspacebundle.SourceCommitRepository, error) {
+	resolved := client.WorkspaceRepository{}
+	if metadata, ok := metadataByStorage[strings.TrimSpace(repo.StorageID)]; ok {
+		resolved = metadata
+	}
+	if resolved.DisplayPath == "" {
+		if metadata, ok := metadataByDisplayPath[strings.TrimSpace(repo.DisplayPath)]; ok {
+			resolved = metadata
+		}
+	}
+
+	displayPath := strings.TrimSpace(repo.DisplayPath)
+	if displayPath == "" {
+		displayPath = strings.TrimSpace(resolved.DisplayPath)
+	}
+	storageID := strings.TrimSpace(repo.StorageID)
+	if storageID == "" {
+		storageID = strings.TrimSpace(resolved.StorageID)
+	}
+	if storageID == "" && displayPath != "" {
+		storageID = sharding.GenerateStorageID(displayPath)
+	}
+
+	repoURL := strings.TrimSpace(repo.RepoURL)
+	if repoURL == "" {
+		repoURL = strings.TrimSpace(resolved.Source)
+	}
+	branch := strings.TrimSpace(repo.Branch)
+	if branch == "" {
+		branch = strings.TrimSpace(resolved.Ref)
+	}
+	baseCommit := strings.TrimSpace(repo.BaseCommit)
+	if baseCommit == "" {
+		baseCommit = strings.TrimSpace(resolved.CommitHash)
+	}
+
+	operations := make([]workspacebundle.Operation, 0, len(repo.Operations))
+	for _, op := range repo.Operations {
+		operations = append(operations, workspacebundle.Operation{
+			Kind:    op.Kind,
+			Path:    op.Path,
+			Mode:    int64(op.Mode),
+			Content: append([]byte(nil), op.Content...),
+			Target:  op.Target,
+		})
+	}
+
+	return workspacebundle.SourceCommitRepository{
+		StorageID:   storageID,
+		DisplayPath: displayPath,
+		RepoURL:     repoURL,
+		Branch:      branch,
+		BaseCommit:  baseCommit,
+		Operations:  operations,
+	}, nil
+}
+
+func (cm *CommitManager) recordSourcePushBranchMappings(logicalBranch string, repos []*pb.WorkspaceSyncRepositoryResult) error {
+	logicalBranch = strings.TrimSpace(logicalBranch)
+	principalID := strings.TrimSpace(cm.principalID)
+	if logicalBranch == "" || principalID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	for _, repo := range repos {
+		if repo == nil || strings.TrimSpace(repo.GetStorageId()) == "" {
+			continue
+		}
+		mapping, found, err := cm.sessionMgr.GetBranchMapping(principalID, logicalBranch, repo.GetStorageId())
+		if err != nil {
+			return fmt.Errorf("read branch mapping for %q: %w", repo.GetDisplayPath(), err)
+		}
+		if !found {
+			mapping = SessionBranchMapping{
+				PrincipalID:    principalID,
+				LogicalBranch:  logicalBranch,
+				StorageID:      repo.GetStorageId(),
+				DisplayPath:    repo.GetDisplayPath(),
+				OriginalBranch: repo.GetBranch(),
+				CreatedAt:      now,
+			}
+		}
+		if mapping.CreatedAt.IsZero() {
+			mapping.CreatedAt = now
+		}
+		if strings.TrimSpace(mapping.DisplayPath) == "" {
+			mapping.DisplayPath = repo.GetDisplayPath()
+		}
+		if strings.TrimSpace(mapping.OriginalBranch) == "" {
+			mapping.OriginalBranch = repo.GetBranch()
+		}
+		if targetBranch := strings.TrimSpace(repo.GetTargetBranch()); targetBranch != "" {
+			mapping.ActualBranch = targetBranch
+		} else if strings.TrimSpace(mapping.ActualBranch) == "" {
+			mapping.ActualBranch = repo.GetBranch()
+		}
+		if pushedCommit := strings.TrimSpace(repo.GetPushedCommit()); pushedCommit != "" {
+			mapping.LastPushedCommit = pushedCommit
+		}
+		if err := cm.sessionMgr.PutBranchMapping(mapping); err != nil {
+			return fmt.Errorf("persist branch mapping for %q: %w", repo.GetDisplayPath(), err)
+		}
+	}
+	return nil
+}
+
+func formatSourcePushSummary(commitCount, repoCount int, logicalBranch string) string {
+	message := fmt.Sprintf("pushed %d local commit(s) across %d repositor(y/ies)", commitCount, repoCount)
+	if strings.TrimSpace(logicalBranch) == "" {
+		return message + " to tracked upstream branches"
+	}
+	return message + fmt.Sprintf(" on logical branch %s", logicalBranch)
+}
+
+type stagedRepositoryGroup struct {
+	Repository client.WorkspaceRepository
+	Entries    []StagedIndexEntry
+}
+
+func (cm *CommitManager) groupStagedEntriesByRepository(ctx context.Context, stagedEntries []StagedIndexEntry) ([]stagedRepositoryGroup, error) {
+	repoMetadata, err := cm.workspaceRepositoryMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	groups := make(map[string]*stagedRepositoryGroup)
+	for _, entry := range stagedEntries {
+		repo, err := cm.resolveStagedRepository(entry, repoMetadata)
+		if err != nil {
+			return nil, err
+		}
+		key := repo.StorageID
+		if strings.TrimSpace(key) == "" {
+			key = repo.DisplayPath
+		}
+		group := groups[key]
+		if group == nil {
+			group = &stagedRepositoryGroup{Repository: repo, Entries: make([]StagedIndexEntry, 0, 1)}
+			groups[key] = group
+		}
+		group.Entries = append(group.Entries, entry)
+	}
+
+	out := make([]stagedRepositoryGroup, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, *group)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Repository.DisplayPath < out[j].Repository.DisplayPath
+	})
+	return out, nil
+}
+
+func (cm *CommitManager) workspaceRepositoryMetadata(ctx context.Context) (map[string]client.WorkspaceRepository, error) {
+	if cm.workspace == nil {
+		return nil, nil
+	}
+	entries, err := cm.workspace.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list workspace repositories: %w", err)
+	}
+	repos := make(map[string]client.WorkspaceRepository, len(entries))
+	for _, entry := range entries {
+		if !entry.Included {
+			continue
+		}
+		repos[entry.Repository.DisplayPath] = entry.Repository
+	}
+	return repos, nil
+}
+
+func (cm *CommitManager) resolveStagedRepository(entry StagedIndexEntry, repoMetadata map[string]client.WorkspaceRepository) (client.WorkspaceRepository, error) {
+	displayPath := strings.Trim(strings.TrimSpace(entry.RepositoryPath), "/")
+	if displayPath == "" {
+		parts := strings.Split(strings.Trim(strings.TrimSpace(entry.Path), "/"), "/")
+		if len(parts) < 4 {
+			return client.WorkspaceRepository{}, fmt.Errorf("cannot infer repository for staged path %q", entry.Path)
+		}
+		displayPath = strings.Join(parts[:3], "/")
+	}
+
+	if repoMetadata != nil {
+		if repo, found := repoMetadata[displayPath]; found {
+			if strings.TrimSpace(repo.StorageID) == "" && strings.TrimSpace(entry.RepositoryStorageID) != "" {
+				repo.StorageID = entry.RepositoryStorageID
+			}
+			return repo, nil
+		}
+	}
+
+	storageID := strings.TrimSpace(entry.RepositoryStorageID)
+	if storageID == "" {
+		storageID = sharding.GenerateStorageID(displayPath)
+	}
+	return client.WorkspaceRepository{
+		StorageID:   storageID,
+		DisplayPath: displayPath,
+	}, nil
+}
+
+func localCommitOperationFromStagedEntry(displayPath string, entry StagedIndexEntry) (LocalCommitOperation, error) {
+	repoRelativePath, err := commitRepositoryRelativePath(displayPath, entry.Path)
+	if err != nil {
+		return LocalCommitOperation{}, err
+	}
+
+	switch entry.ChangeType {
+	case ChangeCreate, ChangeModify:
+		return LocalCommitOperation{
+			Kind:    workspacebundle.OperationUpsert,
+			Path:    repoRelativePath,
+			Mode:    entry.Mode,
+			Content: append([]byte(nil), entry.Content...),
+		}, nil
+	case ChangeDelete:
+		return LocalCommitOperation{Kind: workspacebundle.OperationDelete, Path: repoRelativePath}, nil
+	case ChangeMkdir:
+		mode := entry.Mode
+		if mode == 0 {
+			mode = 0o755
+		}
+		return LocalCommitOperation{Kind: workspacebundle.OperationMkdir, Path: repoRelativePath, Mode: mode}, nil
+	case ChangeRmdir:
+		return LocalCommitOperation{Kind: workspacebundle.OperationRmdir, Path: repoRelativePath}, nil
+	case ChangeSymlink:
+		if strings.TrimSpace(entry.SymlinkTarget) == "" {
+			return LocalCommitOperation{}, fmt.Errorf("symlink target missing for %q", entry.Path)
+		}
+		return LocalCommitOperation{Kind: workspacebundle.OperationSymlink, Path: repoRelativePath, Target: entry.SymlinkTarget}, nil
+	default:
+		return LocalCommitOperation{}, fmt.Errorf("unsupported staged change type %q", entry.ChangeType)
+	}
+}
+
+func newLocalCommitID() string {
+	id := generateSessionID()
+	if len(id) > 12 {
+		id = id[:12]
+	}
+	return "local-" + id
+}
+
+func defaultLocalCommitMessage(message string) string {
+	if trimmed := strings.TrimSpace(message); trimmed != "" {
+		return trimmed
+	}
+	return "local commit"
+}
+
+func latestLocalCommitID(commits []LocalVirtualCommit, logicalBranch string) string {
+	if len(commits) == 0 {
+		return ""
+	}
+	branch := strings.TrimSpace(logicalBranch)
+	sorted := append([]LocalVirtualCommit(nil), commits...)
+	sortLocalVirtualCommits(sorted)
+	for index := len(sorted) - 1; index >= 0; index-- {
+		if strings.TrimSpace(sorted[index].LogicalBranch) == branch {
+			return sorted[index].ID
+		}
+	}
+	return ""
+}
+
+func (cm *CommitManager) advanceOverlayBaseline(stagedEntries []StagedIndexEntry) error {
+	for _, entry := range stagedEntries {
+		if err := cm.reconcileCommittedEntry(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (cm *CommitManager) reconcileCommittedEntry(entry StagedIndexEntry) error {
+	localPath, err := cm.sessionMgr.GetLocalPath(entry.Path)
+	if err != nil {
+		return fmt.Errorf("resolve local path for %q: %w", entry.Path, err)
+	}
+
+	if entry.ChangeType == ChangeDelete || entry.ChangeType == ChangeRmdir {
+		if _, statErr := os.Lstat(localPath); os.IsNotExist(statErr) || cm.sessionMgr.IsDeleted(entry.Path) {
+			return cm.sessionMgr.GetOverlayDB().MarkDeletedWithType(entry.Path, ChangeBaseline)
+		} else if statErr != nil {
+			return fmt.Errorf("stat committed path %q: %w", entry.Path, statErr)
+		}
+		return cm.reclassifyPathFromDisk(entry.Path, true)
+	}
+
+	if cm.sessionMgr.IsDeleted(entry.Path) {
+		deleteType := ChangeDelete
+		if entry.ChangeType == ChangeMkdir {
+			deleteType = ChangeRmdir
+		}
+		return cm.sessionMgr.GetOverlayDB().MarkDeletedWithType(entry.Path, deleteType)
+	}
+
+	matches, currentType, err := stagedEntryMatchesCurrent(entry, localPath)
+	if err != nil {
+		return err
+	}
+	if matches {
+		return cm.putOverlayFileFromDisk(entry.Path, ChangeBaseline)
+	}
+
+	switch currentType {
+	case FileEntrySymlink:
+		return cm.putOverlayFileFromDisk(entry.Path, ChangeSymlink)
+	case FileEntryDir:
+		if entry.ChangeType == ChangeMkdir {
+			return cm.putOverlayFileFromDisk(entry.Path, ChangeBaseline)
+		}
+		return cm.putOverlayFileFromDisk(entry.Path, ChangeMkdir)
+	default:
+		return cm.putOverlayFileFromDisk(entry.Path, ChangeModify)
+	}
+}
+
+func stagedEntryMatchesCurrent(entry StagedIndexEntry, localPath string) (bool, FileEntryType, error) {
+	info, err := os.Lstat(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, "", nil
+		}
+		return false, "", fmt.Errorf("stat committed path %q: %w", entry.Path, err)
+	}
+
+	currentType := fileEntryTypeFromInfo(info)
+	switch entry.ChangeType {
+	case ChangeCreate, ChangeModify:
+		if currentType != FileEntryRegular {
+			return false, currentType, nil
+		}
+		content, mode, err := loadCommitLocalFile(localPath)
+		if err != nil {
+			return false, currentType, err
+		}
+		return bytes.Equal(content, entry.Content) && (entry.Mode == 0 || mode == entry.Mode), currentType, nil
+	case ChangeMkdir:
+		if currentType != FileEntryDir {
+			return false, currentType, nil
+		}
+		return true, currentType, nil
+	case ChangeSymlink:
+		if currentType != FileEntrySymlink {
+			return false, currentType, nil
+		}
+		target, err := os.Readlink(localPath)
+		if err != nil {
+			return false, currentType, fmt.Errorf("read symlink target for %q: %w", entry.Path, err)
+		}
+		return target == entry.SymlinkTarget, currentType, nil
+	default:
+		return false, currentType, nil
+	}
+}
+
+func fileEntryTypeFromInfo(info os.FileInfo) FileEntryType {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return FileEntrySymlink
+	}
+	if info.IsDir() {
+		return FileEntryDir
+	}
+	return FileEntryRegular
+}
+
+func (cm *CommitManager) reclassifyPathFromDisk(monofsPath string, baselineWasDelete bool) error {
+	localPath, err := cm.sessionMgr.GetLocalPath(monofsPath)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cm.sessionMgr.GetOverlayDB().MarkDeletedWithType(monofsPath, ChangeBaseline)
+		}
+		return fmt.Errorf("stat %q: %w", monofsPath, err)
+	}
+
+	switch fileEntryTypeFromInfo(info) {
+	case FileEntryDir:
+		return cm.putOverlayFileFromDisk(monofsPath, ChangeMkdir)
+	case FileEntrySymlink:
+		return cm.putOverlayFileFromDisk(monofsPath, ChangeSymlink)
+	default:
+		changeType := ChangeModify
+		if baselineWasDelete {
+			changeType = ChangeCreate
+		}
+		return cm.putOverlayFileFromDisk(monofsPath, changeType)
+	}
+}
+
+func (cm *CommitManager) putOverlayFileFromDisk(monofsPath string, changeType ChangeType) error {
+	db := cm.sessionMgr.GetOverlayDB()
+	if db == nil {
+		return fmt.Errorf("overlay database not available")
+	}
+
+	localPath, err := cm.sessionMgr.GetLocalPath(monofsPath)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(localPath)
+	if err != nil {
+		return fmt.Errorf("stat %q: %w", monofsPath, err)
+	}
+
+	entry := FileEntry{
+		Type:       fileEntryTypeFromInfo(info),
+		LocalPath:  localPath,
+		Mode:       uint32(info.Mode().Perm()),
+		Size:       uint64(info.Size()),
+		Mtime:      info.ModTime().Unix(),
+		ChangeType: changeType,
+		Timestamp:  time.Now().UTC(),
+	}
+	if entry.Type == FileEntrySymlink {
+		target, err := os.Readlink(localPath)
+		if err != nil {
+			return fmt.Errorf("read symlink target for %q: %w", monofsPath, err)
+		}
+		entry.SymlinkTarget = target
+	}
+	if existing, found, err := db.GetFile(monofsPath); err == nil && found {
+		entry.OrigHash = existing.OrigHash
+	} else if err != nil {
+		return err
+	}
+	return db.PutFile(monofsPath, entry)
 }
 
 func (cm *CommitManager) classifyCommitChanges(ctx context.Context, changes []Change) ([]classifiedCommitChange, error) {

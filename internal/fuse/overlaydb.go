@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +19,9 @@ const (
 	bucketOverlayFiles   = "files"    // monofs path -> FileEntry JSON
 	bucketOverlayDeleted = "deleted"  // monofs path -> deletion timestamp
 	bucketOverlayDirs    = "userdirs" // root dir name -> creation timestamp
+	bucketOverlayStaged  = "staged"   // monofs path -> StagedIndexEntry JSON
+	bucketOverlayCommits = "commits"  // local commit id -> LocalVirtualCommit JSON
+	bucketOverlayBranch  = "branch"   // branch metadata and mappings
 )
 
 // FileEntryType represents the type of an overlay file entry
@@ -41,6 +45,14 @@ type FileEntry struct {
 	OrigHash      string        `json:"orig_hash,omitempty"`
 	ChangeType    ChangeType    `json:"change_type"` // create, modify, etc.
 	Timestamp     time.Time     `json:"timestamp"`
+}
+
+// DeletedEntry preserves the change type for deleted paths so file deletes and
+// directory removals can be reconstructed distinctly from the deleted bucket.
+type DeletedEntry struct {
+	Path       string     `json:"path"`
+	ChangeType ChangeType `json:"change_type"`
+	DeletedAt  time.Time  `json:"deleted_at"`
 }
 
 // OverlayDB wraps NutsDB to track which files are overlayed in a session.
@@ -91,7 +103,14 @@ func OpenOverlayDB(dir string, logger *slog.Logger) (*OverlayDB, error) {
 }
 
 func (odb *OverlayDB) initBuckets() error {
-	buckets := []string{bucketOverlayFiles, bucketOverlayDeleted, bucketOverlayDirs}
+	buckets := []string{
+		bucketOverlayFiles,
+		bucketOverlayDeleted,
+		bucketOverlayDirs,
+		bucketOverlayStaged,
+		bucketOverlayCommits,
+		bucketOverlayBranch,
+	}
 	for _, bucket := range buckets {
 		if err := odb.db.Update(func(tx *nutsdb.Tx) error {
 			return tx.NewBucket(nutsdb.DataStructureBTree, bucket)
@@ -163,11 +182,26 @@ func (odb *OverlayDB) DeleteFile(monofsPath string) error {
 
 // MarkDeleted records that a backend file was deleted in this session.
 func (odb *OverlayDB) MarkDeleted(monofsPath string) error {
-	ts := []byte(time.Now().Format(time.RFC3339))
+	return odb.MarkDeletedWithType(monofsPath, ChangeDelete)
+}
+
+// MarkDeletedWithType records that a backend file or directory was removed in
+// this session while preserving the original change type.
+func (odb *OverlayDB) MarkDeletedWithType(monofsPath string, changeType ChangeType) error {
+	entry := DeletedEntry{
+		Path:       monofsPath,
+		ChangeType: changeType,
+		DeletedAt:  time.Now().UTC(),
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("marshal deleted entry: %w", err)
+	}
+
 	return odb.db.Update(func(tx *nutsdb.Tx) error {
 		// Also remove from files if it was there
 		_ = tx.Delete(bucketOverlayFiles, []byte(monofsPath))
-		return tx.Put(bucketOverlayDeleted, []byte(monofsPath), ts, 0)
+		return tx.Put(bucketOverlayDeleted, []byte(monofsPath), data, 0)
 	})
 }
 
@@ -435,6 +469,50 @@ func (odb *OverlayDB) GetAllDeleted() ([]string, error) {
 	return deleted, err
 }
 
+// GetAllDeletedEntries returns all deleted paths with their persisted change
+// types. Older sessions that only stored timestamps are treated as file
+// deletes for compatibility.
+func (odb *OverlayDB) GetAllDeletedEntries() ([]DeletedEntry, error) {
+	entries := make([]DeletedEntry, 0)
+
+	err := odb.db.View(func(tx *nutsdb.Tx) error {
+		keys, values, err := tx.GetAll(bucketOverlayDeleted)
+		if err != nil {
+			if isNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		for idx, key := range keys {
+			entry := DeletedEntry{Path: string(key), ChangeType: ChangeDelete}
+			if unmarshalErr := json.Unmarshal(values[idx], &entry); unmarshalErr == nil {
+				if entry.Path == "" {
+					entry.Path = string(key)
+				}
+				if entry.ChangeType == "" {
+					entry.ChangeType = ChangeDelete
+				}
+				entries = append(entries, entry)
+				continue
+			}
+
+			if deletedAt, parseErr := time.Parse(time.RFC3339, string(values[idx])); parseErr == nil {
+				entry.DeletedAt = deletedAt
+			}
+			entries = append(entries, entry)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(entries, func(left, right int) bool {
+		return entries[left].Path < entries[right].Path
+	})
+	return entries, nil
+}
+
 // RebuildFromDisk scans the session directory and populates the database
 // from the filesystem. Called when the DB doesn't exist on mount (recovery).
 //
@@ -633,6 +711,46 @@ func (odb *OverlayDB) DeletedCount() int {
 		return nil
 	})
 	return count
+}
+
+func (odb *OverlayDB) deleteKeysWithPrefix(bucket, path string) (int, error) {
+	trimmed := strings.Trim(strings.TrimSpace(path), "/")
+	if trimmed == "" {
+		return 0, nil
+	}
+	prefix := trimmed + "/"
+	deleted := 0
+
+	err := odb.db.Update(func(tx *nutsdb.Tx) error {
+		keys, _, err := tx.PrefixScanEntries(bucket, []byte(prefix), "", 0, -1, true, false)
+		if err != nil {
+			if isNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		for _, key := range keys {
+			if err := tx.Delete(bucket, key); err != nil && !isNotFound(err) {
+				return err
+			}
+			deleted++
+		}
+		return nil
+	})
+
+	return deleted, err
+}
+
+// DeleteFilesUnderPrefix removes all overlay file entries below path, without
+// touching the path itself.
+func (odb *OverlayDB) DeleteFilesUnderPrefix(path string) (int, error) {
+	return odb.deleteKeysWithPrefix(bucketOverlayFiles, path)
+}
+
+// DeleteDeletedUnderPrefix removes all deleted markers below path, without
+// touching the path itself.
+func (odb *OverlayDB) DeleteDeletedUnderPrefix(path string) (int, error) {
+	return odb.deleteKeysWithPrefix(bucketOverlayDeleted, path)
 }
 
 // RenamePrefix re-keys all overlay file entries whose monofsPath starts

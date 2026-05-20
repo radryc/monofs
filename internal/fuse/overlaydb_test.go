@@ -341,6 +341,42 @@ func TestOverlayDB_GetAllDeleted(t *testing.T) {
 	}
 }
 
+func TestOverlayDB_GetAllDeletedEntriesPreservesChangeType(t *testing.T) {
+	dir := t.TempDir()
+
+	odb, err := OpenOverlayDB(dir, nil)
+	if err != nil {
+		t.Fatalf("OpenOverlayDB failed: %v", err)
+	}
+	defer odb.Close()
+
+	if err := odb.MarkDeletedWithType("repo/file.txt", ChangeDelete); err != nil {
+		t.Fatalf("MarkDeletedWithType(file) failed: %v", err)
+	}
+	if err := odb.MarkDeletedWithType("repo/dir", ChangeRmdir); err != nil {
+		t.Fatalf("MarkDeletedWithType(dir) failed: %v", err)
+	}
+
+	entries, err := odb.GetAllDeletedEntries()
+	if err != nil {
+		t.Fatalf("GetAllDeletedEntries failed: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 deleted entries, got %d", len(entries))
+	}
+
+	got := map[string]ChangeType{}
+	for _, entry := range entries {
+		got[entry.Path] = entry.ChangeType
+	}
+	if got["repo/file.txt"] != ChangeDelete {
+		t.Fatalf("repo/file.txt change type = %s, want %s", got["repo/file.txt"], ChangeDelete)
+	}
+	if got["repo/dir"] != ChangeRmdir {
+		t.Fatalf("repo/dir change type = %s, want %s", got["repo/dir"], ChangeRmdir)
+	}
+}
+
 func TestOverlayDB_Counts(t *testing.T) {
 	dir := t.TempDir()
 

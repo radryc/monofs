@@ -34,7 +34,15 @@ const (
 	ChangeUserRootDir ChangeType = "user_root_dir"
 	// ChangeRemoveUserRootDir indicates removal of a user-created root directory
 	ChangeRemoveUserRootDir ChangeType = "remove_user_root_dir"
+	// ChangeBaseline marks overlay state that is part of the local committed
+	// baseline and should stay mounted without appearing in GetChanges().
+	ChangeBaseline ChangeType = "baseline"
 )
+
+func isVisibleChangeType(changeType ChangeType) bool {
+	trimmed := strings.TrimSpace(string(changeType))
+	return trimmed != "" && changeType != ChangeBaseline
+}
 
 // Change represents a single file change in a write session.
 // Kept for backward compatibility with commit/socket APIs.
@@ -195,15 +203,27 @@ func (sm *SessionManager) recoverSession() error {
 	fileCount := db.FileCount()
 	deletedCount := db.DeletedCount()
 	userDirs := db.ListUserDirs()
+	stagedCount := db.StagedEntryCount()
+	localCommitCount := db.LocalVirtualCommitCount()
+	branchMappingCount := db.BranchMappingCount()
+	currentLogicalBranch, hasCurrentLogicalBranch, branchErr := db.GetCurrentLogicalBranch()
+	if branchErr != nil {
+		sm.logger.Warn("recoverSession: failed to read current logical branch", "error", branchErr)
+	}
 
 	sm.logger.Info("recoverSession: overlay database opened",
 		"files", fileCount,
 		"deleted", deletedCount,
 		"user_dirs", len(userDirs),
-		"user_dir_names", userDirs)
+		"user_dir_names", userDirs,
+		"staged_entries", stagedCount,
+		"local_commits", localCommitCount,
+		"branch_mappings", branchMappingCount,
+		"has_current_logical_branch", hasCurrentLogicalBranch,
+		"current_logical_branch", currentLogicalBranch)
 
 	// Check if DB has data; if not, rebuild from disk
-	if fileCount == 0 && deletedCount == 0 && len(userDirs) == 0 {
+	if fileCount == 0 && deletedCount == 0 && len(userDirs) == 0 && stagedCount == 0 && localCommitCount == 0 && branchMappingCount == 0 && !hasCurrentLogicalBranch {
 		sm.logger.Info("recoverSession: overlay database empty, rebuilding from disk scan")
 		if err := db.RebuildFromDisk(sessionPath); err != nil {
 			sm.logger.Warn("recoverSession: rebuild from disk failed", "error", err)
@@ -523,7 +543,7 @@ func (sm *SessionManager) trackChangeInternal(changeType ChangeType, monofsPath,
 			return nil
 		}
 
-		if err := sm.db.MarkDeleted(monofsPath); err != nil {
+		if err := sm.db.MarkDeletedWithType(monofsPath, changeType); err != nil {
 			sm.logger.Error("TrackChange: MarkDeleted failed", "path", monofsPath, "error", err)
 			return err
 		}
@@ -617,6 +637,9 @@ func (sm *SessionManager) GetChanges() []Change {
 	files, err := sm.db.GetAllFiles()
 	if err == nil {
 		for path, entry := range files {
+			if !isVisibleChangeType(entry.ChangeType) {
+				continue
+			}
 			changes = append(changes, Change{
 				Type:          entry.ChangeType,
 				Path:          path,
@@ -629,13 +652,20 @@ func (sm *SessionManager) GetChanges() []Change {
 	}
 
 	// Get all deletions
-	deleted, err := sm.db.GetAllDeleted()
+	deleted, err := sm.db.GetAllDeletedEntries()
 	if err == nil {
-		for _, path := range deleted {
+		for _, entry := range deleted {
+			if !isVisibleChangeType(entry.ChangeType) {
+				continue
+			}
+			timestamp := entry.DeletedAt
+			if timestamp.IsZero() {
+				timestamp = time.Now()
+			}
 			changes = append(changes, Change{
-				Type:      ChangeDelete,
-				Path:      path,
-				Timestamp: time.Now(), // Exact time not stored for deletions
+				Type:      entry.ChangeType,
+				Path:      entry.Path,
+				Timestamp: timestamp,
 			})
 		}
 	}
@@ -654,7 +684,22 @@ func (sm *SessionManager) GetSessionInfo() (id string, createdAt time.Time, chan
 
 	count := 0
 	if sm.db != nil {
-		count = sm.db.FileCount() + sm.db.DeletedCount()
+		files, err := sm.db.GetAllFiles()
+		if err == nil {
+			for _, entry := range files {
+				if isVisibleChangeType(entry.ChangeType) {
+					count++
+				}
+			}
+		}
+		deleted, err := sm.db.GetAllDeletedEntries()
+		if err == nil {
+			for _, entry := range deleted {
+				if isVisibleChangeType(entry.ChangeType) {
+					count++
+				}
+			}
+		}
 	}
 
 	return sm.current.ID, sm.current.CreatedAt, count, true

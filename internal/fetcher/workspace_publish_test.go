@@ -123,6 +123,117 @@ func TestStageAndPublishWorkspaceBundle(t *testing.T) {
 	}
 }
 
+func TestStageAndSourcePushWorkspaceCommitBundle(t *testing.T) {
+	remotePath, baseCommit := createPublishRemoteRepo(t)
+	client, cleanup := startRepoSyncWorkerTestClient(t)
+	defer cleanup()
+
+	bundleBytes, err := json.Marshal(workspacebundle.SourceCommitBundle{
+		WorkspaceID:   "workspace-a",
+		LogicalBranch: "feature/demo",
+		Commits: []workspacebundle.SourceCommit{
+			{
+				ID:      "local-1",
+				Message: "first local commit",
+				Repositories: []workspacebundle.SourceCommitRepository{{
+					StorageID:   "repo-1",
+					DisplayPath: "src/repo-1",
+					RepoURL:     remotePath,
+					Branch:      "main",
+					BaseCommit:  baseCommit,
+					Operations: []workspacebundle.Operation{{
+						Kind:    workspacebundle.OperationUpsert,
+						Path:    "README.md",
+						Content: []byte("first local change\n"),
+					}},
+				}},
+			},
+			{
+				ID:       "local-2",
+				ParentID: "local-1",
+				Message:  "second local commit",
+				Repositories: []workspacebundle.SourceCommitRepository{{
+					StorageID:   "repo-1",
+					DisplayPath: "src/repo-1",
+					RepoURL:     remotePath,
+					Branch:      "main",
+					BaseCommit:  baseCommit,
+					Operations: []workspacebundle.Operation{{
+						Kind:    workspacebundle.OperationUpsert,
+						Path:    "README.md",
+						Content: []byte("second local change\n"),
+					}},
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal source commit bundle: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stage, err := client.StageWorkspaceCommitBundle(ctx)
+	if err != nil {
+		t.Fatalf("open source stage stream: %v", err)
+	}
+	if err := stage.Send(&pb.WorkspaceBundleChunk{
+		WorkspaceId: "workspace-a",
+		BundleId:    "commit-bundle-1",
+		Data:        bundleBytes,
+		IsLast:      true,
+	}); err != nil {
+		t.Fatalf("send source stage chunk: %v", err)
+	}
+	stageResp, err := stage.CloseAndRecv()
+	if err != nil {
+		t.Fatalf("close source stage stream: %v", err)
+	}
+	if stageResp.GetBytesReceived() != int64(len(bundleBytes)) {
+		t.Fatalf("expected %d staged bytes, got %d", len(bundleBytes), stageResp.GetBytesReceived())
+	}
+
+	pushStream, err := client.StartWorkspaceCommitPush(ctx, &pb.StartWorkspaceCommitPushRequest{
+		JobId:         "job-source-1",
+		WorkspaceId:   "workspace-a",
+		BundleId:      "commit-bundle-1",
+		LogicalBranch: "feature/demo",
+	})
+	if err != nil {
+		t.Fatalf("start source push: %v", err)
+	}
+
+	var results []*pb.RepoSyncProgress
+	for {
+		progress, err := pushStream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("recv source push progress: %v", err)
+		}
+		results = append(results, progress)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 source push result, got %d", len(results))
+	}
+	if results[0].GetStatus() != pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED {
+		t.Fatalf("expected published status, got %s", results[0].GetStatus().String())
+	}
+	if results[0].GetTargetBranch() != "feature/demo" {
+		t.Fatalf("target branch = %q, want feature/demo", results[0].GetTargetBranch())
+	}
+	if results[0].GetPushedCommit() == "" {
+		t.Fatal("expected pushed commit hash")
+	}
+
+	content := readRemoteFile(t, remotePath, "feature/demo", "README.md")
+	if string(content) != "second local change\n" {
+		t.Fatalf("unexpected remote file content: %q", string(content))
+	}
+}
+
 func startRepoSyncWorkerTestClient(t *testing.T) (pb.RepoSyncWorkerClient, func()) {
 	t.Helper()
 
