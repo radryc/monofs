@@ -50,7 +50,9 @@ service BlobFetcher {
 // Router orchestrates jobs; the worker talks to upstream repositories.
 service RepoSyncWorker {
     rpc StageWorkspaceBundle(stream WorkspaceBundleChunk) returns (StageWorkspaceBundleResponse);
+    rpc StageWorkspaceCommitBundle(stream WorkspaceBundleChunk) returns (StageWorkspaceBundleResponse);
     rpc StartWorkspacePublish(StartWorkspacePublishRequest) returns (stream RepoSyncProgress);
+    rpc StartWorkspaceCommitPush(StartWorkspaceCommitPushRequest) returns (stream RepoSyncProgress);
     rpc ProbeWorkspaceRefresh(ProbeWorkspaceRefreshRequest) returns (stream RepoSyncProgress);
     rpc DiscardWorkspaceBundle(DiscardWorkspaceBundleRequest) returns (DiscardWorkspaceBundleResponse);
     rpc GetSyncWorkerStats(SyncWorkerStatsRequest) returns (SyncWorkerStatsResponse);
@@ -242,6 +244,13 @@ message StartWorkspacePublishRequest {
     string author_name = 5;
     string author_email = 6;
     string requested_branch_strategy = 7;
+}
+
+message StartWorkspaceCommitPushRequest {
+    string job_id = 1;
+    string workspace_id = 2;
+    string bundle_id = 3;
+    string logical_branch = 4;
 }
 
 message ProbeWorkspaceRefreshRequest {

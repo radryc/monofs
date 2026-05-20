@@ -19,51 +19,53 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MonoFSRouter_GetClusterInfo_FullMethodName           = "/monofs.MonoFSRouter/GetClusterInfo"
-	MonoFSRouter_Heartbeat_FullMethodName                = "/monofs.MonoFSRouter/Heartbeat"
-	MonoFSRouter_IngestRepository_FullMethodName         = "/monofs.MonoFSRouter/IngestRepository"
-	MonoFSRouter_NotifyRepositoryIngested_FullMethodName = "/monofs.MonoFSRouter/NotifyRepositoryIngested"
-	MonoFSRouter_DeleteRepository_FullMethodName         = "/monofs.MonoFSRouter/DeleteRepository"
-	MonoFSRouter_GetNodeForFile_FullMethodName           = "/monofs.MonoFSRouter/GetNodeForFile"
-	MonoFSRouter_RegisterClient_FullMethodName           = "/monofs.MonoFSRouter/RegisterClient"
-	MonoFSRouter_UnregisterClient_FullMethodName         = "/monofs.MonoFSRouter/UnregisterClient"
-	MonoFSRouter_ClientHeartbeat_FullMethodName          = "/monofs.MonoFSRouter/ClientHeartbeat"
-	MonoFSRouter_ListClients_FullMethodName              = "/monofs.MonoFSRouter/ListClients"
-	MonoFSRouter_RequestFailover_FullMethodName          = "/monofs.MonoFSRouter/RequestFailover"
-	MonoFSRouter_GetNodeFiles_FullMethodName             = "/monofs.MonoFSRouter/GetNodeFiles"
-	MonoFSRouter_GetClusterStats_FullMethodName          = "/monofs.MonoFSRouter/GetClusterStats"
-	MonoFSRouter_GetNodeStats_FullMethodName             = "/monofs.MonoFSRouter/GetNodeStats"
-	MonoFSRouter_DrainCluster_FullMethodName             = "/monofs.MonoFSRouter/DrainCluster"
-	MonoFSRouter_UndrainCluster_FullMethodName           = "/monofs.MonoFSRouter/UndrainCluster"
-	MonoFSRouter_DeleteGuardianFile_FullMethodName       = "/monofs.MonoFSRouter/DeleteGuardianFile"
-	MonoFSRouter_DeleteGuardianDirectory_FullMethodName  = "/monofs.MonoFSRouter/DeleteGuardianDirectory"
-	MonoFSRouter_InjectGuardianPartition_FullMethodName  = "/monofs.MonoFSRouter/InjectGuardianPartition"
-	MonoFSRouter_UpsertGuardianPaths_FullMethodName      = "/monofs.MonoFSRouter/UpsertGuardianPaths"
-	MonoFSRouter_DeleteGuardianPaths_FullMethodName      = "/monofs.MonoFSRouter/DeleteGuardianPaths"
-	MonoFSRouter_ListGuardianVersions_FullMethodName     = "/monofs.MonoFSRouter/ListGuardianVersions"
-	MonoFSRouter_GetGuardianVersion_FullMethodName       = "/monofs.MonoFSRouter/GetGuardianVersion"
-	MonoFSRouter_SubscribeGuardianChanges_FullMethodName = "/monofs.MonoFSRouter/SubscribeGuardianChanges"
-	MonoFSRouter_StreamQueryLogs_FullMethodName          = "/monofs.MonoFSRouter/StreamQueryLogs"
-	MonoFSRouter_StreamQueryMetrics_FullMethodName       = "/monofs.MonoFSRouter/StreamQueryMetrics"
-	MonoFSRouter_StreamQueryTraces_FullMethodName        = "/monofs.MonoFSRouter/StreamQueryTraces"
-	MonoFSRouter_QueryLogs_FullMethodName                = "/monofs.MonoFSRouter/QueryLogs"
-	MonoFSRouter_QueryMetrics_FullMethodName             = "/monofs.MonoFSRouter/QueryMetrics"
-	MonoFSRouter_QueryTraces_FullMethodName              = "/monofs.MonoFSRouter/QueryTraces"
-	MonoFSRouter_IngestLogs_FullMethodName               = "/monofs.MonoFSRouter/IngestLogs"
-	MonoFSRouter_IngestMetrics_FullMethodName            = "/monofs.MonoFSRouter/IngestMetrics"
-	MonoFSRouter_IngestTraces_FullMethodName             = "/monofs.MonoFSRouter/IngestTraces"
-	MonoFSRouter_AddWhitelistedClient_FullMethodName     = "/monofs.MonoFSRouter/AddWhitelistedClient"
-	MonoFSRouter_RemoveWhitelistedClient_FullMethodName  = "/monofs.MonoFSRouter/RemoveWhitelistedClient"
-	MonoFSRouter_ListWhitelistedClients_FullMethodName   = "/monofs.MonoFSRouter/ListWhitelistedClients"
-	MonoFSRouter_SetWhitelistEnabled_FullMethodName      = "/monofs.MonoFSRouter/SetWhitelistEnabled"
-	MonoFSRouter_GetWhitelistStatus_FullMethodName       = "/monofs.MonoFSRouter/GetWhitelistStatus"
-	MonoFSRouter_SubscribeToChanges_FullMethodName       = "/monofs.MonoFSRouter/SubscribeToChanges"
-	MonoFSRouter_UploadWorkspaceBundle_FullMethodName    = "/monofs.MonoFSRouter/UploadWorkspaceBundle"
-	MonoFSRouter_PublishWorkspace_FullMethodName         = "/monofs.MonoFSRouter/PublishWorkspace"
-	MonoFSRouter_RefreshWorkspace_FullMethodName         = "/monofs.MonoFSRouter/RefreshWorkspace"
-	MonoFSRouter_GetWorkspaceSyncJob_FullMethodName      = "/monofs.MonoFSRouter/GetWorkspaceSyncJob"
-	MonoFSRouter_ListWorkspaceSyncJobs_FullMethodName    = "/monofs.MonoFSRouter/ListWorkspaceSyncJobs"
-	MonoFSRouter_CancelWorkspaceSyncJob_FullMethodName   = "/monofs.MonoFSRouter/CancelWorkspaceSyncJob"
+	MonoFSRouter_GetClusterInfo_FullMethodName              = "/monofs.MonoFSRouter/GetClusterInfo"
+	MonoFSRouter_Heartbeat_FullMethodName                   = "/monofs.MonoFSRouter/Heartbeat"
+	MonoFSRouter_IngestRepository_FullMethodName            = "/monofs.MonoFSRouter/IngestRepository"
+	MonoFSRouter_NotifyRepositoryIngested_FullMethodName    = "/monofs.MonoFSRouter/NotifyRepositoryIngested"
+	MonoFSRouter_DeleteRepository_FullMethodName            = "/monofs.MonoFSRouter/DeleteRepository"
+	MonoFSRouter_GetNodeForFile_FullMethodName              = "/monofs.MonoFSRouter/GetNodeForFile"
+	MonoFSRouter_RegisterClient_FullMethodName              = "/monofs.MonoFSRouter/RegisterClient"
+	MonoFSRouter_UnregisterClient_FullMethodName            = "/monofs.MonoFSRouter/UnregisterClient"
+	MonoFSRouter_ClientHeartbeat_FullMethodName             = "/monofs.MonoFSRouter/ClientHeartbeat"
+	MonoFSRouter_ListClients_FullMethodName                 = "/monofs.MonoFSRouter/ListClients"
+	MonoFSRouter_RequestFailover_FullMethodName             = "/monofs.MonoFSRouter/RequestFailover"
+	MonoFSRouter_GetNodeFiles_FullMethodName                = "/monofs.MonoFSRouter/GetNodeFiles"
+	MonoFSRouter_GetClusterStats_FullMethodName             = "/monofs.MonoFSRouter/GetClusterStats"
+	MonoFSRouter_GetNodeStats_FullMethodName                = "/monofs.MonoFSRouter/GetNodeStats"
+	MonoFSRouter_DrainCluster_FullMethodName                = "/monofs.MonoFSRouter/DrainCluster"
+	MonoFSRouter_UndrainCluster_FullMethodName              = "/monofs.MonoFSRouter/UndrainCluster"
+	MonoFSRouter_DeleteGuardianFile_FullMethodName          = "/monofs.MonoFSRouter/DeleteGuardianFile"
+	MonoFSRouter_DeleteGuardianDirectory_FullMethodName     = "/monofs.MonoFSRouter/DeleteGuardianDirectory"
+	MonoFSRouter_InjectGuardianPartition_FullMethodName     = "/monofs.MonoFSRouter/InjectGuardianPartition"
+	MonoFSRouter_UpsertGuardianPaths_FullMethodName         = "/monofs.MonoFSRouter/UpsertGuardianPaths"
+	MonoFSRouter_DeleteGuardianPaths_FullMethodName         = "/monofs.MonoFSRouter/DeleteGuardianPaths"
+	MonoFSRouter_ListGuardianVersions_FullMethodName        = "/monofs.MonoFSRouter/ListGuardianVersions"
+	MonoFSRouter_GetGuardianVersion_FullMethodName          = "/monofs.MonoFSRouter/GetGuardianVersion"
+	MonoFSRouter_SubscribeGuardianChanges_FullMethodName    = "/monofs.MonoFSRouter/SubscribeGuardianChanges"
+	MonoFSRouter_StreamQueryLogs_FullMethodName             = "/monofs.MonoFSRouter/StreamQueryLogs"
+	MonoFSRouter_StreamQueryMetrics_FullMethodName          = "/monofs.MonoFSRouter/StreamQueryMetrics"
+	MonoFSRouter_StreamQueryTraces_FullMethodName           = "/monofs.MonoFSRouter/StreamQueryTraces"
+	MonoFSRouter_QueryLogs_FullMethodName                   = "/monofs.MonoFSRouter/QueryLogs"
+	MonoFSRouter_QueryMetrics_FullMethodName                = "/monofs.MonoFSRouter/QueryMetrics"
+	MonoFSRouter_QueryTraces_FullMethodName                 = "/monofs.MonoFSRouter/QueryTraces"
+	MonoFSRouter_IngestLogs_FullMethodName                  = "/monofs.MonoFSRouter/IngestLogs"
+	MonoFSRouter_IngestMetrics_FullMethodName               = "/monofs.MonoFSRouter/IngestMetrics"
+	MonoFSRouter_IngestTraces_FullMethodName                = "/monofs.MonoFSRouter/IngestTraces"
+	MonoFSRouter_AddWhitelistedClient_FullMethodName        = "/monofs.MonoFSRouter/AddWhitelistedClient"
+	MonoFSRouter_RemoveWhitelistedClient_FullMethodName     = "/monofs.MonoFSRouter/RemoveWhitelistedClient"
+	MonoFSRouter_ListWhitelistedClients_FullMethodName      = "/monofs.MonoFSRouter/ListWhitelistedClients"
+	MonoFSRouter_SetWhitelistEnabled_FullMethodName         = "/monofs.MonoFSRouter/SetWhitelistEnabled"
+	MonoFSRouter_GetWhitelistStatus_FullMethodName          = "/monofs.MonoFSRouter/GetWhitelistStatus"
+	MonoFSRouter_SubscribeToChanges_FullMethodName          = "/monofs.MonoFSRouter/SubscribeToChanges"
+	MonoFSRouter_UploadWorkspaceBundle_FullMethodName       = "/monofs.MonoFSRouter/UploadWorkspaceBundle"
+	MonoFSRouter_UploadWorkspaceCommitBundle_FullMethodName = "/monofs.MonoFSRouter/UploadWorkspaceCommitBundle"
+	MonoFSRouter_PublishWorkspace_FullMethodName            = "/monofs.MonoFSRouter/PublishWorkspace"
+	MonoFSRouter_PushWorkspaceCommits_FullMethodName        = "/monofs.MonoFSRouter/PushWorkspaceCommits"
+	MonoFSRouter_RefreshWorkspace_FullMethodName            = "/monofs.MonoFSRouter/RefreshWorkspace"
+	MonoFSRouter_GetWorkspaceSyncJob_FullMethodName         = "/monofs.MonoFSRouter/GetWorkspaceSyncJob"
+	MonoFSRouter_ListWorkspaceSyncJobs_FullMethodName       = "/monofs.MonoFSRouter/ListWorkspaceSyncJobs"
+	MonoFSRouter_CancelWorkspaceSyncJob_FullMethodName      = "/monofs.MonoFSRouter/CancelWorkspaceSyncJob"
 )
 
 // MonoFSRouterClient is the client API for MonoFSRouter service.
@@ -132,7 +134,9 @@ type MonoFSRouterClient interface {
 	SubscribeToChanges(ctx context.Context, in *SubscribeChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ChangeEvent], error)
 	// Workspace sync orchestration for virtual monorepo publish and refresh flows.
 	UploadWorkspaceBundle(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WorkspaceBundleChunk, UploadWorkspaceBundleResponse], error)
+	UploadWorkspaceCommitBundle(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WorkspaceBundleChunk, UploadWorkspaceBundleResponse], error)
 	PublishWorkspace(ctx context.Context, in *PublishWorkspaceRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspaceSyncEvent], error)
+	PushWorkspaceCommits(ctx context.Context, in *PushWorkspaceCommitsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspaceSyncEvent], error)
 	RefreshWorkspace(ctx context.Context, in *RefreshWorkspaceRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspaceSyncEvent], error)
 	GetWorkspaceSyncJob(ctx context.Context, in *GetWorkspaceSyncJobRequest, opts ...grpc.CallOption) (*WorkspaceSyncJob, error)
 	ListWorkspaceSyncJobs(ctx context.Context, in *ListWorkspaceSyncJobsRequest, opts ...grpc.CallOption) (*ListWorkspaceSyncJobsResponse, error)
@@ -604,9 +608,22 @@ func (c *monoFSRouterClient) UploadWorkspaceBundle(ctx context.Context, opts ...
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type MonoFSRouter_UploadWorkspaceBundleClient = grpc.ClientStreamingClient[WorkspaceBundleChunk, UploadWorkspaceBundleResponse]
 
+func (c *monoFSRouterClient) UploadWorkspaceCommitBundle(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WorkspaceBundleChunk, UploadWorkspaceBundleResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[7], MonoFSRouter_UploadWorkspaceCommitBundle_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WorkspaceBundleChunk, UploadWorkspaceBundleResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_UploadWorkspaceCommitBundleClient = grpc.ClientStreamingClient[WorkspaceBundleChunk, UploadWorkspaceBundleResponse]
+
 func (c *monoFSRouterClient) PublishWorkspace(ctx context.Context, in *PublishWorkspaceRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspaceSyncEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[7], MonoFSRouter_PublishWorkspace_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[8], MonoFSRouter_PublishWorkspace_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -623,9 +640,28 @@ func (c *monoFSRouterClient) PublishWorkspace(ctx context.Context, in *PublishWo
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type MonoFSRouter_PublishWorkspaceClient = grpc.ServerStreamingClient[WorkspaceSyncEvent]
 
+func (c *monoFSRouterClient) PushWorkspaceCommits(ctx context.Context, in *PushWorkspaceCommitsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspaceSyncEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[9], MonoFSRouter_PushWorkspaceCommits_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PushWorkspaceCommitsRequest, WorkspaceSyncEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_PushWorkspaceCommitsClient = grpc.ServerStreamingClient[WorkspaceSyncEvent]
+
 func (c *monoFSRouterClient) RefreshWorkspace(ctx context.Context, in *RefreshWorkspaceRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspaceSyncEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[8], MonoFSRouter_RefreshWorkspace_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[10], MonoFSRouter_RefreshWorkspace_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -738,7 +774,9 @@ type MonoFSRouterServer interface {
 	SubscribeToChanges(*SubscribeChangesRequest, grpc.ServerStreamingServer[ChangeEvent]) error
 	// Workspace sync orchestration for virtual monorepo publish and refresh flows.
 	UploadWorkspaceBundle(grpc.ClientStreamingServer[WorkspaceBundleChunk, UploadWorkspaceBundleResponse]) error
+	UploadWorkspaceCommitBundle(grpc.ClientStreamingServer[WorkspaceBundleChunk, UploadWorkspaceBundleResponse]) error
 	PublishWorkspace(*PublishWorkspaceRequest, grpc.ServerStreamingServer[WorkspaceSyncEvent]) error
+	PushWorkspaceCommits(*PushWorkspaceCommitsRequest, grpc.ServerStreamingServer[WorkspaceSyncEvent]) error
 	RefreshWorkspace(*RefreshWorkspaceRequest, grpc.ServerStreamingServer[WorkspaceSyncEvent]) error
 	GetWorkspaceSyncJob(context.Context, *GetWorkspaceSyncJobRequest) (*WorkspaceSyncJob, error)
 	ListWorkspaceSyncJobs(context.Context, *ListWorkspaceSyncJobsRequest) (*ListWorkspaceSyncJobsResponse, error)
@@ -873,8 +911,14 @@ func (UnimplementedMonoFSRouterServer) SubscribeToChanges(*SubscribeChangesReque
 func (UnimplementedMonoFSRouterServer) UploadWorkspaceBundle(grpc.ClientStreamingServer[WorkspaceBundleChunk, UploadWorkspaceBundleResponse]) error {
 	return status.Error(codes.Unimplemented, "method UploadWorkspaceBundle not implemented")
 }
+func (UnimplementedMonoFSRouterServer) UploadWorkspaceCommitBundle(grpc.ClientStreamingServer[WorkspaceBundleChunk, UploadWorkspaceBundleResponse]) error {
+	return status.Error(codes.Unimplemented, "method UploadWorkspaceCommitBundle not implemented")
+}
 func (UnimplementedMonoFSRouterServer) PublishWorkspace(*PublishWorkspaceRequest, grpc.ServerStreamingServer[WorkspaceSyncEvent]) error {
 	return status.Error(codes.Unimplemented, "method PublishWorkspace not implemented")
+}
+func (UnimplementedMonoFSRouterServer) PushWorkspaceCommits(*PushWorkspaceCommitsRequest, grpc.ServerStreamingServer[WorkspaceSyncEvent]) error {
+	return status.Error(codes.Unimplemented, "method PushWorkspaceCommits not implemented")
 }
 func (UnimplementedMonoFSRouterServer) RefreshWorkspace(*RefreshWorkspaceRequest, grpc.ServerStreamingServer[WorkspaceSyncEvent]) error {
 	return status.Error(codes.Unimplemented, "method RefreshWorkspace not implemented")
@@ -1576,6 +1620,13 @@ func _MonoFSRouter_UploadWorkspaceBundle_Handler(srv interface{}, stream grpc.Se
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type MonoFSRouter_UploadWorkspaceBundleServer = grpc.ClientStreamingServer[WorkspaceBundleChunk, UploadWorkspaceBundleResponse]
 
+func _MonoFSRouter_UploadWorkspaceCommitBundle_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(MonoFSRouterServer).UploadWorkspaceCommitBundle(&grpc.GenericServerStream[WorkspaceBundleChunk, UploadWorkspaceBundleResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_UploadWorkspaceCommitBundleServer = grpc.ClientStreamingServer[WorkspaceBundleChunk, UploadWorkspaceBundleResponse]
+
 func _MonoFSRouter_PublishWorkspace_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(PublishWorkspaceRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -1586,6 +1637,17 @@ func _MonoFSRouter_PublishWorkspace_Handler(srv interface{}, stream grpc.ServerS
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type MonoFSRouter_PublishWorkspaceServer = grpc.ServerStreamingServer[WorkspaceSyncEvent]
+
+func _MonoFSRouter_PushWorkspaceCommits_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(PushWorkspaceCommitsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(MonoFSRouterServer).PushWorkspaceCommits(m, &grpc.GenericServerStream[PushWorkspaceCommitsRequest, WorkspaceSyncEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_PushWorkspaceCommitsServer = grpc.ServerStreamingServer[WorkspaceSyncEvent]
 
 func _MonoFSRouter_RefreshWorkspace_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(RefreshWorkspaceRequest)
@@ -1841,8 +1903,18 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 		{
+			StreamName:    "UploadWorkspaceCommitBundle",
+			Handler:       _MonoFSRouter_UploadWorkspaceCommitBundle_Handler,
+			ClientStreams: true,
+		},
+		{
 			StreamName:    "PublishWorkspace",
 			Handler:       _MonoFSRouter_PublishWorkspace_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "PushWorkspaceCommits",
+			Handler:       _MonoFSRouter_PushWorkspaceCommits_Handler,
 			ServerStreams: true,
 		},
 		{
