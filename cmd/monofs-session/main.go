@@ -14,6 +14,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/vladimirvivien/litertlm-go/pkg/litertlm"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -22,6 +23,23 @@ const (
 	defaultSocketTimeout = 30 * time.Second
 	pushSocketTimeout    = 10 * time.Minute
 )
+
+const commitMessagePrompt = `You are an expert software engineer writing git commit messages.
+
+Given the diff below, produce ONE concise commit message using Conventional Commits:
+
+  <type>(<optional scope>): <imperative-mood description>
+
+Valid types: feat, fix, docs, style, refactor, test, chore, build, ci, perf.
+
+Rules:
+- Subject line <= 72 characters.
+- Imperative mood.
+- No trailing period.
+- Output ONLY the commit message line.
+
+Diff:
+%s`
 
 // SessionRequest is sent to the FUSE client
 type SessionRequest struct {
@@ -254,24 +272,33 @@ func (sc *SessionCommand) printUsage() error {
 Usage: monofs-session [--socket <path>] <command>
 
 Commands:
-  start        Start a new write session (or show current if active)
-	add          Stage source changes as local snapshots
-	rm           Remove source paths and stage deletes
-  status       Show current session status and pending changes
-	branch       Show, create, or switch logical branches
-	refs         Show tracked workspace refs for the mounted repositories
-	log          Show local virtual commit history
-  diff [file]  Show unified diff between original and changed files
-	commit       Create a local virtual commit from staged source changes
-	pull         Re-ingest included workspace repositories from their upstream sources
-  discard      Abandon all local changes and delete session
-  blobs-info    Show blob files in the current session
-	push         Send pending local virtual commits upstream on the current logical branch
-	push-blobs   Package and upload blob files to storage backend
-	push-deps    Alias for push-blobs
-  search       Search code across indexed repositories
-  setup        Create blob cache dirs on monofs and print env exports
-  help         Show this help message
+	Session lifecycle:
+		start        Start a new write session (or show current if active)
+		status       Show current session status and pending changes
+		discard      Abandon all local changes and delete session
+
+	Source changes:
+		add          Stage source changes as local snapshots
+		rm           Remove source paths and stage deletes
+		diff [file]  Show unified diff between original and changed files
+		commit       Create a local virtual commit from staged source changes
+		pull         Re-ingest included workspace repositories from their upstream sources
+		push         Send pending local virtual commits upstream on the current logical branch
+
+	Workspace state:
+		branch       Show, create, or switch logical branches
+		refs         Show tracked workspace refs for the mounted repositories
+		log          Show local virtual commit history
+
+	Blobs and search:
+		blobs-info   Show blob files in the current session
+		push-blobs   Package and upload blob files to storage backend
+		push-deps    Alias for push-blobs
+		search       Search code across indexed repositories
+		setup        Create blob cache dirs on monofs and print env exports
+
+	Misc:
+		help         Show this help message
 
 Options:
   --socket <path>  Explicit path to session socket file
@@ -332,6 +359,11 @@ Examples:
 	# Record author metadata on the local virtual commit
 	monofs-session commit -m "Update API" --author-name "Dev" --author-email dev@example.com
 
+	# Auto-generate commit message from session diff using direct LiteRT-LM integration
+	monofs-session commit --auto --model /path/to/gemma-4-E2B-it.litertlm --lib /path/to/litertlm/lib
+	# or set env vars: LITERTLM_MODEL, LITERTLM_LIB (AI_COMMIT_* also accepted)
+	monofs-session commit --auto
+
 	# Push pending local commits on the current logical branch upstream
 	monofs-session push
 
@@ -344,8 +376,8 @@ Examples:
   # Abandon all local changes
   monofs-session discard
 
-	# Upload blob files to storage backend
-	monofs-session push-blobs
+  # Upload blob files to storage backend
+  monofs-session push-blobs
 
   # Setup blob caches on monofs (eval to apply)
   eval $(monofs-session setup --mount /mnt/monofs)
@@ -971,6 +1003,10 @@ func (sc *SessionCommand) commitSession(args []string) error {
 	authorName := commitCmd.String("author-name", firstNonEmpty(os.Getenv("MONOFS_AUTHOR_NAME"), os.Getenv("GIT_AUTHOR_NAME"), os.Getenv("GIT_COMMITTER_NAME")), "Author name recorded on the local virtual commit")
 	authorEmail := commitCmd.String("author-email", firstNonEmpty(os.Getenv("MONOFS_AUTHOR_EMAIL"), os.Getenv("GIT_AUTHOR_EMAIL"), os.Getenv("GIT_COMMITTER_EMAIL")), "Author email recorded on the local virtual commit")
 	branchStrategy := commitCmd.String("branch-strategy", "direct", "Reserved for later push routing; ignored when creating local commits")
+	autoMsg := commitCmd.Bool("auto", false, "Generate commit message from session diff using LiteRT-LM")
+	autoModel := commitCmd.String("model", firstNonEmpty(os.Getenv("AI_COMMIT_MODEL"), os.Getenv("LITERTLM_MODEL")), "Path to .litertlm model file for --auto (default: google/gemma-4-E2B-it)")
+	autoLib := commitCmd.String("lib", firstNonEmpty(os.Getenv("AI_COMMIT_LIB"), os.Getenv("LITERTLM_LIB")), "Directory containing the LiteRT-LM C library for --auto")
+	autoMaxTokens := commitCmd.Int("max-tokens", 128, "Max output tokens for --auto generated message")
 
 	if err := commitCmd.Parse(args); err != nil {
 		return err
@@ -979,11 +1015,22 @@ func (sc *SessionCommand) commitSession(args []string) error {
 		return fmt.Errorf("unsupported branch strategy %q", *branchStrategy)
 	}
 
+	finalMessage := firstNonEmpty(*messageLong, *message)
+
+	if *autoMsg && finalMessage == "" {
+		generated, err := sc.generateCommitMessage(*autoModel, *autoLib, *autoMaxTokens)
+		if err != nil {
+			return fmt.Errorf("--auto: %w", err)
+		}
+		finalMessage = generated
+		fmt.Fprintf(os.Stderr, "litertlm: %s\n", finalMessage)
+	}
+
 	fmt.Println("Creating local commit...")
 
 	resp, err := sc.sendRequest(SessionRequest{
 		Action:                  "commit",
-		LogicalCommitMessage:    firstNonEmpty(*messageLong, *message),
+		LogicalCommitMessage:    finalMessage,
 		AuthorName:              *authorName,
 		AuthorEmail:             *authorEmail,
 		RequestedBranchStrategy: *branchStrategy,
@@ -1000,6 +1047,58 @@ func (sc *SessionCommand) commitSession(args []string) error {
 	fmt.Printf("  %s\n", resp.Message)
 
 	return nil
+}
+
+// generateCommitMessage fetches the current session diff and produces a message
+// directly via LiteRT-LM.
+func (sc *SessionCommand) generateCommitMessage(modelPath, libDir string, maxTokens int) (string, error) {
+	if modelPath == "" {
+		return "", fmt.Errorf("--model (or $AI_COMMIT_MODEL / $LITERTLM_MODEL) is required with --auto\n" +
+			"Download the gemma-4-E2B-it .litertlm file from:\n  https://huggingface.co/google/gemma-4-E2B-it")
+	}
+	if libDir == "" {
+		return "", fmt.Errorf("--lib (or $AI_COMMIT_LIB / $LITERTLM_LIB) is required with --auto\n" +
+			"Build the C library following:\n  https://github.com/vladimirvivien/litertlm-go/blob/main/LITERTLM-BUILD.md")
+	}
+
+	// Fetch the session diff.
+	resp, err := sc.sendRequest(SessionRequest{Action: "diff"})
+	if err != nil {
+		return "", fmt.Errorf("fetching session diff: %w", err)
+	}
+	if !resp.Success {
+		return "", fmt.Errorf("fetching session diff: %s", resp.Error)
+	}
+
+	var sb strings.Builder
+	for _, fd := range resp.DiffData {
+		if fd.Diff != "" {
+			fmt.Fprintf(&sb, "--- %s (%s)\n%s\n", fd.Path, fd.ChangeType, fd.Diff)
+		}
+	}
+	diffText := sb.String()
+
+	if strings.TrimSpace(diffText) == "" {
+		return "", fmt.Errorf("no staged changes found in session diff")
+	}
+
+	ctx := context.Background()
+	client, err := litertlm.New(ctx,
+		litertlm.WithLib(libDir),
+		litertlm.WithModel(modelPath),
+		litertlm.WithMaxTokens(4096),
+	)
+	if err != nil {
+		return "", fmt.Errorf("init litertlm client: %w", err)
+	}
+	defer client.Close()
+
+	prompt := fmt.Sprintf(commitMessagePrompt, diffText)
+	out, err := client.Generate(ctx, prompt, litertlm.WithMaxOutputTokens(maxTokens))
+	if err != nil {
+		return "", fmt.Errorf("litertlm generation failed: %w", err)
+	}
+	return strings.TrimSpace(out), nil
 }
 
 func (sc *SessionCommand) pushSource(args []string) error {

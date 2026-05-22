@@ -13,6 +13,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/storage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -617,6 +618,95 @@ func TestGuardianManagedReposUseKVSBackend(t *testing.T) {
 				t.Fatalf("file backend metadata = %#v, want storage_backend=kvs", batch[0].GetBackendMetadata())
 			}
 		})
+	}
+}
+
+func TestInjectGuardianPartitionFromSourceUsesKVSBackend(t *testing.T) {
+	originalRegistry := storage.DefaultRegistry
+	fakeBackend := &fakeGuardianSourceIngestionBackend{
+		files: []storage.FileMetadata{
+			{
+				Path:    "partition.yaml",
+				Mode:    0o644 | uint32(syscall.S_IFREG),
+				Size:    uint64(len("name: genomics\n")),
+				Content: []byte("name: genomics\n"),
+			},
+			{
+				Path:    "intents/web.yaml",
+				Mode:    0o644 | uint32(syscall.S_IFREG),
+				Size:    uint64(len("kind: Intent\n")),
+				Content: []byte("kind: Intent\n"),
+			},
+		},
+	}
+	registry := storage.NewBackendRegistry()
+	registry.RegisterIngestionBackend(storage.IngestionTypeGit, func() storage.IngestionBackend {
+		return fakeBackend
+	})
+	storage.DefaultRegistry = registry
+	defer func() {
+		storage.DefaultRegistry = originalRegistry
+	}()
+
+	router, nodeClient, node, cleanup := newGuardianRouterTestHarness(t)
+	defer cleanup()
+
+	err := router.injectGuardianPartitionFromSource(context.Background(), "https://example.com/guardian.git", "", "genomics", "secret-token")
+	if err != nil {
+		t.Fatalf("injectGuardianPartitionFromSource() error = %v", err)
+	}
+
+	if fakeBackend.validateCalls != 1 {
+		t.Fatalf("Validate() calls = %d, want 1", fakeBackend.validateCalls)
+	}
+	if fakeBackend.initializeCalls != 1 {
+		t.Fatalf("Initialize() calls = %d, want 1", fakeBackend.initializeCalls)
+	}
+	if fakeBackend.cleanupCalls != 1 {
+		t.Fatalf("Cleanup() calls = %d, want 1", fakeBackend.cleanupCalls)
+	}
+	if got := fakeBackend.lastSource; got != "https://example.com/guardian.git" {
+		t.Fatalf("source = %q, want https://example.com/guardian.git", got)
+	}
+	if got := fakeBackend.lastConfig["branch"]; got != "main" {
+		t.Fatalf("branch = %q, want main", got)
+	}
+	if got := fakeBackend.lastConfig["display_path"]; got != "guardian/genomics" {
+		t.Fatalf("display_path = %q, want guardian/genomics", got)
+	}
+
+	mapped, err := mapGuardianLogicalPath("/partitions/genomics/intents/web.yaml")
+	if err != nil {
+		t.Fatalf("mapGuardianLogicalPath() error = %v", err)
+	}
+
+	node.mu.Lock()
+	regReq := node.registerRequests[mapped.StorageID]
+	batch := node.ingestBatches[mapped.StorageID]
+	node.mu.Unlock()
+
+	if regReq == nil {
+		t.Fatalf("expected RegisterRepository request for storage_id %q", mapped.StorageID)
+	}
+	if regReq.GetDisplayPath() != "guardian/genomics" {
+		t.Fatalf("register display path = %q, want guardian/genomics", regReq.GetDisplayPath())
+	}
+	if regReq.GetFetchConfig()["storage_backend"] != "kvs" {
+		t.Fatalf("fetch config = %#v, want storage_backend=kvs", regReq.GetFetchConfig())
+	}
+	if regReq.GetIngestionConfig()["storage_backend"] != "kvs" {
+		t.Fatalf("ingestion config = %#v, want storage_backend=kvs", regReq.GetIngestionConfig())
+	}
+	if len(batch) == 0 {
+		t.Fatalf("expected ingest batch for storage_id %q", mapped.StorageID)
+	}
+	if batch[0].GetBackendMetadata()["storage_backend"] != "kvs" {
+		t.Fatalf("file backend metadata = %#v, want storage_backend=kvs", batch[0].GetBackendMetadata())
+	}
+
+	content := readAllFromMonoFSClient(t, nodeClient, "guardian/genomics/intents/web.yaml")
+	if string(content) != "kind: Intent\n" {
+		t.Fatalf("read content = %q, want %q", string(content), "kind: Intent\n")
 	}
 }
 
@@ -1439,6 +1529,57 @@ func newMockGuardianLogicalChangeStream() *mockGuardianLogicalChangeStream {
 		ctx:    ctx,
 		cancel: cancel,
 	}
+}
+
+type fakeGuardianSourceIngestionBackend struct {
+	files           []storage.FileMetadata
+	lastSource      string
+	lastConfig      map[string]string
+	validateCalls   int
+	initializeCalls int
+	cleanupCalls    int
+}
+
+func (f *fakeGuardianSourceIngestionBackend) Type() storage.IngestionType {
+	return storage.IngestionTypeGit
+}
+
+func (f *fakeGuardianSourceIngestionBackend) Initialize(_ context.Context, sourceURL string, config map[string]string) error {
+	f.initializeCalls++
+	f.lastSource = sourceURL
+	f.lastConfig = cloneStringMap(config)
+	return nil
+}
+
+func (f *fakeGuardianSourceIngestionBackend) WalkFiles(_ context.Context, fn func(storage.FileMetadata) error) error {
+	for _, file := range f.files {
+		if err := fn(file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *fakeGuardianSourceIngestionBackend) GetMetadata(_ context.Context, path string) (*storage.FileMetadata, error) {
+	for _, file := range f.files {
+		if file.Path == path {
+			copy := file
+			return &copy, nil
+		}
+	}
+	return nil, errors.New("not found")
+}
+
+func (f *fakeGuardianSourceIngestionBackend) Cleanup() error {
+	f.cleanupCalls++
+	return nil
+}
+
+func (f *fakeGuardianSourceIngestionBackend) Validate(_ context.Context, sourceURL string, config map[string]string) error {
+	f.validateCalls++
+	f.lastSource = sourceURL
+	f.lastConfig = cloneStringMap(config)
+	return nil
 }
 
 func cloneStringMap(input map[string]string) map[string]string {
