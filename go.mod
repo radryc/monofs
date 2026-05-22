@@ -1,6 +1,6 @@
 module github.com/radryc/monofs
 
-go 1.25.7
+go 1.26.3
 
 require (
 	cloud.google.com/go/storage v1.61.3
@@ -19,9 +19,10 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/prometheus v0.310.1-0.20260320085417-166d20151c0d
 	github.com/radryc/packager v0.0.0-20260314073213-ebce590b0ca7
-	github.com/rydzu/ainfra/kvs v0.0.0
 	github.com/rydzu/ainfra/cfg v0.0.0
+	github.com/rydzu/ainfra/kvs v0.0.0
 	github.com/sourcegraph/zoekt v0.0.0-20260114143800-c747a3bccc2a
+	github.com/vladimirvivien/litertlm-go v0.4.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.65.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0
 	go.opentelemetry.io/otel v1.42.0
@@ -39,6 +40,7 @@ require (
 )
 
 replace github.com/rydzu/ainfra/kvs => ../kvs
+
 replace github.com/rydzu/ainfra/cfg => ../cfg
 
 require (
@@ -106,6 +108,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-metro v0.0.0-20250106013310-edb8663e5e33 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/edsrzf/mmap-go v1.2.0 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
@@ -144,6 +147,7 @@ require (
 	github.com/hashicorp/raft v1.7.3 // indirect
 	github.com/hashicorp/raft-boltdb/v2 v2.3.1 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
+	github.com/jupiterrider/ffi v0.6.0 // indirect
 	github.com/kamstrup/intmap v0.5.2 // indirect
 	github.com/kevinburke/ssh_config v1.4.0 // indirect
 	github.com/klauspost/asmfmt v1.3.2 // indirect

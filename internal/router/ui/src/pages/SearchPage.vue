@@ -76,7 +76,7 @@ async function openFile(storageId: string, filePath: string, lineNum: number) {
     const res = await fetch('/api/file/content', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ storage_id: storageId, path: filePath }),
+      body: JSON.stringify({ storage_id: storageId, file_path: filePath }),
     })
     const data = await res.json()
     viewerContent.value = data.content ?? ''
