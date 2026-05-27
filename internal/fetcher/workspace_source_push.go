@@ -143,12 +143,13 @@ func (s *Service) StartWorkspaceCommitPush(req *pb.StartWorkspaceCommitPushReque
 	ctx := stream.Context()
 	jobFailed := false
 	plans := sourcePushRepositoryPlans(bundleEntry.commitBundle)
+planLoop:
 	for _, plan := range plans {
 		select {
 		case <-ctx.Done():
 			resultLabel = "failed"
 			jobFailed = true
-			break
+			break planLoop
 		default:
 		}
 
