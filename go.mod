@@ -1,6 +1,6 @@
 module github.com/radryc/monofs
 
-go 1.25.7
+go 1.26.3
 
 require (
 	cloud.google.com/go/storage v1.61.3
@@ -19,8 +19,8 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/prometheus v0.310.1-0.20260320085417-166d20151c0d
 	github.com/radryc/packager v0.0.0-20260314073213-ebce590b0ca7
-	github.com/rydzu/ainfra/kvs v0.0.0
 	github.com/rydzu/ainfra/cfg v0.0.0
+	github.com/rydzu/ainfra/kvs v0.0.0
 	github.com/sourcegraph/zoekt v0.0.0-20260114143800-c747a3bccc2a
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.65.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0
@@ -39,6 +39,7 @@ require (
 )
 
 replace github.com/rydzu/ainfra/kvs => ../kvs
+
 replace github.com/rydzu/ainfra/cfg => ../cfg
 
 require (

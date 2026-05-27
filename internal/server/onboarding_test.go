@@ -88,6 +88,49 @@ func TestOnboardingStatusTracking(t *testing.T) {
 	}
 }
 
+func TestRegisterRepositoryUpdatesExistingSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	gitCache := filepath.Join(tmpDir, "git")
+
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer server.Close()
+
+	ctx := context.Background()
+	storageID := "guardian-storage-123"
+
+	_, err = server.RegisterRepository(ctx, &pb.RegisterRepositoryRequest{
+		StorageId:   storageID,
+		DisplayPath: "guardian/genomics",
+		Source:      "guardian-path-api",
+		FetchConfig: map[string]string{"storage_backend": "kvs"},
+	})
+	if err != nil {
+		t.Fatalf("initial RegisterRepository() error = %v", err)
+	}
+
+	_, err = server.RegisterRepository(ctx, &pb.RegisterRepositoryRequest{
+		StorageId:   storageID,
+		DisplayPath: "guardian/genomics",
+		Source:      "https://example.com/guardian.git",
+		FetchConfig: map[string]string{"storage_backend": "kvs"},
+	})
+	if err != nil {
+		t.Fatalf("update RegisterRepository() error = %v", err)
+	}
+
+	info, err := server.GetRepositoryInfo(ctx, &pb.GetRepositoryInfoRequest{StorageId: storageID})
+	if err != nil {
+		t.Fatalf("GetRepositoryInfo() error = %v", err)
+	}
+	if got := info.GetSource(); got != "https://example.com/guardian.git" {
+		t.Fatalf("source = %q, want https://example.com/guardian.git", got)
+	}
+}
+
 func TestOnboardingStatusMultipleRepositories(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")

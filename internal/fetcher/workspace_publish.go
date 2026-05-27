@@ -23,12 +23,13 @@ import (
 const stagedWorkspaceBundleTTL = 30 * time.Minute
 
 type syncWorkerBundle struct {
-	bundleID    string
-	workspaceID string
-	data        []byte
-	bundle      *workspacebundle.Bundle
-	createdAt   time.Time
-	expiresAt   time.Time
+	bundleID     string
+	workspaceID  string
+	data         []byte
+	bundle       *workspacebundle.Bundle
+	commitBundle *workspacebundle.SourceCommitBundle
+	createdAt    time.Time
+	expiresAt    time.Time
 }
 
 func (s *Service) StageWorkspaceBundle(stream grpc.ClientStreamingServer[pb.WorkspaceBundleChunk, pb.StageWorkspaceBundleResponse]) error {

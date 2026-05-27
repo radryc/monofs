@@ -24,6 +24,13 @@ import (
 	monofuse "github.com/radryc/monofs/internal/fuse"
 )
 
+var (
+	// Version information (injected at build time)
+	Version   = "dev"
+	Commit    = "unknown"
+	BuildTime = "unknown"
+)
+
 func main() {
 	routerAddr := flag.String("router", "localhost:9090", "MonoFS router address")
 	mountpoint := flag.String("mount", "", "Mount point (required)")
@@ -38,7 +45,13 @@ func main() {
 	keepCache := flag.Bool("keep-cache", false, "Keep existing cache on mount (default: clear cache)")
 	rpcTimeout := flag.Duration("rpc-timeout", 10*time.Second, "Timeout for RPC calls to nodes")
 	clientID := flag.String("client-id", "", "Persistent client identifier (default: auto-generated and stored in ~/.monofs/client-id)")
+	showVersion := flag.Bool("version", false, "Print version information and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("monofs-client version=%s commit=%s build_time=%s\n", Version, Commit, BuildTime)
+		return
+	}
 
 	if *mountpoint == "" {
 		flag.Usage()
@@ -90,6 +103,9 @@ func main() {
 	}
 
 	logger.Info("starting monofs-client",
+		"version", Version,
+		"commit", Commit,
+		"build_time", BuildTime,
 		"router", *routerAddr,
 		"mount", *mountpoint,
 		"cache", *cacheDir,
@@ -171,11 +187,17 @@ func main() {
 		}
 
 		commitMgr = monofuse.NewCommitManager(sessionMgr, c, logger.With("component", "commit"))
+		if resolvedClientID != "" {
+			commitMgr.SetPrincipalID(resolvedClientID)
+		}
 
 		socketHandler, err = monofuse.NewSessionSocketHandler(*overlayDir, sessionMgr, commitMgr, logger.With("component", "session-socket"))
 		if err != nil {
 			logger.Error("failed to create session socket", "error", err)
 			os.Exit(1)
+		}
+		if resolvedClientID != "" {
+			socketHandler.SetPrincipalID(resolvedClientID)
 		}
 
 		// Wire cluster ingester so push-deps pushes files to backend nodes.

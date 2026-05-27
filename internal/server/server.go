@@ -579,7 +579,7 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 		// Check if already registered
 		if s.repoExistsByStorageIDTx(tx, req.StorageId) {
 			// Repository already exists — update GuardianURL if a new one is provided.
-			if req.GuardianUrl != "" || storageBackend != "" {
+			if req.GuardianUrl != "" || storageBackend != "" || req.Source != "" {
 				value, err := tx.Get(bucketRepos, []byte(req.StorageId))
 				if err != nil {
 					return nil // can't read, skip update
@@ -589,6 +589,10 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 					return nil
 				}
 				updated := false
+				if req.Source != "" && existing.RepoURL != req.Source {
+					existing.RepoURL = req.Source
+					updated = true
+				}
 				if existing.GuardianURL != req.GuardianUrl {
 					existing.GuardianURL = req.GuardianUrl
 					updated = true

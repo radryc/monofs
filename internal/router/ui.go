@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/storage"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -57,6 +58,63 @@ func (s *mockIngestStream) SendHeader(metadata.MD) error {
 }
 
 func (s *mockIngestStream) SetTrailer(metadata.MD) {
+}
+
+func (r *Router) injectGuardianPartitionFromSource(ctx context.Context, source, ref, partitionName, token string) error {
+	if source == "" {
+		return fmt.Errorf("source is required")
+	}
+	if partitionName == "" {
+		return fmt.Errorf("partition_name is required")
+	}
+	if ref == "" {
+		ref = "main"
+	}
+
+	backend, err := storage.DefaultRegistry.CreateIngestionBackend(storage.IngestionTypeGit)
+	if err != nil {
+		return fmt.Errorf("create guardian source backend: %w", err)
+	}
+	defer backend.Cleanup()
+
+	config := map[string]string{
+		"branch":       ref,
+		"display_path": "guardian/" + partitionName,
+	}
+	if err := backend.Validate(ctx, source, config); err != nil {
+		return fmt.Errorf("validate guardian source: %w", err)
+	}
+	if err := backend.Initialize(ctx, source, config); err != nil {
+		return fmt.Errorf("initialize guardian source: %w", err)
+	}
+
+	files := make([]*pb.InjectGuardianFile, 0, 64)
+	if err := backend.WalkFiles(ctx, func(meta storage.FileMetadata) error {
+		relPath := cleanGuardianRelativePath(meta.Path)
+		if relPath == "" {
+			return fmt.Errorf("guardian source file path %q is invalid", meta.Path)
+		}
+		files = append(files, &pb.InjectGuardianFile{
+			Path:    relPath,
+			Content: append([]byte(nil), meta.Content...),
+		})
+		return nil
+	}); err != nil {
+		return fmt.Errorf("walk guardian source: %w", err)
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("guardian source %q produced no files", source)
+	}
+
+	if _, err := r.InjectGuardianPartition(ctx, &pb.InjectGuardianPartitionRequest{
+		GuardianToken: token,
+		PartitionName: partitionName,
+		Files:         files,
+	}); err != nil {
+		return fmt.Errorf("inject guardian partition: %w", err)
+	}
+
+	return nil
 }
 
 // ServeHTTP returns an HTTP handler for the web UI.
@@ -1092,17 +1150,9 @@ func (r *Router) handleGuardianInject(w http.ResponseWriter, req *http.Request) 
 	ingestionConfig := map[string]string{"guardian_token": token}
 
 	go func() {
-		stream := &mockIngestStream{ctx: context.Background()}
-		err := r.IngestRepository(&pb.IngestRequest{
-			Source:          source,
-			Ref:             ref,
-			SourceId:        partitionName,
-			IngestionType:   pb.IngestionType_INGESTION_GUARDIAN,
-			FetchType:       pb.SourceType_SOURCE_TYPE_BLOB,
-			IngestionConfig: ingestionConfig,
-		}, stream)
+		err := r.injectGuardianPartitionFromSource(context.Background(), source, ref, partitionName, ingestionConfig["guardian_token"])
 		if err != nil {
-			r.logger.Error("guardian ingestion failed", "partition", partitionName, "error", err)
+			r.logger.Error("guardian injection failed", "partition", partitionName, "error", err)
 		}
 	}()
 

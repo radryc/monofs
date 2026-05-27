@@ -17,6 +17,7 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	monoclient "github.com/radryc/monofs/internal/client"
 	"github.com/radryc/monofs/internal/fsstat"
+	"github.com/radryc/monofs/internal/workspacebundle"
 )
 
 // mockClient implements MonoFSClient for testing
@@ -148,6 +149,14 @@ func (m *mockClient) ResolveWorkspacePath(ctx context.Context, path string) (*mo
 		return nil, monoclient.ErrWorkspacePathNotFound
 	}
 	return match, nil
+}
+
+func (m *mockClient) PublishWorkspaceBundle(ctx context.Context, bundle *workspacebundle.Bundle, opts monoclient.WorkspacePublishOptions) (*monoclient.WorkspacePublishResult, error) {
+	return nil, fmt.Errorf("workspace publish not configured")
+}
+
+func (m *mockClient) PushWorkspaceCommitBundle(ctx context.Context, bundle *workspacebundle.SourceCommitBundle) (*monoclient.WorkspaceSourcePushResult, error) {
+	return nil, fmt.Errorf("workspace source push not configured")
 }
 
 func collectDirEntryNames(stream fs.DirStream) []string {
@@ -636,7 +645,7 @@ func TestVirtualMonorepoLookupHidesNestedGitAndServesSyntheticGitignore(t *testi
 	}
 }
 
-func TestVirtualMonorepoRejectsReservedWrites(t *testing.T) {
+func TestVirtualMonorepoAllowsDependencyWritesAndRejectsReservedWrites(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git executable not available")
 	}
@@ -655,8 +664,14 @@ func TestVirtualMonorepoRejectsReservedWrites(t *testing.T) {
 	}
 
 	var entryOut fuse.EntryOut
-	if _, errno := root.Mkdir(context.Background(), "dependency", 0755, &entryOut); errno != syscall.EPERM {
-		t.Fatalf("Mkdir(dependency) errno = %v, want %v", errno, syscall.EPERM)
+	if _, errno := root.Mkdir(context.Background(), "dependency", 0755, &entryOut); errno != 0 {
+		t.Fatalf("Mkdir(dependency) errno = %v, want success", errno)
+	}
+	if !sessionMgr.IsUserRootDir("dependency") {
+		t.Fatal("dependency should be tracked as a writable root directory")
+	}
+	if _, errno := root.Mkdir(context.Background(), "doctor", 0755, &entryOut); errno != syscall.EPERM {
+		t.Fatalf("Mkdir(doctor) errno = %v, want %v", errno, syscall.EPERM)
 	}
 	if _, errno := root.Mkdir(context.Background(), "doctor", 0755, &entryOut); errno != syscall.EPERM {
 		t.Fatalf("Mkdir(doctor) errno = %v, want %v", errno, syscall.EPERM)
