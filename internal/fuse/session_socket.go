@@ -868,6 +868,40 @@ func (h *SessionSocketHandler) handleBranchSwitch(rawBranchName string) SessionR
 	}
 }
 
+func (h *SessionSocketHandler) handleBranch() SessionResponse {
+	if h.rootNode == nil || h.rootNode.WorkspaceManifest() == nil {
+		return SessionResponse{
+			Success: false,
+			Error:   "workspace ref info requires a virtual-monorepo mount",
+		}
+	}
+
+	entries, err := h.rootNode.WorkspaceManifest().List(h.ctx)
+	if err != nil {
+		return SessionResponse{
+			Success: false,
+			Error:   fmt.Sprintf("list workspace repositories: %v", err),
+		}
+	}
+
+	refs := make([]WorkspaceRef, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.Included {
+			continue
+		}
+		refs = append(refs, WorkspaceRef{
+			DisplayPath: entry.Repository.DisplayPath,
+			Ref:         entry.Repository.Ref,
+			CommitHash:  entry.Repository.CommitHash,
+		})
+	}
+
+	return SessionResponse{
+		Success:       true,
+		WorkspaceRefs: refs,
+	}
+}
+
 func (h *SessionSocketHandler) handleCommit(req SessionRequest) SessionResponse {
 	if h.commitMgr == nil {
 		return SessionResponse{
