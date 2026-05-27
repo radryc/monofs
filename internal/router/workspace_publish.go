@@ -15,12 +15,13 @@ import (
 const workspaceBundleTTL = 30 * time.Minute
 
 type stagedWorkspaceBundle struct {
-	bundleID    string
-	workspaceID string
-	data        []byte
-	bundle      *workspacebundle.Bundle
-	createdAt   time.Time
-	expiresAt   time.Time
+	bundleID     string
+	workspaceID  string
+	data         []byte
+	bundle       *workspacebundle.Bundle
+	commitBundle *workspacebundle.SourceCommitBundle
+	createdAt    time.Time
+	expiresAt    time.Time
 }
 
 func (r *Router) UploadWorkspaceBundle(stream grpc.ClientStreamingServer[pb.WorkspaceBundleChunk, pb.UploadWorkspaceBundleResponse]) error {
@@ -126,6 +127,7 @@ func (r *Router) PublishWorkspace(req *pb.PublishWorkspaceRequest, stream pb.Mon
 }
 
 func (r *Router) runWorkspacePublishJob(ctx context.Context, entry *workspaceSyncJobEntry, req *pb.PublishWorkspaceRequest, bundleEntry *stagedWorkspaceBundle, send func(*pb.WorkspaceSyncEvent) error) error {
+	actionLabel := workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_PUBLISH)
 	r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
 		job.State = pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_RUNNING
 		job.StartedAtUnix = time.Now().Unix()
@@ -174,7 +176,7 @@ func (r *Router) runWorkspacePublishJob(ctx context.Context, entry *workspaceSyn
 		default:
 		}
 
-		repoResult := workspaceRepositoryResultFromPublish(progress)
+		repoResult := workspaceRepositoryResultFromPublish(progress, actionLabel)
 		r.updateWorkspaceSyncRepository(entry, repoResult)
 		if err := send(&pb.WorkspaceSyncEvent{
 			EventType:  workspaceEventTypeForRepository(repoResult),

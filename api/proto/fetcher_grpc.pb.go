@@ -464,11 +464,13 @@ var BlobFetcher_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	RepoSyncWorker_StageWorkspaceBundle_FullMethodName   = "/monofs.RepoSyncWorker/StageWorkspaceBundle"
-	RepoSyncWorker_StartWorkspacePublish_FullMethodName  = "/monofs.RepoSyncWorker/StartWorkspacePublish"
-	RepoSyncWorker_ProbeWorkspaceRefresh_FullMethodName  = "/monofs.RepoSyncWorker/ProbeWorkspaceRefresh"
-	RepoSyncWorker_DiscardWorkspaceBundle_FullMethodName = "/monofs.RepoSyncWorker/DiscardWorkspaceBundle"
-	RepoSyncWorker_GetSyncWorkerStats_FullMethodName     = "/monofs.RepoSyncWorker/GetSyncWorkerStats"
+	RepoSyncWorker_StageWorkspaceBundle_FullMethodName       = "/monofs.RepoSyncWorker/StageWorkspaceBundle"
+	RepoSyncWorker_StageWorkspaceCommitBundle_FullMethodName = "/monofs.RepoSyncWorker/StageWorkspaceCommitBundle"
+	RepoSyncWorker_StartWorkspacePublish_FullMethodName      = "/monofs.RepoSyncWorker/StartWorkspacePublish"
+	RepoSyncWorker_StartWorkspaceCommitPush_FullMethodName   = "/monofs.RepoSyncWorker/StartWorkspaceCommitPush"
+	RepoSyncWorker_ProbeWorkspaceRefresh_FullMethodName      = "/monofs.RepoSyncWorker/ProbeWorkspaceRefresh"
+	RepoSyncWorker_DiscardWorkspaceBundle_FullMethodName     = "/monofs.RepoSyncWorker/DiscardWorkspaceBundle"
+	RepoSyncWorker_GetSyncWorkerStats_FullMethodName         = "/monofs.RepoSyncWorker/GetSyncWorkerStats"
 )
 
 // RepoSyncWorkerClient is the client API for RepoSyncWorker service.
@@ -479,7 +481,9 @@ const (
 // Router orchestrates jobs; the worker talks to upstream repositories.
 type RepoSyncWorkerClient interface {
 	StageWorkspaceBundle(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WorkspaceBundleChunk, StageWorkspaceBundleResponse], error)
+	StageWorkspaceCommitBundle(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WorkspaceBundleChunk, StageWorkspaceBundleResponse], error)
 	StartWorkspacePublish(ctx context.Context, in *StartWorkspacePublishRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RepoSyncProgress], error)
+	StartWorkspaceCommitPush(ctx context.Context, in *StartWorkspaceCommitPushRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RepoSyncProgress], error)
 	ProbeWorkspaceRefresh(ctx context.Context, in *ProbeWorkspaceRefreshRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RepoSyncProgress], error)
 	DiscardWorkspaceBundle(ctx context.Context, in *DiscardWorkspaceBundleRequest, opts ...grpc.CallOption) (*DiscardWorkspaceBundleResponse, error)
 	GetSyncWorkerStats(ctx context.Context, in *SyncWorkerStatsRequest, opts ...grpc.CallOption) (*SyncWorkerStatsResponse, error)
@@ -506,9 +510,22 @@ func (c *repoSyncWorkerClient) StageWorkspaceBundle(ctx context.Context, opts ..
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RepoSyncWorker_StageWorkspaceBundleClient = grpc.ClientStreamingClient[WorkspaceBundleChunk, StageWorkspaceBundleResponse]
 
+func (c *repoSyncWorkerClient) StageWorkspaceCommitBundle(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WorkspaceBundleChunk, StageWorkspaceBundleResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RepoSyncWorker_ServiceDesc.Streams[1], RepoSyncWorker_StageWorkspaceCommitBundle_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WorkspaceBundleChunk, StageWorkspaceBundleResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RepoSyncWorker_StageWorkspaceCommitBundleClient = grpc.ClientStreamingClient[WorkspaceBundleChunk, StageWorkspaceBundleResponse]
+
 func (c *repoSyncWorkerClient) StartWorkspacePublish(ctx context.Context, in *StartWorkspacePublishRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RepoSyncProgress], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &RepoSyncWorker_ServiceDesc.Streams[1], RepoSyncWorker_StartWorkspacePublish_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &RepoSyncWorker_ServiceDesc.Streams[2], RepoSyncWorker_StartWorkspacePublish_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -525,9 +542,28 @@ func (c *repoSyncWorkerClient) StartWorkspacePublish(ctx context.Context, in *St
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RepoSyncWorker_StartWorkspacePublishClient = grpc.ServerStreamingClient[RepoSyncProgress]
 
+func (c *repoSyncWorkerClient) StartWorkspaceCommitPush(ctx context.Context, in *StartWorkspaceCommitPushRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RepoSyncProgress], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RepoSyncWorker_ServiceDesc.Streams[3], RepoSyncWorker_StartWorkspaceCommitPush_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[StartWorkspaceCommitPushRequest, RepoSyncProgress]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RepoSyncWorker_StartWorkspaceCommitPushClient = grpc.ServerStreamingClient[RepoSyncProgress]
+
 func (c *repoSyncWorkerClient) ProbeWorkspaceRefresh(ctx context.Context, in *ProbeWorkspaceRefreshRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RepoSyncProgress], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &RepoSyncWorker_ServiceDesc.Streams[2], RepoSyncWorker_ProbeWorkspaceRefresh_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &RepoSyncWorker_ServiceDesc.Streams[4], RepoSyncWorker_ProbeWorkspaceRefresh_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -572,7 +608,9 @@ func (c *repoSyncWorkerClient) GetSyncWorkerStats(ctx context.Context, in *SyncW
 // Router orchestrates jobs; the worker talks to upstream repositories.
 type RepoSyncWorkerServer interface {
 	StageWorkspaceBundle(grpc.ClientStreamingServer[WorkspaceBundleChunk, StageWorkspaceBundleResponse]) error
+	StageWorkspaceCommitBundle(grpc.ClientStreamingServer[WorkspaceBundleChunk, StageWorkspaceBundleResponse]) error
 	StartWorkspacePublish(*StartWorkspacePublishRequest, grpc.ServerStreamingServer[RepoSyncProgress]) error
+	StartWorkspaceCommitPush(*StartWorkspaceCommitPushRequest, grpc.ServerStreamingServer[RepoSyncProgress]) error
 	ProbeWorkspaceRefresh(*ProbeWorkspaceRefreshRequest, grpc.ServerStreamingServer[RepoSyncProgress]) error
 	DiscardWorkspaceBundle(context.Context, *DiscardWorkspaceBundleRequest) (*DiscardWorkspaceBundleResponse, error)
 	GetSyncWorkerStats(context.Context, *SyncWorkerStatsRequest) (*SyncWorkerStatsResponse, error)
@@ -589,8 +627,14 @@ type UnimplementedRepoSyncWorkerServer struct{}
 func (UnimplementedRepoSyncWorkerServer) StageWorkspaceBundle(grpc.ClientStreamingServer[WorkspaceBundleChunk, StageWorkspaceBundleResponse]) error {
 	return status.Error(codes.Unimplemented, "method StageWorkspaceBundle not implemented")
 }
+func (UnimplementedRepoSyncWorkerServer) StageWorkspaceCommitBundle(grpc.ClientStreamingServer[WorkspaceBundleChunk, StageWorkspaceBundleResponse]) error {
+	return status.Error(codes.Unimplemented, "method StageWorkspaceCommitBundle not implemented")
+}
 func (UnimplementedRepoSyncWorkerServer) StartWorkspacePublish(*StartWorkspacePublishRequest, grpc.ServerStreamingServer[RepoSyncProgress]) error {
 	return status.Error(codes.Unimplemented, "method StartWorkspacePublish not implemented")
+}
+func (UnimplementedRepoSyncWorkerServer) StartWorkspaceCommitPush(*StartWorkspaceCommitPushRequest, grpc.ServerStreamingServer[RepoSyncProgress]) error {
+	return status.Error(codes.Unimplemented, "method StartWorkspaceCommitPush not implemented")
 }
 func (UnimplementedRepoSyncWorkerServer) ProbeWorkspaceRefresh(*ProbeWorkspaceRefreshRequest, grpc.ServerStreamingServer[RepoSyncProgress]) error {
 	return status.Error(codes.Unimplemented, "method ProbeWorkspaceRefresh not implemented")
@@ -629,6 +673,13 @@ func _RepoSyncWorker_StageWorkspaceBundle_Handler(srv interface{}, stream grpc.S
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RepoSyncWorker_StageWorkspaceBundleServer = grpc.ClientStreamingServer[WorkspaceBundleChunk, StageWorkspaceBundleResponse]
 
+func _RepoSyncWorker_StageWorkspaceCommitBundle_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(RepoSyncWorkerServer).StageWorkspaceCommitBundle(&grpc.GenericServerStream[WorkspaceBundleChunk, StageWorkspaceBundleResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RepoSyncWorker_StageWorkspaceCommitBundleServer = grpc.ClientStreamingServer[WorkspaceBundleChunk, StageWorkspaceBundleResponse]
+
 func _RepoSyncWorker_StartWorkspacePublish_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(StartWorkspacePublishRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -639,6 +690,17 @@ func _RepoSyncWorker_StartWorkspacePublish_Handler(srv interface{}, stream grpc.
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RepoSyncWorker_StartWorkspacePublishServer = grpc.ServerStreamingServer[RepoSyncProgress]
+
+func _RepoSyncWorker_StartWorkspaceCommitPush_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(StartWorkspaceCommitPushRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(RepoSyncWorkerServer).StartWorkspaceCommitPush(m, &grpc.GenericServerStream[StartWorkspaceCommitPushRequest, RepoSyncProgress]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RepoSyncWorker_StartWorkspaceCommitPushServer = grpc.ServerStreamingServer[RepoSyncProgress]
 
 func _RepoSyncWorker_ProbeWorkspaceRefresh_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(ProbeWorkspaceRefreshRequest)
@@ -710,8 +772,18 @@ var RepoSyncWorker_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 		{
+			StreamName:    "StageWorkspaceCommitBundle",
+			Handler:       _RepoSyncWorker_StageWorkspaceCommitBundle_Handler,
+			ClientStreams: true,
+		},
+		{
 			StreamName:    "StartWorkspacePublish",
 			Handler:       _RepoSyncWorker_StartWorkspacePublish_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "StartWorkspaceCommitPush",
+			Handler:       _RepoSyncWorker_StartWorkspaceCommitPush_Handler,
 			ServerStreams: true,
 		},
 		{

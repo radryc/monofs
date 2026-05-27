@@ -2,6 +2,7 @@
 package fuse
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -24,21 +26,22 @@ import (
 
 // SessionSocketHandler handles session management requests via Unix socket
 type SessionSocketHandler struct {
-	socketPath string
-	sessionMgr *SessionManager
-	commitMgr  *CommitManager
-	ingester   BlobIngester // optional, nil if not configured
-	deleter    BlobDeleter  // optional, nil if not configured
-	refresher  WorkspaceRefresher
-	diffReader DiffReader      // optional, for reading original file content
-	verifier   BackendVerifier // optional, for verifying backend has files before cleanup
-	attrCache  *cache.Cache    // optional, for invalidation after push
-	rootNode   *MonoNode       // optional, for kernel dentry cache invalidation
-	listener   net.Listener
-	logger     *slog.Logger
-	wg         sync.WaitGroup
-	ctx        context.Context
-	cancel     context.CancelFunc
+	socketPath  string
+	sessionMgr  *SessionManager
+	commitMgr   *CommitManager
+	principalID string
+	ingester    BlobIngester // optional, nil if not configured
+	deleter     BlobDeleter  // optional, nil if not configured
+	refresher   WorkspaceRefresher
+	diffReader  DiffReader      // optional, for reading original file content
+	verifier    BackendVerifier // optional, for verifying backend has files before cleanup
+	attrCache   *cache.Cache    // optional, for invalidation after push
+	rootNode    *MonoNode       // optional, for kernel dentry cache invalidation
+	listener    net.Listener
+	logger      *slog.Logger
+	wg          sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 // BlobIngester ingests dependency files into the cluster backend so they
@@ -158,31 +161,43 @@ type BlobFileInfo struct {
 
 // SessionRequest is received from CLI
 type SessionRequest struct {
-	Action                  string `json:"action"`         // start, status, branch, commit, discard, push, blobs-info, diff
-	Path                    string `json:"path,omitempty"` // optional file path filter (for diff)
-	ShowBlobs               bool   `json:"show_blobs,omitempty"`
-	LogicalCommitMessage    string `json:"logical_commit_message,omitempty"`
-	AuthorName              string `json:"author_name,omitempty"`
-	AuthorEmail             string `json:"author_email,omitempty"`
-	RequestedBranchStrategy string `json:"requested_branch_strategy,omitempty"`
+	Action                  string   `json:"action"`         // start, add, rm, status, branch, log, commit, pull, discard, push, push-blobs, blobs-info, diff
+	Path                    string   `json:"path,omitempty"` // optional file path filter (for diff)
+	Paths                   []string `json:"paths,omitempty"`
+	BranchOp                string   `json:"branch_op,omitempty"`
+	BranchName              string   `json:"branch_name,omitempty"`
+	ShowBlobs               bool     `json:"show_blobs,omitempty"`
+	LogicalCommitMessage    string   `json:"logical_commit_message,omitempty"`
+	AuthorName              string   `json:"author_name,omitempty"`
+	AuthorEmail             string   `json:"author_email,omitempty"`
+	RequestedBranchStrategy string   `json:"requested_branch_strategy,omitempty"`
 }
 
 // SessionResponse is sent to CLI
 type SessionResponse struct {
-	Success         bool           `json:"success"`
-	SessionID       string         `json:"session_id,omitempty"`
-	CreatedAt       string         `json:"created_at,omitempty"`
-	Changes         int            `json:"changes,omitempty"`
-	BlobChanges     int            `json:"blob_changes,omitempty"`
-	ExcludedChanges int            `json:"excluded_changes,omitempty"`
-	Message         string         `json:"message,omitempty"`
-	Error           string         `json:"error,omitempty"`
-	ChangeList      []ChangeInfo   `json:"change_list,omitempty"`
-	BlobChangeList  []ChangeInfo   `json:"blob_change_list,omitempty"`
-	WorkspaceRefs   []WorkspaceRef `json:"workspace_refs,omitempty"`
-	DepsInfo        *BlobsInfoData `json:"blobs_info,omitempty"`
-	DiffData        []FileDiff     `json:"diff_data,omitempty"`
-	BlobDiffData    []FileDiff     `json:"blob_diff_data,omitempty"`
+	Success           bool                `json:"success"`
+	SessionID         string              `json:"session_id,omitempty"`
+	CreatedAt         string              `json:"created_at,omitempty"`
+	Changes           int                 `json:"changes,omitempty"`
+	UnstagedChanges   int                 `json:"unstaged_changes,omitempty"`
+	StagedChanges     int                 `json:"staged_changes,omitempty"`
+	PendingCommits    int                 `json:"pending_commits,omitempty"`
+	BlobChanges       int                 `json:"blob_changes,omitempty"`
+	ExcludedChanges   int                 `json:"excluded_changes,omitempty"`
+	Message           string              `json:"message,omitempty"`
+	Error             string              `json:"error,omitempty"`
+	ChangeList        []ChangeInfo        `json:"change_list,omitempty"`
+	StagedChangeList  []ChangeInfo        `json:"staged_change_list,omitempty"`
+	LocalCommitList   []LocalCommitInfo   `json:"local_commit_list,omitempty"`
+	PendingCommitList []LocalCommitInfo   `json:"pending_commit_list,omitempty"`
+	CurrentBranch     string              `json:"current_branch,omitempty"`
+	BranchList        []BranchInfo        `json:"branch_list,omitempty"`
+	BranchMappings    []BranchMappingInfo `json:"branch_mappings,omitempty"`
+	BlobChangeList    []ChangeInfo        `json:"blob_change_list,omitempty"`
+	WorkspaceRefs     []WorkspaceRef      `json:"workspace_refs,omitempty"`
+	DepsInfo          *BlobsInfoData      `json:"blobs_info,omitempty"`
+	DiffData          []FileDiff          `json:"diff_data,omitempty"`
+	BlobDiffData      []FileDiff          `json:"blob_diff_data,omitempty"`
 }
 
 // FileDiff contains the unified diff for a single file.
@@ -218,6 +233,37 @@ type ChangeInfo struct {
 	Timestamp  string `json:"timestamp"`
 }
 
+// LocalCommitInfo is a lightweight status summary for a local virtual commit.
+type LocalCommitInfo struct {
+	ID              string `json:"id"`
+	ParentID        string `json:"parent_id,omitempty"`
+	Message         string `json:"message"`
+	LogicalBranch   string `json:"logical_branch,omitempty"`
+	AuthorName      string `json:"author_name,omitempty"`
+	AuthorEmail     string `json:"author_email,omitempty"`
+	PrincipalID     string `json:"principal_id,omitempty"`
+	CreatedAt       string `json:"created_at,omitempty"`
+	RepositoryCount int    `json:"repository_count,omitempty"`
+	OperationCount  int    `json:"operation_count,omitempty"`
+	Pushed          bool   `json:"pushed,omitempty"`
+}
+
+// BranchInfo summarizes one logical branch known to the current session.
+type BranchInfo struct {
+	Name           string `json:"name"`
+	Current        bool   `json:"current,omitempty"`
+	PendingCommits int    `json:"pending_commits,omitempty"`
+	HasMappings    bool   `json:"has_mappings,omitempty"`
+}
+
+// BranchMappingInfo describes the current branch's per-repo remote mapping.
+type BranchMappingInfo struct {
+	DisplayPath      string `json:"display_path"`
+	OriginalBranch   string `json:"original_branch,omitempty"`
+	ActualBranch     string `json:"actual_branch,omitempty"`
+	LastPushedCommit string `json:"last_pushed_commit,omitempty"`
+}
+
 // WorkspaceRef describes the authoritative tracked ref for one mounted repository.
 type WorkspaceRef struct {
 	DisplayPath string `json:"display_path"`
@@ -238,6 +284,13 @@ type classifiedSessionChange struct {
 	Scope      sessionChangeScope
 	Repository string
 	StorageID  string
+}
+
+type removeTarget struct {
+	Path              string
+	LocalPath         string
+	IsDir             bool
+	ShouldTrackDelete bool
 }
 
 // SetIngester attaches a dependency ingester so push pushes
@@ -274,6 +327,11 @@ func (h *SessionSocketHandler) SetAttrCache(c *cache.Cache) {
 // kernel's dentry cache after removing blob changes.
 func (h *SessionSocketHandler) SetRootNode(n *MonoNode) {
 	h.rootNode = n
+}
+
+// SetPrincipalID records the mounted client identity used for branch scoping.
+func (h *SessionSocketHandler) SetPrincipalID(principalID string) {
+	h.principalID = strings.TrimSpace(principalID)
 }
 
 // NewSessionSocketHandler creates a new socket handler
@@ -369,17 +427,27 @@ func (h *SessionSocketHandler) handleConnection(conn net.Conn) {
 	switch req.Action {
 	case "start":
 		resp = h.handleStart()
+	case "add":
+		resp = h.handleAdd(req.Paths)
+	case "rm":
+		resp = h.handleRemove(req.Paths)
 	case "status":
 		resp = h.handleStatus(req.ShowBlobs)
-	case "branch", "refs":
-		resp = h.handleBranch()
+	case "branch":
+		resp = h.handleBranch(req)
+	case "refs":
+		resp = h.handleRefs()
+	case "log":
+		resp = h.handleLog()
 	case "commit":
 		resp = h.handleCommit(req)
 	case "pull", "refresh":
 		resp = h.handlePull()
 	case "discard":
 		resp = h.handleDiscard()
-	case "push", "push-blobs":
+	case "push":
+		resp = h.handlePushSource()
+	case "push-blobs":
 		resp = h.handleUploadDeps()
 	case "blobs-info":
 		resp = h.handleBlobsInfo()
@@ -395,6 +463,122 @@ func (h *SessionSocketHandler) handleConnection(conn net.Conn) {
 	// Send response
 	if err := json.NewEncoder(conn).Encode(resp); err != nil {
 		h.logger.Warn("failed to encode response", "error", err)
+	}
+}
+
+func (h *SessionSocketHandler) handleAdd(paths []string) SessionResponse {
+	if _, _, _, ok := h.sessionMgr.GetSessionInfo(); !ok {
+		return SessionResponse{Success: false, Error: "no active session"}
+	}
+	normalizedPaths, err := normalizeRequestedSessionPaths(paths)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	if len(normalizedPaths) == 0 {
+		return SessionResponse{Success: false, Error: "at least one path is required"}
+	}
+
+	changes := h.sessionMgr.GetChanges()
+	classified := make([]classifiedSessionChange, 0, len(changes))
+	for _, change := range changes {
+		classified = append(classified, h.classifySessionChange(h.ctx, change))
+	}
+
+	selected, err := h.selectWorkspaceChangesForStaging(normalizedPaths, classified)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	if len(selected) == 0 {
+		return SessionResponse{Success: false, Error: "no pending source changes to stage"}
+	}
+
+	stagedInfos := make([]ChangeInfo, 0, len(selected))
+	for _, change := range selected {
+		entry, err := h.snapshotStagedEntry(change)
+		if err != nil {
+			return SessionResponse{Success: false, Error: err.Error()}
+		}
+		if err := h.sessionMgr.PutStagedEntry(entry); err != nil {
+			return SessionResponse{Success: false, Error: err.Error()}
+		}
+		stagedInfos = append(stagedInfos, changeInfoFromStagedEntry(entry))
+	}
+	sortChangeInfos(stagedInfos)
+
+	return SessionResponse{
+		Success:          true,
+		Changes:          len(selected),
+		StagedChanges:    len(selected),
+		StagedChangeList: stagedInfos,
+		Message:          fmt.Sprintf("staged %d source change(s)", len(selected)),
+	}
+}
+
+func (h *SessionSocketHandler) handleRemove(paths []string) SessionResponse {
+	normalizedPaths, err := normalizeRequestedSessionPaths(paths)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	if len(normalizedPaths) == 0 {
+		return SessionResponse{Success: false, Error: "at least one path is required"}
+	}
+
+	if !h.sessionMgr.HasActiveSession() {
+		if _, err := h.sessionMgr.StartSession(); err != nil {
+			return SessionResponse{Success: false, Error: err.Error()}
+		}
+	}
+
+	for _, path := range normalizedPaths {
+		target, err := h.resolveRemoveTarget(path)
+		if err != nil {
+			return SessionResponse{Success: false, Error: err.Error()}
+		}
+		if target.IsDir {
+			if err := h.removeDirectoryTarget(target); err != nil {
+				return SessionResponse{Success: false, Error: err.Error()}
+			}
+		} else {
+			if err := h.removeFileTarget(target); err != nil {
+				return SessionResponse{Success: false, Error: err.Error()}
+			}
+		}
+		if err := h.clearStagedEntriesForPath(path); err != nil {
+			return SessionResponse{Success: false, Error: err.Error()}
+		}
+	}
+
+	changes := h.sessionMgr.GetChanges()
+	classified := make([]classifiedSessionChange, 0, len(changes))
+	for _, change := range changes {
+		classified = append(classified, h.classifySessionChange(h.ctx, change))
+	}
+	selected := collectWorkspaceChangesForPaths(normalizedPaths, classified)
+
+	stagedInfos := make([]ChangeInfo, 0, len(selected))
+	for _, change := range selected {
+		entry, err := h.snapshotStagedEntry(change)
+		if err != nil {
+			return SessionResponse{Success: false, Error: err.Error()}
+		}
+		if err := h.sessionMgr.PutStagedEntry(entry); err != nil {
+			return SessionResponse{Success: false, Error: err.Error()}
+		}
+		stagedInfos = append(stagedInfos, changeInfoFromStagedEntry(entry))
+	}
+	sortChangeInfos(stagedInfos)
+
+	message := fmt.Sprintf("removed %d path(s); staged %d source change(s)", len(normalizedPaths), len(stagedInfos))
+	if len(stagedInfos) == 0 {
+		message = fmt.Sprintf("removed %d path(s); no source changes remain", len(normalizedPaths))
+	}
+
+	return SessionResponse{
+		Success:          true,
+		Changes:          len(normalizedPaths),
+		StagedChanges:    len(stagedInfos),
+		StagedChangeList: stagedInfos,
+		Message:          message,
 	}
 }
 
@@ -434,10 +618,27 @@ func (h *SessionSocketHandler) handleStatus(showBlobs bool) SessionResponse {
 	}
 	sortClassifiedSessionChanges(classified)
 
+	stagedEntries, err := h.sessionMgr.ListStagedEntries()
+	if err != nil {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("list staged entries: %v", err)}
+	}
+	stagedByPath := make(map[string]StagedIndexEntry, len(stagedEntries))
+	for _, entry := range stagedEntries {
+		stagedByPath[entry.Path] = entry
+	}
+
+	localCommits, err := h.sessionMgr.ListLocalVirtualCommits()
+	if err != nil {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("list local commits: %v", err)}
+	}
+
 	var changeList []ChangeInfo
+	stagedChangeList := make([]ChangeInfo, 0, len(stagedEntries))
+	pendingCommitList := make([]LocalCommitInfo, 0)
 	var depChangeList []ChangeInfo
 	excludedCount := 0
 	depCount := 0
+	workspaceCount := 0
 
 	for _, c := range classified {
 		switch c.Scope {
@@ -458,6 +659,14 @@ func (h *SessionSocketHandler) handleStatus(showBlobs bool) SessionResponse {
 			continue
 		}
 
+		workspaceCount++
+		if staged, ok := stagedByPath[c.Path]; ok {
+			currentSnapshot, snapshotErr := h.snapshotStagedEntry(c)
+			if snapshotErr == nil && stagedEntriesEqual(staged, currentSnapshot) {
+				continue
+			}
+		}
+
 		changeList = append(changeList, ChangeInfo{
 			Type:       string(c.Type),
 			Path:       c.Path,
@@ -467,15 +676,195 @@ func (h *SessionSocketHandler) handleStatus(showBlobs bool) SessionResponse {
 		})
 	}
 
+	for _, staged := range stagedEntries {
+		stagedChangeList = append(stagedChangeList, changeInfoFromStagedEntry(staged))
+	}
+	sortChangeInfos(stagedChangeList)
+
+	for _, commit := range localCommits {
+		if commit.Pushed {
+			continue
+		}
+		pendingCommitList = append(pendingCommitList, localCommitInfoFromCommit(commit))
+	}
+	sortLocalCommitInfos(pendingCommitList)
+
 	return SessionResponse{
-		Success:         true,
-		SessionID:       id,
-		CreatedAt:       createdAt.Format("2006-01-02 15:04:05"),
-		Changes:         len(changeList),
-		BlobChanges:     depCount,
-		ExcludedChanges: excludedCount,
-		ChangeList:      changeList,
-		BlobChangeList:  depChangeList,
+		Success:           true,
+		SessionID:         id,
+		CreatedAt:         createdAt.Format("2006-01-02 15:04:05"),
+		Changes:           workspaceCount,
+		UnstagedChanges:   len(changeList),
+		StagedChanges:     len(stagedChangeList),
+		PendingCommits:    len(pendingCommitList),
+		BlobChanges:       depCount,
+		ExcludedChanges:   excludedCount,
+		ChangeList:        changeList,
+		StagedChangeList:  stagedChangeList,
+		PendingCommitList: pendingCommitList,
+		BlobChangeList:    depChangeList,
+	}
+}
+
+func (h *SessionSocketHandler) handleRefs() SessionResponse {
+	if h.rootNode == nil || h.rootNode.WorkspaceManifest() == nil {
+		return SessionResponse{
+			Success: false,
+			Error:   "workspace ref info requires a virtual-monorepo mount",
+		}
+	}
+
+	entries, err := h.rootNode.WorkspaceManifest().List(h.ctx)
+	if err != nil {
+		return SessionResponse{
+			Success: false,
+			Error:   fmt.Sprintf("list workspace repositories: %v", err),
+		}
+	}
+
+	refs := make([]WorkspaceRef, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.Included {
+			continue
+		}
+		refs = append(refs, WorkspaceRef{
+			DisplayPath: entry.Repository.DisplayPath,
+			Ref:         entry.Repository.Ref,
+			CommitHash:  entry.Repository.CommitHash,
+		})
+	}
+
+	return SessionResponse{
+		Success:       true,
+		WorkspaceRefs: refs,
+	}
+}
+
+func (h *SessionSocketHandler) handleBranch(req SessionRequest) SessionResponse {
+	branchOp := strings.TrimSpace(req.BranchOp)
+	if branchOp == "" {
+		branchOp = "show"
+	}
+
+	switch branchOp {
+	case "show":
+		return h.handleBranchShow()
+	case "create":
+		return h.handleBranchCreate(req.BranchName)
+	case "switch":
+		return h.handleBranchSwitch(req.BranchName)
+	default:
+		return SessionResponse{Success: false, Error: fmt.Sprintf("unknown branch operation: %s", branchOp)}
+	}
+}
+
+func (h *SessionSocketHandler) handleBranchShow() SessionResponse {
+	id, createdAt, _, ok := h.sessionMgr.GetSessionInfo()
+	if !ok {
+		return SessionResponse{Success: false, Error: "no active session"}
+	}
+
+	currentBranch, foundCurrentBranch, err := h.sessionMgr.GetCurrentLogicalBranch()
+	if err != nil {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("read current logical branch: %v", err)}
+	}
+	if !foundCurrentBranch {
+		currentBranch = ""
+	}
+
+	branchList, mappings, err := h.collectLogicalBranchState(currentBranch)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+
+	return SessionResponse{
+		Success:        true,
+		SessionID:      id,
+		CreatedAt:      createdAt.Format("2006-01-02 15:04:05"),
+		CurrentBranch:  currentBranch,
+		BranchList:     branchList,
+		BranchMappings: mappings,
+	}
+}
+
+func (h *SessionSocketHandler) handleBranchCreate(rawBranchName string) SessionResponse {
+	branchName, err := normalizeLogicalBranchName(rawBranchName)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+
+	currentBranch, foundCurrentBranch, err := h.sessionMgr.GetCurrentLogicalBranch()
+	if err != nil {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("read current logical branch: %v", err)}
+	}
+	if !foundCurrentBranch {
+		currentBranch = ""
+	}
+
+	knownBranches, _, err := h.collectLogicalBranchState(currentBranch)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	for _, branch := range knownBranches {
+		if branch.Name == branchName {
+			return SessionResponse{Success: false, Error: fmt.Sprintf("logical branch %q already exists", branchName)}
+		}
+	}
+
+	if err := h.seedLogicalBranchMappings(branchName); err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	if err := h.sessionMgr.SetCurrentLogicalBranch(branchName); err != nil {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("set current logical branch: %v", err)}
+	}
+
+	return SessionResponse{
+		Success:       true,
+		CurrentBranch: branchName,
+		Message:       fmt.Sprintf("created and switched to logical branch %s; working tree and index stay unchanged", branchName),
+	}
+}
+
+func (h *SessionSocketHandler) handleBranchSwitch(rawBranchName string) SessionResponse {
+	branchName, err := normalizeLogicalBranchName(rawBranchName)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+
+	currentBranch, foundCurrentBranch, err := h.sessionMgr.GetCurrentLogicalBranch()
+	if err != nil {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("read current logical branch: %v", err)}
+	}
+	if !foundCurrentBranch {
+		currentBranch = ""
+	}
+
+	knownBranches, _, err := h.collectLogicalBranchState(currentBranch)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	exists := false
+	for _, branch := range knownBranches {
+		if branch.Name == branchName {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("logical branch %q does not exist; use 'monofs-session branch create %s' first", branchName, branchName)}
+	}
+	if currentBranch == branchName {
+		return SessionResponse{Success: true, CurrentBranch: branchName, Message: fmt.Sprintf("already on logical branch %s", branchName)}
+	}
+
+	if err := h.sessionMgr.SetCurrentLogicalBranch(branchName); err != nil {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("set current logical branch: %v", err)}
+	}
+
+	return SessionResponse{
+		Success:       true,
+		CurrentBranch: branchName,
+		Message:       fmt.Sprintf("switched to logical branch %s; working tree and index stay unchanged", branchName),
 	}
 }
 
@@ -533,22 +922,65 @@ func (h *SessionSocketHandler) handleCommit(req SessionRequest) SessionResponse 
 			Error:   err.Error(),
 		}
 	}
-	if len(result.RefreshedRepositories) > 0 {
-		h.invalidateWorkspaceAfterPull(result.RefreshedRepositories)
-	}
 
-	message := "No changes to commit"
-	if result.Message != "" {
-		message = fmt.Sprintf("%s; %s", formatCommitMessage(result), result.Message)
-	} else if result.FilesProcessed > 0 {
-		message = formatCommitMessage(result)
+	message := strings.TrimSpace(result.Message)
+	if message == "" {
+		message = fmt.Sprintf("created local commit %s with %d staged change(s)", result.LocalCommitID, result.FilesProcessed)
+		if result.Repositories > 0 {
+			message += fmt.Sprintf(" across %d repositories", result.Repositories)
+		}
 	}
-	message = h.appendWorkspaceGitSyncWarning(message, len(result.RefreshedRepositories) > 0)
 
 	return SessionResponse{
 		Success:   result.Success,
 		SessionID: result.SessionID,
 		Message:   message,
+	}
+}
+
+func (h *SessionSocketHandler) handlePushSource() SessionResponse {
+	if h.commitMgr == nil {
+		return SessionResponse{Success: false, Error: "commit manager not available"}
+	}
+
+	result, err := h.commitMgr.PushPendingLocalCommits(h.ctx)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+
+	return SessionResponse{
+		Success:       result.Success,
+		SessionID:     result.SessionID,
+		CurrentBranch: result.LogicalBranch,
+		Message:       result.Message,
+	}
+}
+
+func (h *SessionSocketHandler) handleLog() SessionResponse {
+	id, createdAt, _, ok := h.sessionMgr.GetSessionInfo()
+	if !ok {
+		return SessionResponse{
+			Success: false,
+			Error:   "no active session",
+		}
+	}
+
+	localCommits, err := h.sessionMgr.ListLocalVirtualCommits()
+	if err != nil {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("list local commits: %v", err)}
+	}
+
+	commitList := make([]LocalCommitInfo, 0, len(localCommits))
+	for _, commit := range localCommits {
+		commitList = append(commitList, localCommitInfoFromCommit(commit))
+	}
+	sortLocalCommitInfosNewestFirst(commitList)
+
+	return SessionResponse{
+		Success:         true,
+		SessionID:       id,
+		CreatedAt:       createdAt.Format("2006-01-02 15:04:05"),
+		LocalCommitList: commitList,
 	}
 }
 
@@ -569,6 +1001,18 @@ func (h *SessionSocketHandler) handlePull() SessionResponse {
 		return SessionResponse{
 			Success: false,
 			Error:   "local changes pending; commit, discard, or push dependency changes before pull",
+		}
+	}
+	localCommits, err := h.sessionMgr.ListLocalVirtualCommits()
+	if err != nil {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("list local commits: %v", err)}
+	}
+	for _, commit := range localCommits {
+		if !commit.Pushed {
+			return SessionResponse{
+				Success: false,
+				Error:   "local commits pending; push source commits before pull",
+			}
 		}
 	}
 
@@ -1110,6 +1554,528 @@ func sortClassifiedSessionChanges(changes []classifiedSessionChange) {
 		}
 		return changes[i].Type < changes[j].Type
 	})
+}
+
+func sortChangeInfos(changes []ChangeInfo) {
+	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].Repository != changes[j].Repository {
+			return changes[i].Repository < changes[j].Repository
+		}
+		if changes[i].Path != changes[j].Path {
+			return changes[i].Path < changes[j].Path
+		}
+		return changes[i].Type < changes[j].Type
+	})
+}
+
+func sortLocalCommitInfos(commits []LocalCommitInfo) {
+	sort.Slice(commits, func(i, j int) bool {
+		if commits[i].CreatedAt != commits[j].CreatedAt {
+			return commits[i].CreatedAt < commits[j].CreatedAt
+		}
+		return commits[i].ID < commits[j].ID
+	})
+}
+
+func sortLocalCommitInfosNewestFirst(commits []LocalCommitInfo) {
+	sort.Slice(commits, func(i, j int) bool {
+		if commits[i].CreatedAt != commits[j].CreatedAt {
+			return commits[i].CreatedAt > commits[j].CreatedAt
+		}
+		return commits[i].ID > commits[j].ID
+	})
+}
+
+func sortBranchInfos(branches []BranchInfo) {
+	sort.Slice(branches, func(i, j int) bool {
+		if branches[i].Current != branches[j].Current {
+			return branches[i].Current
+		}
+		return branches[i].Name < branches[j].Name
+	})
+}
+
+func sortBranchMappingInfos(mappings []BranchMappingInfo) {
+	sort.Slice(mappings, func(i, j int) bool {
+		return mappings[i].DisplayPath < mappings[j].DisplayPath
+	})
+}
+
+func changeInfoFromStagedEntry(entry StagedIndexEntry) ChangeInfo {
+	return ChangeInfo{
+		Type:       string(entry.ChangeType),
+		Path:       entry.Path,
+		Repository: entry.RepositoryPath,
+		StorageID:  entry.RepositoryStorageID,
+		Timestamp:  entry.StagedAt.Format("15:04:05"),
+	}
+}
+
+func localCommitInfoFromCommit(commit LocalVirtualCommit) LocalCommitInfo {
+	return LocalCommitInfo{
+		ID:              commit.ID,
+		ParentID:        commit.ParentID,
+		Message:         commit.Message,
+		LogicalBranch:   commit.LogicalBranch,
+		AuthorName:      commit.AuthorName,
+		AuthorEmail:     commit.AuthorEmail,
+		PrincipalID:     commit.PrincipalID,
+		CreatedAt:       commit.CreatedAt.Format("2006-01-02 15:04:05"),
+		RepositoryCount: len(commit.Repositories),
+		OperationCount:  localCommitOperationCount(commit),
+		Pushed:          commit.Pushed,
+	}
+}
+
+func localCommitOperationCount(commit LocalVirtualCommit) int {
+	total := 0
+	for _, repo := range commit.Repositories {
+		total += len(repo.Operations)
+	}
+	return total
+}
+
+func normalizeLogicalBranchName(rawBranchName string) (string, error) {
+	branchName := strings.TrimSpace(rawBranchName)
+	if branchName == "" {
+		return "", fmt.Errorf("logical branch name is required")
+	}
+	if branchName == "." || branchName == ".." || branchName == "HEAD" {
+		return "", fmt.Errorf("logical branch name %q is not allowed", branchName)
+	}
+	if strings.HasPrefix(branchName, "/") || strings.HasSuffix(branchName, "/") || strings.Contains(branchName, "//") {
+		return "", fmt.Errorf("logical branch name %q is not allowed", branchName)
+	}
+	if strings.HasSuffix(branchName, ".") || strings.HasSuffix(branchName, ".lock") || strings.Contains(branchName, "..") || strings.Contains(branchName, "@{") {
+		return "", fmt.Errorf("logical branch name %q is not allowed", branchName)
+	}
+	if strings.ContainsAny(branchName, " ~^:?*[\\") {
+		return "", fmt.Errorf("logical branch name %q is not allowed", branchName)
+	}
+	return branchName, nil
+}
+
+func (h *SessionSocketHandler) collectLogicalBranchState(currentBranch string) ([]BranchInfo, []BranchMappingInfo, error) {
+	localCommits, err := h.sessionMgr.ListLocalVirtualCommits()
+	if err != nil {
+		return nil, nil, fmt.Errorf("list local commits: %v", err)
+	}
+	branchMappings, err := h.sessionMgr.ListBranchMappings()
+	if err != nil {
+		return nil, nil, fmt.Errorf("list branch mappings: %v", err)
+	}
+
+	branchMap := make(map[string]*BranchInfo)
+	addBranch := func(name string) *BranchInfo {
+		branch := branchMap[name]
+		if branch == nil {
+			branch = &BranchInfo{Name: name}
+			branchMap[name] = branch
+		}
+		return branch
+	}
+
+	trimmedCurrent := strings.TrimSpace(currentBranch)
+	if trimmedCurrent != "" {
+		addBranch(trimmedCurrent).Current = true
+	}
+
+	for _, commit := range localCommits {
+		branchName := strings.TrimSpace(commit.LogicalBranch)
+		if branchName == "" {
+			continue
+		}
+		branch := addBranch(branchName)
+		if !commit.Pushed {
+			branch.PendingCommits++
+		}
+	}
+
+	currentMappings := make([]BranchMappingInfo, 0)
+	for _, mapping := range branchMappings {
+		if h.principalID != "" && mapping.PrincipalID != h.principalID {
+			continue
+		}
+		branchName := strings.TrimSpace(mapping.LogicalBranch)
+		if branchName == "" {
+			continue
+		}
+		branch := addBranch(branchName)
+		branch.HasMappings = true
+		if branchName == trimmedCurrent && strings.TrimSpace(mapping.ActualBranch) != "" {
+			currentMappings = append(currentMappings, BranchMappingInfo{
+				DisplayPath:      mapping.DisplayPath,
+				OriginalBranch:   mapping.OriginalBranch,
+				ActualBranch:     mapping.ActualBranch,
+				LastPushedCommit: mapping.LastPushedCommit,
+			})
+		}
+	}
+
+	branches := make([]BranchInfo, 0, len(branchMap))
+	for _, branch := range branchMap {
+		branches = append(branches, *branch)
+	}
+	sortBranchInfos(branches)
+	sortBranchMappingInfos(currentMappings)
+	return branches, currentMappings, nil
+}
+
+func (h *SessionSocketHandler) seedLogicalBranchMappings(branchName string) error {
+	if strings.TrimSpace(h.principalID) == "" {
+		return nil
+	}
+	if h.rootNode == nil || h.rootNode.WorkspaceManifest() == nil {
+		return nil
+	}
+
+	entries, err := h.rootNode.WorkspaceManifest().List(h.ctx)
+	if err != nil {
+		return fmt.Errorf("list workspace repositories: %v", err)
+	}
+	for _, entry := range entries {
+		if !entry.Included {
+			continue
+		}
+		mapping := SessionBranchMapping{
+			PrincipalID:    h.principalID,
+			LogicalBranch:  branchName,
+			StorageID:      entry.Repository.StorageID,
+			DisplayPath:    entry.Repository.DisplayPath,
+			OriginalBranch: entry.Repository.Ref,
+			ActualBranch:   "",
+		}
+		if err := h.sessionMgr.PutBranchMapping(mapping); err != nil {
+			return fmt.Errorf("persist branch mapping for %s: %v", entry.Repository.DisplayPath, err)
+		}
+	}
+	return nil
+}
+
+func stagedEntriesEqual(staged, current StagedIndexEntry) bool {
+	return staged.Path == current.Path &&
+		staged.RepositoryStorageID == current.RepositoryStorageID &&
+		staged.RepositoryPath == current.RepositoryPath &&
+		staged.ChangeType == current.ChangeType &&
+		staged.Mode == current.Mode &&
+		staged.SymlinkTarget == current.SymlinkTarget &&
+		bytes.Equal(staged.Content, current.Content)
+}
+
+func normalizeRequestedSessionPaths(paths []string) ([]string, error) {
+	cleaned := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, rawPath := range paths {
+		trimmed := strings.Trim(strings.TrimSpace(rawPath), "/")
+		if trimmed == "" || trimmed == "." {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		cleaned = append(cleaned, trimmed)
+	}
+	if len(cleaned) == 0 {
+		return nil, fmt.Errorf("at least one path is required")
+	}
+
+	sort.Slice(cleaned, func(i, j int) bool {
+		if len(cleaned[i]) != len(cleaned[j]) {
+			return len(cleaned[i]) < len(cleaned[j])
+		}
+		return cleaned[i] < cleaned[j]
+	})
+
+	normalized := make([]string, 0, len(cleaned))
+	for _, path := range cleaned {
+		covered := false
+		for _, existing := range normalized {
+			if requestedPathMatchesChange(existing, path) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			normalized = append(normalized, path)
+		}
+	}
+
+	return normalized, nil
+}
+
+func (h *SessionSocketHandler) snapshotStagedEntry(change classifiedSessionChange) (StagedIndexEntry, error) {
+	entry := StagedIndexEntry{
+		Path:                change.Path,
+		RepositoryStorageID: change.StorageID,
+		RepositoryPath:      change.Repository,
+		ChangeType:          change.Type,
+		StagedAt:            time.Now().UTC(),
+		LocalPath:           change.LocalPath,
+	}
+
+	switch change.Type {
+	case ChangeCreate, ChangeModify:
+		content, mode, err := loadCommitLocalFile(change.LocalPath)
+		if err != nil {
+			return StagedIndexEntry{}, err
+		}
+		entry.Content = content
+		entry.Mode = mode
+	case ChangeDelete, ChangeRmdir, ChangeRemoveUserRootDir:
+		// No local content required for a delete snapshot.
+	case ChangeMkdir, ChangeUserRootDir:
+		entry.Mode = commitLocalMode(change.LocalPath, 0755)
+	case ChangeSymlink:
+		entry.Mode = commitLocalMode(change.LocalPath, 0777)
+		target := strings.TrimSpace(change.SymlinkTarget)
+		if target == "" {
+			if sessionTarget, ok := h.sessionMgr.GetSymlinkTarget(change.Path); ok {
+				target = sessionTarget
+			} else if strings.TrimSpace(change.LocalPath) != "" {
+				var err error
+				target, err = os.Readlink(change.LocalPath)
+				if err != nil {
+					return StagedIndexEntry{}, fmt.Errorf("read symlink target for %q: %w", change.Path, err)
+				}
+			}
+		}
+		if target == "" {
+			return StagedIndexEntry{}, fmt.Errorf("symlink target missing for %q", change.Path)
+		}
+		entry.SymlinkTarget = target
+	default:
+		return StagedIndexEntry{}, fmt.Errorf("staging %q changes is not supported", change.Type)
+	}
+
+	return entry, nil
+}
+
+func (h *SessionSocketHandler) resolveRemoveTarget(path string) (removeTarget, error) {
+	trimmedPath := strings.Trim(strings.TrimSpace(path), "/")
+	if trimmedPath == "" {
+		return removeTarget{}, fmt.Errorf("path is required")
+	}
+	if isDependencyPath(trimmedPath) {
+		return removeTarget{}, fmt.Errorf("path %q is a dependency path; use push-blobs for dependency changes", path)
+	}
+	if h.rootNode != nil && h.rootNode.WorkspaceManifest() != nil {
+		resolution, err := h.rootNode.WorkspaceManifest().ResolvePath(h.ctx, trimmedPath)
+		if err != nil {
+			return removeTarget{}, fmt.Errorf("resolve workspace path %q: %w", trimmedPath, err)
+		}
+		if !resolution.Included {
+			return removeTarget{}, fmt.Errorf("path %q is outside the virtual monorepo view", path)
+		}
+		if resolution.Repository != nil && strings.Trim(resolution.Repository.DisplayPath, "/") == trimmedPath {
+			return removeTarget{}, fmt.Errorf("removing repository root %q is not supported", path)
+		}
+	}
+
+	localPath, err := h.sessionMgr.GetLocalPath(trimmedPath)
+	if err != nil {
+		return removeTarget{}, err
+	}
+	target := removeTarget{Path: trimmedPath, LocalPath: localPath}
+
+	if h.sessionMgr.IsDeleted(trimmedPath) {
+		target.ShouldTrackDelete = true
+	}
+
+	if entry, found, err := h.sessionMgr.GetOverlayDB().GetFile(trimmedPath); err == nil && found {
+		target.ShouldTrackDelete = true
+		target.IsDir = entry.Type == FileEntryDir
+		if strings.TrimSpace(entry.LocalPath) != "" {
+			target.LocalPath = entry.LocalPath
+		}
+		return target, nil
+	} else if err != nil {
+		return removeTarget{}, fmt.Errorf("read overlay entry for %q: %w", trimmedPath, err)
+	}
+
+	if info, statErr := os.Lstat(localPath); statErr == nil {
+		if info.IsDir() {
+			target.IsDir = true
+		} else {
+			target.ShouldTrackDelete = true
+			return target, nil
+		}
+	}
+
+	if stagedEntry, found, err := h.sessionMgr.GetStagedEntry(trimmedPath); err == nil && found {
+		target.ShouldTrackDelete = true
+		target.IsDir = stagedEntry.ChangeType == ChangeRmdir || stagedEntry.ChangeType == ChangeMkdir
+		if strings.TrimSpace(stagedEntry.LocalPath) != "" {
+			target.LocalPath = stagedEntry.LocalPath
+		}
+		return target, nil
+	} else if err != nil {
+		return removeTarget{}, fmt.Errorf("read staged entry for %q: %w", trimmedPath, err)
+	}
+
+	backendFound, backendIsDir, err := h.backendPathKind(trimmedPath)
+	if err != nil {
+		return removeTarget{}, err
+	}
+	if backendFound {
+		target.IsDir = backendIsDir
+		target.ShouldTrackDelete = true
+		return target, nil
+	}
+
+	if target.IsDir {
+		return target, nil
+	}
+
+	return removeTarget{}, fmt.Errorf("path %q does not exist in the current session or workspace", path)
+}
+
+func (h *SessionSocketHandler) removeFileTarget(target removeTarget) error {
+	if strings.TrimSpace(target.LocalPath) != "" {
+		if err := forceRemoveFile(target.LocalPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %q: %w", target.Path, err)
+		}
+	}
+	if !target.ShouldTrackDelete {
+		return nil
+	}
+	if err := h.sessionMgr.TrackChange(ChangeDelete, target.Path, ""); err != nil {
+		return fmt.Errorf("track delete for %q: %w", target.Path, err)
+	}
+	return nil
+}
+
+func (h *SessionSocketHandler) removeDirectoryTarget(target removeTarget) error {
+	if strings.TrimSpace(target.LocalPath) != "" {
+		if err := forceRemoveAll(target.LocalPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove directory %q: %w", target.Path, err)
+		}
+	}
+	if target.ShouldTrackDelete {
+		if err := h.sessionMgr.TrackChange(ChangeRmdir, target.Path, ""); err != nil {
+			return fmt.Errorf("track directory delete for %q: %w", target.Path, err)
+		}
+	}
+	if _, err := h.sessionMgr.GetOverlayDB().DeleteFilesUnderPrefix(target.Path); err != nil {
+		return fmt.Errorf("clear descendant overlay files for %q: %w", target.Path, err)
+	}
+	if _, err := h.sessionMgr.GetOverlayDB().DeleteDeletedUnderPrefix(target.Path); err != nil {
+		return fmt.Errorf("clear descendant delete markers for %q: %w", target.Path, err)
+	}
+	return nil
+}
+
+func (h *SessionSocketHandler) clearStagedEntriesForPath(path string) error {
+	entries, err := h.sessionMgr.ListStagedEntries()
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !requestedPathMatchesChange(path, entry.Path) {
+			continue
+		}
+		if err := h.sessionMgr.DeleteStagedEntry(entry.Path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func collectWorkspaceChangesForPaths(paths []string, classified []classifiedSessionChange) []classifiedSessionChange {
+	selected := make([]classifiedSessionChange, 0)
+	selectedByPath := make(map[string]struct{})
+	for _, requested := range paths {
+		for _, change := range classified {
+			if change.Scope != sessionChangeWorkspace || !requestedPathMatchesChange(requested, change.Path) {
+				continue
+			}
+			if _, exists := selectedByPath[change.Path]; exists {
+				continue
+			}
+			selectedByPath[change.Path] = struct{}{}
+			selected = append(selected, change)
+		}
+	}
+	sortClassifiedSessionChanges(selected)
+	return selected
+}
+
+func (h *SessionSocketHandler) selectWorkspaceChangesForStaging(paths []string, classified []classifiedSessionChange) ([]classifiedSessionChange, error) {
+	selected := make([]classifiedSessionChange, 0)
+	selectedByPath := make(map[string]struct{})
+
+	for _, rawPath := range paths {
+		requested := strings.Trim(strings.TrimSpace(rawPath), "/")
+		stageAll := requested == "" || requested == "."
+
+		workspaceMatches := 0
+		blobMatches := 0
+		excludedMatches := 0
+		anyMatches := 0
+
+		for _, change := range classified {
+			if !stageAll && !requestedPathMatchesChange(requested, change.Path) {
+				continue
+			}
+			anyMatches++
+			switch change.Scope {
+			case sessionChangeWorkspace:
+				workspaceMatches++
+				if _, exists := selectedByPath[change.Path]; exists {
+					continue
+				}
+				selectedByPath[change.Path] = struct{}{}
+				selected = append(selected, change)
+			case sessionChangeBlob:
+				blobMatches++
+			case sessionChangeExcluded:
+				excludedMatches++
+			}
+		}
+
+		if workspaceMatches > 0 {
+			continue
+		}
+		if blobMatches > 0 {
+			return nil, fmt.Errorf("path %q only has dependency changes; use push-blobs instead", rawPath)
+		}
+		if excludedMatches > 0 {
+			return nil, fmt.Errorf("path %q is outside the virtual monorepo view", rawPath)
+		}
+		if anyMatches == 0 {
+			return nil, fmt.Errorf("no pending source changes for %q", rawPath)
+		}
+	}
+
+	sortClassifiedSessionChanges(selected)
+	return selected, nil
+}
+
+func (h *SessionSocketHandler) backendPathKind(path string) (bool, bool, error) {
+	if h.rootNode == nil || h.rootNode.client == nil {
+		return false, false, nil
+	}
+	backendPath := path
+	if mapped, ok := backendPathForSystemView(path); ok {
+		backendPath = mapped
+	}
+	resp, err := h.rootNode.client.GetAttr(h.ctx, backendPath)
+	if err != nil {
+		return false, false, fmt.Errorf("lookup backend attrs for %q: %w", path, err)
+	}
+	if resp == nil || !resp.Found {
+		return false, false, nil
+	}
+	return true, resp.Mode&uint32(syscall.S_IFDIR) != 0, nil
+}
+
+func requestedPathMatchesChange(requested, changePath string) bool {
+	requested = strings.Trim(strings.TrimSpace(requested), "/")
+	changePath = strings.Trim(strings.TrimSpace(changePath), "/")
+	if requested == "" {
+		return true
+	}
+	return changePath == requested || strings.HasPrefix(changePath, requested+"/")
 }
 
 func sortFileDiffs(diffs []FileDiff) {

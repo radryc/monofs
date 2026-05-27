@@ -9,7 +9,7 @@ COPY internal/router/ui/ ./
 RUN npm run build
 
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26.3-alpine AS builder
 
 WORKDIR /app
 

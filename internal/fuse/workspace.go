@@ -43,6 +43,12 @@ var hiddenWorkspaceRoots = map[string]WorkspaceExclusionReason{
 	"guardian-system": WorkspaceExcludedSystemNamespace,
 }
 
+var reservedWorkspaceRoots = map[string]WorkspaceExclusionReason{
+	"doctor":          WorkspaceExcludedSystemNamespace,
+	"guardian":        WorkspaceExcludedSystemNamespace,
+	"guardian-system": WorkspaceExcludedSystemNamespace,
+}
+
 var excludedWorkspaceRoots = map[string]WorkspaceExclusionReason{
 	"dependency":      WorkspaceExcludedSystemNamespace,
 	"doctor":          WorkspaceExcludedSystemNamespace,
@@ -192,7 +198,7 @@ func (m *WorkspaceManifest) ShouldReserveRoot(name string) bool {
 	if name == syntheticWorkspaceControlDirName {
 		return true
 	}
-	_, reserved := workspaceExcludedPath(name)
+	_, reserved := workspacePathExclusion(name, reservedWorkspaceRoots)
 	return reserved
 }
 

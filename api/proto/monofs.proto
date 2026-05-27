@@ -81,7 +81,9 @@ service MonoFSRouter {
 
     // Workspace sync orchestration for virtual monorepo publish and refresh flows.
     rpc UploadWorkspaceBundle(stream WorkspaceBundleChunk) returns (UploadWorkspaceBundleResponse);
+    rpc UploadWorkspaceCommitBundle(stream WorkspaceBundleChunk) returns (UploadWorkspaceBundleResponse);
     rpc PublishWorkspace(PublishWorkspaceRequest) returns (stream WorkspaceSyncEvent);
+    rpc PushWorkspaceCommits(PushWorkspaceCommitsRequest) returns (stream WorkspaceSyncEvent);
     rpc RefreshWorkspace(RefreshWorkspaceRequest) returns (stream WorkspaceSyncEvent);
     rpc GetWorkspaceSyncJob(GetWorkspaceSyncJobRequest) returns (WorkspaceSyncJob);
     rpc ListWorkspaceSyncJobs(ListWorkspaceSyncJobsRequest) returns (ListWorkspaceSyncJobsResponse);
@@ -588,6 +590,7 @@ enum WorkspaceSyncAction {
     WORKSPACE_SYNC_ACTION_UNSPECIFIED = 0;
     WORKSPACE_SYNC_ACTION_REFRESH = 1;
     WORKSPACE_SYNC_ACTION_PUBLISH = 2;
+    WORKSPACE_SYNC_ACTION_SOURCE_PUSH = 3;
 }
 
 enum WorkspaceSyncState {
@@ -655,6 +658,12 @@ message PublishWorkspaceRequest {
     string requested_branch_strategy = 6;
 }
 
+message PushWorkspaceCommitsRequest {
+    string workspace_id = 1;
+    string bundle_id = 2;
+    string logical_branch = 3;
+}
+
 message RefreshWorkspaceRequest {
     string workspace_id = 1;
     repeated WorkspaceRepositoryRef repositories = 2;
@@ -701,6 +710,8 @@ message WorkspaceSyncJob {
     bool reject_if_local_changes = 13;
     string bundle_id = 14;
     string logical_commit_message = 15;
+    string logical_branch = 16;
+    repeated string local_commit_ids = 17;
 }
 
 message WorkspaceSyncEvent {

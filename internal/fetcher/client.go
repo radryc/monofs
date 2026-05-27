@@ -225,6 +225,56 @@ func (c *Client) StageWorkspaceBundle(ctx context.Context, bundleID, workspaceID
 	return resp, nil
 }
 
+// StageWorkspaceCommitBundle pushes a source commit bundle into the selected fetcher sync worker cache.
+func (c *Client) StageWorkspaceCommitBundle(ctx context.Context, bundleID, workspaceID string, data []byte) (*pb.StageWorkspaceBundleResponse, error) {
+	fetcher := c.selectFetcher(workspaceID)
+	if fetcher == nil {
+		return nil, fmt.Errorf("no healthy fetchers available")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, c.config.RequestTimeout)
+	defer cancel()
+
+	stream, err := fetcher.sync.StageWorkspaceCommitBundle(callCtx)
+	if err != nil {
+		fetcher.recordError()
+		return nil, err
+	}
+
+	const chunkSize = 1024 * 1024
+	if len(data) == 0 {
+		if err := stream.Send(&pb.WorkspaceBundleChunk{WorkspaceId: workspaceID, BundleId: bundleID, IsLast: true}); err != nil {
+			fetcher.recordError()
+			return nil, err
+		}
+	} else {
+		for offset := 0; offset < len(data); offset += chunkSize {
+			end := offset + chunkSize
+			if end > len(data) {
+				end = len(data)
+			}
+			chunk := &pb.WorkspaceBundleChunk{
+				WorkspaceId: workspaceID,
+				BundleId:    bundleID,
+				Data:        data[offset:end],
+				IsLast:      end >= len(data),
+			}
+			if err := stream.Send(chunk); err != nil {
+				fetcher.recordError()
+				return nil, err
+			}
+		}
+	}
+
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		fetcher.recordError()
+		return nil, err
+	}
+	fetcher.healthy.Store(true)
+	return resp, nil
+}
+
 // StartWorkspacePublish asks one healthy fetcher sync worker to publish the staged bundle.
 func (c *Client) StartWorkspacePublish(ctx context.Context, req *pb.StartWorkspacePublishRequest) ([]*pb.RepoSyncProgress, error) {
 	fetcher := c.selectFetcher(req.GetWorkspaceId())
@@ -236,6 +286,39 @@ func (c *Client) StartWorkspacePublish(ctx context.Context, req *pb.StartWorkspa
 	defer cancel()
 
 	stream, err := fetcher.sync.StartWorkspacePublish(callCtx, req)
+	if err != nil {
+		fetcher.recordError()
+		return nil, err
+	}
+
+	var results []*pb.RepoSyncProgress
+	for {
+		item, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			fetcher.recordError()
+			return nil, err
+		}
+		results = append(results, item)
+	}
+
+	fetcher.healthy.Store(true)
+	return results, nil
+}
+
+// StartWorkspaceCommitPush asks one healthy fetcher sync worker to push the staged source commit bundle.
+func (c *Client) StartWorkspaceCommitPush(ctx context.Context, req *pb.StartWorkspaceCommitPushRequest) ([]*pb.RepoSyncProgress, error) {
+	fetcher := c.selectFetcher(req.GetWorkspaceId())
+	if fetcher == nil {
+		return nil, fmt.Errorf("no healthy fetchers available")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, c.config.RequestTimeout)
+	defer cancel()
+
+	stream, err := fetcher.sync.StartWorkspaceCommitPush(callCtx, req)
 	if err != nil {
 		fetcher.recordError()
 		return nil, err

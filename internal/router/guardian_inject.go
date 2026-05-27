@@ -49,7 +49,6 @@ func (r *Router) InjectGuardianPartition(ctx context.Context, req *pb.InjectGuar
 		GuardianToken: req.GuardianToken,
 		Writes:        writes,
 		Context: &pb.GuardianMutationContext{
-			PrincipalId:   req.PartitionName,
 			Reason:        "inject guardian partition",
 			CorrelationId: fmt.Sprintf("inject-%d", time.Now().UnixNano()),
 		},

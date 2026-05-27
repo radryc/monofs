@@ -1115,6 +1115,74 @@ func (x *StartWorkspacePublishRequest) GetRequestedBranchStrategy() string {
 	return ""
 }
 
+type StartWorkspaceCommitPushRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	WorkspaceId   string                 `protobuf:"bytes,2,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	BundleId      string                 `protobuf:"bytes,3,opt,name=bundle_id,json=bundleId,proto3" json:"bundle_id,omitempty"`
+	LogicalBranch string                 `protobuf:"bytes,4,opt,name=logical_branch,json=logicalBranch,proto3" json:"logical_branch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StartWorkspaceCommitPushRequest) Reset() {
+	*x = StartWorkspaceCommitPushRequest{}
+	mi := &file_api_proto_fetcher_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartWorkspaceCommitPushRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartWorkspaceCommitPushRequest) ProtoMessage() {}
+
+func (x *StartWorkspaceCommitPushRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_fetcher_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartWorkspaceCommitPushRequest.ProtoReflect.Descriptor instead.
+func (*StartWorkspaceCommitPushRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *StartWorkspaceCommitPushRequest) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *StartWorkspaceCommitPushRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *StartWorkspaceCommitPushRequest) GetBundleId() string {
+	if x != nil {
+		return x.BundleId
+	}
+	return ""
+}
+
+func (x *StartWorkspaceCommitPushRequest) GetLogicalBranch() string {
+	if x != nil {
+		return x.LogicalBranch
+	}
+	return ""
+}
+
 type ProbeWorkspaceRefreshRequest struct {
 	state         protoimpl.MessageState    `protogen:"open.v1"`
 	JobId         string                    `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
@@ -1126,7 +1194,7 @@ type ProbeWorkspaceRefreshRequest struct {
 
 func (x *ProbeWorkspaceRefreshRequest) Reset() {
 	*x = ProbeWorkspaceRefreshRequest{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[12]
+	mi := &file_api_proto_fetcher_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1138,7 +1206,7 @@ func (x *ProbeWorkspaceRefreshRequest) String() string {
 func (*ProbeWorkspaceRefreshRequest) ProtoMessage() {}
 
 func (x *ProbeWorkspaceRefreshRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[12]
+	mi := &file_api_proto_fetcher_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1151,7 +1219,7 @@ func (x *ProbeWorkspaceRefreshRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeWorkspaceRefreshRequest.ProtoReflect.Descriptor instead.
 func (*ProbeWorkspaceRefreshRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{12}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ProbeWorkspaceRefreshRequest) GetJobId() string {
@@ -1184,7 +1252,7 @@ type DiscardWorkspaceBundleRequest struct {
 
 func (x *DiscardWorkspaceBundleRequest) Reset() {
 	*x = DiscardWorkspaceBundleRequest{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[13]
+	mi := &file_api_proto_fetcher_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1196,7 +1264,7 @@ func (x *DiscardWorkspaceBundleRequest) String() string {
 func (*DiscardWorkspaceBundleRequest) ProtoMessage() {}
 
 func (x *DiscardWorkspaceBundleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[13]
+	mi := &file_api_proto_fetcher_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1209,7 +1277,7 @@ func (x *DiscardWorkspaceBundleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiscardWorkspaceBundleRequest.ProtoReflect.Descriptor instead.
 func (*DiscardWorkspaceBundleRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{13}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DiscardWorkspaceBundleRequest) GetBundleId() string {
@@ -1229,7 +1297,7 @@ type DiscardWorkspaceBundleResponse struct {
 
 func (x *DiscardWorkspaceBundleResponse) Reset() {
 	*x = DiscardWorkspaceBundleResponse{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[14]
+	mi := &file_api_proto_fetcher_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1241,7 +1309,7 @@ func (x *DiscardWorkspaceBundleResponse) String() string {
 func (*DiscardWorkspaceBundleResponse) ProtoMessage() {}
 
 func (x *DiscardWorkspaceBundleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[14]
+	mi := &file_api_proto_fetcher_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1254,7 +1322,7 @@ func (x *DiscardWorkspaceBundleResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiscardWorkspaceBundleResponse.ProtoReflect.Descriptor instead.
 func (*DiscardWorkspaceBundleResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{14}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *DiscardWorkspaceBundleResponse) GetSuccess() bool {
@@ -1287,7 +1355,7 @@ type RepoSyncProgress struct {
 
 func (x *RepoSyncProgress) Reset() {
 	*x = RepoSyncProgress{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[15]
+	mi := &file_api_proto_fetcher_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1299,7 +1367,7 @@ func (x *RepoSyncProgress) String() string {
 func (*RepoSyncProgress) ProtoMessage() {}
 
 func (x *RepoSyncProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[15]
+	mi := &file_api_proto_fetcher_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1312,7 +1380,7 @@ func (x *RepoSyncProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepoSyncProgress.ProtoReflect.Descriptor instead.
 func (*RepoSyncProgress) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{15}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RepoSyncProgress) GetJobId() string {
@@ -1379,7 +1447,7 @@ type SyncWorkerStatsRequest struct {
 
 func (x *SyncWorkerStatsRequest) Reset() {
 	*x = SyncWorkerStatsRequest{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[16]
+	mi := &file_api_proto_fetcher_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1391,7 +1459,7 @@ func (x *SyncWorkerStatsRequest) String() string {
 func (*SyncWorkerStatsRequest) ProtoMessage() {}
 
 func (x *SyncWorkerStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[16]
+	mi := &file_api_proto_fetcher_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1404,7 +1472,7 @@ func (x *SyncWorkerStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncWorkerStatsRequest.ProtoReflect.Descriptor instead.
 func (*SyncWorkerStatsRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{16}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{17}
 }
 
 type SyncWorkerStats struct {
@@ -1428,7 +1496,7 @@ type SyncWorkerStats struct {
 
 func (x *SyncWorkerStats) Reset() {
 	*x = SyncWorkerStats{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[17]
+	mi := &file_api_proto_fetcher_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1440,7 +1508,7 @@ func (x *SyncWorkerStats) String() string {
 func (*SyncWorkerStats) ProtoMessage() {}
 
 func (x *SyncWorkerStats) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[17]
+	mi := &file_api_proto_fetcher_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1453,7 +1521,7 @@ func (x *SyncWorkerStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncWorkerStats.ProtoReflect.Descriptor instead.
 func (*SyncWorkerStats) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{17}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *SyncWorkerStats) GetTotalJobs() int64 {
@@ -1556,7 +1624,7 @@ type SyncWorkerStatsResponse struct {
 
 func (x *SyncWorkerStatsResponse) Reset() {
 	*x = SyncWorkerStatsResponse{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[18]
+	mi := &file_api_proto_fetcher_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1568,7 +1636,7 @@ func (x *SyncWorkerStatsResponse) String() string {
 func (*SyncWorkerStatsResponse) ProtoMessage() {}
 
 func (x *SyncWorkerStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[18]
+	mi := &file_api_proto_fetcher_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1581,7 +1649,7 @@ func (x *SyncWorkerStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncWorkerStatsResponse.ProtoReflect.Descriptor instead.
 func (*SyncWorkerStatsResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{18}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *SyncWorkerStatsResponse) GetStats() *SyncWorkerStats {
@@ -1607,7 +1675,7 @@ type AccessEvent struct {
 
 func (x *AccessEvent) Reset() {
 	*x = AccessEvent{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[19]
+	mi := &file_api_proto_fetcher_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1619,7 +1687,7 @@ func (x *AccessEvent) String() string {
 func (*AccessEvent) ProtoMessage() {}
 
 func (x *AccessEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[19]
+	mi := &file_api_proto_fetcher_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1632,7 +1700,7 @@ func (x *AccessEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AccessEvent.ProtoReflect.Descriptor instead.
 func (*AccessEvent) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{19}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *AccessEvent) GetClientId() string {
@@ -1694,7 +1762,7 @@ type ReportAccessRequest struct {
 
 func (x *ReportAccessRequest) Reset() {
 	*x = ReportAccessRequest{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[20]
+	mi := &file_api_proto_fetcher_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1706,7 +1774,7 @@ func (x *ReportAccessRequest) String() string {
 func (*ReportAccessRequest) ProtoMessage() {}
 
 func (x *ReportAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[20]
+	mi := &file_api_proto_fetcher_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1719,7 +1787,7 @@ func (x *ReportAccessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportAccessRequest.ProtoReflect.Descriptor instead.
 func (*ReportAccessRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{20}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ReportAccessRequest) GetEvents() []*AccessEvent {
@@ -1738,7 +1806,7 @@ type ReportAccessResponse struct {
 
 func (x *ReportAccessResponse) Reset() {
 	*x = ReportAccessResponse{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[21]
+	mi := &file_api_proto_fetcher_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1750,7 +1818,7 @@ func (x *ReportAccessResponse) String() string {
 func (*ReportAccessResponse) ProtoMessage() {}
 
 func (x *ReportAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[21]
+	mi := &file_api_proto_fetcher_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1763,7 +1831,7 @@ func (x *ReportAccessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportAccessResponse.ProtoReflect.Descriptor instead.
 func (*ReportAccessResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{21}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ReportAccessResponse) GetAccepted() int32 {
@@ -1787,7 +1855,7 @@ type GetPredictionsRequest struct {
 
 func (x *GetPredictionsRequest) Reset() {
 	*x = GetPredictionsRequest{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[22]
+	mi := &file_api_proto_fetcher_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1799,7 +1867,7 @@ func (x *GetPredictionsRequest) String() string {
 func (*GetPredictionsRequest) ProtoMessage() {}
 
 func (x *GetPredictionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[22]
+	mi := &file_api_proto_fetcher_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1812,7 +1880,7 @@ func (x *GetPredictionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPredictionsRequest.ProtoReflect.Descriptor instead.
 func (*GetPredictionsRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{22}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *GetPredictionsRequest) GetStorageId() string {
@@ -1859,7 +1927,7 @@ type GetPredictionsResponse struct {
 
 func (x *GetPredictionsResponse) Reset() {
 	*x = GetPredictionsResponse{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[23]
+	mi := &file_api_proto_fetcher_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1871,7 +1939,7 @@ func (x *GetPredictionsResponse) String() string {
 func (*GetPredictionsResponse) ProtoMessage() {}
 
 func (x *GetPredictionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[23]
+	mi := &file_api_proto_fetcher_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1884,7 +1952,7 @@ func (x *GetPredictionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPredictionsResponse.ProtoReflect.Descriptor instead.
 func (*GetPredictionsResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{23}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *GetPredictionsResponse) GetPredictions() []*PredictedFile {
@@ -1909,7 +1977,7 @@ type PredictedFile struct {
 
 func (x *PredictedFile) Reset() {
 	*x = PredictedFile{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[24]
+	mi := &file_api_proto_fetcher_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1921,7 +1989,7 @@ func (x *PredictedFile) String() string {
 func (*PredictedFile) ProtoMessage() {}
 
 func (x *PredictedFile) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[24]
+	mi := &file_api_proto_fetcher_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1934,7 +2002,7 @@ func (x *PredictedFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PredictedFile.ProtoReflect.Descriptor instead.
 func (*PredictedFile) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{24}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *PredictedFile) GetStorageId() string {
@@ -2001,7 +2069,7 @@ type StoreBlobRequest struct {
 
 func (x *StoreBlobRequest) Reset() {
 	*x = StoreBlobRequest{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[25]
+	mi := &file_api_proto_fetcher_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2013,7 +2081,7 @@ func (x *StoreBlobRequest) String() string {
 func (*StoreBlobRequest) ProtoMessage() {}
 
 func (x *StoreBlobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[25]
+	mi := &file_api_proto_fetcher_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2026,7 +2094,7 @@ func (x *StoreBlobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoreBlobRequest.ProtoReflect.Descriptor instead.
 func (*StoreBlobRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{25}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *StoreBlobRequest) GetBlobHash() string {
@@ -2062,7 +2130,7 @@ type StoreBlobResponse struct {
 
 func (x *StoreBlobResponse) Reset() {
 	*x = StoreBlobResponse{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[26]
+	mi := &file_api_proto_fetcher_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2074,7 +2142,7 @@ func (x *StoreBlobResponse) String() string {
 func (*StoreBlobResponse) ProtoMessage() {}
 
 func (x *StoreBlobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[26]
+	mi := &file_api_proto_fetcher_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2087,7 +2155,7 @@ func (x *StoreBlobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoreBlobResponse.ProtoReflect.Descriptor instead.
 func (*StoreBlobResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{26}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *StoreBlobResponse) GetSuccess() bool {
@@ -2129,7 +2197,7 @@ type StoreArchiveChunk struct {
 
 func (x *StoreArchiveChunk) Reset() {
 	*x = StoreArchiveChunk{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[27]
+	mi := &file_api_proto_fetcher_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2141,7 +2209,7 @@ func (x *StoreArchiveChunk) String() string {
 func (*StoreArchiveChunk) ProtoMessage() {}
 
 func (x *StoreArchiveChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[27]
+	mi := &file_api_proto_fetcher_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2154,7 +2222,7 @@ func (x *StoreArchiveChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoreArchiveChunk.ProtoReflect.Descriptor instead.
 func (*StoreArchiveChunk) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{27}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *StoreArchiveChunk) GetStorageId() string {
@@ -2199,7 +2267,7 @@ type StoreArchiveResponse struct {
 
 func (x *StoreArchiveResponse) Reset() {
 	*x = StoreArchiveResponse{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[28]
+	mi := &file_api_proto_fetcher_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2211,7 +2279,7 @@ func (x *StoreArchiveResponse) String() string {
 func (*StoreArchiveResponse) ProtoMessage() {}
 
 func (x *StoreArchiveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[28]
+	mi := &file_api_proto_fetcher_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2224,7 +2292,7 @@ func (x *StoreArchiveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoreArchiveResponse.ProtoReflect.Descriptor instead.
 func (*StoreArchiveResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{28}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *StoreArchiveResponse) GetSuccess() bool {
@@ -2279,7 +2347,7 @@ type StoreBlobEntry struct {
 
 func (x *StoreBlobEntry) Reset() {
 	*x = StoreBlobEntry{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[29]
+	mi := &file_api_proto_fetcher_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2291,7 +2359,7 @@ func (x *StoreBlobEntry) String() string {
 func (*StoreBlobEntry) ProtoMessage() {}
 
 func (x *StoreBlobEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[29]
+	mi := &file_api_proto_fetcher_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2304,7 +2372,7 @@ func (x *StoreBlobEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoreBlobEntry.ProtoReflect.Descriptor instead.
 func (*StoreBlobEntry) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{29}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *StoreBlobEntry) GetBlobHash() string {
@@ -2363,7 +2431,7 @@ type StoreBlobBatchResponse struct {
 
 func (x *StoreBlobBatchResponse) Reset() {
 	*x = StoreBlobBatchResponse{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[30]
+	mi := &file_api_proto_fetcher_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2375,7 +2443,7 @@ func (x *StoreBlobBatchResponse) String() string {
 func (*StoreBlobBatchResponse) ProtoMessage() {}
 
 func (x *StoreBlobBatchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[30]
+	mi := &file_api_proto_fetcher_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2388,7 +2456,7 @@ func (x *StoreBlobBatchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoreBlobBatchResponse.ProtoReflect.Descriptor instead.
 func (*StoreBlobBatchResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{30}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *StoreBlobBatchResponse) GetSuccess() bool {
@@ -2454,7 +2522,7 @@ type DeleteBlobsRequest struct {
 
 func (x *DeleteBlobsRequest) Reset() {
 	*x = DeleteBlobsRequest{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[31]
+	mi := &file_api_proto_fetcher_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2466,7 +2534,7 @@ func (x *DeleteBlobsRequest) String() string {
 func (*DeleteBlobsRequest) ProtoMessage() {}
 
 func (x *DeleteBlobsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[31]
+	mi := &file_api_proto_fetcher_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2479,7 +2547,7 @@ func (x *DeleteBlobsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteBlobsRequest.ProtoReflect.Descriptor instead.
 func (*DeleteBlobsRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{31}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *DeleteBlobsRequest) GetBlobHashes() []string {
@@ -2513,7 +2581,7 @@ type DeleteBlobsResponse struct {
 
 func (x *DeleteBlobsResponse) Reset() {
 	*x = DeleteBlobsResponse{}
-	mi := &file_api_proto_fetcher_proto_msgTypes[32]
+	mi := &file_api_proto_fetcher_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2525,7 +2593,7 @@ func (x *DeleteBlobsResponse) String() string {
 func (*DeleteBlobsResponse) ProtoMessage() {}
 
 func (x *DeleteBlobsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_fetcher_proto_msgTypes[32]
+	mi := &file_api_proto_fetcher_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2538,7 +2606,7 @@ func (x *DeleteBlobsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteBlobsResponse.ProtoReflect.Descriptor instead.
 func (*DeleteBlobsResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{32}
+	return file_api_proto_fetcher_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *DeleteBlobsResponse) GetSuccess() bool {
@@ -2683,7 +2751,12 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\vauthor_name\x18\x05 \x01(\tR\n" +
 	"authorName\x12!\n" +
 	"\fauthor_email\x18\x06 \x01(\tR\vauthorEmail\x12:\n" +
-	"\x19requested_branch_strategy\x18\a \x01(\tR\x17requestedBranchStrategy\"\x9c\x01\n" +
+	"\x19requested_branch_strategy\x18\a \x01(\tR\x17requestedBranchStrategy\"\x9f\x01\n" +
+	"\x1fStartWorkspaceCommitPushRequest\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12!\n" +
+	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12\x1b\n" +
+	"\tbundle_id\x18\x03 \x01(\tR\bbundleId\x12%\n" +
+	"\x0elogical_branch\x18\x04 \x01(\tR\rlogicalBranch\"\x9c\x01\n" +
 	"\x1cProbeWorkspaceRefreshRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12B\n" +
@@ -2840,10 +2913,12 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\tStoreBlob\x12\x18.monofs.StoreBlobRequest\x1a\x19.monofs.StoreBlobResponse\x12P\n" +
 	"\x14StoreBlobBatchStream\x12\x16.monofs.StoreBlobEntry\x1a\x1e.monofs.StoreBlobBatchResponse(\x01\x12F\n" +
 	"\vDeleteBlobs\x12\x1a.monofs.DeleteBlobsRequest\x1a\x1b.monofs.DeleteBlobsResponse\x12I\n" +
-	"\fStoreArchive\x12\x19.monofs.StoreArchiveChunk\x1a\x1c.monofs.StoreArchiveResponse(\x012\xe4\x03\n" +
+	"\fStoreArchive\x12\x19.monofs.StoreArchiveChunk\x1a\x1c.monofs.StoreArchiveResponse(\x012\xa9\x05\n" +
 	"\x0eRepoSyncWorker\x12\\\n" +
-	"\x14StageWorkspaceBundle\x12\x1c.monofs.WorkspaceBundleChunk\x1a$.monofs.StageWorkspaceBundleResponse(\x01\x12Y\n" +
-	"\x15StartWorkspacePublish\x12$.monofs.StartWorkspacePublishRequest\x1a\x18.monofs.RepoSyncProgress0\x01\x12Y\n" +
+	"\x14StageWorkspaceBundle\x12\x1c.monofs.WorkspaceBundleChunk\x1a$.monofs.StageWorkspaceBundleResponse(\x01\x12b\n" +
+	"\x1aStageWorkspaceCommitBundle\x12\x1c.monofs.WorkspaceBundleChunk\x1a$.monofs.StageWorkspaceBundleResponse(\x01\x12Y\n" +
+	"\x15StartWorkspacePublish\x12$.monofs.StartWorkspacePublishRequest\x1a\x18.monofs.RepoSyncProgress0\x01\x12_\n" +
+	"\x18StartWorkspaceCommitPush\x12'.monofs.StartWorkspaceCommitPushRequest\x1a\x18.monofs.RepoSyncProgress0\x01\x12Y\n" +
 	"\x15ProbeWorkspaceRefresh\x12$.monofs.ProbeWorkspaceRefreshRequest\x1a\x18.monofs.RepoSyncProgress0\x01\x12g\n" +
 	"\x16DiscardWorkspaceBundle\x12%.monofs.DiscardWorkspaceBundleRequest\x1a&.monofs.DiscardWorkspaceBundleResponse\x12U\n" +
 	"\x12GetSyncWorkerStats\x12\x1e.monofs.SyncWorkerStatsRequest\x1a\x1f.monofs.SyncWorkerStatsResponseB$Z\"github.com/radryc/monofs/api/protob\x06proto3"
@@ -2861,103 +2936,108 @@ func file_api_proto_fetcher_proto_rawDescGZIP() []byte {
 }
 
 var file_api_proto_fetcher_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_api_proto_fetcher_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
+var file_api_proto_fetcher_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
 var file_api_proto_fetcher_proto_goTypes = []any{
-	(RepoSyncStatus)(0),                    // 0: monofs.RepoSyncStatus
-	(AccessType)(0),                        // 1: monofs.AccessType
-	(*FetchBlobRequest)(nil),               // 2: monofs.FetchBlobRequest
-	(*FetchBlobBatchRequest)(nil),          // 3: monofs.FetchBlobBatchRequest
-	(*FetchBlobBatchResponse)(nil),         // 4: monofs.FetchBlobBatchResponse
-	(*PrefetchRequest)(nil),                // 5: monofs.PrefetchRequest
-	(*PrefetchResponse)(nil),               // 6: monofs.PrefetchResponse
-	(*CheckCacheRequest)(nil),              // 7: monofs.CheckCacheRequest
-	(*CheckCacheResponse)(nil),             // 8: monofs.CheckCacheResponse
-	(*FetcherStatsRequest)(nil),            // 9: monofs.FetcherStatsRequest
-	(*FetcherStatsResponse)(nil),           // 10: monofs.FetcherStatsResponse
-	(*SourceStats)(nil),                    // 11: monofs.SourceStats
-	(*StageWorkspaceBundleResponse)(nil),   // 12: monofs.StageWorkspaceBundleResponse
-	(*StartWorkspacePublishRequest)(nil),   // 13: monofs.StartWorkspacePublishRequest
-	(*ProbeWorkspaceRefreshRequest)(nil),   // 14: monofs.ProbeWorkspaceRefreshRequest
-	(*DiscardWorkspaceBundleRequest)(nil),  // 15: monofs.DiscardWorkspaceBundleRequest
-	(*DiscardWorkspaceBundleResponse)(nil), // 16: monofs.DiscardWorkspaceBundleResponse
-	(*RepoSyncProgress)(nil),               // 17: monofs.RepoSyncProgress
-	(*SyncWorkerStatsRequest)(nil),         // 18: monofs.SyncWorkerStatsRequest
-	(*SyncWorkerStats)(nil),                // 19: monofs.SyncWorkerStats
-	(*SyncWorkerStatsResponse)(nil),        // 20: monofs.SyncWorkerStatsResponse
-	(*AccessEvent)(nil),                    // 21: monofs.AccessEvent
-	(*ReportAccessRequest)(nil),            // 22: monofs.ReportAccessRequest
-	(*ReportAccessResponse)(nil),           // 23: monofs.ReportAccessResponse
-	(*GetPredictionsRequest)(nil),          // 24: monofs.GetPredictionsRequest
-	(*GetPredictionsResponse)(nil),         // 25: monofs.GetPredictionsResponse
-	(*PredictedFile)(nil),                  // 26: monofs.PredictedFile
-	(*StoreBlobRequest)(nil),               // 27: monofs.StoreBlobRequest
-	(*StoreBlobResponse)(nil),              // 28: monofs.StoreBlobResponse
-	(*StoreArchiveChunk)(nil),              // 29: monofs.StoreArchiveChunk
-	(*StoreArchiveResponse)(nil),           // 30: monofs.StoreArchiveResponse
-	(*StoreBlobEntry)(nil),                 // 31: monofs.StoreBlobEntry
-	(*StoreBlobBatchResponse)(nil),         // 32: monofs.StoreBlobBatchResponse
-	(*DeleteBlobsRequest)(nil),             // 33: monofs.DeleteBlobsRequest
-	(*DeleteBlobsResponse)(nil),            // 34: monofs.DeleteBlobsResponse
-	nil,                                    // 35: monofs.FetchBlobRequest.SourceConfigEntry
-	nil,                                    // 36: monofs.CheckCacheResponse.CachedEntry
-	nil,                                    // 37: monofs.CheckCacheResponse.SizesEntry
-	nil,                                    // 38: monofs.FetcherStatsResponse.SourceStatsEntry
-	nil,                                    // 39: monofs.PredictedFile.SourceConfigEntry
-	(SourceType)(0),                        // 40: monofs.SourceType
-	(*WorkspaceRepositoryRef)(nil),         // 41: monofs.WorkspaceRepositoryRef
-	(*WorkspaceBundleChunk)(nil),           // 42: monofs.WorkspaceBundleChunk
-	(*DataChunk)(nil),                      // 43: monofs.DataChunk
+	(RepoSyncStatus)(0),                     // 0: monofs.RepoSyncStatus
+	(AccessType)(0),                         // 1: monofs.AccessType
+	(*FetchBlobRequest)(nil),                // 2: monofs.FetchBlobRequest
+	(*FetchBlobBatchRequest)(nil),           // 3: monofs.FetchBlobBatchRequest
+	(*FetchBlobBatchResponse)(nil),          // 4: monofs.FetchBlobBatchResponse
+	(*PrefetchRequest)(nil),                 // 5: monofs.PrefetchRequest
+	(*PrefetchResponse)(nil),                // 6: monofs.PrefetchResponse
+	(*CheckCacheRequest)(nil),               // 7: monofs.CheckCacheRequest
+	(*CheckCacheResponse)(nil),              // 8: monofs.CheckCacheResponse
+	(*FetcherStatsRequest)(nil),             // 9: monofs.FetcherStatsRequest
+	(*FetcherStatsResponse)(nil),            // 10: monofs.FetcherStatsResponse
+	(*SourceStats)(nil),                     // 11: monofs.SourceStats
+	(*StageWorkspaceBundleResponse)(nil),    // 12: monofs.StageWorkspaceBundleResponse
+	(*StartWorkspacePublishRequest)(nil),    // 13: monofs.StartWorkspacePublishRequest
+	(*StartWorkspaceCommitPushRequest)(nil), // 14: monofs.StartWorkspaceCommitPushRequest
+	(*ProbeWorkspaceRefreshRequest)(nil),    // 15: monofs.ProbeWorkspaceRefreshRequest
+	(*DiscardWorkspaceBundleRequest)(nil),   // 16: monofs.DiscardWorkspaceBundleRequest
+	(*DiscardWorkspaceBundleResponse)(nil),  // 17: monofs.DiscardWorkspaceBundleResponse
+	(*RepoSyncProgress)(nil),                // 18: monofs.RepoSyncProgress
+	(*SyncWorkerStatsRequest)(nil),          // 19: monofs.SyncWorkerStatsRequest
+	(*SyncWorkerStats)(nil),                 // 20: monofs.SyncWorkerStats
+	(*SyncWorkerStatsResponse)(nil),         // 21: monofs.SyncWorkerStatsResponse
+	(*AccessEvent)(nil),                     // 22: monofs.AccessEvent
+	(*ReportAccessRequest)(nil),             // 23: monofs.ReportAccessRequest
+	(*ReportAccessResponse)(nil),            // 24: monofs.ReportAccessResponse
+	(*GetPredictionsRequest)(nil),           // 25: monofs.GetPredictionsRequest
+	(*GetPredictionsResponse)(nil),          // 26: monofs.GetPredictionsResponse
+	(*PredictedFile)(nil),                   // 27: monofs.PredictedFile
+	(*StoreBlobRequest)(nil),                // 28: monofs.StoreBlobRequest
+	(*StoreBlobResponse)(nil),               // 29: monofs.StoreBlobResponse
+	(*StoreArchiveChunk)(nil),               // 30: monofs.StoreArchiveChunk
+	(*StoreArchiveResponse)(nil),            // 31: monofs.StoreArchiveResponse
+	(*StoreBlobEntry)(nil),                  // 32: monofs.StoreBlobEntry
+	(*StoreBlobBatchResponse)(nil),          // 33: monofs.StoreBlobBatchResponse
+	(*DeleteBlobsRequest)(nil),              // 34: monofs.DeleteBlobsRequest
+	(*DeleteBlobsResponse)(nil),             // 35: monofs.DeleteBlobsResponse
+	nil,                                     // 36: monofs.FetchBlobRequest.SourceConfigEntry
+	nil,                                     // 37: monofs.CheckCacheResponse.CachedEntry
+	nil,                                     // 38: monofs.CheckCacheResponse.SizesEntry
+	nil,                                     // 39: monofs.FetcherStatsResponse.SourceStatsEntry
+	nil,                                     // 40: monofs.PredictedFile.SourceConfigEntry
+	(SourceType)(0),                         // 41: monofs.SourceType
+	(*WorkspaceRepositoryRef)(nil),          // 42: monofs.WorkspaceRepositoryRef
+	(*WorkspaceBundleChunk)(nil),            // 43: monofs.WorkspaceBundleChunk
+	(*DataChunk)(nil),                       // 44: monofs.DataChunk
 }
 var file_api_proto_fetcher_proto_depIdxs = []int32{
-	40, // 0: monofs.FetchBlobRequest.source_type:type_name -> monofs.SourceType
-	35, // 1: monofs.FetchBlobRequest.source_config:type_name -> monofs.FetchBlobRequest.SourceConfigEntry
+	41, // 0: monofs.FetchBlobRequest.source_type:type_name -> monofs.SourceType
+	36, // 1: monofs.FetchBlobRequest.source_config:type_name -> monofs.FetchBlobRequest.SourceConfigEntry
 	2,  // 2: monofs.FetchBlobBatchRequest.blobs:type_name -> monofs.FetchBlobRequest
 	2,  // 3: monofs.PrefetchRequest.blobs:type_name -> monofs.FetchBlobRequest
-	40, // 4: monofs.CheckCacheRequest.source_type:type_name -> monofs.SourceType
-	36, // 5: monofs.CheckCacheResponse.cached:type_name -> monofs.CheckCacheResponse.CachedEntry
-	37, // 6: monofs.CheckCacheResponse.sizes:type_name -> monofs.CheckCacheResponse.SizesEntry
-	38, // 7: monofs.FetcherStatsResponse.source_stats:type_name -> monofs.FetcherStatsResponse.SourceStatsEntry
-	19, // 8: monofs.FetcherStatsResponse.sync_worker:type_name -> monofs.SyncWorkerStats
-	41, // 9: monofs.ProbeWorkspaceRefreshRequest.repositories:type_name -> monofs.WorkspaceRepositoryRef
-	41, // 10: monofs.RepoSyncProgress.repository:type_name -> monofs.WorkspaceRepositoryRef
+	41, // 4: monofs.CheckCacheRequest.source_type:type_name -> monofs.SourceType
+	37, // 5: monofs.CheckCacheResponse.cached:type_name -> monofs.CheckCacheResponse.CachedEntry
+	38, // 6: monofs.CheckCacheResponse.sizes:type_name -> monofs.CheckCacheResponse.SizesEntry
+	39, // 7: monofs.FetcherStatsResponse.source_stats:type_name -> monofs.FetcherStatsResponse.SourceStatsEntry
+	20, // 8: monofs.FetcherStatsResponse.sync_worker:type_name -> monofs.SyncWorkerStats
+	42, // 9: monofs.ProbeWorkspaceRefreshRequest.repositories:type_name -> monofs.WorkspaceRepositoryRef
+	42, // 10: monofs.RepoSyncProgress.repository:type_name -> monofs.WorkspaceRepositoryRef
 	0,  // 11: monofs.RepoSyncProgress.status:type_name -> monofs.RepoSyncStatus
-	19, // 12: monofs.SyncWorkerStatsResponse.stats:type_name -> monofs.SyncWorkerStats
+	20, // 12: monofs.SyncWorkerStatsResponse.stats:type_name -> monofs.SyncWorkerStats
 	1,  // 13: monofs.AccessEvent.access_type:type_name -> monofs.AccessType
-	21, // 14: monofs.ReportAccessRequest.events:type_name -> monofs.AccessEvent
-	26, // 15: monofs.GetPredictionsResponse.predictions:type_name -> monofs.PredictedFile
-	40, // 16: monofs.PredictedFile.source_type:type_name -> monofs.SourceType
-	39, // 17: monofs.PredictedFile.source_config:type_name -> monofs.PredictedFile.SourceConfigEntry
+	22, // 14: monofs.ReportAccessRequest.events:type_name -> monofs.AccessEvent
+	27, // 15: monofs.GetPredictionsResponse.predictions:type_name -> monofs.PredictedFile
+	41, // 16: monofs.PredictedFile.source_type:type_name -> monofs.SourceType
+	40, // 17: monofs.PredictedFile.source_config:type_name -> monofs.PredictedFile.SourceConfigEntry
 	11, // 18: monofs.FetcherStatsResponse.SourceStatsEntry.value:type_name -> monofs.SourceStats
 	2,  // 19: monofs.BlobFetcher.FetchBlob:input_type -> monofs.FetchBlobRequest
 	3,  // 20: monofs.BlobFetcher.FetchBlobBatch:input_type -> monofs.FetchBlobBatchRequest
 	5,  // 21: monofs.BlobFetcher.PrefetchBlobs:input_type -> monofs.PrefetchRequest
 	7,  // 22: monofs.BlobFetcher.CheckCache:input_type -> monofs.CheckCacheRequest
 	9,  // 23: monofs.BlobFetcher.GetStats:input_type -> monofs.FetcherStatsRequest
-	27, // 24: monofs.BlobFetcher.StoreBlob:input_type -> monofs.StoreBlobRequest
-	31, // 25: monofs.BlobFetcher.StoreBlobBatchStream:input_type -> monofs.StoreBlobEntry
-	33, // 26: monofs.BlobFetcher.DeleteBlobs:input_type -> monofs.DeleteBlobsRequest
-	29, // 27: monofs.BlobFetcher.StoreArchive:input_type -> monofs.StoreArchiveChunk
-	42, // 28: monofs.RepoSyncWorker.StageWorkspaceBundle:input_type -> monofs.WorkspaceBundleChunk
-	13, // 29: monofs.RepoSyncWorker.StartWorkspacePublish:input_type -> monofs.StartWorkspacePublishRequest
-	14, // 30: monofs.RepoSyncWorker.ProbeWorkspaceRefresh:input_type -> monofs.ProbeWorkspaceRefreshRequest
-	15, // 31: monofs.RepoSyncWorker.DiscardWorkspaceBundle:input_type -> monofs.DiscardWorkspaceBundleRequest
-	18, // 32: monofs.RepoSyncWorker.GetSyncWorkerStats:input_type -> monofs.SyncWorkerStatsRequest
-	43, // 33: monofs.BlobFetcher.FetchBlob:output_type -> monofs.DataChunk
-	4,  // 34: monofs.BlobFetcher.FetchBlobBatch:output_type -> monofs.FetchBlobBatchResponse
-	6,  // 35: monofs.BlobFetcher.PrefetchBlobs:output_type -> monofs.PrefetchResponse
-	8,  // 36: monofs.BlobFetcher.CheckCache:output_type -> monofs.CheckCacheResponse
-	10, // 37: monofs.BlobFetcher.GetStats:output_type -> monofs.FetcherStatsResponse
-	28, // 38: monofs.BlobFetcher.StoreBlob:output_type -> monofs.StoreBlobResponse
-	32, // 39: monofs.BlobFetcher.StoreBlobBatchStream:output_type -> monofs.StoreBlobBatchResponse
-	34, // 40: monofs.BlobFetcher.DeleteBlobs:output_type -> monofs.DeleteBlobsResponse
-	30, // 41: monofs.BlobFetcher.StoreArchive:output_type -> monofs.StoreArchiveResponse
-	12, // 42: monofs.RepoSyncWorker.StageWorkspaceBundle:output_type -> monofs.StageWorkspaceBundleResponse
-	17, // 43: monofs.RepoSyncWorker.StartWorkspacePublish:output_type -> monofs.RepoSyncProgress
-	17, // 44: monofs.RepoSyncWorker.ProbeWorkspaceRefresh:output_type -> monofs.RepoSyncProgress
-	16, // 45: monofs.RepoSyncWorker.DiscardWorkspaceBundle:output_type -> monofs.DiscardWorkspaceBundleResponse
-	20, // 46: monofs.RepoSyncWorker.GetSyncWorkerStats:output_type -> monofs.SyncWorkerStatsResponse
-	33, // [33:47] is the sub-list for method output_type
-	19, // [19:33] is the sub-list for method input_type
+	28, // 24: monofs.BlobFetcher.StoreBlob:input_type -> monofs.StoreBlobRequest
+	32, // 25: monofs.BlobFetcher.StoreBlobBatchStream:input_type -> monofs.StoreBlobEntry
+	34, // 26: monofs.BlobFetcher.DeleteBlobs:input_type -> monofs.DeleteBlobsRequest
+	30, // 27: monofs.BlobFetcher.StoreArchive:input_type -> monofs.StoreArchiveChunk
+	43, // 28: monofs.RepoSyncWorker.StageWorkspaceBundle:input_type -> monofs.WorkspaceBundleChunk
+	43, // 29: monofs.RepoSyncWorker.StageWorkspaceCommitBundle:input_type -> monofs.WorkspaceBundleChunk
+	13, // 30: monofs.RepoSyncWorker.StartWorkspacePublish:input_type -> monofs.StartWorkspacePublishRequest
+	14, // 31: monofs.RepoSyncWorker.StartWorkspaceCommitPush:input_type -> monofs.StartWorkspaceCommitPushRequest
+	15, // 32: monofs.RepoSyncWorker.ProbeWorkspaceRefresh:input_type -> monofs.ProbeWorkspaceRefreshRequest
+	16, // 33: monofs.RepoSyncWorker.DiscardWorkspaceBundle:input_type -> monofs.DiscardWorkspaceBundleRequest
+	19, // 34: monofs.RepoSyncWorker.GetSyncWorkerStats:input_type -> monofs.SyncWorkerStatsRequest
+	44, // 35: monofs.BlobFetcher.FetchBlob:output_type -> monofs.DataChunk
+	4,  // 36: monofs.BlobFetcher.FetchBlobBatch:output_type -> monofs.FetchBlobBatchResponse
+	6,  // 37: monofs.BlobFetcher.PrefetchBlobs:output_type -> monofs.PrefetchResponse
+	8,  // 38: monofs.BlobFetcher.CheckCache:output_type -> monofs.CheckCacheResponse
+	10, // 39: monofs.BlobFetcher.GetStats:output_type -> monofs.FetcherStatsResponse
+	29, // 40: monofs.BlobFetcher.StoreBlob:output_type -> monofs.StoreBlobResponse
+	33, // 41: monofs.BlobFetcher.StoreBlobBatchStream:output_type -> monofs.StoreBlobBatchResponse
+	35, // 42: monofs.BlobFetcher.DeleteBlobs:output_type -> monofs.DeleteBlobsResponse
+	31, // 43: monofs.BlobFetcher.StoreArchive:output_type -> monofs.StoreArchiveResponse
+	12, // 44: monofs.RepoSyncWorker.StageWorkspaceBundle:output_type -> monofs.StageWorkspaceBundleResponse
+	12, // 45: monofs.RepoSyncWorker.StageWorkspaceCommitBundle:output_type -> monofs.StageWorkspaceBundleResponse
+	18, // 46: monofs.RepoSyncWorker.StartWorkspacePublish:output_type -> monofs.RepoSyncProgress
+	18, // 47: monofs.RepoSyncWorker.StartWorkspaceCommitPush:output_type -> monofs.RepoSyncProgress
+	18, // 48: monofs.RepoSyncWorker.ProbeWorkspaceRefresh:output_type -> monofs.RepoSyncProgress
+	17, // 49: monofs.RepoSyncWorker.DiscardWorkspaceBundle:output_type -> monofs.DiscardWorkspaceBundleResponse
+	21, // 50: monofs.RepoSyncWorker.GetSyncWorkerStats:output_type -> monofs.SyncWorkerStatsResponse
+	35, // [35:51] is the sub-list for method output_type
+	19, // [19:35] is the sub-list for method input_type
 	19, // [19:19] is the sub-list for extension type_name
 	19, // [19:19] is the sub-list for extension extendee
 	0,  // [0:19] is the sub-list for field type_name
@@ -2975,7 +3055,7 @@ func file_api_proto_fetcher_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_fetcher_proto_rawDesc), len(file_api_proto_fetcher_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   38,
+			NumMessages:   39,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

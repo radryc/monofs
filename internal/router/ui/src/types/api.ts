@@ -369,7 +369,7 @@ export interface SearchResponse {
 
 export interface FileContentRequest {
   storage_id: string
-  path: string
+  file_path: string
 }
 
 export interface FileContentResponse {

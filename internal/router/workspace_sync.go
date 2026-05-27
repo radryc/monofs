@@ -375,7 +375,7 @@ func workspaceRepositoryResultFromProbe(progress *pb.RepoSyncProgress) *pb.Works
 	return result
 }
 
-func workspaceRepositoryResultFromPublish(progress *pb.RepoSyncProgress) *pb.WorkspaceSyncRepositoryResult {
+func workspaceRepositoryResultFromPublish(progress *pb.RepoSyncProgress, actionLabel string) *pb.WorkspaceSyncRepositoryResult {
 	result := &pb.WorkspaceSyncRepositoryResult{}
 	if progress == nil || progress.GetRepository() == nil {
 		result.Status = pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_FAILED
@@ -403,7 +403,7 @@ func workspaceRepositoryResultFromPublish(progress *pb.RepoSyncProgress) *pb.Wor
 		if result.ConflictReason == "" {
 			result.ConflictReason = strings.ToLower(strings.TrimPrefix(progress.GetStatus().String(), "REPO_SYNC_STATUS_"))
 		}
-		routerWorkspaceSyncConflictsTotal.WithLabelValues("publish", result.ConflictReason).Inc()
+		routerWorkspaceSyncConflictsTotal.WithLabelValues(actionLabel, result.ConflictReason).Inc()
 	case pb.RepoSyncStatus_REPO_SYNC_STATUS_AUTH_FAILED, pb.RepoSyncStatus_REPO_SYNC_STATUS_TRANSIENT_ERROR, pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED:
 		result.Status = pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_FAILED
 	default:
@@ -454,6 +454,8 @@ func workspaceSyncActionMetricLabel(action pb.WorkspaceSyncAction) string {
 		return "publish"
 	case pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_REFRESH:
 		return "refresh"
+	case pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH:
+		return "source_push"
 	default:
 		return "unknown"
 	}

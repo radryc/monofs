@@ -25,13 +25,16 @@ const (
 
 // SessionRequest is sent to the FUSE client
 type SessionRequest struct {
-	Action                  string `json:"action"` // start, status, branch, commit, discard, diff
-	Path                    string `json:"path,omitempty"`
-	ShowBlobs               bool   `json:"show_blobs,omitempty"`
-	LogicalCommitMessage    string `json:"logical_commit_message,omitempty"`
-	AuthorName              string `json:"author_name,omitempty"`
-	AuthorEmail             string `json:"author_email,omitempty"`
-	RequestedBranchStrategy string `json:"requested_branch_strategy,omitempty"`
+	Action                  string   `json:"action"` // start, add, rm, status, branch, log, commit, pull, discard, push, push-blobs, diff
+	Path                    string   `json:"path,omitempty"`
+	Paths                   []string `json:"paths,omitempty"`
+	BranchOp                string   `json:"branch_op,omitempty"`
+	BranchName              string   `json:"branch_name,omitempty"`
+	ShowBlobs               bool     `json:"show_blobs,omitempty"`
+	LogicalCommitMessage    string   `json:"logical_commit_message,omitempty"`
+	AuthorName              string   `json:"author_name,omitempty"`
+	AuthorEmail             string   `json:"author_email,omitempty"`
+	RequestedBranchStrategy string   `json:"requested_branch_strategy,omitempty"`
 }
 
 // FileDiff holds the unified diff output for a single changed file.
@@ -45,20 +48,36 @@ type FileDiff struct {
 
 // SessionResponse is received from the FUSE client
 type SessionResponse struct {
-	Success         bool           `json:"success"`
-	SessionID       string         `json:"session_id,omitempty"`
-	CreatedAt       string         `json:"created_at,omitempty"`
-	Changes         int            `json:"changes,omitempty"`
-	BlobChanges     int            `json:"blob_changes,omitempty"`
-	ExcludedChanges int            `json:"excluded_changes,omitempty"`
-	Message         string         `json:"message,omitempty"`
-	Error           string         `json:"error,omitempty"`
-	ChangeList      []ChangeInfo   `json:"change_list,omitempty"`
-	BlobChangeList  []ChangeInfo   `json:"blob_change_list,omitempty"`
-	WorkspaceRefs   []WorkspaceRef `json:"workspace_refs,omitempty"`
-	DepsInfo        *BlobsInfoData `json:"deps_info,omitempty"`
-	DiffData        []FileDiff     `json:"diff_data,omitempty"`
-	BlobDiffData    []FileDiff     `json:"blob_diff_data,omitempty"`
+	Success           bool                `json:"success"`
+	SessionID         string              `json:"session_id,omitempty"`
+	CreatedAt         string              `json:"created_at,omitempty"`
+	Changes           int                 `json:"changes,omitempty"`
+	UnstagedChanges   int                 `json:"unstaged_changes,omitempty"`
+	StagedChanges     int                 `json:"staged_changes,omitempty"`
+	PendingCommits    int                 `json:"pending_commits,omitempty"`
+	BlobChanges       int                 `json:"blob_changes,omitempty"`
+	ExcludedChanges   int                 `json:"excluded_changes,omitempty"`
+	Message           string              `json:"message,omitempty"`
+	Error             string              `json:"error,omitempty"`
+	ChangeList        []ChangeInfo        `json:"change_list,omitempty"`
+	StagedChangeList  []ChangeInfo        `json:"staged_change_list,omitempty"`
+	LocalCommitList   []LocalCommitInfo   `json:"local_commit_list,omitempty"`
+	PendingCommitList []LocalCommitInfo   `json:"pending_commit_list,omitempty"`
+	CurrentBranch     string              `json:"current_branch,omitempty"`
+	BranchList        []BranchInfo        `json:"branch_list,omitempty"`
+	BranchMappings    []BranchMappingInfo `json:"branch_mappings,omitempty"`
+	BlobChangeList    []ChangeInfo        `json:"blob_change_list,omitempty"`
+	WorkspaceRefs     []WorkspaceRef      `json:"workspace_refs,omitempty"`
+	DepsInfo          *BlobsInfoData      `json:"deps_info,omitempty"`
+	DiffData          []FileDiff          `json:"diff_data,omitempty"`
+	BlobDiffData      []FileDiff          `json:"blob_diff_data,omitempty"`
+}
+
+// WorkspaceRef describes the authoritative tracked ref for one mounted repository.
+type WorkspaceRef struct {
+	DisplayPath string `json:"display_path"`
+	Ref         string `json:"ref,omitempty"`
+	CommitHash  string `json:"commit_hash,omitempty"`
 }
 
 // WorkspaceRef describes the authoritative tracked ref for one mounted repository.
@@ -89,6 +108,11 @@ type BlobFileInfo struct {
 	Size int64  `json:"size"`
 }
 
+type setupEnvEntry struct {
+	envVar string
+	dir    string
+}
+
 // ChangeInfo represents a single change for display
 type ChangeInfo struct {
 	Type       string `json:"type"`
@@ -96,6 +120,34 @@ type ChangeInfo struct {
 	Repository string `json:"repository,omitempty"`
 	StorageID  string `json:"storage_id,omitempty"`
 	Timestamp  string `json:"timestamp"`
+}
+
+type LocalCommitInfo struct {
+	ID              string `json:"id"`
+	ParentID        string `json:"parent_id,omitempty"`
+	Message         string `json:"message"`
+	LogicalBranch   string `json:"logical_branch,omitempty"`
+	AuthorName      string `json:"author_name,omitempty"`
+	AuthorEmail     string `json:"author_email,omitempty"`
+	PrincipalID     string `json:"principal_id,omitempty"`
+	CreatedAt       string `json:"created_at,omitempty"`
+	RepositoryCount int    `json:"repository_count,omitempty"`
+	OperationCount  int    `json:"operation_count,omitempty"`
+	Pushed          bool   `json:"pushed,omitempty"`
+}
+
+type BranchInfo struct {
+	Name           string `json:"name"`
+	Current        bool   `json:"current,omitempty"`
+	PendingCommits int    `json:"pending_commits,omitempty"`
+	HasMappings    bool   `json:"has_mappings,omitempty"`
+}
+
+type BranchMappingInfo struct {
+	DisplayPath      string `json:"display_path"`
+	OriginalBranch   string `json:"original_branch,omitempty"`
+	ActualBranch     string `json:"actual_branch,omitempty"`
+	LastPushedCommit string `json:"last_pushed_commit,omitempty"`
 }
 
 // SessionCommand handles write session management via Unix socket
@@ -108,6 +160,20 @@ func NewSessionCommand(overlayDir string) *SessionCommand {
 	return &SessionCommand{
 		socketPath: filepath.Join(overlayDir, "session.sock"),
 	}
+}
+
+func defaultSessionSocketPath() string {
+	overlayDir := firstNonEmpty(
+		os.Getenv("MONOFS_OVERLAY_DIR"),
+		os.Getenv("GITFS_OVERLAY_DIR"),
+		os.Getenv("MONOFS_OVERLAY"),
+	)
+	if overlayDir != "" {
+		return filepath.Join(overlayDir, "session.sock")
+	}
+
+	homeDir, _ := os.UserHomeDir()
+	return filepath.Join(homeDir, ".monofs", "overlay", "session.sock")
 }
 
 func main() {
@@ -131,14 +197,7 @@ func main() {
 
 	// Determine overlay directory for socket path
 	if socketPath == "" {
-		// Check for MONOFS_OVERLAY_DIR environment variable first
-		if envDir := os.Getenv("MONOFS_OVERLAY_DIR"); envDir != "" {
-			socketPath = filepath.Join(envDir, "session.sock")
-		} else {
-			// Default to ~/.monofs/overlay
-			homeDir, _ := os.UserHomeDir()
-			socketPath = filepath.Join(homeDir, ".monofs", "overlay", "session.sock")
-		}
+		socketPath = defaultSessionSocketPath()
 	}
 
 	cmd := &SessionCommand{socketPath: socketPath}
@@ -159,10 +218,18 @@ func (sc *SessionCommand) Execute(args []string) error {
 	switch args[0] {
 	case "start":
 		return sc.startSession()
+	case "add":
+		return sc.addToIndex(args[1:])
+	case "rm":
+		return sc.removeFromIndex(args[1:])
 	case "status":
 		return sc.showStatus(args[1:])
-	case "branch", "refs":
-		return sc.showBranches(args[1:])
+	case "branch":
+		return sc.manageBranches(args[1:])
+	case "refs":
+		return sc.showRefs(args[1:])
+	case "log":
+		return sc.showLog(args[1:])
 	case "commit":
 		return sc.commitSession(args[1:])
 	case "pull":
@@ -178,6 +245,8 @@ func (sc *SessionCommand) Execute(args []string) error {
 	case "blobs-info":
 		return sc.showBlobsInfo(args[1:])
 	case "push":
+		return sc.pushSource(args[1:])
+	case "push-blobs", "push-deps":
 		return sc.uploadBlobs(args[1:])
 	case "help", "--help", "-h":
 		return sc.printUsage()
@@ -192,27 +261,44 @@ func (sc *SessionCommand) printUsage() error {
 Usage: monofs-session [--socket <path>] <command>
 
 Commands:
-  start        Start a new write session (or show current if active)
-  status       Show current session status and pending changes
-	branch       Show tracked workspace refs for the mounted repositories
-  diff [file]  Show unified diff between original and changed files
-	commit       Publish local workspace changes upstream and archive session
-	pull         Re-ingest included workspace repositories from their upstream sources
-  discard      Abandon all local changes and delete session
-  blobs-info    Show blob files in the current session
-  push          Package and upload blob files to storage backend
-  search       Search code across indexed repositories
-  setup        Create blob cache dirs on monofs and print env exports
-  help         Show this help message
+	Session lifecycle:
+		start        Start a new write session (or show current if active)
+		status       Show current session status and pending changes
+		discard      Abandon all local changes and delete session
+
+	Source changes:
+		add          Stage source changes as local snapshots
+		rm           Remove source paths and stage deletes
+		diff [file]  Show unified diff between original and changed files
+		commit       Create a local virtual commit from staged source changes
+		pull         Re-ingest included workspace repositories from their upstream sources
+		push         Send pending local virtual commits upstream on the current logical branch
+
+	Workspace state:
+		branch       Show, create, or switch logical branches
+		refs         Show tracked workspace refs for the mounted repositories
+		log          Show local virtual commit history
+
+	Blobs and search:
+		blobs-info   Show blob files in the current session
+		push-blobs   Package and upload blob files to storage backend
+		push-deps    Alias for push-blobs
+		search       Search code across indexed repositories
+		setup        Create blob cache dirs on monofs and print env exports
+
+	Misc:
+		help         Show this help message
 
 Options:
   --socket <path>  Explicit path to session socket file
 
-Write sessions allow you to make local modifications that are tracked
-and can be published to the upstream Git repositories when ready.
+Write sessions allow you to make local modifications, stage source snapshots,
+and checkpoint them as local virtual commits before later push flows publish them upstream.
 
 Environment:
-  MONOFS_OVERLAY_DIR  Override default overlay location (~/.monofs/overlay)
+	MONOFS_OVERLAY_DIR  Preferred overlay location override
+	GITFS_OVERLAY_DIR   Legacy overlay location override still honored
+	MONOFS_OVERLAY      Mount helper overlay path (fallback)
 
 Examples:
   # Start a new session
@@ -221,8 +307,27 @@ Examples:
   # Check what changes are pending
   monofs-session status
 
+	# Stage source changes before commit
+	monofs-session add github.com/acme/service-a/file.go
+	monofs-session add github.com/acme/service-a github.com/acme/lib
+
+	# Remove a file or directory and stage the delete
+	monofs-session rm github.com/acme/service-a/file.go
+	monofs-session rm github.com/acme/service-a/internal
+
 	# Show authoritative tracked refs for the mounted repositories
+	monofs-session refs
+
+	# Show logical branch state
 	monofs-session branch
+	monofs-session branch show
+
+	# Create or switch logical branches for future local commits
+	monofs-session branch create feature/session-vcs
+	monofs-session branch switch feature/session-vcs
+
+	# Inspect local virtual commit history
+	monofs-session log
 
   # Include blob file changes in status/diff
   monofs-session status --deps
@@ -237,11 +342,17 @@ Examples:
   # Use explicit socket path (useful in Docker)
   monofs-session --socket /path/to/session.sock status
 
-	# Publish all changes directly to upstream branches
+	# Create a local virtual commit from staged changes
   monofs-session commit
 
-	# Publish with a custom message and branch strategy
-	monofs-session commit -m "Update API" --branch-strategy workspace_branch
+	# Record author metadata on the local virtual commit
+	monofs-session commit -m "Update API" --author-name "Dev" --author-email dev@example.com
+
+	# Push pending local commits on the current logical branch upstream
+	monofs-session push
+
+	# Upload dependency blobs only, without pushing source/Git changes
+	monofs-session push-deps
 
 	# Refresh the virtual workspace from upstream sources
 	monofs-session pull
@@ -250,7 +361,7 @@ Examples:
   monofs-session discard
 
   # Upload blob files to storage backend
-  monofs-session push
+  monofs-session push-blobs
 
   # Setup blob caches on monofs (eval to apply)
   eval $(monofs-session setup --mount /mnt/monofs)
@@ -275,16 +386,17 @@ Possible fixes:
   1. Start monofs-client with --writable flag:
      monofs-client --mount /mnt --writable
 
-  2. Set GITFS_OVERLAY_DIR to match monofs-client's --overlay path:
-     export GITFS_OVERLAY_DIR=/path/to/overlay
+  2. Set MONOFS_OVERLAY_DIR or GITFS_OVERLAY_DIR to match monofs-client's --overlay path:
+	  export MONOFS_OVERLAY_DIR=/path/to/overlay
      monofs-session status
 
   3. Use --socket to specify explicit path:
      monofs-session --socket /path/to/session.sock status
 
 Common socket locations:
-  - %s/.monofs/overlay/session.sock (default)
-  - /tmp/monofs-overlay/session.sock (Docker common)
+	- %s/.monofs/overlay/session.sock (default)
+	- /tmp/monofs-overlay/session.sock (Docker common)
+	- $GITFS_OVERLAY_DIR/session.sock (legacy dev-workspace env)
 
 Run 'find / -name session.sock 2>/dev/null' to locate existing sockets.
 `, sc.socketPath, homeDir)
@@ -323,7 +435,7 @@ func (sc *SessionCommand) sendCommandWithPath(action, path string) (*SessionResp
 func (sc *SessionCommand) sendRequest(req SessionRequest) (*SessionResponse, error) {
 	// Check if socket exists
 	if _, err := os.Stat(sc.socketPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("session socket not found at %s (is monofs-client running with --writable?)", sc.socketPath)
+		return nil, fmt.Errorf("session socket not found at %s (is monofs-client running with --writable? check MONOFS_OVERLAY_DIR or GITFS_OVERLAY_DIR)", sc.socketPath)
 	}
 
 	conn, err := net.Dial("unix", sc.socketPath)
@@ -453,8 +565,83 @@ func (sc *SessionCommand) startSession() error {
 	fmt.Printf("  Created:    %s\n", resp.CreatedAt)
 	fmt.Printf("\nYou can now modify files in the mounted filesystem.\n")
 	fmt.Printf("Use 'monofs-session status' to see pending changes.\n")
-	fmt.Printf("Use 'monofs-session commit' when ready to push changes.\n")
+	fmt.Printf("Use 'monofs-session commit' to checkpoint staged source changes locally.\n")
+	fmt.Printf("Use 'monofs-session log' to inspect local virtual commits.\n")
 
+	return nil
+}
+
+func (sc *SessionCommand) addToIndex(args []string) error {
+	addCmd := flag.NewFlagSet("add", flag.ExitOnError)
+	if err := addCmd.Parse(args); err != nil {
+		return err
+	}
+	if addCmd.NArg() == 0 {
+		return fmt.Errorf("add requires at least one path")
+	}
+
+	paths := make([]string, 0, addCmd.NArg())
+	for _, path := range addCmd.Args() {
+		trimmed := strings.TrimSpace(path)
+		if trimmed != "" {
+			paths = append(paths, trimmed)
+		}
+	}
+	if len(paths) == 0 {
+		return fmt.Errorf("add requires at least one non-empty path")
+	}
+
+	resp, err := sc.sendRequest(SessionRequest{Action: "add", Paths: paths})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("failed to stage changes: %s", resp.Error)
+	}
+
+	if resp.Message != "" {
+		fmt.Println(resp.Message)
+	} else {
+		fmt.Printf("Staged %d source change(s)\n", resp.StagedChanges)
+	}
+	printChangeInfoSection("Staged Changes:", resp.StagedChangeList)
+	return nil
+}
+
+func (sc *SessionCommand) removeFromIndex(args []string) error {
+	rmCmd := flag.NewFlagSet("rm", flag.ExitOnError)
+	if err := rmCmd.Parse(args); err != nil {
+		return err
+	}
+	if rmCmd.NArg() == 0 {
+		return fmt.Errorf("rm requires at least one path")
+	}
+
+	paths := make([]string, 0, rmCmd.NArg())
+	for _, path := range rmCmd.Args() {
+		trimmed := strings.TrimSpace(path)
+		if trimmed != "" {
+			paths = append(paths, trimmed)
+		}
+	}
+	if len(paths) == 0 {
+		return fmt.Errorf("rm requires at least one non-empty path")
+	}
+
+	resp, err := sc.sendRequest(SessionRequest{Action: "rm", Paths: paths})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("failed to remove paths: %s", resp.Error)
+	}
+
+	if resp.Message != "" {
+		fmt.Println(resp.Message)
+	} else {
+		fmt.Printf("Removed %d path(s)\n", resp.Changes)
+	}
+	printChangeInfoSection("Staged Changes:", resp.StagedChangeList)
 	return nil
 }
 
@@ -486,13 +673,16 @@ func (sc *SessionCommand) showStatus(args []string) error {
 	fmt.Printf("====================\n")
 	fmt.Printf("Session ID: %s\n", resp.SessionID)
 	fmt.Printf("Created:    %s\n", resp.CreatedAt)
-	fmt.Printf("Changes:    %d file(s)\n", resp.Changes)
+	fmt.Printf("Workspace:  %d file(s)\n", resp.Changes)
+	fmt.Printf("Unstaged:   %d file(s)\n", resp.UnstagedChanges)
+	fmt.Printf("Staged:     %d file(s)\n", resp.StagedChanges)
+	fmt.Printf("Pending:    %d local commit(s)\n", resp.PendingCommits)
 	fmt.Printf("Authority:  monofs-session is the source of truth; root git is synthetic\n")
 	if resp.BlobChanges > 0 {
 		if *showBlobs {
-			fmt.Printf("Blobs:       %d file(s)  (use 'push' to upload)\n", resp.BlobChanges)
+			fmt.Printf("Blobs:       %d file(s)  (use 'push-deps' or 'push-blobs' to upload)\n", resp.BlobChanges)
 		} else {
-			fmt.Printf("Blobs:       %d file(s)  (use --deps to show, 'push' to upload)\n", resp.BlobChanges)
+			fmt.Printf("Blobs:       %d file(s)  (use --deps to show, 'push-deps' or 'push-blobs' to upload)\n", resp.BlobChanges)
 		}
 	}
 	if resp.ExcludedChanges > 0 {
@@ -501,21 +691,26 @@ func (sc *SessionCommand) showStatus(args []string) error {
 	fmt.Println()
 
 	if len(resp.ChangeList) > 0 {
-		fmt.Println("Pending Changes:")
-		lastRepo := ""
-		for _, change := range resp.ChangeList {
-			if change.Repository != "" && change.Repository != lastRepo {
-				fmt.Printf("  %s\n", change.Repository)
-				lastRepo = change.Repository
-			}
-			symbol := getChangeSymbol(change.Type)
-			indent := "  "
-			if change.Repository != "" {
-				indent = "    "
-			}
-			fmt.Printf("%s%s %s\n", indent, symbol, change.Path)
+		printChangeInfoSection("Unstaged Changes:", resp.ChangeList)
+	}
+
+	if len(resp.StagedChangeList) > 0 {
+		if len(resp.ChangeList) > 0 {
+			fmt.Println()
 		}
-	} else if resp.BlobChanges == 0 {
+		printChangeInfoSection("Staged Changes:", resp.StagedChangeList)
+	}
+
+	if len(resp.PendingCommitList) > 0 {
+		if len(resp.ChangeList) > 0 || len(resp.StagedChangeList) > 0 {
+			fmt.Println()
+		}
+		fmt.Println("Pending Local Commits:")
+		for _, commit := range resp.PendingCommitList {
+			branch := firstNonEmpty(strings.TrimSpace(commit.LogicalBranch), "(default)")
+			fmt.Printf("  %s  %s  [%s]\n", commit.ID, commit.Message, branch)
+		}
+	} else if resp.BlobChanges == 0 && len(resp.StagedChangeList) == 0 {
 		fmt.Println("No changes yet.")
 	}
 
@@ -540,13 +735,120 @@ func (sc *SessionCommand) showStatus(args []string) error {
 	return nil
 }
 
-func (sc *SessionCommand) showBranches(args []string) error {
-	branchCmd := flag.NewFlagSet("branch", flag.ExitOnError)
-	if err := branchCmd.Parse(args); err != nil {
+func (sc *SessionCommand) showLog(args []string) error {
+	logCmd := flag.NewFlagSet("log", flag.ExitOnError)
+	if err := logCmd.Parse(args); err != nil {
 		return err
 	}
 
-	resp, err := sc.sendCommand("branch")
+	resp, err := sc.sendCommand("log")
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		if resp.Error == "no active session" {
+			fmt.Println("No active write session.")
+			fmt.Println("\nUse 'monofs-session start' to begin a new session.")
+			return nil
+		}
+		return fmt.Errorf("failed to get local commit log: %s", resp.Error)
+	}
+
+	fmt.Printf("Local Commit Log\n")
+	fmt.Printf("================\n")
+	fmt.Printf("Session ID: %s\n", resp.SessionID)
+	fmt.Printf("Created:    %s\n", resp.CreatedAt)
+	fmt.Printf("Authority:  monofs-session is the source of truth; root git is synthetic\n")
+
+	if len(resp.LocalCommitList) == 0 {
+		fmt.Println()
+		fmt.Println("No local commits yet.")
+		return nil
+	}
+
+	for i, commit := range resp.LocalCommitList {
+		if i == 0 {
+			fmt.Println()
+		} else {
+			fmt.Println()
+			fmt.Println()
+		}
+		fmt.Printf("commit %s\n", commit.ID)
+		fmt.Printf("Created:    %s\n", commit.CreatedAt)
+		fmt.Printf("Branch:     %s\n", firstNonEmpty(strings.TrimSpace(commit.LogicalBranch), "(default)"))
+		if parentID := strings.TrimSpace(commit.ParentID); parentID != "" {
+			fmt.Printf("Parent:     %s\n", parentID)
+		}
+		fmt.Printf("Principal:  %s\n", firstNonEmpty(strings.TrimSpace(commit.PrincipalID), "(unknown)"))
+		if author := formatLocalCommitAuthor(commit); author != "" {
+			fmt.Printf("Author:     %s\n", author)
+		}
+		fmt.Printf("State:      %s\n", localCommitState(commit))
+		fmt.Printf("Changes:    %d operation(s) across %d repo(s)\n", commit.OperationCount, commit.RepositoryCount)
+		fmt.Printf("\n    %s\n", commit.Message)
+	}
+
+	return nil
+}
+
+func printChangeInfoSection(title string, changes []ChangeInfo) {
+	if len(changes) == 0 {
+		return
+	}
+	fmt.Println(title)
+	lastRepo := ""
+	for _, change := range changes {
+		if change.Repository != "" && change.Repository != lastRepo {
+			fmt.Printf("  %s\n", change.Repository)
+			lastRepo = change.Repository
+		}
+		symbol := getChangeSymbol(change.Type)
+		indent := "  "
+		if change.Repository != "" {
+			indent = "    "
+		}
+		fmt.Printf("%s%s %s\n", indent, symbol, change.Path)
+	}
+}
+
+func formatLocalCommitAuthor(commit LocalCommitInfo) string {
+	name := strings.TrimSpace(commit.AuthorName)
+	email := strings.TrimSpace(commit.AuthorEmail)
+	switch {
+	case name != "" && email != "":
+		return fmt.Sprintf("%s <%s>", name, email)
+	case name != "":
+		return name
+	case email != "":
+		return fmt.Sprintf("<%s>", email)
+	default:
+		return ""
+	}
+}
+
+func localCommitState(commit LocalCommitInfo) string {
+	if commit.Pushed {
+		return "pushed"
+	}
+	return "pending"
+}
+
+func displayLogicalBranchName(branchName string) string {
+	trimmed := strings.TrimSpace(branchName)
+	if trimmed == "" {
+		return "(default)"
+	}
+	return trimmed
+}
+
+func (sc *SessionCommand) showRefs(args []string) error {
+	refsCmd := flag.NewFlagSet("refs", flag.ExitOnError)
+	if err := refsCmd.Parse(args); err != nil {
+		return err
+	}
+
+	resp, err := sc.sendCommand("refs")
 	if err != nil {
 		return err
 	}
@@ -576,13 +878,115 @@ func (sc *SessionCommand) showBranches(args []string) error {
 	return w.Flush()
 }
 
+func (sc *SessionCommand) manageBranches(args []string) error {
+	op := "show"
+	branchName := ""
+	if len(args) > 0 {
+		op = args[0]
+		if len(args) > 1 {
+			branchName = strings.TrimSpace(args[1])
+		}
+	}
+
+	switch op {
+	case "show":
+		if len(args) > 1 {
+			return fmt.Errorf("branch show does not take a branch name")
+		}
+		return sc.showLogicalBranches()
+	case "create", "switch":
+		if branchName == "" {
+			return fmt.Errorf("branch %s requires a logical branch name", op)
+		}
+		if len(args) > 2 {
+			return fmt.Errorf("branch %s takes exactly one logical branch name", op)
+		}
+		resp, err := sc.sendRequest(SessionRequest{Action: "branch", BranchOp: op, BranchName: branchName})
+		if err != nil {
+			return err
+		}
+		if !resp.Success {
+			return fmt.Errorf("failed to %s logical branch: %s", op, resp.Error)
+		}
+		fmt.Println(resp.Message)
+		return nil
+	default:
+		return fmt.Errorf("unknown branch subcommand: %s", op)
+	}
+}
+
+func (sc *SessionCommand) showLogicalBranches() error {
+	resp, err := sc.sendRequest(SessionRequest{Action: "branch", BranchOp: "show"})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		if resp.Error == "no active session" {
+			fmt.Println("No active write session.")
+			fmt.Println("\nUse 'monofs-session start' to begin a new session.")
+			return nil
+		}
+		return fmt.Errorf("failed to get logical branch state: %s", resp.Error)
+	}
+
+	fmt.Printf("Logical Branches\n")
+	fmt.Printf("================\n")
+	fmt.Printf("Session ID: %s\n", resp.SessionID)
+	fmt.Printf("Created:    %s\n", resp.CreatedAt)
+	fmt.Printf("Current:    %s\n", displayLogicalBranchName(resp.CurrentBranch))
+	fmt.Printf("Authority:  monofs-session is the source of truth; switching branches does not rewrite the working tree\n")
+
+	if len(resp.BranchList) == 0 {
+		fmt.Println()
+		fmt.Println("No named logical branches yet.")
+	} else {
+		fmt.Println()
+		fmt.Println("Known Branches:")
+		for _, branch := range resp.BranchList {
+			marker := " "
+			if branch.Current {
+				marker = "*"
+			}
+			line := fmt.Sprintf("%s %s", marker, displayLogicalBranchName(branch.Name))
+			if branch.PendingCommits > 0 {
+				line += fmt.Sprintf("  (%d pending local commit(s))", branch.PendingCommits)
+			}
+			if branch.HasMappings {
+				line += "  [repo mappings tracked]"
+			}
+			fmt.Println(line)
+		}
+	}
+
+	if len(resp.BranchMappings) > 0 {
+		fmt.Println()
+		fmt.Println("Current Branch Repo Mappings:")
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ACTUAL\tTRACKED\tLAST PUSH\tREPOSITORY")
+		for _, mapping := range resp.BranchMappings {
+			lastPush := shortCommitHash(mapping.LastPushedCommit)
+			if lastPush == "" {
+				lastPush = "-"
+			}
+			tracked := firstNonEmpty(strings.TrimSpace(mapping.OriginalBranch), "-")
+			actual := firstNonEmpty(strings.TrimSpace(mapping.ActualBranch), "-")
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", actual, tracked, lastPush, mapping.DisplayPath)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (sc *SessionCommand) commitSession(args []string) error {
 	commitCmd := flag.NewFlagSet("commit", flag.ExitOnError)
-	message := commitCmd.String("m", "", "Logical commit message for the workspace publish")
-	messageLong := commitCmd.String("message", "", "Logical commit message for the workspace publish")
-	authorName := commitCmd.String("author-name", firstNonEmpty(os.Getenv("MONOFS_AUTHOR_NAME"), os.Getenv("GIT_AUTHOR_NAME"), os.Getenv("GIT_COMMITTER_NAME")), "Author name for the publish commit")
-	authorEmail := commitCmd.String("author-email", firstNonEmpty(os.Getenv("MONOFS_AUTHOR_EMAIL"), os.Getenv("GIT_AUTHOR_EMAIL"), os.Getenv("GIT_COMMITTER_EMAIL")), "Author email for the publish commit")
-	branchStrategy := commitCmd.String("branch-strategy", "direct", "Branch strategy: direct, workspace_branch, or per_repo_branch")
+	message := commitCmd.String("m", "", "Logical commit message for the local virtual commit")
+	messageLong := commitCmd.String("message", "", "Logical commit message for the local virtual commit")
+	authorName := commitCmd.String("author-name", firstNonEmpty(os.Getenv("MONOFS_AUTHOR_NAME"), os.Getenv("GIT_AUTHOR_NAME"), os.Getenv("GIT_COMMITTER_NAME")), "Author name recorded on the local virtual commit")
+	authorEmail := commitCmd.String("author-email", firstNonEmpty(os.Getenv("MONOFS_AUTHOR_EMAIL"), os.Getenv("GIT_AUTHOR_EMAIL"), os.Getenv("GIT_COMMITTER_EMAIL")), "Author email recorded on the local virtual commit")
+	branchStrategy := commitCmd.String("branch-strategy", "direct", "Reserved for later push routing; ignored when creating local commits")
 
 	if err := commitCmd.Parse(args); err != nil {
 		return err
@@ -591,11 +995,13 @@ func (sc *SessionCommand) commitSession(args []string) error {
 		return fmt.Errorf("unsupported branch strategy %q", *branchStrategy)
 	}
 
-	fmt.Println("Committing changes...")
+	finalMessage := firstNonEmpty(*messageLong, *message)
+
+	fmt.Println("Creating local commit...")
 
 	resp, err := sc.sendRequest(SessionRequest{
 		Action:                  "commit",
-		LogicalCommitMessage:    firstNonEmpty(*messageLong, *message),
+		LogicalCommitMessage:    finalMessage,
 		AuthorName:              *authorName,
 		AuthorEmail:             *authorEmail,
 		RequestedBranchStrategy: *branchStrategy,
@@ -608,8 +1014,36 @@ func (sc *SessionCommand) commitSession(args []string) error {
 		return fmt.Errorf("commit failed: %s", resp.Error)
 	}
 
-	fmt.Printf("✓ Session committed successfully\n")
+	fmt.Printf("✓ Local commit created\n")
 	fmt.Printf("  %s\n", resp.Message)
+
+	return nil
+}
+
+func (sc *SessionCommand) pushSource(args []string) error {
+	pushCmd := flag.NewFlagSet("push", flag.ExitOnError)
+	if err := pushCmd.Parse(args); err != nil {
+		return err
+	}
+	if pushCmd.NArg() > 0 {
+		return fmt.Errorf("push does not accept positional arguments")
+	}
+
+	fmt.Println("Pushing local commits...")
+	fmt.Println("Warning: pending local commits are currently squashed into one upstream Git commit per affected repository.")
+
+	resp, err := sc.sendCommand("push")
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("push failed: %s", resp.Error)
+	}
+
+	fmt.Printf("✓ Local commits pushed\n")
+	if resp.Message != "" {
+		fmt.Printf("  %s\n", resp.Message)
+	}
 
 	return nil
 }
@@ -755,7 +1189,7 @@ func formatBytes(b int64) string {
 // uploadBlobs sends a dependency upload request to the FUSE client via socket.
 // The actual work (ZIP packaging + upload) happens server-side.
 func (sc *SessionCommand) uploadBlobs(args []string) error {
-	uploadCmd := flag.NewFlagSet("push", flag.ExitOnError)
+	uploadCmd := flag.NewFlagSet("push-blobs", flag.ExitOnError)
 
 	if err := uploadCmd.Parse(args); err != nil {
 		return err
@@ -763,7 +1197,7 @@ func (sc *SessionCommand) uploadBlobs(args []string) error {
 
 	fmt.Println("Uploading blob files...")
 
-	resp, err := sc.sendCommand("push")
+	resp, err := sc.sendCommand("push-blobs")
 	if err != nil {
 		return err
 	}
@@ -827,43 +1261,37 @@ func (sc *SessionCommand) setupBlobs(args []string) error {
 
 	depsBase := filepath.Join(*mountPath, "dependency")
 
-	// Define directory layout and env vars per tool
-	type envEntry struct {
-		envVar string
-		dir    string
-	}
-
-	var entries []envEntry
+	var entries []setupEnvEntry
 
 	if enabled["go"] {
 		entries = append(entries,
-			envEntry{"GOMODCACHE", filepath.Join(depsBase, "go", "mod")},
-			envEntry{"GOPATH", filepath.Join(depsBase, "go", "path")},
+			setupEnvEntry{"GOMODCACHE", filepath.Join(depsBase, "go", "mod")},
+			setupEnvEntry{"GOPATH", filepath.Join(depsBase, "go", "path")},
 		)
 	}
 	if enabled["npm"] {
 		entries = append(entries,
-			envEntry{"npm_config_cache", filepath.Join(depsBase, "npm", "cache")},
-			envEntry{"NPM_CONFIG_PREFIX", filepath.Join(depsBase, "npm", "global")},
-			envEntry{"YARN_CACHE_FOLDER", filepath.Join(depsBase, "npm", "yarn-cache")},
-			envEntry{"PNPM_HOME", filepath.Join(depsBase, "npm", "pnpm")},
+			setupEnvEntry{"npm_config_cache", filepath.Join(depsBase, "npm", "cache")},
+			setupEnvEntry{"NPM_CONFIG_PREFIX", filepath.Join(depsBase, "npm", "global")},
+			setupEnvEntry{"YARN_CACHE_FOLDER", filepath.Join(depsBase, "npm", "yarn-cache")},
+			setupEnvEntry{"PNPM_HOME", filepath.Join(depsBase, "npm", "pnpm")},
 		)
 	}
 	if enabled["pip"] {
 		entries = append(entries,
-			envEntry{"PIP_CACHE_DIR", filepath.Join(depsBase, "pip", "cache")},
-			envEntry{"PYTHONUSERBASE", filepath.Join(depsBase, "pip", "user")},
+			setupEnvEntry{"PIP_CACHE_DIR", filepath.Join(depsBase, "pip", "cache")},
+			setupEnvEntry{"PYTHONUSERBASE", filepath.Join(depsBase, "pip", "user")},
 		)
 	}
 	if enabled["bazel"] {
 		entries = append(entries,
-			envEntry{"BAZEL_REPOSITORY_CACHE", filepath.Join(depsBase, "bazel", "repo-cache")},
-			envEntry{"BAZEL_OUTPUT_BASE", filepath.Join(depsBase, "bazel", "output-base")},
+			setupEnvEntry{"BAZEL_REPOSITORY_CACHE", filepath.Join(depsBase, "bazel", "repo-cache")},
+			setupEnvEntry{"BAZEL_OUTPUT_BASE", filepath.Join(depsBase, "bazel", "output-base")},
 		)
 	}
 	if enabled["cargo"] {
 		entries = append(entries,
-			envEntry{"CARGO_HOME", filepath.Join(depsBase, "cargo")},
+			setupEnvEntry{"CARGO_HOME", filepath.Join(depsBase, "cargo")},
 		)
 	}
 
@@ -871,7 +1299,6 @@ func (sc *SessionCommand) setupBlobs(args []string) error {
 		return fmt.Errorf("no valid tools specified; choose from: go, npm, pip, bazel, cargo")
 	}
 
-	// Create directories that don't already exist
 	var created int
 	for _, e := range entries {
 		if _, err := os.Stat(e.dir); err == nil {
