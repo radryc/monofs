@@ -673,9 +673,6 @@ func TestVirtualMonorepoAllowsDependencyWritesAndRejectsReservedWrites(t *testin
 	if _, errno := root.Mkdir(context.Background(), "doctor", 0755, &entryOut); errno != syscall.EPERM {
 		t.Fatalf("Mkdir(doctor) errno = %v, want %v", errno, syscall.EPERM)
 	}
-	if _, errno := root.Mkdir(context.Background(), "doctor", 0755, &entryOut); errno != syscall.EPERM {
-		t.Fatalf("Mkdir(doctor) errno = %v, want %v", errno, syscall.EPERM)
-	}
 	if _, errno := root.Mkdir(context.Background(), syntheticWorkspaceGitName, 0755, &entryOut); errno != syscall.EPERM {
 		t.Fatalf("Mkdir(.git) errno = %v, want %v", errno, syscall.EPERM)
 	}

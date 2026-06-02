@@ -80,13 +80,6 @@ type WorkspaceRef struct {
 	CommitHash  string `json:"commit_hash,omitempty"`
 }
 
-// WorkspaceRef describes the authoritative tracked ref for one mounted repository.
-type WorkspaceRef struct {
-	DisplayPath string `json:"display_path"`
-	Ref         string `json:"ref,omitempty"`
-	CommitHash  string `json:"commit_hash,omitempty"`
-}
-
 // BlobsInfoData contains blob file information.
 type BlobsInfoData struct {
 	TotalFiles int             `json:"total_files"`

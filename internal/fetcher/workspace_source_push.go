@@ -143,13 +143,12 @@ func (s *Service) StartWorkspaceCommitPush(req *pb.StartWorkspaceCommitPushReque
 	ctx := stream.Context()
 	jobFailed := false
 	plans := sourcePushRepositoryPlans(bundleEntry.commitBundle)
-planLoop:
 	for _, plan := range plans {
 		select {
 		case <-ctx.Done():
 			resultLabel = "failed"
 			jobFailed = true
-			break planLoop
+			break
 		default:
 		}
 
@@ -355,6 +354,7 @@ func cloneSourcePushWorktree(ctx context.Context, repo workspacebundle.SourceCom
 	_, err = gogit.PlainCloneContext(ctx, worktreeRoot, &gogit.CloneOptions{
 		URL:           repo.RepoURL,
 		ReferenceName: plumbing.NewBranchReferenceName(repo.Branch),
+		SingleBranch:  true,
 	})
 	if err != nil {
 		_ = os.RemoveAll(worktreeRoot)
