@@ -28,6 +28,8 @@ type RouterConfig struct {
 	UnhealthyThreshold  time.Duration
 	PeerRouters         []RouterPeer
 	FetcherAddresses    []string // Fetcher cluster addresses for monitoring
+	FetcherDiagnostics  []string // Optional explicit diagnostics addresses for fetchers
+	SearchDiagnostics   string   // Optional explicit diagnostics address for search
 	EncryptionKey       []byte   // 32-byte ChaCha20-Poly1305 key for packager archives
 	GuardianStateDir    string   // Optional directory for persistent Guardian router state
 
@@ -104,6 +106,7 @@ type Router struct {
 	// Search service integration
 	searchClient pb.MonoFSSearchClient
 	searchConn   *grpc.ClientConn
+	searchAddr   string
 
 	// Ingestion whitelist
 	whitelist *whitelistStore
@@ -415,6 +418,11 @@ func (r *Router) triggerIndexRebuild(nodeID, storageID string) error {
 // SetSearchClient configures the search service client for automatic indexing.
 // It will retry the connection in the background if initial connection fails.
 func (r *Router) SetSearchClient(addr string) error {
+	addr = strings.TrimSpace(addr)
+	r.mu.Lock()
+	r.searchAddr = addr
+	r.mu.Unlock()
+
 	if addr == "" {
 		r.logger.Info("search service not configured")
 		return nil
@@ -467,6 +475,12 @@ func (r *Router) retrySearchConnection(addr string) {
 		r.logger.Info("search service client connected after retry", "addr", addr)
 		return
 	}
+}
+
+func (r *Router) getSearchAddress() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.searchAddr
 }
 
 // SetFetcherClient configures the fetcher cluster client for monitoring.

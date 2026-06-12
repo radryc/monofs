@@ -4,10 +4,27 @@ import { useAutoRefresh, formatBytes, formatNumber } from '../composables/useAut
 import PageHeader from '../components/PageHeader.vue'
 import StatCard from '../components/StatCard.vue'
 import DataCard from '../components/DataCard.vue'
-import type { ListClientsResponse, PredictorStats } from '../types/api'
+import type { ListClientsResponse, PredictorStats, PprofCollectRequest, PprofProfile } from '../types/api'
 
 const clients = ref<ListClientsResponse | null>(null)
 const predictor = ref<PredictorStats | null>(null)
+const collectingPprof = ref(false)
+const pprofError = ref('')
+const pprofSuccess = ref('')
+const cpuDurationSeconds = ref(30)
+
+const profileOptions: Array<{ key: PprofProfile; label: string; advanced?: boolean }> = [
+  { key: 'cpu', label: 'CPU' },
+  { key: 'heap', label: 'Heap' },
+  { key: 'goroutine', label: 'Goroutine' },
+  { key: 'allocs', label: 'Allocs', advanced: true },
+  { key: 'mutex', label: 'Mutex', advanced: true },
+  { key: 'block', label: 'Block', advanced: true },
+  { key: 'threadcreate', label: 'Thread Create', advanced: true },
+  { key: 'trace', label: 'Trace', advanced: true }
+]
+
+const selectedProfiles = ref<PprofProfile[]>(['cpu', 'heap', 'goroutine'])
 
 const totalOps = computed(() => clients.value?.clients?.reduce((s, c) => s + (c.operations_count ?? 0), 0) ?? 0)
 const totalBytes = computed(() => clients.value?.clients?.reduce((s, c) => s + (c.bytes_read ?? 0), 0) ?? 0)
@@ -30,6 +47,55 @@ const top5Ops = computed(() =>
 const top5Bytes = computed(() =>
   [...(clients.value?.clients ?? [])].sort((a, b) => (b.bytes_read ?? 0) - (a.bytes_read ?? 0)).slice(0, 5)
 )
+
+async function collectClusterPprof() {
+  if (selectedProfiles.value.length === 0) {
+    pprofError.value = 'Select at least one profile'
+    return
+  }
+
+  collectingPprof.value = true
+  pprofError.value = ''
+  pprofSuccess.value = ''
+
+  const requestBody: PprofCollectRequest = {
+    profiles: selectedProfiles.value,
+    cpu_duration_seconds: Math.max(1, Math.min(120, cpuDurationSeconds.value || 30))
+  }
+
+  try {
+    const response = await fetch('/api/pprof/collect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody)
+    })
+
+    if (!response.ok) {
+      const message = await response.text()
+      throw new Error(message || `Collect failed (${response.status})`)
+    }
+
+    const blob = await response.blob()
+    const contentDisposition = response.headers.get('Content-Disposition') || ''
+    const match = contentDisposition.match(/filename="?([^";]+)"?/i)
+    const fileName = match?.[1] ?? `monofs-pprof-${Date.now()}.zip`
+
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fileName
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+
+    pprofSuccess.value = `Collected ${selectedProfiles.value.length} profile type(s) into ${fileName}`
+  } catch (error) {
+    pprofError.value = error instanceof Error ? error.message : 'Failed to collect cluster pprof'
+  } finally {
+    collectingPprof.value = false
+  }
+}
 </script>
 
 <template>
@@ -115,6 +181,52 @@ const top5Bytes = computed(() =>
         </table>
       </div>
       <div v-else class="py-12 text-center text-slate-400 text-sm">No clients connected</div>
+    </DataCard>
+
+    <DataCard class="mb-6">
+      <template #header>
+        <div>
+          <h2 class="text-sm font-semibold text-slate-200">Cluster pprof</h2>
+          <p class="text-xs text-slate-400 mt-0.5">Collect pprof from routers, servers, fetchers, and search as one zip.</p>
+        </div>
+      </template>
+      <div class="px-6 py-5">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+          <label v-for="option in profileOptions" :key="option.key" class="flex items-center gap-2 text-sm text-slate-300">
+            <input
+              :value="option.key"
+              v-model="selectedProfiles"
+              type="checkbox"
+              class="h-4 w-4 rounded border-slate-600 bg-slate-900 text-violet-500 focus:ring-violet-500"
+            />
+            <span>{{ option.label }} <span v-if="option.advanced" class="text-xs text-slate-500">(advanced)</span></span>
+          </label>
+        </div>
+
+        <div class="flex flex-col sm:flex-row sm:items-end gap-3 mb-4">
+          <label class="text-xs text-slate-400">
+            CPU duration (seconds)
+            <input
+              v-model.number="cpuDurationSeconds"
+              type="number"
+              min="1"
+              max="120"
+              class="mt-1 w-44 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200"
+            />
+          </label>
+          <button
+            type="button"
+            class="rounded-md bg-violet-600 hover:bg-violet-500 disabled:opacity-60 disabled:cursor-not-allowed px-4 py-2 text-sm font-medium text-white"
+            :disabled="collectingPprof"
+            @click="collectClusterPprof"
+          >
+            {{ collectingPprof ? 'Collecting...' : 'Collect From All Servers' }}
+          </button>
+        </div>
+
+        <p v-if="pprofSuccess" class="text-xs text-emerald-400">{{ pprofSuccess }}</p>
+        <p v-if="pprofError" class="text-xs text-rose-400">{{ pprofError }}</p>
+      </div>
     </DataCard>
 
     <!-- Predictor -->

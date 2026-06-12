@@ -314,6 +314,13 @@ export interface PredictorNode {
   error?: string
 }
 
+export type PprofProfile = 'cpu' | 'heap' | 'goroutine' | 'allocs' | 'mutex' | 'block' | 'threadcreate' | 'trace'
+
+export interface PprofCollectRequest {
+  profiles: PprofProfile[]
+  cpu_duration_seconds: number
+}
+
 export interface SearchIndex {
   storage_id: string
   display_path: string

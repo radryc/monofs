@@ -60,7 +60,9 @@ func main() {
 		externalAddrs    = flag.String("external-addrs", "", "External addresses for host clients: node1=localhost:9001,node2=localhost:9002,...")
 		peerRouters      = flag.String("peer-routers", "", "Peer routers for UI aggregation: name=http://host:port or host:port,...")
 		searchAddr       = flag.String("search-addr", "", "Search service address (e.g., search:9100)")
+		searchDiagAddr   = flag.String("search-diagnostics-addr", "", "Search diagnostics address for pprof collection (e.g., search:9101)")
 		fetcherAddrs     = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
+		fetcherDiagAddrs = flag.String("fetcher-diagnostics-addrs", "", "Fetcher diagnostics addresses for pprof collection (e.g., fetcher1:9201,fetcher2:9201)")
 		healthInt        = flag.Duration("health-interval", 2*time.Second, "Health check interval")
 		unhealthyThr     = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
 		debug            = flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
@@ -155,6 +157,8 @@ func main() {
 		HealthCheckInterval:   *healthInt,
 		UnhealthyThreshold:    *unhealthyThr,
 		PeerRouters:           parsePeerRouters(*peerRouters),
+		SearchDiagnostics:     strings.TrimSpace(*searchDiagAddr),
+		FetcherDiagnostics:    parseCSVAddrs(*fetcherDiagAddrs),
 		GuardianStateDir:      *guardianStateDir,
 		EncryptionKey:         encryptionKey,
 		ReplicationFactor:     *replicationFactor,
@@ -361,4 +365,19 @@ func parsePeerRouters(peersStr string) []router.RouterPeer {
 		peers = append(peers, router.RouterPeer{Name: spec, URL: spec})
 	}
 	return peers
+}
+
+func parseCSVAddrs(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		addr := strings.TrimSpace(part)
+		if addr != "" {
+			result = append(result, addr)
+		}
+	}
+	return result
 }
