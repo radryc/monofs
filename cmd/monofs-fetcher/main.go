@@ -34,9 +34,11 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/radryc/monofs/internal/diagnostics"
 	"github.com/radryc/monofs/internal/fetcher"
 	"github.com/radryc/monofs/internal/storage"
 	"github.com/radryc/monofs/internal/storage/blob"
@@ -121,6 +123,7 @@ func main() {
 	prefetchWorkers := flag.Int("prefetch-workers", 0, "Number of background prefetch workers")
 	encryptionKeyHex := flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
 	enableGit := flag.Bool("enable-git", false, "Enable optional Git backend")
+	diagnosticsAddr := flag.String("diagnostics-addr", ":9201", "Listen address for Prometheus /metrics and pprof endpoints (empty disables)")
 	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
 	flag.Parse()
 
@@ -260,9 +263,13 @@ func main() {
 	logger.Info("starting monofs-fetcher",
 		"id", fetcherID,
 		"port", cfg.Port,
+		"diagnostics_addr", *diagnosticsAddr,
 		"cache_dir", cfg.CacheDir,
 		"blob_storage", cfg.Storage.LocalPath,
 	)
+
+	diagServer := diagnostics.StartServer(logger, "monofs-fetcher", strings.TrimSpace(*diagnosticsAddr))
+	defer diagnostics.ShutdownServer(logger, "monofs-fetcher", diagServer)
 
 	// Ensure cache directory exists
 	if err := os.MkdirAll(cfg.CacheDir, 0755); err != nil {

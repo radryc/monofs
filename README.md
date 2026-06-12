@@ -55,3 +55,33 @@ uv run st-bootstrap stamp-urls
 uv run st-release --partition doctor
 uv run st-release --partition dev-workspace
 ```
+
+## Cluster pprof From Performance Tab
+
+MonoFS can now collect pprof snapshots from all runtime services directly from the Router UI Performance tab.
+
+### Enabled Endpoints
+
+* `monofs-router`: `http://<router-http>/debug/pprof/*` and `/metrics`
+* `monofs-server`: diagnostics listener via `--metrics-addr` (default `:9100`)
+* `monofs-search`: diagnostics listener via `--diagnostics-addr` (default `:9101`)
+* `monofs-fetcher`: diagnostics listener via `--diagnostics-addr` (default `:9201`)
+
+### Router Collection API
+
+* Performance tab calls `POST /api/pprof/collect`
+* Default profiles: `cpu` (30s), `heap`, `goroutine`
+* Optional profiles: `allocs`, `mutex`, `block`, `threadcreate`, `trace`
+* Output: one zip containing per-service profile files plus `manifest.json`
+
+### Router Discovery Flags (Recommended)
+
+Use explicit diagnostics addresses so collection is deterministic even when runtime ports are customized:
+
+* `--search-diagnostics-addr=search-index:9101`
+* `--fetcher-diagnostics-addrs=fetcher-a:9201,fetcher-b:9201`
+
+If those are not set, router falls back to derived conventions:
+
+* search diagnostics = `search gRPC port + 1`
+* fetcher diagnostics = `fetcher gRPC port + 1`

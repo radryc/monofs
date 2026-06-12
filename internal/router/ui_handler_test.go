@@ -1,6 +1,8 @@
 package router
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	pb "github.com/radryc/monofs/api/proto"
@@ -124,4 +126,65 @@ func TestDedupeGuardianClientsPrefersFreshestEntry(t *testing.T) {
 	if got[1].ClientID != "guardian-pusher-k8s-456" {
 		t.Fatalf("second client ID = %q, want guardian-pusher-k8s-456", got[1].ClientID)
 	}
+}
+
+func TestNormalizePprofProfiles(t *testing.T) {
+	profiles := normalizePprofProfiles([]string{"CPU", "heap", "goroutine", "invalid", "heap"})
+	if len(profiles) != 3 {
+		t.Fatalf("expected 3 normalized profiles, got %d", len(profiles))
+	}
+	if profiles[0] != "cpu" || profiles[1] != "heap" || profiles[2] != "goroutine" {
+		t.Fatalf("unexpected normalized profiles: %#v", profiles)
+	}
+}
+
+func TestAddressWithOffset(t *testing.T) {
+	addr, err := addressWithOffset("node-a:9000", 100)
+	if err != nil {
+		t.Fatalf("addressWithOffset returned error: %v", err)
+	}
+	if addr != "node-a:9100" {
+		t.Fatalf("addressWithOffset = %q, want %q", addr, "node-a:9100")
+	}
+}
+
+func TestRouterBaseURLFromRequest(t *testing.T) {
+	req := httptest.NewRequest("GET", "http://localhost:8080/api/pprof/collect", nil)
+	req.Header.Set("X-Forwarded-Host", "example.local:8080")
+	req.Header.Set("X-Forwarded-Proto", "https")
+
+	baseURL := routerBaseURLFromRequest(req)
+	if baseURL != "https://example.local:8080" {
+		t.Fatalf("routerBaseURLFromRequest = %q, want %q", baseURL, "https://example.local:8080")
+	}
+}
+
+func TestCollectPprofTargetsUsesExplicitDiagnosticsAddresses(t *testing.T) {
+	config := DefaultRouterConfig()
+	config.RouterName = "router-a"
+	config.SearchDiagnostics = "search-index:9101"
+	config.FetcherDiagnostics = []string{"fetcher-a:9201", "http://fetcher-b:9201"}
+
+	r := NewRouter(config, nil)
+	req := httptest.NewRequest(http.MethodPost, "http://router-a:8080/api/pprof/collect", nil)
+	targets := r.collectPprofTargets(req)
+
+	if !hasTarget(targets, "search", "search-index:9101", "http://search-index:9101") {
+		t.Fatalf("expected explicit search diagnostics target, got %#v", targets)
+	}
+	if !hasTarget(targets, "fetcher", "fetcher-a:9201", "http://fetcher-a:9201") {
+		t.Fatalf("expected explicit fetcher target fetcher-a:9201, got %#v", targets)
+	}
+	if !hasTarget(targets, "fetcher", "fetcher-b:9201", "http://fetcher-b:9201") {
+		t.Fatalf("expected explicit fetcher target fetcher-b:9201, got %#v", targets)
+	}
+}
+
+func hasTarget(targets []pprofTarget, serviceType, address, baseURL string) bool {
+	for _, target := range targets {
+		if target.ServiceType == serviceType && target.Address == address && target.BaseURL == baseURL {
+			return true
+		}
+	}
+	return false
 }

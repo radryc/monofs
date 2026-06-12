@@ -21,6 +21,7 @@ services:
         BUILD_TIME: ${BUILD_TIME:-unknown}
     command:
       - "--port=9200"
+      - "--diagnostics-addr=:9201"
       - "--cache-dir=/data/cache"
       - "--max-cache-gb=20"
       - "--cache-age-hours=2"
@@ -60,6 +61,7 @@ services:
         BUILD_TIME: ${BUILD_TIME:-unknown}
     command:
       - "--port=9200"
+      - "--diagnostics-addr=:9201"
       - "--cache-dir=/data/cache"
       - "--max-cache-gb=20"
       - "--cache-age-hours=2"
@@ -99,6 +101,7 @@ services:
         BUILD_TIME: ${BUILD_TIME:-unknown}
     command:
       - "--port=9100"
+      - "--diagnostics-addr=:9101"
       - "--index-dir=/data/indexes"
       - "--cache-dir=/data/cache"
       - "--workers=2"
@@ -127,13 +130,14 @@ services:
   # HAProxy - Load balancer for routers
   haproxy:
     <<: *otel-syslog-logging
-    image: haproxy:2.9-alpine
+    build:
+      context: ../lb
+      dockerfile: Dockerfile
+    environment:
+      - LB_BOOTSTRAP=9090=router-a:9090,router-b:9090;8080=router-a:8080,router-b:8080
     ports:
       - "9090:9090"
       - "8080:8080"
-      - "8404:8404"  # HAProxy stats
-    volumes:
-      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     networks:
       - monofs-net
     depends_on:
@@ -166,7 +170,9 @@ services:
       - "--weights=node-a=100,node-b=100,node-c=100,node-d=100,node-e=100"
       - "--external-addrs=node-a=localhost:9001,node-b=localhost:9002,node-c=localhost:9003,node-d=localhost:9004,node-e=localhost:9005"
       - "--search-addr=search-index:9100"
+      - "--search-diagnostics-addr=search-index:9101"
       - "--fetcher-addrs=fetcher-a:9200,fetcher-b:9200"
+      - "--fetcher-diagnostics-addrs=fetcher-a:9201,fetcher-b:9201"
       - "--debug"
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
@@ -208,7 +214,9 @@ services:
       - "--weights=node-a=100,node-b=100,node-c=100,node-d=100,node-e=100"
       - "--external-addrs=node-a=localhost:9001,node-b=localhost:9002,node-c=localhost:9003,node-d=localhost:9004,node-e=localhost:9005"
       - "--search-addr=search-index:9100"
+      - "--search-diagnostics-addr=search-index:9101"
       - "--fetcher-addrs=fetcher-a:9200,fetcher-b:9200"
+      - "--fetcher-diagnostics-addrs=fetcher-a:9201,fetcher-b:9201"
       - "--debug"
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
