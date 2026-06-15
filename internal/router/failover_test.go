@@ -1020,7 +1020,7 @@ func TestApplyGuardianRepoStorageBackend(t *testing.T) {
 		wantKVS     bool
 	}{
 		{name: "guardian system", displayPath: "guardian-system", wantKVS: true},
-		{name: "guardian partition", displayPath: "guardian/payments", wantKVS: true},
+		{name: "guardian partition", displayPath: "guardian/payments", wantKVS: false},
 		{name: "regular repo", displayPath: "github.com/acme/service", wantKVS: false},
 	}
 

@@ -1,87 +1,111 @@
 # MonoFS
 
-[![MonoFS logo](https://raw.githubusercontent.com/radryc/monofs/main/internal/router/static/monofs.png)](https://github.com/radryc/monofs)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**The distributed source workspace, code search, and publish engine for monolithic repositories.**
+**Distributed source workspace, code search, and publish engine for monolithic repositories.**
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/radryc/monofs)](https://goreportcard.com/report/github.com/radryc/monofs)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+MonoFS projects only the subset of a monorepo you need through a high-performance FUSE mount, while storage, indexing, and ingestion live on a horizontally scalable backend. Instead of cloning the world to your laptop, you mount a virtual monorepo, edit code like it is local, and publish through an explicit `monofs-session commit`.
 
-[Quick Start](#quick-start-dogfooding-monofs) · [Architecture](#architecture) · [The Strata Ecosystem](#the-strata-ecosystem) · [Workflow Guide](docs/virtual-monorepo-workflow.md) · [Session CLI](cmd/monofs-session/README.md)
+[Architecture](docs/architecture.md) · [Usage Guide](docs/usage.md) · [Docs Index](docs/README.md) · [Session CLI](cmd/monofs-session/README.md)
 
 ---
 
-## The Problem It Solves
+## The Problem
 
-As engineering organizations scale, monolithic repositories become a bottleneck. Running `git clone` takes long enough to brew coffee, IDE indexers choke on millions of files, and managing distributed builds becomes an operational nightmare.
+As engineering organizations scale, monolithic repositories become a bottleneck:
 
-**MonoFS** flips the standard source control model. It is not just a FUSE daemon—it is a router-led distributed workspace platform. Instead of downloading the entire world to your local SSD, MonoFS dynamically projects the exact subset of the monorepo you need via a high-performance FUSE client. It shifts the heavy lifting (storage, indexing, and fetching) to a horizontally scalable, immutable backend.
+- `git clone` takes long enough to brew coffee
+- IDE indexers choke on millions of files
+- Distributed builds become an operational nightmare
+- Source-of-truth for code is split across Git, S3, lockfile caches, and deployment manifests
+
+MonoFS flips the standard source-control model. It is not just a FUSE daemon — it is a router-led distributed workspace platform that pushes the heavy lifting (storage, indexing, fetching, publishing) to an immutable, scalable backend.
 
 ## The Strata Ecosystem
 
-MonoFS is the foundational storage and workspace layer of the **Strata Platform**, designed to integrate seamlessly with its sibling repositories to provide a complete enterprise-grade deployment stack:
+MonoFS is the foundational storage and workspace layer of the **Strata Platform**:
 
-* **[Guardian](https://github.com/radryc/guardian):** An intent-based deployment engine. Guardian leverages a "City Builder" architecture (Pushers, Builders, Blueprints) to orchestrate state, partition rollouts, and infrastructure across **Customer Accounts**.
-* **[Doctor](https://github.com/radryc/doctor):** The enterprise observability layer, providing cross-account telemetry and monitoring for the entire integrated stack.
+- **[Guardian](https://github.com/radryc/guardian):** intent-based deployment engine ("City Builder" architecture: Pushers, Builders, Blueprints) that orchestrates state across **Customer Accounts**.
+- **[Doctor](https://github.com/radryc/doctor):** enterprise observability layer with cross-account telemetry.
 
-MonoFS acts as the unified control plane to view, search, and manage code across these integrated systems through built-in native namespaces.
+The router natively exposes `doctor/` and `guardian/` namespaces so the integrated stack is visible from a single mount, a single UI, and a single gRPC API.
 
-## Architecture
+## Components at a Glance
 
-MonoFS is built for extreme scale, concurrency, and retrieval speed, organized around a robust control plane and an immutable storage tier.
+| Component             | Role                                                       |
+|-----------------------|------------------------------------------------------------|
+| **Router**            | Control plane: topology, health, publish/refresh jobs, UI  |
+| **Storage Nodes**     | Sharded WORM data plane; HRW-placed, replicated            |
+| **Fetcher Tier**      | Stateless bridge to upstream Git, S3, GCS, MinIO           |
+| **Search Service**    | Out-of-band Zoekt indexing (no read-path impact)           |
+| **FUSE Client**       | Local mount with writable overlay and session socket       |
+| **Session CLI**       | `monofs-session`: status, diff, commit, pull, push, search |
+| **Admin CLI**         | `monofs-admin`: ingest, failover, drain, rebalance         |
+
+For a full architectural deep dive, see [docs/architecture.md](docs/architecture.md).
 
 ![MonoFS architecture overview](docs/assets/architecture-overview.svg)
 
-### Core Components
+## Quick Start
 
-* **Router (Control Plane):** The central coordination hub. It tracks healthy nodes, serves cluster topology to clients, and drives workspace publish/refresh jobs. It also serves the main web UI and natively exposes the `doctor` and `guardian` namespaces.
-* **Storage Nodes (Indexed-Tail Backend):** These nodes hold sharded repository metadata and serve file operations for mounted clients. They leverage an **Indexed-Tail architecture** built on a WORM (Write-Once, Read-Many) format. Groups of files are packed into single encrypted and compressed objects, optimizing for lightning-fast, zero-overhead retrieval from object storage.
-* **Fetcher Tier:** The bridge to upstream systems. It manages external Git and blob access, stages workspace bundles, and executes publish and refresh work asynchronously so local reads are never blocked.
-* **Search Service:** Builds and serves code indexes out-of-band. Keeping search separated from the critical file-serving loop ensures that massive background indexing jobs never impact FUSE read latency.
-* **FUSE Client:** The primary developer interface. It mounts the projected workspace locally, dynamically resolves cluster state via the Router, and streams directory and file data directly from the backend nodes.
-
-## Quick Start: Dogfooding MonoFS
-
-The best way to understand MonoFS is to use it to develop the Strata stack itself.
-
-### 1. Bootstrap the Cluster
-
-Bring up the storage stack and Guardian control plane:
+A typical first-time flow:
 
 ```bash
-cd ../stratatools
-uv run st-bootstrap deploy
-uv run st-bootstrap stamp-urls
-uv run st-release --partition doctor
-uv run st-release --partition dev-workspace
+# 1. Bring up the shared stack and release the partitions you need
+mt-bootstrap deploy
+mt-bootstrap stamp-urls
+mt-release --partition doctor
+mt-release --partition dev-workspace
+
+# 2. Make the router reachable from your workstation
+mt-bootstrap port-forward    # router on :9090, UI on :8080
+
+# 3. Ingest the repos you want to work on
+./bin/monofs-admin ingest --router=localhost:9090 \
+  --source=git@github.com:acme/service-a.git --ref=main
+./bin/monofs-admin ingest --router=localhost:9090 \
+  --source=git@github.com:acme/shared-lib.git --ref=main
+
+# 4. Mount a virtual monorepo
+mkdir -p /tmp/monofs-dev /tmp/monofs-overlay
+./bin/monofs-client \
+  --mount=/tmp/monofs-dev \
+  --router=localhost:9090 \
+  --use-external-addrs \
+  --virtual-monorepo \
+  --writable \
+  --overlay=/tmp/monofs-overlay
+
+# 5. Develop, then publish
+cd /tmp/monofs-dev
+git status
+./bin/monofs-session status
+./bin/monofs-session commit -m "Update service-a to new shared client"
+./bin/monofs-session pull
 ```
 
-## Cluster pprof From Performance Tab
+For the full daily workflow, flag reference, troubleshooting, and publish/refresh details, see [docs/usage.md](docs/usage.md).
 
-MonoFS can now collect pprof snapshots from all runtime services directly from the Router UI Performance tab.
+## Observability
 
-### Enabled Endpoints
+Every service exposes Prometheus `/metrics` and `net/http/pprof` endpoints. The router UI bundles them in a **Performance** tab that collects profiles from all services in a single zip.
 
-* `monofs-router`: `http://<router-http>/debug/pprof/*` and `/metrics`
-* `monofs-server`: diagnostics listener via `--metrics-addr` (default `:9100`)
-* `monofs-search`: diagnostics listener via `--diagnostics-addr` (default `:9101`)
-* `monofs-fetcher`: diagnostics listener via `--diagnostics-addr` (default `:9201`)
+| Service         | Default diagnostics address          |
+|-----------------|--------------------------------------|
+| `monofs-router` | `:8080/debug/pprof/`, `:8080/metrics` |
+| `monofs-server` | `--metrics-addr` (default `:9100`)   |
+| `monofs-search` | `--diagnostics-addr` (default `:9101`) |
+| `monofs-fetcher`| `--diagnostics-addr` (default `:9201`) |
 
-### Router Collection API
+UI API: `POST /api/pprof/collect`. Default profiles: `cpu` (30s), `heap`, `goroutine`. Optional: `allocs`, `mutex`, `block`, `threadcreate`, `trace`.
 
-* Performance tab calls `POST /api/pprof/collect`
-* Default profiles: `cpu` (30s), `heap`, `goroutine`
-* Optional profiles: `allocs`, `mutex`, `block`, `threadcreate`, `trace`
-* Output: one zip containing per-service profile files plus `manifest.json`
+## Documentation
 
-### Router Discovery Flags (Recommended)
+- [docs/architecture.md](docs/architecture.md) — system design, components, data flows
+- [docs/usage.md](docs/usage.md) — daily developer workflow and CLI reference
+- [cmd/monofs-session/README.md](cmd/monofs-session/README.md) — `monofs-session` command reference
+- [docs/native-protocol-v1.md](docs/native-protocol-v1.md) — experimental native VFS protocol (internal)
 
-Use explicit diagnostics addresses so collection is deterministic even when runtime ports are customized:
+## License
 
-* `--search-diagnostics-addr=search-index:9101`
-* `--fetcher-diagnostics-addrs=fetcher-a:9201,fetcher-b:9201`
-
-If those are not set, router falls back to derived conventions:
-
-* search diagnostics = `search gRPC port + 1`
-* fetcher diagnostics = `fetcher gRPC port + 1`
+Apache 2.0 — see [LICENSE](LICENSE).

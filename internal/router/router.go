@@ -28,8 +28,9 @@ type RouterConfig struct {
 	UnhealthyThreshold  time.Duration
 	PeerRouters         []RouterPeer
 	FetcherAddresses    []string // Fetcher cluster addresses for monitoring
-	FetcherDiagnostics  []string // Optional explicit diagnostics addresses for fetchers
-	SearchDiagnostics   string   // Optional explicit diagnostics address for search
+	FetcherDiagnostics  []string          // Optional explicit diagnostics addresses for fetchers
+	SearchDiagnostics   string            // Optional explicit diagnostics address for search
+	ServerDiagnostics   map[string]string // Optional explicit diagnostics addresses for servers: nodeID -> addr
 	EncryptionKey       []byte   // 32-byte ChaCha20-Poly1305 key for packager archives
 	GuardianStateDir    string   // Optional directory for persistent Guardian router state
 
@@ -37,6 +38,7 @@ type RouterConfig struct {
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
 	RebalanceDelay        time.Duration // Wait before triggering permanent rebalance after failure, default: 10m
 	GracefulFailoverDelay time.Duration // Wait for planned restarts/upgrades, default: 60s
+	GuardianIngestTimeout time.Duration // Timeout for guardian batch ingestion to nodes, default: 5m
 }
 
 // RouterPeer identifies another router instance to aggregate UI data from.
@@ -56,6 +58,7 @@ func DefaultRouterConfig() RouterConfig {
 		ReplicationFactor:     2,                // Primary + 1 backup (protects against 1 node failure)
 		RebalanceDelay:        10 * time.Minute, // Wait 10 minutes before permanent rebalancing
 		GracefulFailoverDelay: 60 * time.Second, // 60 seconds for planned restarts
+		GuardianIngestTimeout: 5 * time.Minute,  // 5 minutes for large guardian file batches
 	}
 }
 

@@ -89,7 +89,16 @@ async function collectClusterPprof() {
     a.remove()
     URL.revokeObjectURL(url)
 
-    pprofSuccess.value = `Collected ${selectedProfiles.value.length} profile type(s) into ${fileName}`
+    const targetCount = parseInt(response.headers.get('X-Pprof-Target-Count') ?? '0', 10)
+    const successTargets = parseInt(response.headers.get('X-Pprof-Success-Targets') ?? '0', 10)
+    const failedTargets = parseInt(response.headers.get('X-Pprof-Failed-Targets') ?? '0', 10)
+
+    let msg = `Collected ${selectedProfiles.value.length} profile type(s) from ${targetCount} target(s)`
+    if (failedTargets > 0) {
+      msg += ` (${successTargets} ok, ${failedTargets} failed)`
+    }
+    msg += ` into ${fileName}`
+    pprofSuccess.value = msg
   } catch (error) {
     pprofError.value = error instanceof Error ? error.message : 'Failed to collect cluster pprof'
   } finally {

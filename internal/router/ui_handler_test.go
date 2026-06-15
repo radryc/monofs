@@ -164,8 +164,15 @@ func TestCollectPprofTargetsUsesExplicitDiagnosticsAddresses(t *testing.T) {
 	config.RouterName = "router-a"
 	config.SearchDiagnostics = "search-index:9101"
 	config.FetcherDiagnostics = []string{"fetcher-a:9201", "http://fetcher-b:9201"}
+	config.ServerDiagnostics = map[string]string{
+		"node-a": "node-a:9150",
+		"node-b": "http://node-b:9150",
+	}
 
 	r := NewRouter(config, nil)
+	r.RegisterNodeStatic("node-a", "node-a:9000", 100)
+	r.RegisterNodeStatic("node-b", "node-b:9000", 100)
+
 	req := httptest.NewRequest(http.MethodPost, "http://router-a:8080/api/pprof/collect", nil)
 	targets := r.collectPprofTargets(req)
 
@@ -177,6 +184,12 @@ func TestCollectPprofTargetsUsesExplicitDiagnosticsAddresses(t *testing.T) {
 	}
 	if !hasTarget(targets, "fetcher", "fetcher-b:9201", "http://fetcher-b:9201") {
 		t.Fatalf("expected explicit fetcher target fetcher-b:9201, got %#v", targets)
+	}
+	if !hasTarget(targets, "server", "node-a:9150", "http://node-a:9150") {
+		t.Fatalf("expected explicit server diagnostics target node-a:9150, got %#v", targets)
+	}
+	if !hasTarget(targets, "server", "node-b:9150", "http://node-b:9150") {
+		t.Fatalf("expected explicit server diagnostics target node-b:9150, got %#v", targets)
 	}
 }
 

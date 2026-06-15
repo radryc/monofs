@@ -557,18 +557,21 @@ func TestGuardianManagedReposUseKVSBackend(t *testing.T) {
 		logicalPath string
 		content     string
 		displayPath string
+		wantKVS     bool
 	}{
 		{
 			name:        "partition repo",
 			logicalPath: "/partitions/genomics/intents/web.yaml",
 			content:     "kind: Intent\n",
 			displayPath: "guardian/genomics",
+			wantKVS:     false,
 		},
 		{
 			name:        "guardian system repo",
 			logicalPath: "/.queues/local/tasks/task-1.json",
 			content:     "{\"id\":\"task-1\"}",
 			displayPath: "guardian-system",
+			wantKVS:     true,
 		},
 	}
 
@@ -605,23 +608,29 @@ func TestGuardianManagedReposUseKVSBackend(t *testing.T) {
 			if regReq.GetDisplayPath() != tt.displayPath {
 				t.Fatalf("register display path = %q, want %q", regReq.GetDisplayPath(), tt.displayPath)
 			}
-			if regReq.GetFetchConfig()["storage_backend"] != "kvs" {
-				t.Fatalf("fetch config = %#v, want storage_backend=kvs", regReq.GetFetchConfig())
-			}
-			if regReq.GetIngestionConfig()["storage_backend"] != "kvs" {
-				t.Fatalf("ingestion config = %#v, want storage_backend=kvs", regReq.GetIngestionConfig())
-			}
 			if len(batch) == 0 {
 				t.Fatalf("expected ingest batch for storage_id %q", mapped.StorageID)
 			}
-			if batch[0].GetBackendMetadata()["storage_backend"] != "kvs" {
-				t.Fatalf("file backend metadata = %#v, want storage_backend=kvs", batch[0].GetBackendMetadata())
+			if tt.wantKVS {
+				if regReq.GetFetchConfig()["storage_backend"] != "kvs" || regReq.GetIngestionConfig()["storage_backend"] != "kvs" {
+					t.Fatalf("fetch config = %#v, want storage_backend=kvs", regReq.GetFetchConfig())
+				}
+				if batch[0].GetBackendMetadata()["storage_backend"] != "kvs" {
+					t.Fatalf("file backend metadata = %#v, want storage_backend=kvs", batch[0].GetBackendMetadata())
+				}
+			} else {
+				if regReq.GetFetchConfig()["storage_backend"] != "" || regReq.GetIngestionConfig()["storage_backend"] != "" {
+					t.Fatalf("fetch config = %#v, want no storage_backend", regReq.GetFetchConfig())
+				}
+				if batch[0].GetBackendMetadata()["storage_backend"] != "" {
+					t.Fatalf("file backend metadata = %#v, want no storage_backend", batch[0].GetBackendMetadata())
+				}
 			}
 		})
 	}
 }
 
-func TestInjectGuardianPartitionFromSourceUsesKVSBackend(t *testing.T) {
+func TestInjectGuardianPartitionFromSourceDoesNotUseKVSBackend(t *testing.T) {
 	originalRegistry := storage.DefaultRegistry
 	fakeBackend := &fakeGuardianSourceIngestionBackend{
 		files: []storage.FileMetadata{
@@ -691,17 +700,17 @@ func TestInjectGuardianPartitionFromSourceUsesKVSBackend(t *testing.T) {
 	if regReq.GetDisplayPath() != "guardian/genomics" {
 		t.Fatalf("register display path = %q, want guardian/genomics", regReq.GetDisplayPath())
 	}
-	if regReq.GetFetchConfig()["storage_backend"] != "kvs" {
-		t.Fatalf("fetch config = %#v, want storage_backend=kvs", regReq.GetFetchConfig())
+	if regReq.GetFetchConfig()["storage_backend"] != "" {
+		t.Fatalf("fetch config = %#v, want no storage_backend for partition paths", regReq.GetFetchConfig())
 	}
-	if regReq.GetIngestionConfig()["storage_backend"] != "kvs" {
-		t.Fatalf("ingestion config = %#v, want storage_backend=kvs", regReq.GetIngestionConfig())
+	if regReq.GetIngestionConfig()["storage_backend"] != "" {
+		t.Fatalf("ingestion config = %#v, want no storage_backend for partition paths", regReq.GetIngestionConfig())
 	}
 	if len(batch) == 0 {
 		t.Fatalf("expected ingest batch for storage_id %q", mapped.StorageID)
 	}
-	if batch[0].GetBackendMetadata()["storage_backend"] != "kvs" {
-		t.Fatalf("file backend metadata = %#v, want storage_backend=kvs", batch[0].GetBackendMetadata())
+	if batch[0].GetBackendMetadata()["storage_backend"] != "" {
+		t.Fatalf("file backend metadata = %#v, want no storage_backend for partition paths", batch[0].GetBackendMetadata())
 	}
 
 	content := readAllFromMonoFSClient(t, nodeClient, "guardian/genomics/intents/web.yaml")
@@ -721,8 +730,8 @@ func TestGuardianManagedReposTargetKVSLeaderOnly(t *testing.T) {
 	_, err := router.UpsertGuardianPaths(context.Background(), &pb.UpsertGuardianPathsRequest{
 		GuardianToken: "secret-token",
 		Writes: []*pb.GuardianPathWrite{{
-			LogicalPath: "/partitions/genomics/intents/web.yaml",
-			Content:     []byte("kind: Intent\n"),
+			LogicalPath: "/.queues/test-kvs/task.yaml",
+			Content:     []byte("kind: Task\n"),
 		}},
 		Context: &pb.GuardianMutationContext{
 			Reason:        "kvs leader routing",
@@ -733,11 +742,18 @@ func TestGuardianManagedReposTargetKVSLeaderOnly(t *testing.T) {
 		t.Fatalf("UpsertGuardianPaths() error = %v", err)
 	}
 
+	mapped, err := mapGuardianLogicalPath("/.queues/test-kvs/task.yaml")
+	if err != nil {
+		t.Fatalf("mapGuardianLogicalPath() error = %v", err)
+	}
+	if mapped.DisplayPath != "guardian-system" {
+		t.Fatalf("display path = %q, want guardian-system", mapped.DisplayPath)
+	}
 	for nodeID, node := range nodes {
 		node.mu.Lock()
 		registerCalls := node.registerCalls
 		ingestCalls := node.ingestBatchCalls
-		_, hasFile := node.files["guardian/genomics/intents/web.yaml"]
+		_, hasFile := node.files[mapped.DisplayPath+"/"+mapped.RelativePath]
 		node.mu.Unlock()
 
 		if nodeID == "node-2" {
@@ -745,7 +761,7 @@ func TestGuardianManagedReposTargetKVSLeaderOnly(t *testing.T) {
 				t.Fatalf("leader node calls = register:%d ingest:%d, want 1/1", registerCalls, ingestCalls)
 			}
 			if !hasFile {
-				t.Fatal("expected leader node to receive guardian file")
+				t.Fatal("expected leader node to receive guardian-system file")
 			}
 			continue
 		}
@@ -753,7 +769,7 @@ func TestGuardianManagedReposTargetKVSLeaderOnly(t *testing.T) {
 			t.Fatalf("follower %s calls = register:%d ingest:%d, want 0/0", nodeID, registerCalls, ingestCalls)
 		}
 		if hasFile {
-			t.Fatalf("follower %s unexpectedly stored guardian file", nodeID)
+			t.Fatalf("follower %s unexpectedly stored guardian-system file", nodeID)
 		}
 	}
 }
@@ -769,8 +785,8 @@ func TestGuardianManagedRepoDeletesTargetKVSLeaderOnly(t *testing.T) {
 	writeResp, err := router.UpsertGuardianPaths(context.Background(), &pb.UpsertGuardianPathsRequest{
 		GuardianToken: "secret-token",
 		Writes: []*pb.GuardianPathWrite{{
-			LogicalPath: "/partitions/genomics/intents/web.yaml",
-			Content:     []byte("kind: Intent\n"),
+			LogicalPath: "/.queues/test-kvs-del/task.yaml",
+			Content:     []byte("kind: Task\n"),
 		}},
 		Context: &pb.GuardianMutationContext{
 			Reason:        "kvs leader delete setup",
@@ -788,7 +804,7 @@ func TestGuardianManagedRepoDeletesTargetKVSLeaderOnly(t *testing.T) {
 	_, err = router.DeleteGuardianPaths(context.Background(), &pb.DeleteGuardianPathsRequest{
 		GuardianToken: "secret-token",
 		Deletes: []*pb.GuardianPathDelete{{
-			LogicalPath:       "/partitions/genomics/intents/web.yaml",
+			LogicalPath:       "/.queues/test-kvs-del/task.yaml",
 			ExpectedVersionId: writeResp.GetVersions()[0].GetVersionId(),
 		}},
 		Context: &pb.GuardianMutationContext{
