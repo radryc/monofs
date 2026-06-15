@@ -52,6 +52,7 @@ service MonoFSRouter {
     // Files become immediately visible on all FUSE mounts at guardian/<partition>/.
     rpc InjectGuardianPartition(InjectGuardianPartitionRequest) returns (InjectGuardianPartitionResponse);
     rpc UpsertGuardianPaths(UpsertGuardianPathsRequest) returns (UpsertGuardianPathsResponse);
+    rpc UpsertGuardianPathsStream(stream GuardianPathWriteChunk) returns (UpsertGuardianPathsResponse);
     rpc DeleteGuardianPaths(DeleteGuardianPathsRequest) returns (DeleteGuardianPathsResponse);
     rpc ListGuardianVersions(ListGuardianVersionsRequest) returns (ListGuardianVersionsResponse);
     rpc GetGuardianVersion(GetGuardianVersionRequest) returns (GetGuardianVersionResponse);
@@ -1110,6 +1111,13 @@ message UpsertGuardianPathsRequest {
     string guardian_token = 1;
     repeated GuardianPathWrite writes = 2;
     GuardianMutationContext context = 3;
+}
+
+message GuardianPathWriteChunk {
+    repeated GuardianPathWrite writes = 1;
+    bool is_last = 2;
+    string guardian_token = 3;
+    GuardianMutationContext context = 4;
 }
 
 message UpsertGuardianPathsResponse {

@@ -1441,9 +1441,13 @@ func (r *Router) handlePprofCollectAPI(w http.ResponseWriter, req *http.Request)
 		return
 	}
 
+	succeeded := len(targets) - failedTargets
 	filename := fmt.Sprintf("monofs-pprof-%d.zip", time.Now().Unix())
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Header().Set("X-Pprof-Target-Count", strconv.Itoa(len(targets)))
+	w.Header().Set("X-Pprof-Success-Targets", strconv.Itoa(succeeded))
+	w.Header().Set("X-Pprof-Failed-Targets", strconv.Itoa(failedTargets))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf.Bytes())
 }
@@ -1486,25 +1490,39 @@ func (r *Router) collectPprofTargets(req *http.Request) []pprofTarget {
 		})
 	}
 
-	// Storage servers use gRPC+100 diagnostics port convention.
+	// Storage servers: explicit diagnostics addresses first, then gRPC+100 convention.
 	r.mu.RLock()
 	for _, state := range r.nodes {
 		if state == nil || state.info == nil {
 			continue
 		}
-		diagAddr, err := addressWithOffset(state.info.Address, 100)
-		if err != nil {
-			r.logger.Warn("skipping server pprof target: cannot compute diagnostics address",
-				"node_id", state.info.NodeId,
-				"address", state.info.Address,
-				"error", err)
-			continue
+		var diagAddr string
+		var baseURL string
+		if configured, ok := r.config.ServerDiagnostics[state.info.NodeId]; ok {
+			baseURL, diagAddr = diagnosticsEndpoint(configured)
+			if baseURL == "" {
+				r.logger.Warn("skipping server pprof target: invalid explicit diagnostics config",
+					"node_id", state.info.NodeId,
+					"configured", configured)
+				continue
+			}
+		} else {
+			var err error
+			diagAddr, err = addressWithOffset(state.info.Address, 100)
+			if err != nil {
+				r.logger.Warn("skipping server pprof target: cannot compute diagnostics address",
+					"node_id", state.info.NodeId,
+					"address", state.info.Address,
+					"error", err)
+				continue
+			}
+			baseURL = "http://" + diagAddr
 		}
 		addTarget(pprofTarget{
 			ServiceType: "server",
 			Name:        state.info.NodeId,
 			Address:     diagAddr,
-			BaseURL:     "http://" + diagAddr,
+			BaseURL:     baseURL,
 		})
 	}
 	r.mu.RUnlock()
