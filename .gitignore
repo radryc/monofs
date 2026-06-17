@@ -18,6 +18,13 @@ bin/
 dist/
 build/
 
+# Environment
+.env
+
+# UI build artifacts
+internal/router/ui/dist/
+internal/router/ui/node_modules/
+
 # Bazel artifacts
 bazel-*
 .bazel-cache/
