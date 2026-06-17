@@ -63,6 +63,7 @@ func main() {
 		searchDiagAddr   = flag.String("search-diagnostics-addr", "", "Search diagnostics address for pprof collection (e.g., search:9101)")
 		fetcherAddrs     = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
 		fetcherDiagAddrs = flag.String("fetcher-diagnostics-addrs", "", "Fetcher diagnostics addresses for pprof collection (e.g., fetcher1:9201,fetcher2:9201)")
+		registryAddr     = flag.String("registry-addr", "", "Monofs-registry address for UI proxy (e.g., monofs-registry:5000)")
 		serverDiagAddrs  = flag.String("server-diagnostics-addrs", "", "Server diagnostics addresses for pprof collection (e.g., node-a=node-a:9100,node-b=node-b:9100)")
 		healthInt        = flag.Duration("health-interval", 2*time.Second, "Health check interval")
 		unhealthyThr     = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
@@ -190,6 +191,10 @@ func main() {
 		}
 	}
 
+	if *registryAddr != "" {
+		r.SetRegistryAddr(strings.TrimSpace(*registryAddr))
+	}
+
 	// Parse initial nodes
 	if *nodes != "" {
 		weightMap := parseWeights(*weights)
@@ -233,8 +238,8 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(
-		grpc.MaxRecvMsgSize(256*1024*1024),
-		grpc.MaxSendMsgSize(256*1024*1024),
+		grpc.MaxRecvMsgSize(1024*1024*1024),
+		grpc.MaxSendMsgSize(1024*1024*1024),
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second, // Allow pings every 5s (prevents too_many_pings)

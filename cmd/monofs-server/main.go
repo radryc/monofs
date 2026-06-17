@@ -174,8 +174,8 @@ func main() {
 	// Create gRPC server with raised message limits for inline dep blobs
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
-		grpc.MaxRecvMsgSize(256*1024*1024), // 256 MB
-		grpc.MaxSendMsgSize(256*1024*1024),
+		grpc.MaxRecvMsgSize(1024*1024*1024), // 1 GB
+		grpc.MaxSendMsgSize(1024*1024*1024),
 	)
 
 	// Create server with NutsDB backend

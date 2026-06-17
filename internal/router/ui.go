@@ -166,6 +166,10 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/guardian/partitions", r.handleGuardianPartitions)
 	mux.HandleFunc("/api/guardian/partitions/", r.handleGuardianPartition)
 
+	// Registry API routes (proxy to monofs-registry)
+	mux.HandleFunc("/api/registry/stats", r.handleRegistryStats)
+	mux.HandleFunc("/api/registry/repos", r.handleRegistryRepos)
+
 	// Health check endpoint for HAProxy
 	mux.HandleFunc("/health", r.handleHealth)
 
@@ -937,6 +941,57 @@ func (r *Router) handleFetchersAPI(w http.ResponseWriter, req *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+// handleRegistryStats proxies to monofs-registry stats endpoint.
+func (r *Router) handleRegistryStats(w http.ResponseWriter, req *http.Request) {
+	r.mu.RLock()
+	addr := r.registryAddr
+	r.mu.RUnlock()
+
+	if addr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"pulls": 0, "pushes": 0, "cache_hits": 0, "cache_misses": 0,
+			"bytes_served": 0, "bytes_fetched": 0, "blob_count": 0,
+		})
+		return
+	}
+
+	resp, err := http.Get("http://" + addr + "/api/v1/stats")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(), "available": false,
+		})
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	io.Copy(w, resp.Body)
+}
+
+// handleRegistryRepos proxies to monofs-registry repos endpoint.
+func (r *Router) handleRegistryRepos(w http.ResponseWriter, req *http.Request) {
+	r.mu.RLock()
+	addr := r.registryAddr
+	r.mu.RUnlock()
+
+	if addr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"repositories": []string{}})
+		return
+	}
+
+	resp, err := http.Get("http://" + addr + "/api/v1/repos")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"repositories": []string{}, "error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	io.Copy(w, resp.Body)
 }
 
 // handleLogEngineAPI returns per-node doctor telemetry logengine stats.

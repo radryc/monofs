@@ -12,6 +12,7 @@ const routes = [
   { path: '/indexer', component: () => import('../pages/IndexerPage.vue'), meta: { title: 'Indexer' } },
   { path: '/fetchers', component: () => import('../pages/FetchersPage.vue'), meta: { title: 'Fetchers' } },
   { path: '/dependencies', component: () => import('../pages/DependenciesPage.vue'), meta: { title: 'Dependencies' } },
+  { path: '/registry', component: () => import('../pages/RegistryPage.vue'), meta: { title: 'Registry' } },
 ]
 
 export const router = createRouter({
