@@ -427,3 +427,13 @@ export interface ToggleWhitelistRequest {
 export interface AddWhitelistRequest {
   client_id: string
 }
+
+export interface RegistryStats {
+  pulls: number
+  pushes: number
+  cache_hits: number
+  cache_misses: number
+  bytes_served: number
+  bytes_fetched: number
+  blob_count: number
+}

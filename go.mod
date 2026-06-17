@@ -15,6 +15,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.7.2
 	github.com/nutsdb/nutsdb v1.1.0
+	github.com/opencontainers/go-digest v1.0.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/prometheus v0.310.1-0.20260320085417-166d20151c0d

@@ -161,6 +161,9 @@ type Router struct {
 	// Directory index rebuild tracking (nodeID -> set of storageIDs)
 	pendingIndexRebuilds   map[string]map[string]bool
 	pendingIndexRebuildsMu sync.Mutex
+
+	// Registry integration
+	registryAddr string
 }
 
 var fetcherReconnectInterval = 5 * time.Second
@@ -546,6 +549,15 @@ func (r *Router) swapFetcherClient(client *fetcher.Client) {
 
 	if oldClient != nil && oldClient != client {
 		_ = oldClient.Close()
+	}
+}
+
+func (r *Router) SetRegistryAddr(addr string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registryAddr = addr
+	if addr != "" {
+		r.logger.Info("registry api configured", "addr", addr)
 	}
 }
 
