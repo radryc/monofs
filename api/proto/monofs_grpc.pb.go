@@ -39,6 +39,7 @@ const (
 	MonoFSRouter_DeleteGuardianDirectory_FullMethodName     = "/monofs.MonoFSRouter/DeleteGuardianDirectory"
 	MonoFSRouter_InjectGuardianPartition_FullMethodName     = "/monofs.MonoFSRouter/InjectGuardianPartition"
 	MonoFSRouter_UpsertGuardianPaths_FullMethodName         = "/monofs.MonoFSRouter/UpsertGuardianPaths"
+	MonoFSRouter_UpsertGuardianPathsStream_FullMethodName   = "/monofs.MonoFSRouter/UpsertGuardianPathsStream"
 	MonoFSRouter_DeleteGuardianPaths_FullMethodName         = "/monofs.MonoFSRouter/DeleteGuardianPaths"
 	MonoFSRouter_ListGuardianVersions_FullMethodName        = "/monofs.MonoFSRouter/ListGuardianVersions"
 	MonoFSRouter_GetGuardianVersion_FullMethodName          = "/monofs.MonoFSRouter/GetGuardianVersion"
@@ -109,6 +110,7 @@ type MonoFSRouterClient interface {
 	// Files become immediately visible on all FUSE mounts at guardian/<partition>/.
 	InjectGuardianPartition(ctx context.Context, in *InjectGuardianPartitionRequest, opts ...grpc.CallOption) (*InjectGuardianPartitionResponse, error)
 	UpsertGuardianPaths(ctx context.Context, in *UpsertGuardianPathsRequest, opts ...grpc.CallOption) (*UpsertGuardianPathsResponse, error)
+	UpsertGuardianPathsStream(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[GuardianPathWriteChunk, UpsertGuardianPathsResponse], error)
 	DeleteGuardianPaths(ctx context.Context, in *DeleteGuardianPathsRequest, opts ...grpc.CallOption) (*DeleteGuardianPathsResponse, error)
 	ListGuardianVersions(ctx context.Context, in *ListGuardianVersionsRequest, opts ...grpc.CallOption) (*ListGuardianVersionsResponse, error)
 	GetGuardianVersion(ctx context.Context, in *GetGuardianVersionRequest, opts ...grpc.CallOption) (*GetGuardianVersionResponse, error)
@@ -360,6 +362,19 @@ func (c *monoFSRouterClient) UpsertGuardianPaths(ctx context.Context, in *Upsert
 	return out, nil
 }
 
+func (c *monoFSRouterClient) UpsertGuardianPathsStream(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[GuardianPathWriteChunk, UpsertGuardianPathsResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[1], MonoFSRouter_UpsertGuardianPathsStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[GuardianPathWriteChunk, UpsertGuardianPathsResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_UpsertGuardianPathsStreamClient = grpc.ClientStreamingClient[GuardianPathWriteChunk, UpsertGuardianPathsResponse]
+
 func (c *monoFSRouterClient) DeleteGuardianPaths(ctx context.Context, in *DeleteGuardianPathsRequest, opts ...grpc.CallOption) (*DeleteGuardianPathsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DeleteGuardianPathsResponse)
@@ -392,7 +407,7 @@ func (c *monoFSRouterClient) GetGuardianVersion(ctx context.Context, in *GetGuar
 
 func (c *monoFSRouterClient) SubscribeGuardianChanges(ctx context.Context, in *SubscribeGuardianChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GuardianChangeEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[1], MonoFSRouter_SubscribeGuardianChanges_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[2], MonoFSRouter_SubscribeGuardianChanges_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +426,7 @@ type MonoFSRouter_SubscribeGuardianChangesClient = grpc.ServerStreamingClient[Gu
 
 func (c *monoFSRouterClient) StreamQueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[2], MonoFSRouter_StreamQueryLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[3], MonoFSRouter_StreamQueryLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +445,7 @@ type MonoFSRouter_StreamQueryLogsClient = grpc.ServerStreamingClient[QueryResult
 
 func (c *monoFSRouterClient) StreamQueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[3], MonoFSRouter_StreamQueryMetrics_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[4], MonoFSRouter_StreamQueryMetrics_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -449,7 +464,7 @@ type MonoFSRouter_StreamQueryMetricsClient = grpc.ServerStreamingClient[QueryRes
 
 func (c *monoFSRouterClient) StreamQueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResultItem], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[4], MonoFSRouter_StreamQueryTraces_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[5], MonoFSRouter_StreamQueryTraces_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -578,7 +593,7 @@ func (c *monoFSRouterClient) GetWhitelistStatus(ctx context.Context, in *GetWhit
 
 func (c *monoFSRouterClient) SubscribeToChanges(ctx context.Context, in *SubscribeChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ChangeEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[5], MonoFSRouter_SubscribeToChanges_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[6], MonoFSRouter_SubscribeToChanges_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -597,7 +612,7 @@ type MonoFSRouter_SubscribeToChangesClient = grpc.ServerStreamingClient[ChangeEv
 
 func (c *monoFSRouterClient) UploadWorkspaceBundle(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WorkspaceBundleChunk, UploadWorkspaceBundleResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[6], MonoFSRouter_UploadWorkspaceBundle_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[7], MonoFSRouter_UploadWorkspaceBundle_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +625,7 @@ type MonoFSRouter_UploadWorkspaceBundleClient = grpc.ClientStreamingClient[Works
 
 func (c *monoFSRouterClient) UploadWorkspaceCommitBundle(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WorkspaceBundleChunk, UploadWorkspaceBundleResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[7], MonoFSRouter_UploadWorkspaceCommitBundle_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[8], MonoFSRouter_UploadWorkspaceCommitBundle_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -623,7 +638,7 @@ type MonoFSRouter_UploadWorkspaceCommitBundleClient = grpc.ClientStreamingClient
 
 func (c *monoFSRouterClient) PublishWorkspace(ctx context.Context, in *PublishWorkspaceRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspaceSyncEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[8], MonoFSRouter_PublishWorkspace_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[9], MonoFSRouter_PublishWorkspace_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -642,7 +657,7 @@ type MonoFSRouter_PublishWorkspaceClient = grpc.ServerStreamingClient[WorkspaceS
 
 func (c *monoFSRouterClient) PushWorkspaceCommits(ctx context.Context, in *PushWorkspaceCommitsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspaceSyncEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[9], MonoFSRouter_PushWorkspaceCommits_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[10], MonoFSRouter_PushWorkspaceCommits_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -661,7 +676,7 @@ type MonoFSRouter_PushWorkspaceCommitsClient = grpc.ServerStreamingClient[Worksp
 
 func (c *monoFSRouterClient) RefreshWorkspace(ctx context.Context, in *RefreshWorkspaceRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspaceSyncEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[10], MonoFSRouter_RefreshWorkspace_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &MonoFSRouter_ServiceDesc.Streams[11], MonoFSRouter_RefreshWorkspace_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -749,6 +764,7 @@ type MonoFSRouterServer interface {
 	// Files become immediately visible on all FUSE mounts at guardian/<partition>/.
 	InjectGuardianPartition(context.Context, *InjectGuardianPartitionRequest) (*InjectGuardianPartitionResponse, error)
 	UpsertGuardianPaths(context.Context, *UpsertGuardianPathsRequest) (*UpsertGuardianPathsResponse, error)
+	UpsertGuardianPathsStream(grpc.ClientStreamingServer[GuardianPathWriteChunk, UpsertGuardianPathsResponse]) error
 	DeleteGuardianPaths(context.Context, *DeleteGuardianPathsRequest) (*DeleteGuardianPathsResponse, error)
 	ListGuardianVersions(context.Context, *ListGuardianVersionsRequest) (*ListGuardianVersionsResponse, error)
 	GetGuardianVersion(context.Context, *GetGuardianVersionRequest) (*GetGuardianVersionResponse, error)
@@ -850,6 +866,9 @@ func (UnimplementedMonoFSRouterServer) InjectGuardianPartition(context.Context, 
 }
 func (UnimplementedMonoFSRouterServer) UpsertGuardianPaths(context.Context, *UpsertGuardianPathsRequest) (*UpsertGuardianPathsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpsertGuardianPaths not implemented")
+}
+func (UnimplementedMonoFSRouterServer) UpsertGuardianPathsStream(grpc.ClientStreamingServer[GuardianPathWriteChunk, UpsertGuardianPathsResponse]) error {
+	return status.Error(codes.Unimplemented, "method UpsertGuardianPathsStream not implemented")
 }
 func (UnimplementedMonoFSRouterServer) DeleteGuardianPaths(context.Context, *DeleteGuardianPathsRequest) (*DeleteGuardianPathsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteGuardianPaths not implemented")
@@ -1305,6 +1324,13 @@ func _MonoFSRouter_UpsertGuardianPaths_Handler(srv interface{}, ctx context.Cont
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _MonoFSRouter_UpsertGuardianPathsStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(MonoFSRouterServer).UpsertGuardianPathsStream(&grpc.GenericServerStream[GuardianPathWriteChunk, UpsertGuardianPathsResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MonoFSRouter_UpsertGuardianPathsStreamServer = grpc.ClientStreamingServer[GuardianPathWriteChunk, UpsertGuardianPathsResponse]
 
 func _MonoFSRouter_DeleteGuardianPaths_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DeleteGuardianPathsRequest)
@@ -1871,6 +1897,11 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "IngestRepository",
 			Handler:       _MonoFSRouter_IngestRepository_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "UpsertGuardianPathsStream",
+			Handler:       _MonoFSRouter_UpsertGuardianPathsStream_Handler,
+			ClientStreams: true,
 		},
 		{
 			StreamName:    "SubscribeGuardianChanges",

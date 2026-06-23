@@ -143,6 +143,28 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-loadtest ./cmd/monofs-loadtest
 
+FROM builder AS registry-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
+    -o /bin/monofs-registry ./cmd/monofs-registry
+
+# OCI Registry image
+FROM alpine:3.19 AS registry
+
+RUN apk add --no-cache ca-certificates
+
+COPY --from=registry-builder /bin/monofs-registry /usr/local/bin/monofs-registry
+
+EXPOSE 5000
+
+ENTRYPOINT ["monofs-registry"]
+CMD ["--addr=:5000"]
+
 # Server image
 FROM alpine:3.19 AS server
 

@@ -28,6 +28,10 @@ type RouterConfig struct {
 	UnhealthyThreshold  time.Duration
 	PeerRouters         []RouterPeer
 	FetcherAddresses    []string // Fetcher cluster addresses for monitoring
+	FetcherDiagnostics    []string          // Optional explicit diagnostics addresses for fetchers
+	SearchDiagnostics     string            // Optional explicit diagnostics address for search
+	ServerDiagnostics     map[string]string // Optional explicit diagnostics addresses for servers: nodeID -> addr
+	RegistryDiagnostics   string            // Optional explicit diagnostics address for registry
 	EncryptionKey       []byte   // 32-byte ChaCha20-Poly1305 key for packager archives
 	GuardianStateDir    string   // Optional directory for persistent Guardian router state
 
@@ -35,6 +39,7 @@ type RouterConfig struct {
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
 	RebalanceDelay        time.Duration // Wait before triggering permanent rebalance after failure, default: 10m
 	GracefulFailoverDelay time.Duration // Wait for planned restarts/upgrades, default: 60s
+	GuardianIngestTimeout time.Duration // Timeout for guardian batch ingestion to nodes, default: 5m
 }
 
 // RouterPeer identifies another router instance to aggregate UI data from.
@@ -54,6 +59,7 @@ func DefaultRouterConfig() RouterConfig {
 		ReplicationFactor:     2,                // Primary + 1 backup (protects against 1 node failure)
 		RebalanceDelay:        10 * time.Minute, // Wait 10 minutes before permanent rebalancing
 		GracefulFailoverDelay: 60 * time.Second, // 60 seconds for planned restarts
+		GuardianIngestTimeout: 5 * time.Minute,  // 5 minutes for large guardian file batches
 	}
 }
 
@@ -104,6 +110,7 @@ type Router struct {
 	// Search service integration
 	searchClient pb.MonoFSSearchClient
 	searchConn   *grpc.ClientConn
+	searchAddr   string
 
 	// Ingestion whitelist
 	whitelist *whitelistStore
@@ -155,6 +162,9 @@ type Router struct {
 	// Directory index rebuild tracking (nodeID -> set of storageIDs)
 	pendingIndexRebuilds   map[string]map[string]bool
 	pendingIndexRebuildsMu sync.Mutex
+
+	// Registry integration
+	registryAddr string
 }
 
 var fetcherReconnectInterval = 5 * time.Second
@@ -415,6 +425,11 @@ func (r *Router) triggerIndexRebuild(nodeID, storageID string) error {
 // SetSearchClient configures the search service client for automatic indexing.
 // It will retry the connection in the background if initial connection fails.
 func (r *Router) SetSearchClient(addr string) error {
+	addr = strings.TrimSpace(addr)
+	r.mu.Lock()
+	r.searchAddr = addr
+	r.mu.Unlock()
+
 	if addr == "" {
 		r.logger.Info("search service not configured")
 		return nil
@@ -467,6 +482,12 @@ func (r *Router) retrySearchConnection(addr string) {
 		r.logger.Info("search service client connected after retry", "addr", addr)
 		return
 	}
+}
+
+func (r *Router) getSearchAddress() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.searchAddr
 }
 
 // SetFetcherClient configures the fetcher cluster client for monitoring.
@@ -529,6 +550,15 @@ func (r *Router) swapFetcherClient(client *fetcher.Client) {
 
 	if oldClient != nil && oldClient != client {
 		_ = oldClient.Close()
+	}
+}
+
+func (r *Router) SetRegistryAddr(addr string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registryAddr = addr
+	if addr != "" {
+		r.logger.Info("registry api configured", "addr", addr)
 	}
 }
 

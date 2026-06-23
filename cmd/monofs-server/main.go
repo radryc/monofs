@@ -8,15 +8,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/diagnostics"
 	"github.com/radryc/monofs/internal/fetcher"
 	"github.com/radryc/monofs/internal/server"
 	"github.com/radryc/monofs/internal/storage/logengine"
@@ -175,8 +174,8 @@ func main() {
 	// Create gRPC server with raised message limits for inline dep blobs
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
-		grpc.MaxRecvMsgSize(256*1024*1024), // 256 MB
-		grpc.MaxSendMsgSize(256*1024*1024),
+		grpc.MaxRecvMsgSize(1024*1024*1024), // 1 GB
+		grpc.MaxSendMsgSize(1024*1024*1024),
 	)
 
 	// Create server with NutsDB backend
@@ -294,21 +293,9 @@ func main() {
 	// Enable reflection for debugging with grpcurl
 	reflection.Register(grpcServer)
 
-	// Start Prometheus metrics HTTP server (separate from gRPC, since monofs-server has no UI port).
-	if addr := strings.TrimSpace(*metricsAddr); addr != "" {
-		metricsServer := &http.Server{Addr: addr, Handler: newMetricsHandler()}
-		go func() {
-			logger.Info("metrics server listening", "addr", addr, "pprof_path", "/debug/pprof/")
-			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				logger.Error("metrics server error", "error", err)
-			}
-		}()
-		defer func() {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = metricsServer.Shutdown(shutdownCtx)
-		}()
-	}
+	// Start diagnostics HTTP server (metrics + pprof), separate from gRPC.
+	diagServer := diagnostics.StartServer(logger, "monofs-server", strings.TrimSpace(*metricsAddr))
+	defer diagnostics.ShutdownServer(logger, "monofs-server", diagServer)
 
 	// Start serving in background
 	go func() {
@@ -356,20 +343,7 @@ func main() {
 }
 
 func newMetricsHandler() http.Handler {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
-	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
-	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
-	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
-	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
-	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
-	return mux
+	return diagnostics.NewHandler()
 }
 
 func requestFailover(routerAddr, nodeID string, logger *slog.Logger) error {

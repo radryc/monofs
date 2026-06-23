@@ -60,7 +60,12 @@ func main() {
 		externalAddrs    = flag.String("external-addrs", "", "External addresses for host clients: node1=localhost:9001,node2=localhost:9002,...")
 		peerRouters      = flag.String("peer-routers", "", "Peer routers for UI aggregation: name=http://host:port or host:port,...")
 		searchAddr       = flag.String("search-addr", "", "Search service address (e.g., search:9100)")
+		searchDiagAddr   = flag.String("search-diagnostics-addr", "", "Search diagnostics address for pprof collection (e.g., search:9101)")
 		fetcherAddrs     = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
+		fetcherDiagAddrs = flag.String("fetcher-diagnostics-addrs", "", "Fetcher diagnostics addresses for pprof collection (e.g., fetcher1:9201,fetcher2:9201)")
+		registryAddr     = flag.String("registry-addr", "", "Monofs-registry address for UI proxy (e.g., monofs-registry:5000)")
+		registryDiagAddr = flag.String("registry-diagnostics-addr", "", "Registry diagnostics address for pprof collection (e.g., registry:5001)")
+		serverDiagAddrs  = flag.String("server-diagnostics-addrs", "", "Server diagnostics addresses for pprof collection (e.g., node-a=node-a:9100,node-b=node-b:9100)")
 		healthInt        = flag.Duration("health-interval", 2*time.Second, "Health check interval")
 		unhealthyThr     = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
 		debug            = flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
@@ -71,6 +76,7 @@ func main() {
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
 		rebalanceDelay        = flag.Duration("rebalance-delay", 10*time.Minute, "Wait time before permanent rebalancing after node failure")
 		gracefulFailoverDelay = flag.Duration("graceful-failover-delay", 60*time.Second, "Wait time for graceful failover (planned restarts)")
+		guardianIngestTimeout = flag.Duration("guardian-ingest-timeout", 5*time.Minute, "Timeout for guardian batch file ingestion to nodes")
 
 		// Packager encryption
 		encryptionKeyHex = flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
@@ -155,11 +161,16 @@ func main() {
 		HealthCheckInterval:   *healthInt,
 		UnhealthyThreshold:    *unhealthyThr,
 		PeerRouters:           parsePeerRouters(*peerRouters),
+		SearchDiagnostics:     strings.TrimSpace(*searchDiagAddr),
+		FetcherDiagnostics:    parseCSVAddrs(*fetcherDiagAddrs),
+		ServerDiagnostics:     parseServerDiagnostics(*serverDiagAddrs),
+		RegistryDiagnostics:   strings.TrimSpace(*registryDiagAddr),
 		GuardianStateDir:      *guardianStateDir,
 		EncryptionKey:         encryptionKey,
 		ReplicationFactor:     *replicationFactor,
 		RebalanceDelay:        *rebalanceDelay,
 		GracefulFailoverDelay: *gracefulFailoverDelay,
+		GuardianIngestTimeout: *guardianIngestTimeout,
 	}
 	r := router.NewRouter(cfg, logger)
 	r.SetVersion(Version, Commit, BuildTime)
@@ -180,6 +191,10 @@ func main() {
 		if err := r.SetFetcherClient(addrs); err != nil {
 			logger.Warn("failed to configure fetcher cluster", "error", err)
 		}
+	}
+
+	if *registryAddr != "" {
+		r.SetRegistryAddr(strings.TrimSpace(*registryAddr))
 	}
 
 	// Parse initial nodes
@@ -225,8 +240,8 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(
-		grpc.MaxRecvMsgSize(256*1024*1024),
-		grpc.MaxSendMsgSize(256*1024*1024),
+		grpc.MaxRecvMsgSize(1024*1024*1024),
+		grpc.MaxSendMsgSize(1024*1024*1024),
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second, // Allow pings every 5s (prevents too_many_pings)
@@ -361,4 +376,42 @@ func parsePeerRouters(peersStr string) []router.RouterPeer {
 		peers = append(peers, router.RouterPeer{Name: spec, URL: spec})
 	}
 	return peers
+}
+
+func parseCSVAddrs(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		addr := strings.TrimSpace(part)
+		if addr != "" {
+			result = append(result, addr)
+		}
+	}
+	return result
+}
+
+func parseServerDiagnostics(raw string) map[string]string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	result := make(map[string]string)
+	for _, spec := range strings.Split(raw, ",") {
+		spec = strings.TrimSpace(spec)
+		if spec == "" {
+			continue
+		}
+		parts := strings.SplitN(spec, "=", 2)
+		nodeID := strings.TrimSpace(parts[0])
+		addr := ""
+		if len(parts) == 2 {
+			addr = strings.TrimSpace(parts[1])
+		}
+		if nodeID != "" && addr != "" {
+			result[nodeID] = addr
+		}
+	}
+	return result
 }

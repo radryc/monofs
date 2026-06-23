@@ -791,6 +791,19 @@ func (c *Client) HealthyFetchers() []string {
 	return addresses
 }
 
+// AllFetchers returns a sorted list of configured fetcher addresses.
+func (c *Client) AllFetchers() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	addresses := make([]string, 0, len(c.fetchers))
+	for _, f := range c.fetchers {
+		addresses = append(addresses, f.address)
+	}
+	sort.Strings(addresses)
+	return addresses
+}
+
 // FetchBlobSimple is a convenience wrapper for FetchBlob.
 func (c *Client) FetchBlobSimple(ctx context.Context, sourceURL, blobHash, filePath, branch string, sourceType SourceType) ([]byte, error) {
 	sourceConfig := map[string]string{

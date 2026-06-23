@@ -9,10 +9,12 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/diagnostics"
 	"github.com/radryc/monofs/internal/search"
 	"github.com/radryc/monofs/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -36,6 +38,7 @@ func main() {
 	workers := flag.Int("workers", 2, "Number of concurrent indexing workers")
 	queueSize := flag.Int("queue-size", 100, "Size of indexing job queue")
 	routerAddr := flag.String("router-addr", "", "Router address for cluster access (optional, enables fetching from storage nodes)")
+	diagnosticsAddr := flag.String("diagnostics-addr", ":9101", "Listen address for Prometheus /metrics and pprof endpoints (empty disables)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
@@ -84,9 +87,13 @@ func main() {
 		"version", Version,
 		"commit", Commit,
 		"port", *port,
+		"diagnostics_addr", *diagnosticsAddr,
 		"index_dir", *indexDir,
 		"cache_dir", *cacheDir,
 		"workers", *workers)
+
+	diagServer := diagnostics.StartServer(logger, "monofs-search", strings.TrimSpace(*diagnosticsAddr))
+	defer diagnostics.ShutdownServer(logger, "monofs-search", diagServer)
 
 	// Create search service
 	cfg := search.Config{

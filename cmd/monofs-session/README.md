@@ -159,4 +159,5 @@ The socket is created by `monofs-client --writable --overlay=...`.
 ## Related Docs
 
 - [../../README.md](../../README.md)
-- [../../docs/virtual-monorepo-workflow.md](../../docs/virtual-monorepo-workflow.md)
+- [../../docs/usage.md](../../docs/usage.md)
+- [../../docs/architecture.md](../../docs/architecture.md)

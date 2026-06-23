@@ -2,14 +2,21 @@
 package router
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/http/pprof"
+	"net/url"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -141,6 +148,7 @@ func (r *Router) ServeHTTP() http.Handler {
 
 	// Predictor API route
 	mux.HandleFunc("/api/predictor", r.handlePredictorAPI)
+	mux.HandleFunc("/api/pprof/collect", r.handlePprofCollectAPI)
 
 	// Search API routes
 	mux.HandleFunc("/api/search", r.handleSearchAPI)
@@ -158,11 +166,27 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/guardian/partitions", r.handleGuardianPartitions)
 	mux.HandleFunc("/api/guardian/partitions/", r.handleGuardianPartition)
 
+	// Registry API routes (proxy to monofs-registry)
+	mux.HandleFunc("/api/registry/stats", r.handleRegistryStats)
+	mux.HandleFunc("/api/registry/repos", r.handleRegistryRepos)
+	mux.HandleFunc("/api/registry/repos/", r.handleRegistryRepoDetail)
+
 	// Health check endpoint for HAProxy
 	mux.HandleFunc("/health", r.handleHealth)
 
 	// Prometheus metrics
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
+	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
+	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
 
 	// Static files (logo, etc.)
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
@@ -920,6 +944,94 @@ func (r *Router) handleFetchersAPI(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(stats)
 }
 
+// handleRegistryStats proxies to monofs-registry stats endpoint.
+func (r *Router) handleRegistryStats(w http.ResponseWriter, req *http.Request) {
+	r.mu.RLock()
+	addr := r.registryAddr
+	r.mu.RUnlock()
+
+	if addr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"pulls": 0, "pushes": 0, "cache_hits": 0, "cache_misses": 0,
+			"bytes_served": 0, "bytes_fetched": 0, "blob_count": 0,
+		})
+		return
+	}
+
+	resp, err := http.Get("http://" + addr + "/api/v1/stats")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(), "available": false,
+		})
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	io.Copy(w, resp.Body)
+}
+
+// handleRegistryRepos proxies to monofs-registry repos endpoint.
+func (r *Router) handleRegistryRepos(w http.ResponseWriter, req *http.Request) {
+	r.mu.RLock()
+	addr := r.registryAddr
+	r.mu.RUnlock()
+
+	if addr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"repositories": []string{}})
+		return
+	}
+
+	resp, err := http.Get("http://" + addr + "/api/v1/repos")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"repositories": []string{}, "error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	io.Copy(w, resp.Body)
+}
+
+// handleRegistryRepoDetail proxies to monofs-registry per-repo detail endpoint.
+func (r *Router) handleRegistryRepoDetail(w http.ResponseWriter, req *http.Request) {
+	repo := strings.TrimPrefix(req.URL.Path, "/api/registry/repos/")
+	if repo == "" {
+		http.Error(w, "repo name required", http.StatusBadRequest)
+		return
+	}
+
+	r.mu.RLock()
+	addr := r.registryAddr
+	r.mu.RUnlock()
+
+	if addr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"name": repo,
+			"tags": []string{},
+		})
+		return
+	}
+
+	u := "http://" + addr + "/api/v1/repos/" + repo
+	resp, err := http.Get(u)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"name":  repo,
+			"tags":  []string{},
+			"error": err.Error(),
+		})
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	io.Copy(w, resp.Body)
+}
+
 // handleLogEngineAPI returns per-node doctor telemetry logengine stats.
 func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 	r.mu.RLock()
@@ -1281,6 +1393,519 @@ func (r *Router) handleGuardianPartition(w http.ResponseWriter, req *http.Reques
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "unknown sub-action: " + subAction})
 	}
+}
+
+type pprofCollectRequest struct {
+	Profiles           []string `json:"profiles"`
+	CpuDurationSeconds int      `json:"cpu_duration_seconds"`
+}
+
+type pprofTarget struct {
+	ServiceType string `json:"service_type"`
+	Name        string `json:"name"`
+	Address     string `json:"address"`
+	BaseURL     string `json:"base_url"`
+}
+
+type pprofProfileResult struct {
+	Profile string `json:"profile"`
+	OK      bool   `json:"ok"`
+	Bytes   int    `json:"bytes,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type pprofTargetResult struct {
+	ServiceType string               `json:"service_type"`
+	Name        string               `json:"name"`
+	Address     string               `json:"address"`
+	BaseURL     string               `json:"base_url"`
+	Profiles    []pprofProfileResult `json:"profiles"`
+}
+
+type pprofCollectManifest struct {
+	GeneratedAt          string              `json:"generated_at"`
+	Profiles             []string            `json:"profiles"`
+	CpuDurationSeconds   int                 `json:"cpu_duration_seconds"`
+	RequestedTargetCount int                 `json:"requested_target_count"`
+	Results              []pprofTargetResult `json:"results"`
+}
+
+func (r *Router) handlePprofCollectAPI(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	bodyReq := pprofCollectRequest{}
+	if req.Body != nil {
+		defer req.Body.Close()
+		if err := json.NewDecoder(req.Body).Decode(&bodyReq); err != nil && err != io.EOF {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	profiles := normalizePprofProfiles(bodyReq.Profiles)
+	if len(profiles) == 0 {
+		profiles = []string{"cpu", "heap", "goroutine"}
+	}
+	cpuSeconds := bodyReq.CpuDurationSeconds
+	if cpuSeconds <= 0 {
+		cpuSeconds = 30
+	}
+	if cpuSeconds > 120 {
+		cpuSeconds = 120
+	}
+
+	targets := r.collectPprofTargets(req)
+	if len(targets) == 0 {
+		http.Error(w, "No pprof targets discovered", http.StatusServiceUnavailable)
+		return
+	}
+
+	r.logger.Info("pprof collection starting",
+		"targets", len(targets),
+		"profiles", profiles,
+		"cpu_seconds", cpuSeconds)
+
+	collectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	manifest, files := collectPprofArtifacts(collectCtx, targets, profiles, cpuSeconds)
+
+	var failedTargets, failedProfiles int
+	for _, result := range manifest.Results {
+		for _, p := range result.Profiles {
+			if !p.OK {
+				failedProfiles++
+				r.logger.Warn("pprof profile fetch failed",
+					"service_type", result.ServiceType,
+					"name", result.Name,
+					"address", result.Address,
+					"profile", p.Profile,
+					"error", p.Error)
+			}
+		}
+		hasTargetFailed := false
+		for _, p := range result.Profiles {
+			if !p.OK {
+				hasTargetFailed = true
+				break
+			}
+		}
+		if hasTargetFailed {
+			failedTargets++
+		}
+	}
+	r.logger.Info("pprof collection completed",
+		"targets", len(targets),
+		"failed_targets", failedTargets,
+		"failed_profiles", failedProfiles,
+		"files_collected", len(files))
+
+	buf := bytes.NewBuffer(nil)
+	zw := zip.NewWriter(buf)
+	for name, data := range files {
+		fileWriter, err := zw.Create(name)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create zip entry: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if _, err := fileWriter.Write(data); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to write zip entry: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode manifest: %v", err), http.StatusInternalServerError)
+		return
+	}
+	manifestWriter, err := zw.Create("manifest.json")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create manifest entry: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if _, err := manifestWriter.Write(manifestBytes); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to write manifest entry: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if err := zw.Close(); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to finalize zip: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	succeeded := len(targets) - failedTargets
+	filename := fmt.Sprintf("monofs-pprof-%d.zip", time.Now().Unix())
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Header().Set("X-Pprof-Target-Count", strconv.Itoa(len(targets)))
+	w.Header().Set("X-Pprof-Success-Targets", strconv.Itoa(succeeded))
+	w.Header().Set("X-Pprof-Failed-Targets", strconv.Itoa(failedTargets))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
+}
+
+func (r *Router) collectPprofTargets(req *http.Request) []pprofTarget {
+	targets := make([]pprofTarget, 0, 16)
+	seen := make(map[string]bool)
+
+	addTarget := func(t pprofTarget) {
+		if t.BaseURL == "" {
+			return
+		}
+		key := t.ServiceType + "|" + t.Name + "|" + t.BaseURL
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		targets = append(targets, t)
+	}
+
+	// Routers: local router + configured peers.
+	if baseURL := routerBaseURLFromRequest(req); baseURL != "" {
+		addTarget(pprofTarget{
+			ServiceType: "router",
+			Name:        r.config.RouterName,
+			Address:     baseURL,
+			BaseURL:     baseURL,
+		})
+	}
+	for _, peer := range r.config.PeerRouters {
+		peerURL, err := normalizeRouterURL(peer.URL)
+		if err != nil {
+			continue
+		}
+		addTarget(pprofTarget{
+			ServiceType: "router",
+			Name:        peer.Name,
+			Address:     peerURL,
+			BaseURL:     peerURL,
+		})
+	}
+
+	// Storage servers: explicit diagnostics addresses first, then gRPC+100 convention.
+	r.mu.RLock()
+	for _, state := range r.nodes {
+		if state == nil || state.info == nil {
+			continue
+		}
+		var diagAddr string
+		var baseURL string
+		if configured, ok := r.config.ServerDiagnostics[state.info.NodeId]; ok {
+			baseURL, diagAddr = diagnosticsEndpoint(configured)
+			if baseURL == "" {
+				r.logger.Warn("skipping server pprof target: invalid explicit diagnostics config",
+					"node_id", state.info.NodeId,
+					"configured", configured)
+				continue
+			}
+		} else {
+			var err error
+			diagAddr, err = addressWithOffset(state.info.Address, 100)
+			if err != nil {
+				r.logger.Warn("skipping server pprof target: cannot compute diagnostics address",
+					"node_id", state.info.NodeId,
+					"address", state.info.Address,
+					"error", err)
+				continue
+			}
+			baseURL = "http://" + diagAddr
+		}
+		addTarget(pprofTarget{
+			ServiceType: "server",
+			Name:        state.info.NodeId,
+			Address:     diagAddr,
+			BaseURL:     baseURL,
+		})
+	}
+	r.mu.RUnlock()
+
+	// Search service diagnostics: explicit address first, then gRPC+1 convention.
+	if diagURL, diagAddress := diagnosticsEndpoint(r.config.SearchDiagnostics); diagURL != "" {
+		addTarget(pprofTarget{
+			ServiceType: "search",
+			Name:        "search",
+			Address:     diagAddress,
+			BaseURL:     diagURL,
+		})
+	} else if searchAddr := r.getSearchAddress(); strings.TrimSpace(searchAddr) != "" {
+		if diagAddr, err := addressWithOffset(searchAddr, 1); err == nil {
+			addTarget(pprofTarget{
+				ServiceType: "search",
+				Name:        "search",
+				Address:     diagAddr,
+				BaseURL:     "http://" + diagAddr,
+			})
+		} else {
+			r.logger.Warn("skipping search pprof target: cannot compute diagnostics address",
+				"search_addr", searchAddr,
+				"error", err)
+		}
+	}
+
+	// Registry diagnostics: explicit address only.
+	if diagURL, diagAddress := diagnosticsEndpoint(r.config.RegistryDiagnostics); diagURL != "" {
+		addTarget(pprofTarget{
+			ServiceType: "registry",
+			Name:        "registry",
+			Address:     diagAddress,
+			BaseURL:     diagURL,
+		})
+	}
+
+	// Fetcher diagnostics: explicit addresses first, then gRPC+1 convention.
+	if len(r.config.FetcherDiagnostics) > 0 {
+		for _, configured := range r.config.FetcherDiagnostics {
+			diagURL, diagAddress := diagnosticsEndpoint(configured)
+			if diagURL == "" {
+				continue
+			}
+			addTarget(pprofTarget{
+				ServiceType: "fetcher",
+				Name:        diagAddress,
+				Address:     diagAddress,
+				BaseURL:     diagURL,
+			})
+		}
+	} else if fetcherClient := r.getFetcherClient(); fetcherClient != nil {
+		for _, fetcherAddr := range fetcherClient.AllFetchers() {
+			diagAddr, err := addressWithOffset(fetcherAddr, 1)
+			if err != nil {
+				r.logger.Warn("skipping fetcher pprof target: cannot compute diagnostics address",
+					"fetcher_addr", fetcherAddr,
+					"error", err)
+				continue
+			}
+			addTarget(pprofTarget{
+				ServiceType: "fetcher",
+				Name:        fetcherAddr,
+				Address:     diagAddr,
+				BaseURL:     "http://" + diagAddr,
+			})
+		}
+	}
+
+	r.logger.Info("pprof targets discovered",
+		"count", len(targets),
+		"service_types", pprofTargetServiceTypes(targets))
+
+	return targets
+}
+
+func collectPprofArtifacts(parent context.Context, targets []pprofTarget, profiles []string, cpuSeconds int) (pprofCollectManifest, map[string][]byte) {
+	manifest := pprofCollectManifest{
+		GeneratedAt:          time.Now().UTC().Format(time.RFC3339),
+		Profiles:             append([]string(nil), profiles...),
+		CpuDurationSeconds:   cpuSeconds,
+		RequestedTargetCount: len(targets),
+		Results:              make([]pprofTargetResult, 0, len(targets)),
+	}
+
+	files := make(map[string][]byte)
+	results := make([]pprofTargetResult, 0, len(targets))
+
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+
+	for _, target := range targets {
+		target := target
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result := pprofTargetResult{
+				ServiceType: target.ServiceType,
+				Name:        target.Name,
+				Address:     target.Address,
+				BaseURL:     target.BaseURL,
+				Profiles:    make([]pprofProfileResult, 0, len(profiles)),
+			}
+
+			for _, profile := range profiles {
+				data, err := fetchPprofProfile(parent, target.BaseURL, profile, cpuSeconds)
+				entry := pprofProfileResult{Profile: profile}
+				if err != nil {
+					entry.OK = false
+					entry.Error = err.Error()
+					result.Profiles = append(result.Profiles, entry)
+					continue
+				}
+
+				entry.OK = true
+				entry.Bytes = len(data)
+				result.Profiles = append(result.Profiles, entry)
+
+				fileName := fmt.Sprintf("%s/%s/%s.pprof", sanitizePathSegment(target.ServiceType), sanitizePathSegment(target.Name), sanitizePathSegment(profile))
+				mu.Lock()
+				files[fileName] = data
+				mu.Unlock()
+			}
+
+			mu.Lock()
+			results = append(results, result)
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].ServiceType == results[j].ServiceType {
+			return results[i].Name < results[j].Name
+		}
+		return results[i].ServiceType < results[j].ServiceType
+	})
+	manifest.Results = results
+	return manifest, files
+}
+
+func fetchPprofProfile(parent context.Context, baseURL, profile string, cpuSeconds int) ([]byte, error) {
+	path := "/debug/pprof/" + profile
+	if profile == "cpu" {
+		path = "/debug/pprof/profile?seconds=" + strconv.Itoa(cpuSeconds)
+	}
+
+	ctx, cancel := context.WithTimeout(parent, profileTimeout(profile, cpuSeconds))
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	client := &http.Client{Timeout: profileTimeout(profile, cpuSeconds)}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", response.StatusCode)
+	}
+
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty profile")
+	}
+	return data, nil
+}
+
+func profileTimeout(profile string, cpuSeconds int) time.Duration {
+	if profile == "cpu" {
+		return time.Duration(cpuSeconds+15) * time.Second
+	}
+	if profile == "trace" {
+		return 45 * time.Second
+	}
+	return 20 * time.Second
+}
+
+func normalizePprofProfiles(input []string) []string {
+	allowed := map[string]bool{
+		"cpu":          true,
+		"heap":         true,
+		"goroutine":    true,
+		"allocs":       true,
+		"mutex":        true,
+		"block":        true,
+		"threadcreate": true,
+		"trace":        true,
+	}
+	seen := make(map[string]bool)
+	profiles := make([]string, 0, len(input))
+	for _, item := range input {
+		profile := strings.ToLower(strings.TrimSpace(item))
+		if !allowed[profile] || seen[profile] {
+			continue
+		}
+		seen[profile] = true
+		profiles = append(profiles, profile)
+	}
+	return profiles
+}
+
+func sanitizePathSegment(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "unknown"
+	}
+	trimmed = strings.ReplaceAll(trimmed, ":", "_")
+	trimmed = strings.ReplaceAll(trimmed, "/", "_")
+	trimmed = strings.ReplaceAll(trimmed, "\\", "_")
+	trimmed = strings.ReplaceAll(trimmed, "..", "_")
+	cleaned := filepath.Clean(trimmed)
+	if cleaned == "." || cleaned == "" {
+		return "unknown"
+	}
+	return cleaned
+}
+
+func pprofTargetServiceTypes(targets []pprofTarget) []string {
+	seen := make(map[string]bool)
+	types := make([]string, 0, 4)
+	for _, t := range targets {
+		if !seen[t.ServiceType] {
+			seen[t.ServiceType] = true
+			types = append(types, t.ServiceType)
+		}
+	}
+	sort.Strings(types)
+	return types
+}
+
+func routerBaseURLFromRequest(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	host := strings.TrimSpace(req.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = strings.TrimSpace(req.Host)
+	}
+	if host == "" {
+		return ""
+	}
+	if strings.Contains(host, ",") {
+		host = strings.TrimSpace(strings.Split(host, ",")[0])
+	}
+	proto := strings.TrimSpace(req.Header.Get("X-Forwarded-Proto"))
+	if proto == "" {
+		if req.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	return fmt.Sprintf("%s://%s", proto, host)
+}
+
+func addressWithOffset(address string, portOffset int) (string, error) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return "", err
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(host, strconv.Itoa(portNum+portOffset)), nil
+}
+
+func diagnosticsEndpoint(raw string) (baseURL string, address string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", ""
+	}
+	if strings.Contains(trimmed, "://") {
+		parsed, err := url.Parse(trimmed)
+		if err != nil || parsed.Host == "" {
+			return "", ""
+		}
+		return strings.TrimRight(parsed.String(), "/"), parsed.Host
+	}
+	return "http://" + trimmed, trimmed
 }
 
 // fetchPeerClients fetches FUSE clients from a peer router's /api/local-clients endpoint.
