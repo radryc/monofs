@@ -28,9 +28,10 @@ type RouterConfig struct {
 	UnhealthyThreshold  time.Duration
 	PeerRouters         []RouterPeer
 	FetcherAddresses    []string // Fetcher cluster addresses for monitoring
-	FetcherDiagnostics  []string          // Optional explicit diagnostics addresses for fetchers
-	SearchDiagnostics   string            // Optional explicit diagnostics address for search
-	ServerDiagnostics   map[string]string // Optional explicit diagnostics addresses for servers: nodeID -> addr
+	FetcherDiagnostics    []string          // Optional explicit diagnostics addresses for fetchers
+	SearchDiagnostics     string            // Optional explicit diagnostics address for search
+	ServerDiagnostics     map[string]string // Optional explicit diagnostics addresses for servers: nodeID -> addr
+	RegistryDiagnostics   string            // Optional explicit diagnostics address for registry
 	EncryptionKey       []byte   // 32-byte ChaCha20-Poly1305 key for packager archives
 	GuardianStateDir    string   // Optional directory for persistent Guardian router state
 

@@ -435,5 +435,16 @@ export interface RegistryStats {
   cache_misses: number
   bytes_served: number
   bytes_fetched: number
+  bytes_stored: number
   blob_count: number
+}
+
+export interface RegistryRepoTag {
+  name: string
+  digest: string
+}
+
+export interface RegistryRepoDetail {
+  name: string
+  tags: RegistryRepoTag[]
 }

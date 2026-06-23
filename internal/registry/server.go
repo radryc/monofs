@@ -73,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v2/", s.handleV2)
 	mux.HandleFunc("/api/v1/stats", s.handleStats)
 	mux.HandleFunc("/api/v1/repos", s.handleRepos)
+	mux.HandleFunc("/api/v1/repos/", s.handleRepoDetail)
 	mux.HandleFunc("/health", s.handleHealth)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -102,19 +103,33 @@ func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parts := strings.SplitN(path, "/", 4)
-
-	switch {
-	case len(parts) == 1 && r.Method == "GET":
-		repo := parts[0]
-		if strings.HasSuffix(path, "/tags/list") {
-			s.handleListTags(w, r, repo)
-			return
+	// Split path into segments and find the action boundary.
+	// Repo names can contain slashes (e.g. "library/alpine", "grafana/grafana").
+	// We look for known action keywords: "manifests", "blobs", "tags".
+	segs := strings.Split(path, "/")
+	repoEnd := -1
+	for i, s := range segs {
+		if s == "manifests" || s == "blobs" || s == "tags" {
+			repoEnd = i
+			break
 		}
+	}
+	if repoEnd < 0 {
+		// Single-segment repo with no action (e.g. "/v2/guardian" → tags list probing)
+		repo := segs[0]
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		w.WriteHeader(http.StatusOK)
+		_ = repo
+		return
+	}
 
-	case len(parts) >= 2 && parts[1] == "manifests":
-		repo := parts[0]
-		ref := strings.Join(parts[2:], "/")
+	repo := strings.Join(segs[:repoEnd], "/")
+	action := segs[repoEnd]
+	rest := segs[repoEnd+1:]
+
+	switch action {
+	case "manifests":
+		ref := strings.Join(rest, "/")
 		switch r.Method {
 		case "GET", "HEAD":
 			s.handleGetManifest(w, r, repo, ref)
@@ -127,10 +142,9 @@ func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 
-	case len(parts) >= 2 && parts[1] == "blobs":
-		repo := parts[0]
-		if len(parts) == 3 {
-			dig := parts[2]
+	case "blobs":
+		if len(rest) == 1 {
+			dig := rest[0]
 			switch r.Method {
 			case "GET", "HEAD":
 				s.handleGetBlob(w, r, repo, dig)
@@ -141,9 +155,8 @@ func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		if len(parts) == 4 && parts[2] == "uploads" {
-			uuid := parts[3]
-			// Handle POST to /v2/<repo>/blobs/uploads/ (trailing slash gives empty parts[3])
+		if len(rest) >= 2 && rest[0] == "uploads" {
+			uuid := rest[1]
 			if uuid == "" && r.Method == "POST" {
 				s.handleStartUpload(w, r, repo)
 				return
@@ -160,11 +173,14 @@ func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-
-	case len(parts) >= 3 && parts[1] == "blobs" && parts[2] == "uploads":
-		repo := parts[0]
-		if r.Method == "POST" {
+		if len(rest) == 1 && rest[0] == "uploads" && r.Method == "POST" {
 			s.handleStartUpload(w, r, repo)
+			return
+		}
+
+	case "tags":
+		if len(rest) == 1 && rest[0] == "list" {
+			s.handleListTags(w, r, repo)
 			return
 		}
 	}
@@ -179,7 +195,8 @@ func (s *Server) handleGetManifest(w http.ResponseWriter, r *http.Request, repo,
 	if err == nil {
 		s.stats.Pulls.Add(1)
 		s.stats.BytesServed.Add(int64(len(data)))
-		w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
+		contentType := detectManifestContentType(data)
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Docker-Content-Digest", dgst)
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		if r.Method == "HEAD" {
@@ -195,7 +212,8 @@ func (s *Server) handleGetManifest(w http.ResponseWriter, r *http.Request, repo,
 		data, dgst, err := s.proxy.FetchManifest(ctx, repo, ref)
 		if err == nil {
 			s.stats.Pulls.Add(1)
-			w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
+			contentType := detectManifestContentType(data)
+			w.Header().Set("Content-Type", contentType)
 			w.Header().Set("Docker-Content-Digest", dgst)
 			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 			if r.Method == "HEAD" {
@@ -250,35 +268,47 @@ func (s *Server) handleGetBlob(w http.ResponseWriter, r *http.Request, repo, dig
 		dgst = dgst
 	}
 
-	data, err := s.blobs.Get(ctx, dgst)
+	reader, err := s.blobs.GetReader(ctx, dgst)
 	if err == nil {
+		defer reader.Close()
 		s.stats.Pulls.Add(1)
-		s.stats.BytesServed.Add(int64(len(data)))
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Docker-Content-Digest", dgst)
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		if r.Method == "HEAD" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write(data)
+		written, copyErr := io.Copy(w, reader)
+		s.stats.BytesServed.Add(written)
+		if copyErr != nil {
+			s.logger.Warn("blob copy error", "digest", dgst, "error", copyErr)
+		}
 		return
 	}
 
 	if s.proxy != nil {
-		data, err := s.proxy.FetchBlob(ctx, repo, dgst)
+		_, err := s.proxy.FetchBlob(ctx, repo, dgst)
 		if err == nil {
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Header().Set("Docker-Content-Digest", dgst)
-			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-			if r.Method == "HEAD" {
+			reader, readErr := s.blobs.GetReader(ctx, dgst)
+			if readErr == nil {
+				defer reader.Close()
+				s.stats.Pulls.Add(1)
+				w.Header().Set("Content-Type", "application/octet-stream")
+				w.Header().Set("Docker-Content-Digest", dgst)
+				if r.Method == "HEAD" {
+					w.WriteHeader(http.StatusOK)
+					return
+				}
 				w.WriteHeader(http.StatusOK)
+				written, copyErr := io.Copy(w, reader)
+				s.stats.BytesServed.Add(written)
+				if copyErr != nil {
+					s.logger.Warn("proxy blob copy error", "digest", dgst, "error", copyErr)
+				}
 				return
 			}
-			w.WriteHeader(http.StatusOK)
-			w.Write(data)
-			return
+			s.logger.Warn("blob fetched from upstream but local read failed", "digest", dgst, "error", readErr)
 		}
 		s.logger.Warn("blob not found locally or upstream", "repo", repo, "digest", dgst, "error", err)
 	}
@@ -288,14 +318,23 @@ func (s *Server) handleGetBlob(w http.ResponseWriter, r *http.Request, repo, dig
 
 func (s *Server) handleDeleteBlob(w http.ResponseWriter, r *http.Request, repo, digestStr string) {
 	ctx := r.Context()
+	size, _ := s.blobs.Size(ctx, digestStr)
 	if err := s.blobs.Delete(ctx, digestStr); err != nil && !os.IsNotExist(err) {
 		s.logger.Error("failed to delete blob", "digest", digestStr, "error", err)
+	}
+	if size > 0 {
+		s.stats.BytesStored.Add(-size)
 	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
 func (s *Server) handleStartUpload(w http.ResponseWriter, r *http.Request, repo string) {
-	session := s.uploads.Start(repo)
+	session, err := s.uploads.Start(repo)
+	if err != nil {
+		s.logger.Error("failed to start upload session", "error", err)
+		writeOCIError(w, "BLOB_UPLOAD_INVALID", "failed to start upload")
+		return
+	}
 	w.Header().Set("Docker-Upload-UUID", session.ID)
 	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/uploads/%s", repo, session.ID))
 	w.Header().Set("Range", "0-0")
@@ -309,14 +348,8 @@ func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request, repo,
 		return
 	}
 
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeOCIError(w, "BLOB_UPLOAD_INVALID", "failed to read chunk")
-		return
-	}
 	defer r.Body.Close()
-
-	updated, err := s.uploads.Append(uuid, data)
+	updated, _, err := s.uploads.Append(uuid, r.Body)
 	if err != nil {
 		writeOCIError(w, "BLOB_UPLOAD_INVALID", err.Error())
 		return
@@ -348,7 +381,21 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request, re
 	}
 	dgst := string(d)
 
-	verifiedDgst := digestContent(session.Data)
+	if r.ContentLength > 0 {
+		defer r.Body.Close()
+		_, _, err := s.uploads.Append(uuid, r.Body)
+		if err != nil {
+			writeOCIError(w, "BLOB_UPLOAD_INVALID", "failed to read final chunk")
+			return
+		}
+	}
+
+	verifiedDgst, err := session.Digest()
+	if err != nil {
+		s.uploads.Remove(uuid)
+		writeOCIError(w, "BLOB_UPLOAD_INVALID", "failed to verify digest")
+		return
+	}
 	if dgst != verifiedDgst {
 		s.uploads.Remove(uuid)
 		writeOCIError(w, "DIGEST_INVALID", fmt.Sprintf("digest mismatch: expected %s, got %s", dgst, verifiedDgst))
@@ -356,14 +403,15 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request, re
 	}
 
 	ctx := r.Context()
-	if err := s.blobs.PutUnchecked(ctx, dgst, session.Data); err != nil {
+	if err := s.blobs.PutUncheckedFromReader(ctx, dgst, session.File, session.Size); err != nil {
 		writeOCIError(w, "BLOB_UPLOAD_INVALID", err.Error())
 		return
 	}
 
 	s.uploads.Remove(uuid)
 	s.stats.Pushes.Add(1)
-	s.stats.BytesServed.Add(int64(session.Size))
+	s.stats.BytesServed.Add(session.Size)
+	s.stats.BytesStored.Add(session.Size)
 	s.stats.BlobCount.Add(1)
 
 	w.Header().Set("Docker-Content-Digest", dgst)
@@ -432,6 +480,43 @@ func (s *Server) handleRepos(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+func (s *Server) handleRepoDetail(w http.ResponseWriter, r *http.Request) {
+	repo := strings.TrimPrefix(r.URL.Path, "/api/v1/repos/")
+	if repo == "" {
+		http.Error(w, "repo name required", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	tags, err := s.tags.ListTags(ctx, repo)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+
+	type tagInfo struct {
+		Name   string `json:"name"`
+		Digest string `json:"digest"`
+	}
+	tagInfos := make([]tagInfo, 0, len(tags))
+	for _, tag := range tags {
+		dgst, _ := s.tags.GetTag(ctx, repo, tag)
+		if dgst == "" {
+			dgst = "-"
+		}
+		tagInfos = append(tagInfos, tagInfo{Name: tag, Digest: dgst})
+	}
+
+	result := map[string]interface{}{
+		"name": repo,
+		"tags": tagInfos,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -465,4 +550,30 @@ func writeOCIError(w http.ResponseWriter, code, message string) {
 	}
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(errResp)
+}
+
+var (
+	ociIndexMediaType    = "application/vnd.oci.image.index.v1+json"
+	ociManifestMediaType = "application/vnd.oci.image.manifest.v1+json"
+	dockerManifestV2     = "application/vnd.docker.distribution.manifest.v2+json"
+	dockerManifestList   = "application/vnd.docker.distribution.manifest.list.v2+json"
+)
+
+type manifestHeader struct {
+	MediaType string `json:"mediaType"`
+}
+
+func detectManifestContentType(data []byte) string {
+	var h manifestHeader
+	if err := json.Unmarshal(data, &h); err == nil {
+		switch h.MediaType {
+		case ociIndexMediaType:
+			return ociIndexMediaType
+		case ociManifestMediaType:
+			return ociManifestMediaType
+		case dockerManifestList:
+			return dockerManifestList
+		}
+	}
+	return dockerManifestV2
 }

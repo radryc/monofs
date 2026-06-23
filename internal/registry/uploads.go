@@ -2,10 +2,10 @@ package registry
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -15,15 +15,14 @@ import (
 type UploadSession struct {
 	ID        string    `json:"id"`
 	Repo      string    `json:"repo"`
-	Digest    string    `json:"digest"`
-	Data      []byte    `json:"-"`
+	File      *os.File  `json:"-"`
 	Size      int64     `json:"size"`
 	StartedAt time.Time `json:"started_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type UploadManager struct {
-	mu      sync.RWMutex
+	mu       sync.RWMutex
 	sessions map[string]*UploadSession
 }
 
@@ -33,17 +32,22 @@ func NewUploadManager() *UploadManager {
 	}
 }
 
-func (um *UploadManager) Start(repo string) *UploadSession {
+func (um *UploadManager) Start(repo string) (*UploadSession, error) {
+	f, err := os.CreateTemp("", "monofs-registry-upload-*")
+	if err != nil {
+		return nil, fmt.Errorf("create upload temp file: %w", err)
+	}
 	um.mu.Lock()
 	defer um.mu.Unlock()
 	session := &UploadSession{
 		ID:        uuid.New().String(),
 		Repo:      repo,
+		File:      f,
 		StartedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
 	um.sessions[session.ID] = session
-	return session
+	return session, nil
 }
 
 func (um *UploadManager) Get(id string) (*UploadSession, bool) {
@@ -53,33 +57,31 @@ func (um *UploadManager) Get(id string) (*UploadSession, bool) {
 	return s, ok
 }
 
-func (um *UploadManager) Append(id string, chunkData []byte) (*UploadSession, error) {
+func (um *UploadManager) Append(id string, r io.Reader) (*UploadSession, int64, error) {
 	um.mu.Lock()
 	defer um.mu.Unlock()
 	s, ok := um.sessions[id]
 	if !ok {
-		return nil, fmt.Errorf("upload session not found: %s", id)
+		return nil, 0, fmt.Errorf("upload session not found: %s", id)
 	}
-	s.Data = append(s.Data, chunkData...)
-	s.Size = int64(len(s.Data))
+	n, err := io.Copy(s.File, r)
+	if err != nil {
+		return nil, 0, fmt.Errorf("write to upload temp file: %w", err)
+	}
+	s.Size += n
 	s.UpdatedAt = time.Now()
-	return s, nil
-}
-
-func (um *UploadManager) Complete(id, digest string) (*UploadSession, error) {
-	um.mu.Lock()
-	defer um.mu.Unlock()
-	s, ok := um.sessions[id]
-	if !ok {
-		return nil, fmt.Errorf("upload session not found: %s", id)
-	}
-	s.Digest = digest
-	return s, nil
+	return s, n, nil
 }
 
 func (um *UploadManager) Remove(id string) {
 	um.mu.Lock()
 	defer um.mu.Unlock()
+	s, ok := um.sessions[id]
+	if !ok {
+		return
+	}
+	s.File.Close()
+	os.Remove(s.File.Name())
 	delete(um.sessions, id)
 }
 
@@ -90,6 +92,8 @@ func (um *UploadManager) Cleanup(maxAge time.Duration) int {
 	removed := 0
 	for id, s := range um.sessions {
 		if s.UpdatedAt.Before(cutoff) {
+			s.File.Close()
+			os.Remove(s.File.Name())
 			delete(um.sessions, id)
 			removed++
 		}
@@ -97,21 +101,21 @@ func (um *UploadManager) Cleanup(maxAge time.Duration) int {
 	return removed
 }
 
-func hexEncode(data []byte) string {
-	return hex.EncodeToString(data)
+func (s *UploadSession) SeekToStart() error {
+	_, err := s.File.Seek(0, 0)
+	return err
 }
 
-func sha256Sum(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
-}
-
-func digestContent(data []byte) string {
-	return "sha256:" + sha256Sum(data)
-}
-
-func readAll(r io.Reader) ([]byte, error) {
-	return io.ReadAll(r)
+func (s *UploadSession) Digest() (string, error) {
+	if err := s.SeekToStart(); err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, s.File); err != nil {
+		return "", fmt.Errorf("compute digest: %w", err)
+	}
+	_ = s.SeekToStart()
+	return "sha256:" + fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 type uploadStateJSON struct {

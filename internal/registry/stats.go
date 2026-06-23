@@ -11,6 +11,7 @@ type Stats struct {
 	CacheMisses  atomic.Int64
 	BytesServed  atomic.Int64
 	BytesFetched atomic.Int64
+	BytesStored  atomic.Int64
 	BlobCount    atomic.Int64
 }
 
@@ -22,6 +23,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		CacheMisses:  s.CacheMisses.Load(),
 		BytesServed:  s.BytesServed.Load(),
 		BytesFetched: s.BytesFetched.Load(),
+		BytesStored:  s.BytesStored.Load(),
 		BlobCount:    s.BlobCount.Load(),
 	}
 }
@@ -33,6 +35,7 @@ type StatsSnapshot struct {
 	CacheMisses  int64 `json:"cache_misses"`
 	BytesServed  int64 `json:"bytes_served"`
 	BytesFetched int64 `json:"bytes_fetched"`
+	BytesStored  int64 `json:"bytes_stored"`
 	BlobCount    int64 `json:"blob_count"`
 }
 

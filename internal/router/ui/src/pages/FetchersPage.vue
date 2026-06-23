@@ -5,10 +5,11 @@ import PageHeader from '../components/PageHeader.vue'
 import StatCard from '../components/StatCard.vue'
 import DataCard from '../components/DataCard.vue'
 import NodeBadge from '../components/NodeBadge.vue'
-import type { FetcherStats, LogEngineData } from '../types/api'
+import type { FetcherStats, LogEngineData, RegistryStats } from '../types/api'
 
 const fetchers = ref<FetcherStats | null>(null)
 const logEngine = ref<LogEngineData | null>(null)
+const registryStats = ref<RegistryStats | null>(null)
 const detailed = ref(false)
 
 async function loadFetchers() {
@@ -20,8 +21,14 @@ async function loadLogEngine() {
   logEngine.value = await fetch('/api/logengine').then(r => r.json())
 }
 
+async function loadRegistryStats() {
+  try {
+    registryStats.value = await fetch('/api/registry/stats').then(r => r.json())
+  } catch {}
+}
+
 const { loading: fetchersLoading } = useAutoRefresh(async () => {
-  await Promise.allSettled([loadFetchers(), loadLogEngine()])
+  await Promise.allSettled([loadFetchers(), loadLogEngine(), loadRegistryStats()])
 }, 10_000)
 
 function hitColor(rate: number): string {
@@ -116,35 +123,72 @@ const storageBlobsEntries = computed(() => {
       <template #header>
         <h2 class="text-sm font-semibold text-slate-200">Archive Storage</h2>
       </template>
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 p-5">
-        <div
-          v-for="entry in blobStatsEntries"
-          :key="entry.key"
-          class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4"
-        >
-          <div class="flex items-center gap-2 mb-2">
-            <span class="text-xl">{{ entry.meta.icon }}</span>
+      <div class="flex flex-col lg:flex-row gap-4 p-5">
+        <div class="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div
+            v-for="entry in blobStatsEntries"
+            :key="entry.key"
+            class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4"
+          >
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-xl">{{ entry.meta.icon }}</span>
+              <div>
+                <div class="text-sm font-semibold text-slate-200">{{ entry.meta.label }}</div>
+                <div class="text-xs text-slate-500">{{ entry.meta.desc }}</div>
+              </div>
+            </div>
+            <div class="text-xs space-y-1 mt-3">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Archives</span>
+                <span class="text-slate-200 font-medium">{{ formatNumber(entry.blob_count) }}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Size</span>
+                <span class="text-slate-200 font-medium">{{ formatBytes(entry.blob_bytes) }}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Share</span>
+                <span class="text-slate-200 font-medium">{{ entry.pct.toFixed(1) }}%</span>
+              </div>
+            </div>
+            <div class="mt-2 h-1 bg-slate-700 rounded-full overflow-hidden">
+              <div class="h-full bg-violet-500 rounded-full" :style="{ width: `${entry.pct}%` }"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Registry Data Usage -->
+        <div v-if="registryStats" class="lg:w-64 shrink-0 bg-violet-900/20 rounded-xl border border-violet-700/30 p-4 h-fit">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-xl">🐳</span>
             <div>
-              <div class="text-sm font-semibold text-slate-200">{{ entry.meta.label }}</div>
-              <div class="text-xs text-slate-500">{{ entry.meta.desc }}</div>
+              <div class="text-sm font-semibold text-slate-200">Registry Data</div>
+              <div class="text-xs text-slate-500">OCI blob storage on disk</div>
             </div>
           </div>
-          <div class="text-xs space-y-1 mt-3">
+          <div class="text-xs space-y-1.5 mt-3">
             <div class="flex justify-between">
-              <span class="text-slate-400">Archives</span>
-              <span class="text-slate-200 font-medium">{{ formatNumber(entry.blob_count) }}</span>
+              <span class="text-slate-400">Blobs</span>
+              <span class="text-slate-200 font-medium">{{ formatNumber(registryStats.blob_count) }}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-400">Size</span>
-              <span class="text-slate-200 font-medium">{{ formatBytes(entry.blob_bytes) }}</span>
+              <span class="text-slate-400">On Disk</span>
+              <span class="text-slate-200 font-medium">{{ formatBytes(registryStats.bytes_stored) }}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-400">Share</span>
-              <span class="text-slate-200 font-medium">{{ entry.pct.toFixed(1) }}%</span>
+              <span class="text-slate-400">Fetched</span>
+              <span class="text-slate-200 font-medium">{{ formatBytes(registryStats.bytes_fetched) }}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Served</span>
+              <span class="text-slate-200 font-medium">{{ formatBytes(registryStats.bytes_served) }}</span>
             </div>
           </div>
-          <div class="mt-2 h-1 bg-slate-700 rounded-full overflow-hidden">
-            <div class="h-full bg-violet-500 rounded-full" :style="{ width: `${entry.pct}%` }"></div>
+          <div class="mt-3 pt-3 border-t border-violet-700/30 text-xs">
+            <div class="flex justify-between text-slate-500">
+              <span>Pulls / Pushes</span>
+              <span class="text-slate-400">{{ formatNumber(registryStats.pulls) }} / {{ formatNumber(registryStats.pushes) }}</span>
+            </div>
           </div>
         </div>
       </div>

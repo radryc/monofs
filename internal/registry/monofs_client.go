@@ -177,6 +177,78 @@ func (c *Client) Read(ctx context.Context, path string) ([]byte, error) {
 	return nil, os.ErrNotExist
 }
 
+// ReadStream returns a streaming reader for the file at path.
+// The caller must close the returned reader to release the underlying gRPC stream.
+func (c *Client) ReadStream(ctx context.Context, path string) (io.ReadCloser, error) {
+	nodes, err := c.healthyNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	fullPath := c.dataPath(path)
+	var lastErr error
+	for _, node := range nodes {
+		callCtx, cancel := context.WithTimeout(ctx, c.rpcTimeout)
+		stream, err := node.client.Read(callCtx, &pb.ReadRequest{Path: fullPath, Offset: 0, Size: 0})
+		if err != nil {
+			cancel()
+			lastErr = err
+			continue
+		}
+		return &grpcReadCloser{stream: stream, cancel: cancel}, nil
+	}
+	if lastErr != nil {
+		if status.Code(lastErr) == codes.NotFound {
+			return nil, os.ErrNotExist
+		}
+		return nil, lastErr
+	}
+	return nil, os.ErrNotExist
+}
+
+type grpcReadCloser struct {
+	stream pb.MonoFS_ReadClient
+	cancel context.CancelFunc
+	buf    []byte
+	offset int
+	eof    bool
+}
+
+func (r *grpcReadCloser) Read(p []byte) (int, error) {
+	if r.offset < len(r.buf) {
+		n := copy(p, r.buf[r.offset:])
+		r.offset += n
+		return n, nil
+	}
+	if r.eof {
+		return 0, io.EOF
+	}
+	chunk, err := r.stream.Recv()
+	if err == io.EOF {
+		r.eof = true
+		r.cancel()
+		return 0, io.EOF
+	}
+	if err != nil {
+		r.cancel()
+		return 0, err
+	}
+	r.buf = chunk.GetData()
+	r.offset = 0
+	if len(r.buf) == 0 {
+		r.eof = true
+		r.cancel()
+		return 0, io.EOF
+	}
+	n := copy(p, r.buf)
+	r.offset = n
+	return n, nil
+}
+
+func (r *grpcReadCloser) Close() error {
+	r.cancel()
+	return nil
+}
+
 // Write creates or overwrites a file at the given path.
 func (c *Client) Write(ctx context.Context, path string, data []byte) error {
 	nodes, err := c.healthyNodes(ctx)
