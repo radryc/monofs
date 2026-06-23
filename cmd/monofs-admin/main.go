@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -36,6 +38,7 @@ func main() {
 	clearFailoverCmd := flag.NewFlagSet("clear-failover", flag.ExitOnError)
 	nodeFilesCmd := flag.NewFlagSet("node-files", flag.ExitOnError)
 	fetchersCmd := flag.NewFlagSet("fetchers", flag.ExitOnError)
+	dogfoodCmd := flag.NewFlagSet("dogfood", flag.ExitOnError)
 
 	// Ingest flags
 	routerAddr := ingestCmd.String("router", "localhost:9090", "MonoFS router address")
@@ -100,6 +103,11 @@ func main() {
 	fetchersRouter := fetchersCmd.String("router", "localhost:8080", "MonoFS router HTTP address")
 	fetchersFormat := fetchersCmd.String("format", "table", "Output format: table or json")
 	fetchersDetailed := fetchersCmd.Bool("detailed", false, "Show per-source statistics")
+
+	// Dogfood flags
+	dogfoodRouter := dogfoodCmd.String("router", "localhost:9090", "MonoFS router gRPC address")
+	dogfoodRepos := dogfoodCmd.String("repos", "", "Comma-separated repo names (default: all siblings)")
+	dogfoodExclude := dogfoodCmd.String("exclude", "agent", "Comma-separated repo names to exclude")
 
 	// Whitelist command
 	whitelistCmd := flag.NewFlagSet("whitelist", flag.ExitOnError)
@@ -274,6 +282,14 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "dogfood":
+		dogfoodCmd.Parse(os.Args[2:])
+
+		if err := dogfoodRepositories(*dogfoodRouter, *dogfoodRepos, *dogfoodExclude); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: dogfood failed: %v\n", err)
+			os.Exit(1)
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -303,6 +319,7 @@ Commands:
   node-files       List files owned by a specific node
   fetchers         Show fetcher cluster status and statistics
   whitelist        Manage ingestion whitelist (add, remove, list, enable, disable)
+  dogfood          Ingest all local sibling repositories into MonoFS
 
 Examples:
   # Ingest repository (auto-detect branch from URL)
@@ -2301,4 +2318,140 @@ func formatBytesShort(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.0f%cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// dogfoodRepositories discovers sibling repos and ingests them into MonoFS.
+func dogfoodRepositories(routerAddr, reposFilter, excludeFilter string) error {
+	siblingRepos := map[string]string{
+		"guardian": "https://github.com/radryc/guardian.git",
+		"doctor":   "https://github.com/radryc/doctor.git",
+		"monofs":   "https://github.com/radryc/monofs.git",
+		"kvs":      "https://github.com/radryc/kvs.git",
+		"k8s-top":  "https://github.com/radryc/k8s-top.git",
+		"agent":    "https://github.com/radryc/agent.git",
+		"packager": "https://github.com/radryc/packager.git",
+		"cfg":      "https://github.com/radryc/cfg.git",
+	}
+
+	// Determine which repos to process
+	var names []string
+	if reposFilter != "" {
+		names = strings.Split(reposFilter, ",")
+	} else {
+		for name := range siblingRepos {
+			names = append(names, name)
+		}
+		// Also include stratatools itself
+		names = append(names, "stratatools")
+		sort.Strings(names)
+	}
+
+	// Parse exclude list
+	excluded := make(map[string]bool)
+	for _, name := range strings.Split(excludeFilter, ",") {
+		excluded[strings.TrimSpace(name)] = true
+	}
+
+	// Discover AINFRA directory (parent of stratatools)
+	ainfra := filepath.Join(filepath.Dir(findStratatoolsRoot()), "..")
+
+	fmt.Fprintf(os.Stderr, "=== dogfooding MonoFS from %d local repositories ===\n", len(names))
+	var failures []string
+	var ingested []string
+
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || excluded[name] {
+			fmt.Fprintf(os.Stderr, "skipping %s: excluded\n", name)
+			continue
+		}
+
+		var repoDir string
+		if name == "stratatools" {
+			repoDir = findStratatoolsRoot()
+		} else {
+			repoDir = filepath.Join(ainfra, name)
+		}
+
+		if _, err := os.Stat(repoDir); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "skipping %s: directory not found (%s)\n", name, repoDir)
+			continue
+		}
+
+		// Get git remote URL and current ref
+		source := gitOutput(repoDir, []string{"remote", "get-url", "origin"}, "")
+		if source == "" {
+			fmt.Fprintf(os.Stderr, "skipping %s: no git remote\n", name)
+			continue
+		}
+		// Normalize SSH to HTTPS
+		source = normalizeGitSource(source)
+
+		ref := gitOutput(repoDir, []string{"symbolic-ref", "--quiet", "--short", "HEAD"}, "")
+		if ref == "" {
+			ref = gitOutput(repoDir, []string{"rev-parse", "HEAD"}, "main")
+		}
+
+		fmt.Fprintf(os.Stderr, "=== ingest repo: %s (%s) ===\n", name, ref)
+
+		if err := ingestRepository(routerAddr, source, ref, "", "git", "blob", false, ""); err != nil {
+			failures = append(failures, name)
+			fmt.Fprintf(os.Stderr, "WARNING: ingest failed for %s: %v\n", name, err)
+			continue
+		}
+		ingested = append(ingested, name)
+	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf("dogfood ingest failed for: %s", strings.Join(failures, ", "))
+	}
+
+	fmt.Fprintf(os.Stderr, "dogfood ingest complete: %v\n", ingested)
+	return nil
+}
+
+func findStratatoolsRoot() string {
+	dir, _ := os.Getwd()
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); err == nil {
+			// Check for stratatools specifically
+			if _, err := os.Stat(filepath.Join(dir, "src", "stratatools")); err == nil {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	// Fallback
+	return filepath.Join(dir, "stratatools")
+}
+
+func gitOutput(repoDir string, args []string, defaultVal string) string {
+	cmdArgs := append([]string{"-C", repoDir}, args...)
+	cmd := exec.Command("git", cmdArgs...)
+	out, err := cmd.Output()
+	if err != nil {
+		return defaultVal
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func normalizeGitSource(source string) string {
+	source = strings.TrimSpace(source)
+	// git@github.com:owner/repo.git -> https://github.com/owner/repo.git
+	if strings.HasPrefix(source, "git@github.com:") {
+		rest := strings.TrimPrefix(source, "git@github.com:")
+		rest = strings.TrimSuffix(rest, ".git")
+		return "https://github.com/" + rest + ".git"
+	}
+	// ssh://git@github.com/owner/repo.git -> https://github.com/owner/repo.git
+	if strings.HasPrefix(source, "ssh://git@github.com/") {
+		rest := strings.TrimPrefix(source, "ssh://git@github.com/")
+		rest = strings.TrimSuffix(rest, ".git")
+		return "https://github.com/" + rest + ".git"
+	}
+	return source
 }

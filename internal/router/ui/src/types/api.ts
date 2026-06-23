@@ -314,6 +314,13 @@ export interface PredictorNode {
   error?: string
 }
 
+export type PprofProfile = 'cpu' | 'heap' | 'goroutine' | 'allocs' | 'mutex' | 'block' | 'threadcreate' | 'trace'
+
+export interface PprofCollectRequest {
+  profiles: PprofProfile[]
+  cpu_duration_seconds: number
+}
+
 export interface SearchIndex {
   storage_id: string
   display_path: string
@@ -419,4 +426,25 @@ export interface ToggleWhitelistRequest {
 
 export interface AddWhitelistRequest {
   client_id: string
+}
+
+export interface RegistryStats {
+  pulls: number
+  pushes: number
+  cache_hits: number
+  cache_misses: number
+  bytes_served: number
+  bytes_fetched: number
+  bytes_stored: number
+  blob_count: number
+}
+
+export interface RegistryRepoTag {
+  name: string
+  digest: string
+}
+
+export interface RegistryRepoDetail {
+  name: string
+  tags: RegistryRepoTag[]
 }

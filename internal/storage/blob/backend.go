@@ -287,12 +287,18 @@ func (bb *BlobBackend) scanArchives(archiveDir string) error {
 		for _, packPath := range packs {
 			info, err := os.Stat(packPath)
 			if err != nil {
+				if bb.logger != nil {
+					bb.logger.Warn("failed to stat archive during scan", "path", packPath, "error", err)
+				}
 				continue
 			}
 			totalBytes += info.Size()
 
 			count, err := bb.indexArchive(packPath)
 			if err != nil {
+				if bb.logger != nil {
+					bb.logger.Warn("failed to index archive during scan (wrong encryption key? corrupt file?)", "path", packPath, "error", err)
+				}
 				continue
 			}
 			totalFiles += int64(count)
@@ -1081,12 +1087,18 @@ func (bb *BlobBackend) findBlobOnDisk(blobHash string) (archiveRef, bool, error)
 		for _, packPath := range packs {
 			store, err := pkgstorage.NewLocalFileReader(packPath)
 			if err != nil {
+				if bb.logger != nil {
+					bb.logger.Warn("findBlobOnDisk: failed to open archive file", "path", packPath, "error", err)
+				}
 				continue
 			}
 
 			ar, err := packager.OpenArchive(store, bb.pipeline)
 			if err != nil {
 				store.Close()
+				if bb.logger != nil {
+					bb.logger.Warn("findBlobOnDisk: failed to open archive (wrong encryption key?)", "path", packPath, "error", err)
+				}
 				continue
 			}
 

@@ -49,7 +49,7 @@ type guardianDeletePlan struct {
 }
 
 func guardianRepoStorageBackend(displayPath string) string {
-	if displayPath == "guardian-system" || strings.HasPrefix(displayPath, "guardian/") {
+	if displayPath == "guardian-system" {
 		return "kvs"
 	}
 	return ""
@@ -74,7 +74,52 @@ func applyGuardianRepoStorageBackend(req *pb.RegisterRepositoryRequest) *pb.Regi
 	return req
 }
 
+func (r *Router) UpsertGuardianPathsStream(stream grpc.ClientStreamingServer[pb.GuardianPathWriteChunk, pb.UpsertGuardianPathsResponse]) error {
+	var allWrites []*pb.GuardianPathWrite
+	var token string
+	var mutationCtx *pb.GuardianMutationContext
+
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return status.Errorf(codes.Internal, "recv chunk: %v", err)
+		}
+		if token == "" && chunk.GetGuardianToken() != "" {
+			token = chunk.GetGuardianToken()
+		}
+		if mutationCtx == nil && chunk.GetContext() != nil {
+			mutationCtx = chunk.GetContext()
+		}
+		allWrites = append(allWrites, chunk.GetWrites()...)
+		if chunk.GetIsLast() {
+			break
+		}
+	}
+
+	if len(allWrites) == 0 {
+		return status.Error(codes.InvalidArgument, "at least one write is required")
+	}
+
+	req := &pb.UpsertGuardianPathsRequest{
+		GuardianToken: token,
+		Writes:        allWrites,
+		Context:       mutationCtx,
+	}
+	resp, err := r.processGuardianUpsert(stream.Context(), req)
+	if err != nil {
+		return err
+	}
+	return stream.SendAndClose(resp)
+}
+
 func (r *Router) UpsertGuardianPaths(ctx context.Context, req *pb.UpsertGuardianPathsRequest) (*pb.UpsertGuardianPathsResponse, error) {
+	return r.processGuardianUpsert(ctx, req)
+}
+
+func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardianPathsRequest) (*pb.UpsertGuardianPathsResponse, error) {
 	principal, ok := r.authenticateGuardianMutation(req.GetGuardianToken(), req.GetContext())
 	if !ok {
 		return nil, status.Error(codes.PermissionDenied, "invalid guardian token")
@@ -488,7 +533,7 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 				r.logger.Warn("RegisterRepository failed for guardian upsert", "node", node.id, "display_path", group.displayPath, "error", regErr)
 			}
 
-			batchCtx, batchCancel := context.WithTimeout(ctx, 30*time.Second)
+			batchCtx, batchCancel := context.WithTimeout(ctx, r.config.GuardianIngestTimeout)
 			batchSource := repoURL
 			if batchSource == "" {
 				batchSource = "guardian-path-api"

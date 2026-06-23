@@ -5,7 +5,7 @@ import { useAppStore } from '../stores/app'
 import ToastContainer from './ToastContainer.vue'
 import {
   LayoutDashboard, Server, Users, Zap, GitBranch,
-  BookOpen, Upload, Search, Layers, Download, Package
+  BookOpen, Upload, Search, Layers, Download, Package, Container
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -31,6 +31,7 @@ const navItems = [
   { to: '/indexer',      icon: Layers,          label: 'Indexer' },
   { to: '/fetchers',     icon: Download,        label: 'Fetchers' },
   { to: '/dependencies', icon: Package,         label: 'Dependencies' },
+  { to: '/registry',     icon: Container,       label: 'Registry' },
 ]
 </script>
 

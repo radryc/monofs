@@ -738,7 +738,11 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	content, wasPrefetched, fetchErr = s.readViaFetcher(ctx, storageID, blobHash, repoURL, filePath, branch)
 	if fetchErr != nil {
 		s.logger.ErrorContext(ctx, "read: fetcher request failed", "path", path, "blob_hash", blobHash, "error", fetchErr)
-		return status.Errorf(codes.Unavailable, "failed to read blob via fetcher: %v", fetchErr)
+		code := codes.Unavailable
+		if strings.Contains(fetchErr.Error(), "blob not found") {
+			code = codes.NotFound
+		}
+		return status.Errorf(code, "failed to read blob via fetcher: %v", fetchErr)
 	}
 
 	// Track prefetch hit/miss metrics
