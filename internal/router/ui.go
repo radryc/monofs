@@ -169,6 +169,7 @@ func (r *Router) ServeHTTP() http.Handler {
 	// Registry API routes (proxy to monofs-registry)
 	mux.HandleFunc("/api/registry/stats", r.handleRegistryStats)
 	mux.HandleFunc("/api/registry/repos", r.handleRegistryRepos)
+	mux.HandleFunc("/api/registry/repos/", r.handleRegistryRepoDetail)
 
 	// Health check endpoint for HAProxy
 	mux.HandleFunc("/health", r.handleHealth)
@@ -994,6 +995,43 @@ func (r *Router) handleRegistryRepos(w http.ResponseWriter, req *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
+// handleRegistryRepoDetail proxies to monofs-registry per-repo detail endpoint.
+func (r *Router) handleRegistryRepoDetail(w http.ResponseWriter, req *http.Request) {
+	repo := strings.TrimPrefix(req.URL.Path, "/api/registry/repos/")
+	if repo == "" {
+		http.Error(w, "repo name required", http.StatusBadRequest)
+		return
+	}
+
+	r.mu.RLock()
+	addr := r.registryAddr
+	r.mu.RUnlock()
+
+	if addr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"name": repo,
+			"tags": []string{},
+		})
+		return
+	}
+
+	u := "http://" + addr + "/api/v1/repos/" + repo
+	resp, err := http.Get(u)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"name":  repo,
+			"tags":  []string{},
+			"error": err.Error(),
+		})
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	io.Copy(w, resp.Body)
+}
+
 // handleLogEngineAPI returns per-node doctor telemetry logengine stats.
 func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 	r.mu.RLock()
@@ -1603,6 +1641,16 @@ func (r *Router) collectPprofTargets(req *http.Request) []pprofTarget {
 				"search_addr", searchAddr,
 				"error", err)
 		}
+	}
+
+	// Registry diagnostics: explicit address only.
+	if diagURL, diagAddress := diagnosticsEndpoint(r.config.RegistryDiagnostics); diagURL != "" {
+		addTarget(pprofTarget{
+			ServiceType: "registry",
+			Name:        "registry",
+			Address:     diagAddress,
+			BaseURL:     diagURL,
+		})
 	}
 
 	// Fetcher diagnostics: explicit addresses first, then gRPC+1 convention.

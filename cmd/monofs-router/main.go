@@ -64,6 +64,7 @@ func main() {
 		fetcherAddrs     = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
 		fetcherDiagAddrs = flag.String("fetcher-diagnostics-addrs", "", "Fetcher diagnostics addresses for pprof collection (e.g., fetcher1:9201,fetcher2:9201)")
 		registryAddr     = flag.String("registry-addr", "", "Monofs-registry address for UI proxy (e.g., monofs-registry:5000)")
+		registryDiagAddr = flag.String("registry-diagnostics-addr", "", "Registry diagnostics address for pprof collection (e.g., registry:5001)")
 		serverDiagAddrs  = flag.String("server-diagnostics-addrs", "", "Server diagnostics addresses for pprof collection (e.g., node-a=node-a:9100,node-b=node-b:9100)")
 		healthInt        = flag.Duration("health-interval", 2*time.Second, "Health check interval")
 		unhealthyThr     = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
@@ -163,6 +164,7 @@ func main() {
 		SearchDiagnostics:     strings.TrimSpace(*searchDiagAddr),
 		FetcherDiagnostics:    parseCSVAddrs(*fetcherDiagAddrs),
 		ServerDiagnostics:     parseServerDiagnostics(*serverDiagAddrs),
+		RegistryDiagnostics:   strings.TrimSpace(*registryDiagAddr),
 		GuardianStateDir:      *guardianStateDir,
 		EncryptionKey:         encryptionKey,
 		ReplicationFactor:     *replicationFactor,

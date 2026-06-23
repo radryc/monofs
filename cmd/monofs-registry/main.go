@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/radryc/monofs/internal/diagnostics"
 	"github.com/radryc/monofs/internal/registry"
 )
 
@@ -34,6 +35,8 @@ func main() {
 		upstreamUsername   = flag.String("upstream-username", os.Getenv("MONOFS_REGISTRY_UPSTREAM_USERNAME"), "Username for upstream registry auth")
 		upstreamPassword   = flag.String("upstream-password", os.Getenv("MONOFS_REGISTRY_UPSTREAM_PASSWORD"), "Password for upstream registry auth")
 		upstreamCooldown   = flag.Duration("upstream-cooldown", 10*time.Minute, "Time before re-checking upstream for updates")
+
+		diagnosticsAddr = flag.String("diagnostics-addr", ":5001", "Listen address for Prometheus /metrics and pprof endpoints (empty disables)")
 	)
 	flag.Parse()
 
@@ -87,6 +90,9 @@ func main() {
 		Password: *upstreamPassword,
 		Cooldown: *upstreamCooldown,
 	}
+
+	diagServer := diagnostics.StartServer(logger, "monofs-registry", strings.TrimSpace(*diagnosticsAddr))
+	defer diagnostics.ShutdownServer(logger, "monofs-registry", diagServer)
 
 	proxy := registry.NewProxy(upstreamConfig, registry.NewBlobStore(client), registry.NewTagStore(client, registry.NewBlobStore(client)), &registry.Stats{}, logger)
 	server := registry.NewServer(client, proxy, logger, *dataNS)
