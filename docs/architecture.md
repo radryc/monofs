@@ -30,8 +30,10 @@ This document explains **how MonoFS works**. For day-to-day commands and develop
 6. [Replication, Failover, and Rebalancing](#6-replication-failover-and-rebalancing)
 7. [Native Protocol (Experimental)](#7-native-protocol-experimental)
 8. [Built-in Namespaces: Doctor and Guardian](#8-built-in-namespaces-doctor-and-guardian)
-9. [Observability](#9-observability)
-10. [Where to Read the Code](#10-where-to-read-the-code)
+9. [Encryption at Rest](#9-encryption-at-rest)
+10. [Dual Addressing](#10-dual-addressing)
+11. [Observability](#11-observability)
+12. [Where to Read the Code](#12-where-to-read-the-code)
 
 ---
 
@@ -41,19 +43,21 @@ MonoFS solves a single problem: **make a giant monorepo feel local**.
 
 Instead of `git clone`-ing the world onto every laptop and watching IDE indexers choke, MonoFS projects exactly the subset of files you need through a FUSE mount. Storage, indexing, and ingestion live on a horizontally scalable backend. The local machine only ever holds the files it is actively touching.
 
-The system is composed of five small services and two CLI tools:
+The system is composed of five services, three CLI tools, and two supplementary binaries:
 
-| Service          | Binary              | Role                                      |
-|------------------|---------------------|-------------------------------------------|
-| Router           | `monofs-router`     | Control plane, UI, topology, publish jobs |
-| Storage Node     | `monofs-server`     | Sharded WORM backend, file serving        |
-| Fetcher          | `monofs-fetcher`    | Upstream Git/blob bridge                  |
-| Search           | `monofs-search`     | Out-of-band code indexing                 |
-| FUSE Client      | `monofs-client`     | Local mount (developer machine)           |
-| Session CLI      | `monofs-session`    | Inspect/publish/refresh (developer)       |
-| Admin CLI        | `monofs-admin`      | Operator tasks (ingest, failover, etc.)   |
-| Loadtest         | `monofs-loadtest`   | Filesystem load generator                 |
-| Trace Dump       | `monofs-trace-dump` | Log engine query tool                     |
+| Service          | Binary              | Role                                                        |
+|------------------|---------------------|-------------------------------------------------------------|
+| Router           | `monofs-router`     | Control plane: topology, health, ingest, publish/refresh, UI |
+| Storage Node     | `monofs-server`     | Sharded WORM backend, file serving, replication             |
+| Fetcher          | `monofs-fetcher`    | Stateless DMZ bridge to upstream Git, S3, GCS, MinIO        |
+| Search           | `monofs-search`     | Out-of-band Zoekt code indexing and query                   |
+| FUSE Client      | `monofs-client`     | Local mount with writable overlay and session socket        |
+| Session CLI      | `monofs-session`    | Developer: status, diff, commit, pull, push, search, discard |
+| Admin CLI        | `monofs-admin`      | Operator: ingest, failover, drain, rebalance, rebuild-index |
+| Loadtest         | `monofs-loadtest`   | Filesystem load generator                                   |
+| Trace Dump       | `monofs-trace-dump` | Storage log engine query tool                               |
+
+Plus: a [VS Code extension](../vscode-monofs/) for build/deploy/status commands, and an experimental [kernel module](../monofs-kmod/) for a native VFS path.
 
 ---
 
@@ -392,7 +396,21 @@ See `internal/router/guardian_paths.go` and `internal/router/guardian_path_mappe
 
 ---
 
-## 9. Observability
+## 9. Encryption at Rest
+
+All packager archives are encrypted with **ChaCha20-Poly1305**. The encryption key is a 32-byte value configured via the `MONOFS_ENCRYPTION_KEY` environment variable. It must be identical across all services in the cluster. Docker deployments require it; local dev can skip encryption by omitting the variable.
+
+Key files: `internal/storage/blob/crypto.go`.
+
+## 10. Dual Addressing
+
+Storage nodes register both an internal pod-network address and an optional external host-reachable address with the router. The router advertises the correct set per client:
+- Cluster-internal clients get pod-network addresses for low-latency routing.
+- External clients (WSL, Docker, remote workstations) get external addresses when `--use-external-addrs` is set.
+
+This enables the same cluster to serve both internal services and developer workstations without a separate ingress layer.
+
+## 11. Observability
 
 Every service ships with a Prometheus `/metrics` endpoint and `net/http/pprof` debug endpoints. The router UI bundles all of them into a **Performance** tab.
 
@@ -405,11 +423,11 @@ Every service ships with a Prometheus `/metrics` endpoint and `net/http/pprof` d
 
 The UI calls `POST /api/pprof/collect` to grab a zip of named profiles from all services in one shot. Default profiles: `cpu` (30s), `heap`, `goroutine`. Optional: `allocs`, `mutex`, `block`, `threadcreate`, `trace`.
 
-For log queries, the `monofs-trace-dump` tool exposes a CLI for the storage node’s log engine.
+Additionally, all services export OpenTelemetry traces, metrics, and logs via OTLP (`internal/telemetry/`). The `monofs-trace-dump` tool provides a CLI for querying the storage node's log engine.
 
 ---
 
-## 10. Where to Read the Code
+## 12. Where to Read the Code
 
 | Concern               | Start here                                                  |
 |-----------------------|-------------------------------------------------------------|

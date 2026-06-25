@@ -336,7 +336,11 @@ func (bb *BlobBackend) indexArchive(archivePath string) (int, error) {
 		if strings.Contains(entry, "/") || strings.Contains(entry, ".") {
 			continue
 		}
-		if !isHexString(entry) {
+		hexPart := entry
+		if after, found := strings.CutPrefix(entry, "sha256:"); found {
+			hexPart = after
+		}
+		if !isHexString(hexPart) {
 			continue
 		}
 		bb.blobIndex[entry] = archiveRef{
