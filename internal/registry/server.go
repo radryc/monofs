@@ -109,7 +109,7 @@ func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
 	segs := strings.Split(path, "/")
 	repoEnd := -1
 	for i, s := range segs {
-		if s == "manifests" || s == "blobs" || s == "tags" {
+		if s == "manifests" || s == "blobs" || s == "tags" || s == "referrers" {
 			repoEnd = i
 			break
 		}
@@ -181,6 +181,11 @@ func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
 	case "tags":
 		if len(rest) == 1 && rest[0] == "list" {
 			s.handleListTags(w, r, repo)
+			return
+		}
+	case "referrers":
+		if len(rest) == 1 {
+			s.handleReferrers(w, r, repo, rest[0])
 			return
 		}
 	}
@@ -275,7 +280,15 @@ func (s *Server) handleGetBlob(w http.ResponseWriter, r *http.Request, repo, dig
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Docker-Content-Digest", dgst)
 		if r.Method == "HEAD" {
-			w.WriteHeader(http.StatusOK)
+			blobSize, sizeErr := s.blobs.Size(ctx, dgst)
+			if sizeErr == nil && blobSize > 0 {
+				w.Header().Set("Content-Length", strconv.FormatInt(blobSize, 10))
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			// Blob exists in index but size metadata is missing/corrupt.
+			// Return 404 so the client re-uploads instead of failing on size mismatch.
+			writeOCIError(w, "BLOB_UNKNOWN", "blob content unavailable")
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -297,6 +310,10 @@ func (s *Server) handleGetBlob(w http.ResponseWriter, r *http.Request, repo, dig
 				w.Header().Set("Content-Type", "application/octet-stream")
 				w.Header().Set("Docker-Content-Digest", dgst)
 				if r.Method == "HEAD" {
+					blobSize, sizeErr := s.blobs.Size(ctx, dgst)
+					if sizeErr == nil && blobSize > 0 {
+						w.Header().Set("Content-Length", strconv.FormatInt(blobSize, 10))
+					}
 					w.WriteHeader(http.StatusOK)
 					return
 				}
@@ -550,6 +567,17 @@ func writeOCIError(w http.ResponseWriter, code, message string) {
 	}
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(errResp)
+}
+
+// handleReferrers returns an empty OCI referrers index.
+func (s *Server) handleReferrers(w http.ResponseWriter, r *http.Request, repo, ref string) {
+	w.Header().Set("Content-Type", ociIndexMediaType)
+	if r.Method == "HEAD" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}`))
 }
 
 var (

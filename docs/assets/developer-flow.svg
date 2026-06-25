@@ -1,60 +1,108 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 350" width="100%" height="100%" style="background-color: #0d1117; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
-    <defs>
-        <linearGradient id="gradStep1" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#3b82f6" />
-            <stop offset="100%" stop-color="#1d4ed8" />
-        </linearGradient>
-        <linearGradient id="gradStep2" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#8b5cf6" />
-            <stop offset="100%" stop-color="#6d28d9" />
-        </linearGradient>
-        <linearGradient id="gradStep3" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#ec4899" />
-            <stop offset="100%" stop-color="#be185d" />
-        </linearGradient>
-        <linearGradient id="gradStep4" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#10b981" />
-            <stop offset="100%" stop-color="#047857" />
-        </linearGradient>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="100%" height="100%" style="background-color:#0d1117;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1d4ed8"/></linearGradient>
+    <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#6d28d9"/></linearGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ec4899"/><stop offset="100%" stop-color="#be185d"/></linearGradient>
+    <linearGradient id="g4" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#047857"/></linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L8,5 L0,9 Z" fill="#475569"/></marker>
+    <filter id="shadow"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.3"/></filter>
+  </defs>
 
-        <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-            <polygon points="0 0, 10 3.5, 0 7" fill="#475569" />
-        </marker>
-    </defs>
+  <text x="480" y="38" fill="#f8fafc" font-size="22" font-weight="bold" text-anchor="middle" letter-spacing="1">MonoFS Developer Workflow</text>
+  <text x="480" y="62" fill="#64748b" font-size="13" text-anchor="middle">From cluster bootstrap to published changes in four steps</text>
 
-    <text x="450" y="40" fill="#f8fafc" font-size="22" font-weight="bold" text-anchor="middle" letter-spacing="1">MonoFS Developer Workflow</text>
+  <!-- Connecting line -->
+  <line x1="120" y1="90" x2="840" y2="90" stroke="#475569" stroke-width="3" marker-end="url(#arrow)"/>
 
-    <path d="M 150 150 L 750 150" fill="none" stroke="#475569" stroke-width="4" marker-end="url(#arrow)" />
+  <!-- Step 1: Bootstrap -->
+  <g transform="translate(30, 105)">
+    <rect x="0" y="0" width="200" height="280" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <circle cx="100" cy="40" r="30" fill="url(#g1)" filter="url(#shadow)"/>
+    <text x="100" y="47" fill="#fff" font-size="18" font-weight="bold" text-anchor="middle">1</text>
+    <text x="100" y="92" fill="#f8fafc" font-size="15" font-weight="bold" text-anchor="middle">Bootstrap</text>
+    <text x="100" y="112" fill="#64748b" font-size="12" text-anchor="middle">Bring up the shared stack</text>
+    <rect x="15" y="130" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="146" fill="#60a5fa" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="146" fill="#cbd5e1" font-size="10" font-family="monospace">mt-bootstrap deploy</text>
+    <rect x="15" y="162" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="178" fill="#60a5fa" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="178" fill="#cbd5e1" font-size="10" font-family="monospace">mt-bootstrap stamp-urls</text>
+    <rect x="15" y="194" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="210" fill="#60a5fa" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="210" fill="#cbd5e1" font-size="10" font-family="monospace">mt-release --partition …</text>
+    <rect x="15" y="226" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="242" fill="#60a5fa" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="242" fill="#cbd5e1" font-size="10" font-family="monospace">mt-bootstrap port-forward</text>
+  </g>
 
-    <g transform="translate(60, 110)">
-        <circle cx="90" cy="40" r="40" fill="url(#gradStep1)" />
-        <text x="90" y="46" fill="#ffffff" font-size="20" font-weight="bold" text-anchor="middle">1</text>
-        <text x="90" y="110" fill="#f8fafc" font-size="16" font-weight="bold" text-anchor="middle">Bootstrap Cluster</text>
-        <text x="90" y="130" fill="#94a3b8" font-size="12" text-anchor="middle">mt-bootstrap deploy</text>
-        <text x="90" y="150" fill="#94a3b8" font-size="12" text-anchor="middle">mt-release --partition</text>
-    </g>
+  <!-- Step 2: Ingest -->
+  <g transform="translate(255, 105)">
+    <rect x="0" y="0" width="200" height="280" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <circle cx="100" cy="40" r="30" fill="url(#g2)" filter="url(#shadow)"/>
+    <text x="100" y="47" fill="#fff" font-size="18" font-weight="bold" text-anchor="middle">2</text>
+    <text x="100" y="92" fill="#f8fafc" font-size="15" font-weight="bold" text-anchor="middle">Ingest Repos</text>
+    <text x="100" y="112" fill="#64748b" font-size="12" text-anchor="middle">Load repos into the cluster</text>
+    <rect x="15" y="130" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="146" fill="#c084fc" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="146" fill="#cbd5e1" font-size="9.5" font-family="monospace">monofs-admin ingest \</text>
+    <rect x="15" y="158" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="32" y="174" fill="#94a3b8" font-size="9.5" font-family="monospace">  --router=localhost:9090 \</text>
+    <rect x="15" y="186" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="32" y="202" fill="#94a3b8" font-size="9.5" font-family="monospace">  --source=... --ref=main</text>
+    <text x="100" y="230" fill="#475569" font-size="11" text-anchor="middle">Re-run to refresh</text>
+    <text x="100" y="248" fill="#475569" font-size="11" text-anchor="middle">— idempotent</text>
+  </g>
 
-    <g transform="translate(250, 110)">
-        <circle cx="90" cy="40" r="40" fill="url(#gradStep2)" />
-        <text x="90" y="46" fill="#ffffff" font-size="20" font-weight="bold" text-anchor="middle">2</text>
-        <text x="90" y="110" fill="#f8fafc" font-size="16" font-weight="bold" text-anchor="middle">Ingest Repos</text>
-        <text x="90" y="130" fill="#94a3b8" font-size="12" text-anchor="middle">monofs-admin ingest</text>
-        <text x="90" y="150" fill="#94a3b8" font-size="12" text-anchor="middle">--source=... --ref=main</text>
-    </g>
+  <!-- Step 3: Mount & Code -->
+  <g transform="translate(480, 105)">
+    <rect x="0" y="0" width="200" height="280" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <circle cx="100" cy="40" r="30" fill="url(#g3)" filter="url(#shadow)"/>
+    <text x="100" y="47" fill="#fff" font-size="18" font-weight="bold" text-anchor="middle">3</text>
+    <text x="100" y="92" fill="#f8fafc" font-size="15" font-weight="bold" text-anchor="middle">Mount & Code</text>
+    <text x="100" y="112" fill="#64748b" font-size="12" text-anchor="middle">FUSE mount + edit like local</text>
+    <rect x="15" y="130" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="146" fill="#f472b6" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="146" fill="#cbd5e1" font-size="9.5" font-family="monospace">monofs-client \</text>
+    <rect x="15" y="158" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="32" y="174" fill="#94a3b8" font-size="9.5" font-family="monospace">  --mount=/tmp/dev \</text>
+    <rect x="15" y="186" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="32" y="202" fill="#94a3b8" font-size="9.5" font-family="monospace">  --virtual-monorepo</text>
+    <rect x="15" y="214" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="230" fill="#f472b6" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="230" fill="#cbd5e1" font-size="10" font-family="monospace">git status · go build · IDE</text>
+  </g>
 
-    <g transform="translate(440, 110)">
-        <circle cx="90" cy="40" r="40" fill="url(#gradStep3)" />
-        <text x="90" y="46" fill="#ffffff" font-size="20" font-weight="bold" text-anchor="middle">3</text>
-        <text x="90" y="110" fill="#f8fafc" font-size="16" font-weight="bold" text-anchor="middle">Mount &amp; Code</text>
-        <text x="90" y="130" fill="#94a3b8" font-size="12" text-anchor="middle">monofs-client --mount</text>
-        <text x="90" y="150" fill="#94a3b8" font-size="12" text-anchor="middle">git status | IDE editing</text>
-    </g>
+  <!-- Step 4: Publish -->
+  <g transform="translate(705, 105)">
+    <rect x="0" y="0" width="200" height="280" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <circle cx="100" cy="40" r="30" fill="url(#g4)" filter="url(#shadow)"/>
+    <text x="100" y="47" fill="#fff" font-size="18" font-weight="bold" text-anchor="middle">4</text>
+    <text x="100" y="92" fill="#f8fafc" font-size="15" font-weight="bold" text-anchor="middle">Publish</text>
+    <text x="100" y="112" fill="#64748b" font-size="12" text-anchor="middle">Commit overlay → upstream</text>
+    <rect x="15" y="130" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="146" fill="#34d399" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="146" fill="#cbd5e1" font-size="10" font-family="monospace">monofs-session status</text>
+    <rect x="15" y="162" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="178" fill="#34d399" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="178" fill="#cbd5e1" font-size="10" font-family="monospace">monofs-session diff</text>
+    <rect x="15" y="194" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="210" fill="#34d399" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="210" fill="#cbd5e1" font-size="9.5" font-family="monospace">monofs-session commit \</text>
+    <rect x="15" y="222" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="32" y="238" fill="#94a3b8" font-size="9.5" font-family="monospace">  -m "commit message"</text>
+    <rect x="15" y="254" width="170" height="24" rx="4" fill="#1e293b"/>
+    <text x="20" y="270" fill="#34d399" font-size="10" font-family="monospace" font-weight="bold">$</text>
+    <text x="32" y="270" fill="#cbd5e1" font-size="10" font-family="monospace">monofs-session pull</text>
+  </g>
 
-    <g transform="translate(630, 110)">
-        <circle cx="90" cy="40" r="40" fill="url(#gradStep4)" />
-        <text x="90" y="46" fill="#ffffff" font-size="20" font-weight="bold" text-anchor="middle">4</text>
-        <text x="90" y="110" fill="#f8fafc" font-size="16" font-weight="bold" text-anchor="middle">Publish Changes</text>
-        <text x="90" y="130" fill="#94a3b8" font-size="12" text-anchor="middle">monofs-session commit</text>
-        <text x="90" y="150" fill="#94a3b8" font-size="12" text-anchor="middle">monofs-session push</text>
-    </g>
+  <!-- Section: Read Path + Write Path -->
+  <line x1="60" y1="410" x2="900" y2="410" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Read path -->
+  <text x="120" y="400" fill="#34d399" font-size="11" font-weight="bold" text-anchor="middle">Read Path</text>
+  <text x="245" y="400" fill="#64748b" font-size="10" text-anchor="middle">App → kernel VFS → FUSE → HRW lookup → gRPC to storage node → stream data</text>
+
+  <!-- Write path -->
+  <text x="560" y="400" fill="#60a5fa" font-size="11" font-weight="bold" text-anchor="middle">Write Path</text>
+  <text x="680" y="400" fill="#64748b" font-size="10" text-anchor="middle">App → FUSE → overlay DB → commit → router → fetcher → upstream Git</text>
 </svg>
