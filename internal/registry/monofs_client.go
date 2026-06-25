@@ -194,7 +194,16 @@ func (c *Client) ReadStream(ctx context.Context, path string) (io.ReadCloser, er
 			lastErr = err
 			continue
 		}
-		return &grpcReadCloser{stream: stream, cancel: cancel}, nil
+		// Verify the stream has data by receiving the first chunk.
+		// The node's Read handler may successfully open a stream but
+		// return NotFound on the first Recv if metadata is missing.
+		chunk, recvErr := stream.Recv()
+		if recvErr != nil {
+			cancel()
+			lastErr = recvErr
+			continue
+		}
+		return &grpcReadCloser{stream: stream, cancel: cancel, buf: chunk.GetData(), offset: 0}, nil
 	}
 	if lastErr != nil {
 		if status.Code(lastErr) == codes.NotFound {

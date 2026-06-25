@@ -35,22 +35,21 @@ This document is the **how** that pairs with [architecture.md](architecture.md),
 - **Overlay** — local-only change buffer that lives outside the mount. Required for any write.
 - **Session** — a writable mount’s active overlay plus its identity on the cluster.
 - **Virtual monorepo** — mount mode that hides internal namespaces and synthesizes a root `.git` so you can `git status` and `git diff` at the mount root.
+- **Encryption** — all stored data is encrypted with ChaCha20-Poly1305. The `MONOFS_ENCRYPTION_KEY` env var must be set consistently across all tools.
 - **Commit / Pull / Push** — `commit` publishes source changes upstream, `pull` refreshes the mount from upstream, `push` uploads dependency blobs.
 
 ---
 
 ## The Tools
 
-There are two CLIs you will use directly:
+| Command             | Audience   | Talks to                         | Purpose                                 |
+|---------------------|------------|----------------------------------|-----------------------------------------|
+| `monofs-client`     | Developer  | Router (gRPC), then storage nodes | Mount the filesystem                    |
+| `monofs-session`    | Developer  | Client session socket (Unix)      | Inspect, publish, refresh, search       |
+| `monofs-admin`      | Operator   | Router (gRPC)                     | Ingest, status, failover, drain         |
+| `monofs-trace-dump` | Operator   | Storage node log engine           | Query ingest and telemetry logs         |
 
-| Command             | Audience   | Talks to                         | Purpose                            |
-|---------------------|------------|----------------------------------|------------------------------------|
-| `monofs-client`     | Developer  | Router (gRPC), then storage nodes | Mount the filesystem              |
-| `monofs-session`    | Developer  | Client session socket (Unix)      | Inspect/publish/refresh/search    |
-| `monofs-admin`      | Operator   | Router (gRPC)                     | Ingest, status, failover, drain    |
-| `monofs-trace-dump` | Operator   | Storage node log engine           | Query ingest logs                 |
-
-You usually only need `monofs-client` and `monofs-session` for day-to-day development.
+You usually only need `monofs-client` and `monofs-session` for day-to-day development. A [VS Code extension](../vscode-monofs/) is also available for build, deploy, stamp-URLs, and status panel commands.
 
 ---
 
@@ -61,6 +60,7 @@ You usually only need `monofs-client` and `monofs-session` for day-to-day develo
 You need:
 
 - A reachable router address (default gRPC `:9090`, HTTP UI `:8080`).
+- If the cluster uses encryption, `MONOFS_ENCRYPTION_KEY` must be set in the environment of every client, admin CLI, and session CLI invocation.
 - For local dev, port-forward the MonoFS service:
   ```bash
   mt-bootstrap port-forward   # exposes router on localhost:9090, UI on localhost:8080
@@ -379,6 +379,12 @@ Listings fan out to all healthy nodes. If one node is degraded, the merge waits 
 **Search returns nothing.**
 Make sure the search service has indexed your repos; this happens out of band after ingest and may take a few minutes. `monofs-admin status` reports search worker state.
 
+**gRPC errors about authentication or encryption.**
+Check that `MONOFS_ENCRYPTION_KEY` is set and matches across all services and client tools. Without it, encrypted clusters will reject client connections.
+
+**Mount reports "no healthy nodes" or "topology unavailable."**
+Verify the router is reachable (`monofs-admin status`). If using WSL or Docker, make sure `--use-external-addrs` is set. Check that the cluster has at least one healthy storage node.
+
 ---
 
 ## Current Limits
@@ -388,6 +394,8 @@ MonoFS covers the core edit, publish, and refresh loop. A few adjacent workflows
 - It does not create pull requests — your Git hosting UI handles that.
 - It does not auto-watch branch merges for non-`direct` publish strategies.
 - It does not include `dependency/**` in source-repository publish.
+- File rename, chmod, and special files are not yet supported in the publish bundle; do these operations upstream and re-mount.
+- The native VFS protocol (`monofs-kmod`) is experimental and not part of the stable ABI.
 
 Those steps happen in your existing Git tooling or in future MonoFS automation.
 
