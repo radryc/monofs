@@ -107,6 +107,17 @@ func (b *BlobStore) putChunkedFromReader(ctx context.Context, digest string, r i
 	if size <= 0 {
 		return b.writeSingle(ctx, BlobPath(digest), nil)
 	}
+	// For blobs <= chunkSize, store as a single entry instead of chunked.
+	// Chunked storage creates index entries for _blobs/<hash>/0000 etc.,
+	// but the node's Read handler looks up metadata by the base path
+	// _blobs/<hash> which doesn't exist, causing reads to fail.
+	if size <= chunkSize {
+		buf := make([]byte, size)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return fmt.Errorf("read blob: %w", err)
+		}
+		return b.writeSingle(ctx, BlobPath(digest), buf)
+	}
 	chunks := int(math.Ceil(float64(size) / float64(chunkSize)))
 	for i := 0; i < chunks; i++ {
 		remain := size - int64(i)*int64(chunkSize)
@@ -161,18 +172,35 @@ func (b *BlobStore) Size(ctx context.Context, digest string) (int64, error) {
 		return int64(resp.GetSize()), nil
 	}
 	var total int64
+	sawAny := false
 	for i := 0; ; i++ {
 		chunkPath := chunkPath(digest, i)
 		resp, err := b.client.Stat(ctx, chunkPath)
 		if err != nil {
-			if i == 0 {
-				return 0, err
+			if i == 0 && !sawAny {
+				// Single file not found, try reading the blob to get its size.
+				// The blob exists (GetReader works) but NutsDB metadata lookup fails
+				// because the blob was stored via chunked upload with different index keys.
+				rc, readErr := b.GetReader(ctx, digest)
+				if readErr != nil {
+					return 0, readErr
+				}
+				blobData, readErr := io.ReadAll(rc)
+				rc.Close()
+				if readErr != nil {
+					return 0, readErr
+				}
+				return int64(len(blobData)), nil
 			}
 			break
 		}
+		sawAny = true
 		total += int64(resp.GetSize())
 	}
-	return total, nil
+	if sawAny {
+		return total, nil
+	}
+	return 0, err
 }
 
 func chunkPath(digest string, index int) string {
