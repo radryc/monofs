@@ -80,6 +80,7 @@ func main() {
 	nodeID := flag.String("node-id", "", "Unique node identifier (required)")
 	routerAddr := flag.String("router", "", "Router address for failover coordination (optional)")
 	dbPath := flag.String("db-path", "/tmp/monofs-db", "NutsDB database path")
+	dbSync := flag.Bool("db-sync", false, "Enable synchronous writes to NutsDB for durability (trade performance for data safety)")
 	gitCache := flag.String("git-cache", "/tmp/monofs-git-cache", "Git repository cache directory")
 	debug := flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
 	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
@@ -179,7 +180,7 @@ func main() {
 	)
 
 	// Create server with NutsDB backend
-	srv, err := server.NewServer(*nodeID, *addr, *dbPath, *gitCache, logger)
+	srv, err := server.NewServer(*nodeID, *addr, *dbPath, *gitCache, *dbSync, logger)
 	if err != nil {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)

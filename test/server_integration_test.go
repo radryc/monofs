@@ -51,7 +51,7 @@ func newServerTestEnv(t *testing.T, nodeID string, port int) *serverTestEnv {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	srv, err := server.NewServer(nodeID, fmt.Sprintf("localhost:%d", port), dbPath, gitCache, logger)
+	srv, err := server.NewServer(nodeID, fmt.Sprintf("localhost:%d", port), dbPath, gitCache, false, logger)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}

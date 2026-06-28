@@ -66,7 +66,7 @@ func newClientTestCluster(t *testing.T, numNodes int, basePort int) *clientTestC
 		os.MkdirAll(dbPath, 0755)
 		os.MkdirAll(gitCache, 0755)
 
-		srv, err := server.NewServer(nodeID, fmt.Sprintf("localhost:%d", port), dbPath, gitCache, logger)
+		srv, err := server.NewServer(nodeID, fmt.Sprintf("localhost:%d", port), dbPath, gitCache, false, logger)
 		if err != nil {
 			cluster.cleanup()
 			t.Fatalf("Failed to create server %d: %v", i+1, err)

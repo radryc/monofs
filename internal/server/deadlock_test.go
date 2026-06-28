@@ -41,7 +41,7 @@ func TestConcurrentIngestFile(t *testing.T) {
 	gitCache := filepath.Join(tempDir, "git-cache")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	server, err := NewServer("test-node", ":0", dbPath, gitCache, logger)
+	server, err := NewServer("test-node", ":0", dbPath, gitCache, false, logger)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestConcurrentReadWrite(t *testing.T) {
 	gitCache := filepath.Join(tempDir, "git-cache")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	server, err := NewServer("test-node", ":0", dbPath, gitCache, logger)
+	server, err := NewServer("test-node", ":0", dbPath, gitCache, false, logger)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestRepoExistsNoDeadlock(t *testing.T) {
 	gitCache := filepath.Join(tempDir, "git-cache")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	server, err := NewServer("test-node", ":0", dbPath, gitCache, logger)
+	server, err := NewServer("test-node", ":0", dbPath, gitCache, false, logger)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestDatabaseRecovery(t *testing.T) {
 
 	// Create server
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err := NewServer("test-node", ":0", dbPath, gitCache, logger)
+	server, err := NewServer("test-node", ":0", dbPath, gitCache, false, logger)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestDatabaseRecovery(t *testing.T) {
 		t.Skip("Skipping recovery test: database close timed out (NutsDB async write limitation)")
 	}
 
-	server2, err := NewServer("test-node", ":0", dbPath, gitCache, logger)
+	server2, err := NewServer("test-node", ":0", dbPath, gitCache, false, logger)
 	if err != nil {
 		t.Fatalf("Failed to reopen server: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestHighContentionScenario(t *testing.T) {
 	gitCache := filepath.Join(tempDir, "git-cache")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	server, err := NewServer("test-node", ":0", dbPath, gitCache, logger)
+	server, err := NewServer("test-node", ":0", dbPath, gitCache, false, logger)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}

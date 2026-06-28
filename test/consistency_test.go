@@ -48,7 +48,7 @@ func TestDataPersistence(t *testing.T) {
 
 	// Phase 1: Create server, ingest data, close server
 	t.Run("Phase1_IngestData", func(t *testing.T) {
-		srv, err := server.NewServer("persist-node", fmt.Sprintf("localhost:%d", port), dbPath, gitCache, logger)
+		srv, err := server.NewServer("persist-node", fmt.Sprintf("localhost:%d", port), dbPath, gitCache, false, logger)
 		if err != nil {
 			t.Fatalf("Failed to create server: %v", err)
 		}
@@ -634,7 +634,7 @@ func TestClusterDataDistribution(t *testing.T) {
 		srv, err := server.NewServer(
 			fmt.Sprintf("dist-node-%d", i+1),
 			fmt.Sprintf("localhost:%d", port),
-			dbPath, gitCache, logger,
+			dbPath, gitCache, false, logger,
 		)
 		if err != nil {
 			t.Fatalf("Failed to create node %d: %v", i+1, err)

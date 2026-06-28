@@ -483,5 +483,5 @@ func createTestServer(t *testing.T, tmpDir, nodeID, address string, logger *slog
 		return nil, err
 	}
 
-	return server.NewServer(nodeID, address, dbPath, gitCache, logger)
+	return server.NewServer(nodeID, address, dbPath, gitCache, false, logger)
 }

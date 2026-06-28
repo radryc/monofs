@@ -14,7 +14,7 @@ func TestOnboardingStatusTracking(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestRegisterRepositoryUpdatesExistingSource(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestOnboardingStatusMultipleRepositories(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}

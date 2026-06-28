@@ -18,7 +18,7 @@ func newUsageTestServer(t *testing.T) *Server {
 	dbPath := filepath.Join(tmpDir, "db")
 	gitCache := filepath.Join(tmpDir, "git-cache")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}

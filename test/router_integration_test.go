@@ -228,7 +228,7 @@ func TestRouterHealthChecks(t *testing.T) {
 	os.MkdirAll(dbPath, 0755)
 	os.MkdirAll(gitCache, 0755)
 
-	node, err := server.NewServer("health-test-node", fmt.Sprintf("localhost:%d", nodePort), dbPath, gitCache, logger)
+	node, err := server.NewServer("health-test-node", fmt.Sprintf("localhost:%d", nodePort), dbPath, gitCache, false, logger)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestNodeFailoverScenario(t *testing.T) {
 		node, err := server.NewServer(
 			fmt.Sprintf("failover-node-%d", i+1),
 			fmt.Sprintf("localhost:%d", port),
-			dbPath, gitCache, logger,
+			dbPath, gitCache, false, logger,
 		)
 		if err != nil {
 			t.Fatalf("Failed to create node %d: %v", i+1, err)

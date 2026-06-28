@@ -45,7 +45,7 @@ func TestGetRepositoryFiles(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestGetRepositoryFilesEmpty(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestStreamRepositoryFiles(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestSyncMetadataFromNode(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, nil)
+	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestClearFailoverCache(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, nil)
+	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestFailoverCacheCheck(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestOwnershipTracking(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestReplicaTracking(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, nil)
+	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestConcurrentFailoverOperations(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestMultipleNodeFailoverCleanup(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, nil)
+	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -579,7 +579,7 @@ func BenchmarkGetRepositoryFiles(b *testing.B) {
 	dbPath := filepath.Join(tmpDir, "bench.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("bench-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("bench-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		b.Fatalf("failed to create server: %v", err)
 	}
@@ -635,7 +635,7 @@ func TestIngestReplicaBatch(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, nil)
+	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -721,7 +721,7 @@ func TestIngestReplicaBatchEmpty(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, nil)
+	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -755,7 +755,7 @@ func TestIngestReplicaBatchRegistersRepo(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, nil)
+	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -809,7 +809,7 @@ func TestReplicaDataUsedDuringFailover(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, nil)
+	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -882,7 +882,7 @@ func TestConcurrentReplicaIngestion(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, nil)
+	server, err := NewServer("backup-node", "localhost:9001", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
