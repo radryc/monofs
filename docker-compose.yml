@@ -267,6 +267,7 @@ services:
       - "--fetcher=fetcher-a:9200"
       - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
+      - "--db-sync=true"
       - "--debug"
     volumes:
       - node-a-data:/data
@@ -310,6 +311,7 @@ services:
       - "--fetcher=fetcher-a:9200"
       - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
+      - "--db-sync=true"
       - "--debug"
     volumes:
       - node-b-data:/data
@@ -353,6 +355,7 @@ services:
       - "--fetcher=fetcher-a:9200"
       - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
+      - "--db-sync=true"
       - "--debug"
     volumes:
       - node-c-data:/data
@@ -396,6 +399,7 @@ services:
       - "--fetcher=fetcher-a:9200"
       - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
+      - "--db-sync=true"
       - "--debug"
     volumes:
       - node-d-data:/data
@@ -439,6 +443,7 @@ services:
       - "--fetcher=fetcher-a:9200"
       - "--fetcher=fetcher-b:9200"
       - "--enable-prediction"
+      - "--db-sync=true"
       - "--debug"
     volumes:
       - node-e-data:/data

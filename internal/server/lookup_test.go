@@ -23,7 +23,7 @@ func TestLookupWithIntermediateDirectories(t *testing.T) {
 
 	// Create real server with database
 	dbPath := filepath.Join(tmpDir, "db")
-	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, nil)
+	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestIsIntermediateDir(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "db")
-	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, nil)
+	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestReadDirWithIntermediateDirectories(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "db")
-	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, nil)
+	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestIntermediateDirCache(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "db")
-	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, nil)
+	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestDoctorNamespaceVisibleWithoutRepo(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "db")
-	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, nil)
+	server, err := NewServer("test-node", ":9000", dbPath, tmpDir, false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
