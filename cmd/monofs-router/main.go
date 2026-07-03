@@ -70,7 +70,8 @@ func main() {
 		unhealthyThr     = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
 		debug            = flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
 		logLevel         = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-		guardianStateDir = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
+		guardianStateDir  = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
+		workspaceStateDir = flag.String("workspace-state-dir", "", "Directory for persistent workspace job state (Phase 1), separate from Guardian state")
 
 		// Replication and failover configuration
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
@@ -166,6 +167,7 @@ func main() {
 		ServerDiagnostics:     parseServerDiagnostics(*serverDiagAddrs),
 		RegistryDiagnostics:   strings.TrimSpace(*registryDiagAddr),
 		GuardianStateDir:      *guardianStateDir,
+		WorkspaceStateDir:     *workspaceStateDir,
 		EncryptionKey:         encryptionKey,
 		ReplicationFactor:     *replicationFactor,
 		RebalanceDelay:        *rebalanceDelay,

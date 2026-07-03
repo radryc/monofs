@@ -16,6 +16,7 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/storage/workspacestore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -33,7 +34,8 @@ type RouterConfig struct {
 	ServerDiagnostics     map[string]string // Optional explicit diagnostics addresses for servers: nodeID -> addr
 	RegistryDiagnostics   string            // Optional explicit diagnostics address for registry
 	EncryptionKey       []byte   // 32-byte ChaCha20-Poly1305 key for packager archives
-	GuardianStateDir    string   // Optional directory for persistent Guardian router state
+	GuardianStateDir     string // Optional directory for persistent Guardian router state
+	WorkspaceStateDir    string // Optional directory for persistent workspace job state (Phase 1)
 
 	// Replication and failover configuration
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
@@ -126,6 +128,9 @@ type Router struct {
 	workspaceSyncJobs map[string]*workspaceSyncJobEntry
 	workspaceBundleMu sync.RWMutex
 	workspaceBundles  map[string]*stagedWorkspaceBundle
+
+	// Phase 1: Persistent workspace job store (nil when WorkspaceStateDir is empty)
+	workspaceJobStore *workspacestore.Store
 
 	// Connected FUSE clients
 	clients     map[string]*clientState // clientID -> state
@@ -317,6 +322,17 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		logger.Error("failed to initialize guardian version store", "state_dir", cfg.GuardianStateDir, "error", err)
 		guardianVersions, _ = newGuardianVersionStore("")
 	}
+
+	var wjs *workspacestore.Store
+	if cfg.WorkspaceStateDir != "" {
+		wjsCfg := workspacestore.DefaultStoreConfig(cfg.WorkspaceStateDir)
+		wjs, err = workspacestore.New(wjsCfg, logger)
+		if err != nil {
+			logger.Error("failed to initialize workspace job store, falling back to in-memory",
+				"state_dir", cfg.WorkspaceStateDir, "error", err)
+			wjs = nil
+		}
+	}
 	r := &Router{
 		nodes:                     make(map[string]*nodeState),
 		ingestedRepos:             make(map[string]*ingestedRepo),
@@ -331,6 +347,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		pendingIndexRebuilds:      make(map[string]map[string]bool),
 		workspaceSyncJobs:         make(map[string]*workspaceSyncJobEntry),
 		workspaceBundles:          make(map[string]*stagedWorkspaceBundle),
+		workspaceJobStore:         wjs,
 		failoverTimers:            make(map[string]*time.Timer),
 		failoverStartTimes:        make(map[string]time.Time),
 		config:                    cfg,
@@ -1661,6 +1678,10 @@ func (r *Router) Close() error {
 
 	// Flush and stop the guardian version store background ticker.
 	r.guardianVersions.close()
+
+	if r.workspaceJobStore != nil {
+		r.workspaceJobStore.Close()
+	}
 
 	// Close search connection
 	if r.searchConn != nil {
