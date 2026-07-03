@@ -234,6 +234,135 @@ func TestStageAndSourcePushWorkspaceCommitBundle(t *testing.T) {
 	}
 }
 
+func TestSourcePushPreserveModePerCommitReplay(t *testing.T) {
+	remotePath, baseCommit := createPublishRemoteRepo(t)
+	client, cleanup := startRepoSyncWorkerTestClient(t)
+	defer cleanup()
+
+	bundleBytes, err := json.Marshal(workspacebundle.SourceCommitBundle{
+		WorkspaceID:   "workspace-b",
+		LogicalBranch: "feature/preserve",
+		Commits: []workspacebundle.SourceCommit{
+			{
+				ID:            "local-c1",
+				Message:       "add feature A",
+				AuthorName:    "Alice",
+				AuthorEmail:   "alice@example.com",
+				CreatedAtUnix: 100,
+				Repositories: []workspacebundle.SourceCommitRepository{{
+					StorageID:   "repo-1",
+					DisplayPath: "src/repo-1",
+					RepoURL:     remotePath,
+					Branch:      "main",
+					BaseCommit:  baseCommit,
+					Operations: []workspacebundle.Operation{{
+						Kind:    workspacebundle.OperationUpsert,
+						Path:    "feature_a.txt",
+						Content: []byte("feature A content\n"),
+					}},
+				}},
+			},
+			{
+				ID:            "local-c2",
+				ParentID:      "local-c1",
+				Message:       "add feature B",
+				AuthorName:    "Bob",
+				AuthorEmail:   "bob@example.com",
+				CreatedAtUnix: 200,
+				Repositories: []workspacebundle.SourceCommitRepository{{
+					StorageID:   "repo-1",
+					DisplayPath: "src/repo-1",
+					RepoURL:     remotePath,
+					Branch:      "main",
+					BaseCommit:  baseCommit,
+					Operations: []workspacebundle.Operation{{
+						Kind:    workspacebundle.OperationUpsert,
+						Path:    "feature_b.txt",
+						Content: []byte("feature B content\n"),
+					}},
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal source commit bundle: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stage, err := client.StageWorkspaceCommitBundle(ctx)
+	if err != nil {
+		t.Fatalf("open source stage stream: %v", err)
+	}
+	if err := stage.Send(&pb.WorkspaceBundleChunk{
+		WorkspaceId: "workspace-b",
+		BundleId:    "commit-bundle-p",
+		Data:        bundleBytes,
+		IsLast:      true,
+	}); err != nil {
+		t.Fatalf("send source stage chunk: %v", err)
+	}
+	stageResp, err := stage.CloseAndRecv()
+	if err != nil {
+		t.Fatalf("close source stage stream: %v", err)
+	}
+	if stageResp.GetBytesReceived() != int64(len(bundleBytes)) {
+		t.Fatalf("expected %d staged bytes, got %d", len(bundleBytes), stageResp.GetBytesReceived())
+	}
+
+	pushStream, err := client.StartWorkspaceCommitPush(ctx, &pb.StartWorkspaceCommitPushRequest{
+		JobId:          "job-preserve-1",
+		WorkspaceId:    "workspace-b",
+		BundleId:       "commit-bundle-p",
+		LogicalBranch:  "feature/preserve",
+		SourcePushMode: "preserve",
+	})
+	if err != nil {
+		t.Fatalf("start preserve source push: %v", err)
+	}
+
+	var results []*pb.RepoSyncProgress
+	for {
+		progress, err := pushStream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("recv preserve push progress: %v", err)
+		}
+		results = append(results, progress)
+	}
+	if len(results) != 2 {
+		t.Fatalf("preserve mode: expected 2 results (one per commit), got %d", len(results))
+	}
+
+	for i, r := range results {
+		if r.GetStatus() != pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED {
+			t.Fatalf("result %d: expected published, got %s", i, r.GetStatus().String())
+		}
+		if r.GetPushedCommit() == "" {
+			t.Fatalf("result %d: expected pushed commit hash", i)
+		}
+		if r.GetLocalCommitId() == "" {
+			t.Fatalf("result %d: expected local_commit_id", i)
+		}
+		if got := r.GetLocalCommitIndex(); int(got) != i {
+			t.Fatalf("result %d: expected local_commit_index=%d, got %d", i, i, got)
+		}
+		if r.GetTargetBranch() != "feature/preserve" {
+			t.Fatalf("result %d: target branch = %q, want feature/preserve", i, r.GetTargetBranch())
+		}
+	}
+
+	if results[0].GetLocalCommitId() != "local-c1" {
+		t.Fatalf("first commit id = %q, want local-c1", results[0].GetLocalCommitId())
+	}
+	if results[1].GetLocalCommitId() != "local-c2" {
+		t.Fatalf("second commit id = %q, want local-c2", results[1].GetLocalCommitId())
+	}
+}
+
 func startRepoSyncWorkerTestClient(t *testing.T) (pb.RepoSyncWorkerClient, func()) {
 	t.Helper()
 

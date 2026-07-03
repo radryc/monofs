@@ -147,11 +147,13 @@ func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspace
 		return sendWorkspaceSyncTerminalEvent(send, entry, "workspace source push job failed")
 	}
 
+	pushMode := resolveSourcePushMode(req.GetSourcePushMode(), r.config.SourcePushMode)
 	pushResults, err := fetcherClient.StartWorkspaceCommitPush(ctx, &pb.StartWorkspaceCommitPushRequest{
-		JobId:         entry.snapshot().GetJobId(),
-		WorkspaceId:   bundleEntry.workspaceID,
-		BundleId:      req.GetBundleId(),
-		LogicalBranch: logicalBranch,
+		JobId:           entry.snapshot().GetJobId(),
+		WorkspaceId:     bundleEntry.workspaceID,
+		BundleId:        req.GetBundleId(),
+		LogicalBranch:   logicalBranch,
+		SourcePushMode:  pushMode,
 	})
 	if err != nil {
 		r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH), err.Error())
@@ -222,4 +224,23 @@ func resolveSourcePushLogicalBranch(requested string, bundle *workspacebundle.So
 		return requested, nil
 	}
 	return bundleBranch, nil
+}
+
+const (
+	sourcePushModeSquash   = "squash"
+	sourcePushModePreserve = "preserve"
+)
+
+func resolveSourcePushMode(requested pb.SourcePushMode, configDefault string) string {
+	if requested == pb.SourcePushMode_SOURCE_PUSH_MODE_PRESERVE {
+		return sourcePushModePreserve
+	}
+	if requested == pb.SourcePushMode_SOURCE_PUSH_MODE_SQUASH {
+		return sourcePushModeSquash
+	}
+	requestedStr := strings.TrimSpace(strings.ToLower(configDefault))
+	if requestedStr == sourcePushModePreserve {
+		return sourcePushModePreserve
+	}
+	return sourcePushModeSquash
 }

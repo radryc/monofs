@@ -37,6 +37,9 @@ type RouterConfig struct {
 	GuardianStateDir     string // Optional directory for persistent Guardian router state
 	WorkspaceStateDir    string // Optional directory for persistent workspace job state (Phase 1)
 
+	// Source push behavior
+	SourcePushMode string // "squash" (default) or "preserve"
+
 	// Replication and failover configuration
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
 	RebalanceDelay        time.Duration // Wait before triggering permanent rebalance after failure, default: 10m

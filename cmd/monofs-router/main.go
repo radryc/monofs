@@ -72,6 +72,7 @@ func main() {
 		logLevel         = flag.String("log-level", "info", "Log level: debug, info, warn, error")
 		guardianStateDir  = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
 		workspaceStateDir = flag.String("workspace-state-dir", "", "Directory for persistent workspace job state (Phase 1), separate from Guardian state")
+		sourcePushMode    = flag.String("source-push-mode", "squash", "Source push mode: squash or preserve")
 
 		// Replication and failover configuration
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
@@ -168,6 +169,7 @@ func main() {
 		RegistryDiagnostics:   strings.TrimSpace(*registryDiagAddr),
 		GuardianStateDir:      *guardianStateDir,
 		WorkspaceStateDir:     *workspaceStateDir,
+		SourcePushMode:        *sourcePushMode,
 		EncryptionKey:         encryptionKey,
 		ReplicationFactor:     *replicationFactor,
 		RebalanceDelay:        *rebalanceDelay,

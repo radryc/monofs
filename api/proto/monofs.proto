@@ -594,6 +594,12 @@ enum WorkspaceSyncAction {
     WORKSPACE_SYNC_ACTION_SOURCE_PUSH = 3;
 }
 
+enum SourcePushMode {
+    SOURCE_PUSH_MODE_UNSPECIFIED = 0;
+    SOURCE_PUSH_MODE_SQUASH = 1;
+    SOURCE_PUSH_MODE_PRESERVE = 2;
+}
+
 enum WorkspaceSyncState {
     WORKSPACE_SYNC_STATE_UNSPECIFIED = 0;
     WORKSPACE_SYNC_STATE_QUEUED = 1;
@@ -663,6 +669,7 @@ message PushWorkspaceCommitsRequest {
     string workspace_id = 1;
     string bundle_id = 2;
     string logical_branch = 3;
+    SourcePushMode source_push_mode = 4;
 }
 
 message RefreshWorkspaceRequest {
@@ -693,6 +700,8 @@ message WorkspaceSyncRepositoryResult {
     string conflict_reason = 9;
     string target_branch = 10;
     string pushed_commit = 11;
+    string local_commit_id = 12;
+    int32 local_commit_index = 13;
 }
 
 message WorkspaceSyncJob {
