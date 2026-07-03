@@ -81,6 +81,9 @@ func (r *Router) CancelWorkspaceSyncJob(ctx context.Context, req *pb.CancelWorks
 	entry.job.State = pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_CANCELLED
 	entry.job.FinishedAtUnix = time.Now().Unix()
 	entry.job.ErrorMessage = "cancelled"
+	if r.workspaceJobStore != nil {
+		_ = r.workspaceJobStore.UpsertJob(proto.Clone(entry.job).(*pb.WorkspaceSyncJob))
+	}
 	entry.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -219,6 +222,9 @@ func (r *Router) storeWorkspaceSyncJob(entry *workspaceSyncJobEntry) {
 	r.workspaceSyncMu.Lock()
 	r.workspaceSyncJobs[entry.job.GetJobId()] = entry
 	r.workspaceSyncMu.Unlock()
+	if r.workspaceJobStore != nil {
+		_ = r.workspaceJobStore.UpsertJob(entry.snapshot())
+	}
 }
 
 func (r *Router) getWorkspaceSyncJob(jobID string) *workspaceSyncJobEntry {
@@ -259,6 +265,9 @@ func (r *Router) updateWorkspaceSyncJob(entry *workspaceSyncJobEntry, update fun
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	update(entry.job)
+	if r.workspaceJobStore != nil {
+		_ = r.workspaceJobStore.UpsertJob(proto.Clone(entry.job).(*pb.WorkspaceSyncJob))
+	}
 }
 
 func (r *Router) updateWorkspaceSyncRepository(entry *workspaceSyncJobEntry, repo *pb.WorkspaceSyncRepositoryResult) {
@@ -278,6 +287,9 @@ func (r *Router) updateWorkspaceSyncRepository(entry *workspaceSyncJobEntry, rep
 	}
 	routerWorkspaceSyncRepositoriesTotal.WithLabelValues(actionLabel, workspaceSyncRepositoryMetricLabel(repo.GetStatus())).Inc()
 	updateWorkspaceSyncSummary(entry.job)
+	if r.workspaceJobStore != nil {
+		_ = r.workspaceJobStore.UpsertJob(proto.Clone(entry.job).(*pb.WorkspaceSyncJob))
+	}
 }
 
 func (r *Router) failWorkspaceSyncJob(entry *workspaceSyncJobEntry, actionLabel, message string) {

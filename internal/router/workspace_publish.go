@@ -8,6 +8,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/storage/workspacestore"
 	"github.com/radryc/monofs/internal/workspacebundle"
 	"google.golang.org/grpc"
 )
@@ -220,6 +221,17 @@ func (r *Router) storeWorkspaceBundle(entry *stagedWorkspaceBundle) {
 	r.workspaceBundleMu.Lock()
 	r.workspaceBundles[entry.bundleID] = entry
 	r.workspaceBundleMu.Unlock()
+	if r.workspaceJobStore != nil {
+		_ = r.workspaceJobStore.UpsertBundle(&workspacestore.BundleMetadata{
+			BundleID:       entry.bundleID,
+			WorkspaceID:    entry.workspaceID,
+			Kind:           "publish",
+			ByteSize:       int64(len(entry.data)),
+			RepoCount:      int32(len(entry.bundle.Repositories)),
+			CreatedAtUnix:  entry.createdAt.Unix(),
+			ExpiresAtUnix:  entry.expiresAt.Unix(),
+		})
+	}
 }
 
 func (r *Router) getWorkspaceBundle(bundleID string) *stagedWorkspaceBundle {
