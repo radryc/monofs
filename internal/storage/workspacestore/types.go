@@ -65,10 +65,10 @@ type Checkpoint struct {
 }
 
 type compactedSnapshot struct {
-	CheckpointSeq uint64           `json:"checkpoint_seq"`
-	Jobs          []*jobSnapshot   `json:"jobs"`
+	CheckpointSeq uint64            `json:"checkpoint_seq"`
+	Jobs          []*jobSnapshot    `json:"jobs"`
 	Bundles       []*BundleMetadata `json:"bundles"`
-	AuditEvents   []*AuditEvent    `json:"audit_events"`
+	AuditEvents   []*AuditEvent     `json:"audit_events"`
 }
 
 type jobSnapshot struct {
@@ -76,13 +76,13 @@ type jobSnapshot struct {
 }
 
 type StoreConfig struct {
-	StateDir               string
-	CompactionInterval     time.Duration
+	StateDir                string
+	CompactionInterval      time.Duration
 	CompactionSizeThreshold int64
-	JobRetentionDays       int
-	MaxJobsPerWorkspace    int
-	LocalRetentionDays     int
-	FsyncEnabled           bool
+	JobRetentionDays        int
+	MaxJobsPerWorkspace     int
+	LocalRetentionDays      int
+	FsyncEnabled            bool
 }
 
 func DefaultStoreConfig(stateDir string) StoreConfig {
