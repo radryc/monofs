@@ -16,7 +16,7 @@ type Store struct {
 	cfg    StoreConfig
 	logger *slog.Logger
 
-	mu     sync.RWMutex
+	mu      sync.RWMutex
 	nextSeq uint64
 
 	jobs        map[string]*jobEntry
@@ -209,6 +209,52 @@ func (s *Store) ListAuditEvents() []*AuditEvent {
 		result[i] = cp
 	}
 	return result
+}
+
+func (s *Store) InsertLedger(data []byte) error {
+	s.mu.Lock()
+	seq := s.nextSeq
+	s.nextSeq++
+
+	walEntry := WALEntry{
+		Seq:  seq,
+		TS:   time.Now(),
+		Op:   OpInsert,
+		Kind: KindLedger,
+		Data: json.RawMessage(data),
+	}
+	s.mu.Unlock()
+
+	if s.wal != nil {
+		return s.wal.Append(walEntry)
+	}
+	return nil
+}
+
+func (s *Store) ReplayLedgerEntries(callback func([]byte) error) error {
+	if s.wal == nil {
+		return nil
+	}
+
+	fromSeq := uint64(0)
+	if s.checkpoint != nil {
+		fromSeq = s.checkpoint.LastCompactedSeq
+	}
+
+	entries, err := s.wal.ReplayEntries(fromSeq)
+	if err != nil {
+		return fmt.Errorf("replay ledger WAL: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.Kind != KindLedger {
+			continue
+		}
+		if err := callback(entry.Data); err != nil {
+			return fmt.Errorf("replay ledger entry seq=%d: %w", entry.Seq, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() {

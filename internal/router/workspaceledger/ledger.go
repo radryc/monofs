@@ -1,14 +1,20 @@
 package workspaceledger
 
 import (
+	"encoding/json"
 	"sort"
 	"sync"
 
 	pb "github.com/radryc/monofs/api/proto"
 )
 
+type WALWriter interface {
+	InsertLedger(data []byte) error
+}
+
 type Ledger struct {
 	mu sync.RWMutex
+	wal WALWriter
 
 	commits  []*pb.LocalCommit
 	outcomes []*pb.PushOutcome
@@ -20,7 +26,6 @@ type Ledger struct {
 	byPrincipal map[string][]int
 	byRepo      map[string][]int
 	byStatus   map[string][]int
-	byTime      []int
 }
 
 func New() *Ledger {
@@ -34,23 +39,95 @@ func New() *Ledger {
 	}
 }
 
+func NewWithWAL(wal WALWriter) *Ledger {
+	return &Ledger{
+		wal:         wal,
+		byCommitID:  make(map[string]*pb.LocalCommit),
+		byJobID:     make(map[string]*pb.PushOutcome),
+		byWorkspace: make(map[string][]int),
+		byPrincipal: make(map[string][]int),
+		byRepo:      make(map[string][]int),
+		byStatus:    make(map[string][]int),
+	}
+}
+
+type ledgerRecord struct {
+	Table string          `json:"table"`
+	Data  json.RawMessage `json:"data"`
+}
+
 func (l *Ledger) InsertCommit(c *pb.LocalCommit) {
+	data, _ := json.Marshal(ledgerRecord{Table: "local_commits", Data: mustMarshal(c)})
+	if l.wal != nil {
+		_ = l.wal.InsertLedger(data)
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.insertCommitLocked(c)
+}
 
+func (l *Ledger) InsertPushOutcome(o *pb.PushOutcome) {
+	data, _ := json.Marshal(ledgerRecord{Table: "push_outcomes", Data: mustMarshal(o)})
+	if l.wal != nil {
+		_ = l.wal.InsertLedger(data)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.insertOutcomeLocked(o)
+}
+
+func (l *Ledger) InsertRefreshEvent(r *pb.RefreshEvent) {
+	data, _ := json.Marshal(ledgerRecord{Table: "refresh_events", Data: mustMarshal(r)})
+	if l.wal != nil {
+		_ = l.wal.InsertLedger(data)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.refreshes = append(l.refreshes, r)
+	l.byWorkspace[r.GetWorkspaceId()] = append(l.byWorkspace[r.GetWorkspaceId()], len(l.refreshes)-1)
+	l.byRepo[r.GetRepoStorageId()] = append(l.byRepo[r.GetRepoStorageId()], len(l.refreshes)-1)
+}
+
+func (l *Ledger) ReplayFromWAL(entryData []byte) error {
+	var rec ledgerRecord
+	if err := json.Unmarshal(entryData, &rec); err != nil {
+		return err
+	}
+	switch rec.Table {
+	case "local_commits":
+		var c pb.LocalCommit
+		if err := json.Unmarshal(rec.Data, &c); err != nil {
+			return err
+		}
+		l.insertCommitLocked(&c)
+	case "push_outcomes":
+		var o pb.PushOutcome
+		if err := json.Unmarshal(rec.Data, &o); err != nil {
+			return err
+		}
+		l.insertOutcomeLocked(&o)
+	case "refresh_events":
+		var r pb.RefreshEvent
+		if err := json.Unmarshal(rec.Data, &r); err != nil {
+			return err
+		}
+		l.refreshes = append(l.refreshes, &r)
+		l.byWorkspace[r.GetWorkspaceId()] = append(l.byWorkspace[r.GetWorkspaceId()], len(l.refreshes)-1)
+		l.byRepo[r.GetRepoStorageId()] = append(l.byRepo[r.GetRepoStorageId()], len(l.refreshes)-1)
+	}
+	return nil
+}
+
+func (l *Ledger) insertCommitLocked(c *pb.LocalCommit) {
 	idx := len(l.commits)
 	l.commits = append(l.commits, c)
 	l.byCommitID[c.GetLocalCommitId()] = c
 	l.byWorkspace[c.GetWorkspaceId()] = append(l.byWorkspace[c.GetWorkspaceId()], idx)
 	l.byPrincipal[c.GetPrincipalId()] = append(l.byPrincipal[c.GetPrincipalId()], idx)
 	l.byRepo[c.GetRepoStorageId()] = append(l.byRepo[c.GetRepoStorageId()], idx)
-	l.byTime = append(l.byTime, idx)
 }
 
-func (l *Ledger) InsertPushOutcome(o *pb.PushOutcome) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
+func (l *Ledger) insertOutcomeLocked(o *pb.PushOutcome) {
 	idx := len(l.outcomes)
 	l.outcomes = append(l.outcomes, o)
 	l.byJobID[o.GetJobId()] = o
@@ -58,15 +135,6 @@ func (l *Ledger) InsertPushOutcome(o *pb.PushOutcome) {
 	l.byRepo[o.GetRepoStorageId()] = append(l.byRepo[o.GetRepoStorageId()], idx)
 	statusKey := "outcome:" + o.GetStatus()
 	l.byStatus[statusKey] = append(l.byStatus[statusKey], idx)
-}
-
-func (l *Ledger) InsertRefreshEvent(r *pb.RefreshEvent) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	l.refreshes = append(l.refreshes, r)
-	l.byWorkspace[r.GetWorkspaceId()] = append(l.byWorkspace[r.GetWorkspaceId()], len(l.refreshes)-1)
-	l.byRepo[r.GetRepoStorageId()] = append(l.byRepo[r.GetRepoStorageId()], len(l.refreshes)-1)
 }
 
 func (l *Ledger) Query(req *pb.QueryLedgerRequest) *pb.QueryLedgerResponse {
@@ -157,4 +225,9 @@ func sortByTimestamp[T interface{ GetTimestampUnix() int64 }](s []T) {
 	sort.Slice(s, func(i, j int) bool {
 		return s[i].GetTimestampUnix() > s[j].GetTimestampUnix()
 	})
+}
+
+func mustMarshal(v interface{}) []byte {
+	b, _ := json.Marshal(v)
+	return b
 }

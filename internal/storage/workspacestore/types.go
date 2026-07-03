@@ -17,6 +17,7 @@ const (
 	KindJob    EntityKind = "JOB"
 	KindBundle EntityKind = "BUNDLE"
 	KindAudit  EntityKind = "AUDIT"
+	KindLedger EntityKind = "LEDGER"
 )
 
 type WalOp string
