@@ -17,6 +17,7 @@ import (
 	"github.com/radryc/monofs/internal/fetcher"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
+	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -39,6 +40,10 @@ type RouterConfig struct {
 
 	// Source push behavior
 	SourcePushMode string // "squash" (default) or "preserve"
+
+	// Policy gate (Phase 3)
+	PolicyGateEnabled bool
+	PolicyConfigPath  string
 
 	// Replication and failover configuration
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
@@ -134,6 +139,10 @@ type Router struct {
 
 	// Phase 1: Persistent workspace job store (nil when WorkspaceStateDir is empty)
 	workspaceJobStore *workspacestore.Store
+
+	// Phase 3: Policy evaluation
+	policyCfg    *workspacepolicy.PolicyConfig
+	policyCfgMu  sync.RWMutex
 
 	// Connected FUSE clients
 	clients     map[string]*clientState // clientID -> state
@@ -336,6 +345,18 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 			wjs = nil
 		}
 	}
+
+	var policyCfg *workspacepolicy.PolicyConfig
+	if cfg.PolicyGateEnabled && cfg.PolicyConfigPath != "" {
+		policyCfg, err = workspacepolicy.Load(cfg.PolicyConfigPath)
+		if err != nil {
+			logger.Error("failed to load policy config, policy gate will deny all",
+				"path", cfg.PolicyConfigPath, "error", err)
+			policyCfg = nil
+		} else {
+			logger.Info("policy config loaded", "path", cfg.PolicyConfigPath, "rules", len(policyCfg.Rules))
+		}
+	}
 	r := &Router{
 		nodes:                     make(map[string]*nodeState),
 		ingestedRepos:             make(map[string]*ingestedRepo),
@@ -351,6 +372,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		workspaceSyncJobs:         make(map[string]*workspaceSyncJobEntry),
 		workspaceBundles:          make(map[string]*stagedWorkspaceBundle),
 		workspaceJobStore:         wjs,
+		policyCfg:                 policyCfg,
 		failoverTimers:            make(map[string]*time.Timer),
 		failoverStartTimes:        make(map[string]time.Time),
 		config:                    cfg,
@@ -1669,6 +1691,21 @@ func (r *Router) checkAllNodes() {
 		}
 		_ = nodeID // Silence unused variable warning
 	}
+}
+
+func (r *Router) evalPolicy(req *workspacepolicy.EvaluationRequest) (*workspacepolicy.EvaluationResult, error) {
+	if !r.config.PolicyGateEnabled {
+		return &workspacepolicy.EvaluationResult{Effect: workspacepolicy.EffectAllow, ReasonCode: workspacepolicy.ReasonPolicyAllowed}, nil
+	}
+	r.policyCfgMu.RLock()
+	cfg := r.policyCfg
+	r.policyCfgMu.RUnlock()
+
+	if cfg == nil {
+		return &workspacepolicy.EvaluationResult{Effect: workspacepolicy.EffectDeny, ReasonCode: workspacepolicy.ReasonPolicyDenied, Reason: "policy config not loaded"}, nil
+	}
+
+	return workspacepolicy.Evaluate(cfg, req), nil
 }
 
 // Close shuts down the router and all connections.

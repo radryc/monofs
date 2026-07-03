@@ -73,6 +73,8 @@ func main() {
 		guardianStateDir  = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
 		workspaceStateDir = flag.String("workspace-state-dir", "", "Directory for persistent workspace job state (Phase 1), separate from Guardian state")
 		sourcePushMode    = flag.String("source-push-mode", "squash", "Source push mode: squash or preserve")
+		policyGateEnabled = flag.Bool("policy-gate", false, "Enable policy-gated push/publish/refresh (Phase 3)")
+		policyConfigPath  = flag.String("policy-config", "", "Path to policy YAML config file (Phase 3)")
 
 		// Replication and failover configuration
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
@@ -170,6 +172,8 @@ func main() {
 		GuardianStateDir:      *guardianStateDir,
 		WorkspaceStateDir:     *workspaceStateDir,
 		SourcePushMode:        *sourcePushMode,
+		PolicyGateEnabled:     *policyGateEnabled,
+		PolicyConfigPath:      *policyConfigPath,
 		EncryptionKey:         encryptionKey,
 		ReplicationFactor:     *replicationFactor,
 		RebalanceDelay:        *rebalanceDelay,
