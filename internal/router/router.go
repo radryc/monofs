@@ -46,6 +46,10 @@ type RouterConfig struct {
 	PolicyGateEnabled bool
 	PolicyConfigPath  string
 
+	// Auto-push (Phase 3)
+	AutoPushEnabled  bool
+	AutoPushInterval time.Duration
+
 	// Replication and failover configuration
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
 	RebalanceDelay        time.Duration // Wait before triggering permanent rebalance after failure, default: 10m
@@ -147,6 +151,9 @@ type Router struct {
 
 	// Phase 6: Commit/diff ledger
 	ledger *workspaceledger.Ledger
+
+	// Phase 3: Auto-push worker (nil when disabled)
+	autoPushWorker *autoPushWorker
 
 	// Connected FUSE clients
 	clients     map[string]*clientState // clientID -> state
@@ -390,6 +397,22 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 	}
 	r.version.Store(1)
 	r.namespaceGeneration.Store(1)
+
+	if wjs != nil {
+		r.ledger = workspaceledger.NewWithWAL(wjs)
+		if err := wjs.ReplayLedgerEntries(r.ledger.ReplayFromWAL); err != nil {
+			logger.Error("failed to replay ledger from WAL", "error", err)
+		}
+	}
+
+	if cfg.AutoPushEnabled {
+		interval := cfg.AutoPushInterval
+		if interval <= 0 {
+			interval = defaultAutoPushInterval
+		}
+		r.autoPushWorker = newAutoPushWorker(r, interval, defaultConcurrencyCap, logger)
+		r.autoPushWorker.Start()
+	}
 
 	// Start UI request handler goroutine
 	go r.handleUIRequests()
@@ -1723,6 +1746,10 @@ func (r *Router) Close() error {
 
 	// Flush and stop the guardian version store background ticker.
 	r.guardianVersions.close()
+
+	if r.autoPushWorker != nil {
+		r.autoPushWorker.Stop()
+	}
 
 	if r.workspaceJobStore != nil {
 		r.workspaceJobStore.Close()
