@@ -15,9 +15,10 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/router/workspaceledger"
+	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
-	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -29,14 +30,14 @@ type RouterConfig struct {
 	HealthCheckInterval time.Duration
 	UnhealthyThreshold  time.Duration
 	PeerRouters         []RouterPeer
-	FetcherAddresses    []string // Fetcher cluster addresses for monitoring
-	FetcherDiagnostics    []string          // Optional explicit diagnostics addresses for fetchers
-	SearchDiagnostics     string            // Optional explicit diagnostics address for search
-	ServerDiagnostics     map[string]string // Optional explicit diagnostics addresses for servers: nodeID -> addr
-	RegistryDiagnostics   string            // Optional explicit diagnostics address for registry
-	EncryptionKey       []byte   // 32-byte ChaCha20-Poly1305 key for packager archives
-	GuardianStateDir     string // Optional directory for persistent Guardian router state
-	WorkspaceStateDir    string // Optional directory for persistent workspace job state (Phase 1)
+	FetcherAddresses    []string          // Fetcher cluster addresses for monitoring
+	FetcherDiagnostics  []string          // Optional explicit diagnostics addresses for fetchers
+	SearchDiagnostics   string            // Optional explicit diagnostics address for search
+	ServerDiagnostics   map[string]string // Optional explicit diagnostics addresses for servers: nodeID -> addr
+	RegistryDiagnostics string            // Optional explicit diagnostics address for registry
+	EncryptionKey       []byte            // 32-byte ChaCha20-Poly1305 key for packager archives
+	GuardianStateDir    string            // Optional directory for persistent Guardian router state
+	WorkspaceStateDir   string            // Optional directory for persistent workspace job state (Phase 1)
 
 	// Source push behavior
 	SourcePushMode string // "squash" (default) or "preserve"
@@ -143,6 +144,9 @@ type Router struct {
 	// Phase 3: Policy evaluation
 	policyCfg    *workspacepolicy.PolicyConfig
 	policyCfgMu  sync.RWMutex
+
+	// Phase 6: Commit/diff ledger
+	ledger *workspaceledger.Ledger
 
 	// Connected FUSE clients
 	clients     map[string]*clientState // clientID -> state
@@ -373,6 +377,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		workspaceBundles:          make(map[string]*stagedWorkspaceBundle),
 		workspaceJobStore:         wjs,
 		policyCfg:                 policyCfg,
+		ledger:                    workspaceledger.New(),
 		failoverTimers:            make(map[string]*time.Timer),
 		failoverStartTimes:        make(map[string]time.Time),
 		config:                    cfg,

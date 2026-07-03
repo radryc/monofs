@@ -91,12 +91,12 @@ func (r *Router) PushWorkspaceCommits(req *pb.PushWorkspaceCommitsRequest, strea
 
 	pushMode := resolveSourcePushMode(req.GetSourcePushMode(), r.config.SourcePushMode)
 	policyResult, err := r.evalPolicy(&workspacepolicy.EvaluationRequest{
-		PrincipalID:    job.GetRequestedByClientId(),
-		WorkspaceID:    job.GetWorkspaceId(),
-		LogicalBranch:  logicalBranch,
-		RepositoryIDs:  storageIDsFromSourceBundle(bundleEntry.commitBundle),
-		Action:         workspacepolicy.ActionSourcePush,
-		PushMode:       pushMode,
+		PrincipalID:   job.GetRequestedByClientId(),
+		WorkspaceID:   job.GetWorkspaceId(),
+		LogicalBranch: logicalBranch,
+		RepositoryIDs: storageIDsFromSourceBundle(bundleEntry.commitBundle),
+		Action:        workspacepolicy.ActionSourcePush,
+		PushMode:      pushMode,
 	})
 	if err != nil {
 		return err
@@ -177,11 +177,11 @@ func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspace
 
 	pushMode := resolveSourcePushMode(req.GetSourcePushMode(), r.config.SourcePushMode)
 	pushResults, err := fetcherClient.StartWorkspaceCommitPush(ctx, &pb.StartWorkspaceCommitPushRequest{
-		JobId:           entry.snapshot().GetJobId(),
-		WorkspaceId:     bundleEntry.workspaceID,
-		BundleId:        req.GetBundleId(),
-		LogicalBranch:   logicalBranch,
-		SourcePushMode:  pushMode,
+		JobId:          entry.snapshot().GetJobId(),
+		WorkspaceId:    bundleEntry.workspaceID,
+		BundleId:       req.GetBundleId(),
+		LogicalBranch:  logicalBranch,
+		SourcePushMode: pushMode,
 	})
 	if err != nil {
 		r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH), err.Error())
@@ -198,6 +198,18 @@ func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspace
 
 		repoResult := workspaceRepositoryResultFromPublish(progress, actionLabel)
 		r.updateWorkspaceSyncRepository(entry, repoResult)
+
+		r.ledger.InsertPushOutcome(&pb.PushOutcome{
+			PushOutcomeId:      fmt.Sprintf("%s:%s", entry.job.GetJobId(), repoResult.GetStorageId()),
+			JobId:              entry.job.GetJobId(),
+			WorkspaceId:        entry.job.GetWorkspaceId(),
+			RepoStorageId:      repoResult.GetStorageId(),
+			Branch:             repoResult.GetBranch(),
+			PushMode:           pushMode,
+			UpstreamCommitHash: repoResult.GetPushedCommit(),
+			LocalCommitIds:     entry.job.GetLocalCommitIds(),
+			Status:             pushStatusFromRepositoryResult(repoResult),
+		})
 		if err := send(&pb.WorkspaceSyncEvent{
 			EventType:  workspaceEventTypeForRepository(repoResult),
 			Job:        entry.snapshot(),
@@ -288,4 +300,15 @@ func storageIDsFromSourceBundle(bundle *workspacebundle.SourceCommitBundle) []st
 		}
 	}
 	return ids
+}
+
+func pushStatusFromRepositoryResult(repo *pb.WorkspaceSyncRepositoryResult) string {
+	switch repo.GetStatus() {
+	case pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED:
+		return "pushed"
+	case pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_CONFLICT:
+		return "conflict"
+	default:
+		return "failed"
+	}
 }

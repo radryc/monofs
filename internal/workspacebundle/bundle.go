@@ -15,6 +15,8 @@ const (
 	OperationMkdir   = "mkdir"
 	OperationRmdir   = "rmdir"
 	OperationSymlink = "symlink"
+	OperationRename  = "rename"
+	OperationChmod   = "chmod"
 )
 
 type Bundle struct {
@@ -122,7 +124,7 @@ func (b *Bundle) RepositoryByStorageID(storageID string) *RepositoryBundle {
 
 func validateOperation(storageID string, idx int, op Operation) error {
 	switch op.Kind {
-	case OperationUpsert, OperationDelete, OperationMkdir, OperationRmdir, OperationSymlink:
+	case OperationUpsert, OperationDelete, OperationMkdir, OperationRmdir, OperationSymlink, OperationRename, OperationChmod:
 	default:
 		return fmt.Errorf("repository %q operation %d has unsupported kind %q", storageID, idx, op.Kind)
 	}
@@ -134,6 +136,9 @@ func validateOperation(storageID string, idx int, op Operation) error {
 	}
 	if op.Kind == OperationSymlink && strings.TrimSpace(op.Target) == "" {
 		return fmt.Errorf("repository %q operation %d symlink target is required", storageID, idx)
+	}
+	if op.Kind == OperationRename && strings.TrimSpace(op.Target) == "" {
+		return fmt.Errorf("repository %q operation %d rename target is required", storageID, idx)
 	}
 	return nil
 }

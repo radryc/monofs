@@ -67,6 +67,7 @@ const (
 	MonoFSRouter_GetWorkspaceSyncJob_FullMethodName         = "/monofs.MonoFSRouter/GetWorkspaceSyncJob"
 	MonoFSRouter_ListWorkspaceSyncJobs_FullMethodName       = "/monofs.MonoFSRouter/ListWorkspaceSyncJobs"
 	MonoFSRouter_CancelWorkspaceSyncJob_FullMethodName      = "/monofs.MonoFSRouter/CancelWorkspaceSyncJob"
+	MonoFSRouter_QueryLedger_FullMethodName                 = "/monofs.MonoFSRouter/QueryLedger"
 )
 
 // MonoFSRouterClient is the client API for MonoFSRouter service.
@@ -143,6 +144,7 @@ type MonoFSRouterClient interface {
 	GetWorkspaceSyncJob(ctx context.Context, in *GetWorkspaceSyncJobRequest, opts ...grpc.CallOption) (*WorkspaceSyncJob, error)
 	ListWorkspaceSyncJobs(ctx context.Context, in *ListWorkspaceSyncJobsRequest, opts ...grpc.CallOption) (*ListWorkspaceSyncJobsResponse, error)
 	CancelWorkspaceSyncJob(ctx context.Context, in *CancelWorkspaceSyncJobRequest, opts ...grpc.CallOption) (*CancelWorkspaceSyncJobResponse, error)
+	QueryLedger(ctx context.Context, in *QueryLedgerRequest, opts ...grpc.CallOption) (*QueryLedgerResponse, error)
 }
 
 type monoFSRouterClient struct {
@@ -723,6 +725,16 @@ func (c *monoFSRouterClient) CancelWorkspaceSyncJob(ctx context.Context, in *Can
 	return out, nil
 }
 
+func (c *monoFSRouterClient) QueryLedger(ctx context.Context, in *QueryLedgerRequest, opts ...grpc.CallOption) (*QueryLedgerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryLedgerResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_QueryLedger_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MonoFSRouterServer is the server API for MonoFSRouter service.
 // All implementations must embed UnimplementedMonoFSRouterServer
 // for forward compatibility.
@@ -797,6 +809,7 @@ type MonoFSRouterServer interface {
 	GetWorkspaceSyncJob(context.Context, *GetWorkspaceSyncJobRequest) (*WorkspaceSyncJob, error)
 	ListWorkspaceSyncJobs(context.Context, *ListWorkspaceSyncJobsRequest) (*ListWorkspaceSyncJobsResponse, error)
 	CancelWorkspaceSyncJob(context.Context, *CancelWorkspaceSyncJobRequest) (*CancelWorkspaceSyncJobResponse, error)
+	QueryLedger(context.Context, *QueryLedgerRequest) (*QueryLedgerResponse, error)
 	mustEmbedUnimplementedMonoFSRouterServer()
 }
 
@@ -950,6 +963,9 @@ func (UnimplementedMonoFSRouterServer) ListWorkspaceSyncJobs(context.Context, *L
 }
 func (UnimplementedMonoFSRouterServer) CancelWorkspaceSyncJob(context.Context, *CancelWorkspaceSyncJobRequest) (*CancelWorkspaceSyncJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelWorkspaceSyncJob not implemented")
+}
+func (UnimplementedMonoFSRouterServer) QueryLedger(context.Context, *QueryLedgerRequest) (*QueryLedgerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryLedger not implemented")
 }
 func (UnimplementedMonoFSRouterServer) mustEmbedUnimplementedMonoFSRouterServer() {}
 func (UnimplementedMonoFSRouterServer) testEmbeddedByValue()                      {}
@@ -1740,6 +1756,24 @@ func _MonoFSRouter_CancelWorkspaceSyncJob_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFSRouter_QueryLedger_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryLedgerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).QueryLedger(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_QueryLedger_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).QueryLedger(ctx, req.(*QueryLedgerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MonoFSRouter_ServiceDesc is the grpc.ServiceDesc for MonoFSRouter service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1890,6 +1924,10 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelWorkspaceSyncJob",
 			Handler:    _MonoFSRouter_CancelWorkspaceSyncJob_Handler,
+		},
+		{
+			MethodName: "QueryLedger",
+			Handler:    _MonoFSRouter_QueryLedger_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

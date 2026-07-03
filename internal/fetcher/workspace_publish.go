@@ -383,6 +383,22 @@ func applyRepositoryOperations(root string, operations []workspacebundle.Operati
 			if err := os.Symlink(op.Target, path); err != nil {
 				return err
 			}
+		case workspacebundle.OperationRename:
+			target := filepath.Join(root, filepath.Clean(op.Target))
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return err
+			}
+			if err := os.Rename(path, target); err != nil {
+				return err
+			}
+		case workspacebundle.OperationChmod:
+			mode := fs.FileMode(op.Mode)
+			if mode == 0 {
+				mode = 0644
+			}
+			if err := os.Chmod(path, mode); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
