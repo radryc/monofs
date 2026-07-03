@@ -9,6 +9,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"github.com/radryc/monofs/internal/workspacebundle"
 	"google.golang.org/grpc"
 )
@@ -87,6 +88,33 @@ func (r *Router) PushWorkspaceCommits(req *pb.PushWorkspaceCommitsRequest, strea
 	}
 
 	job := r.newWorkspaceCommitPushJob(req, bundleEntry.commitBundle, logicalBranch, extractClientID(stream.Context()))
+
+	pushMode := resolveSourcePushMode(req.GetSourcePushMode(), r.config.SourcePushMode)
+	policyResult, err := r.evalPolicy(&workspacepolicy.EvaluationRequest{
+		PrincipalID:    job.GetRequestedByClientId(),
+		WorkspaceID:    job.GetWorkspaceId(),
+		LogicalBranch:  logicalBranch,
+		RepositoryIDs:  storageIDsFromSourceBundle(bundleEntry.commitBundle),
+		Action:         workspacepolicy.ActionSourcePush,
+		PushMode:       pushMode,
+	})
+	if err != nil {
+		return err
+	}
+	if policyResult.Effect != workspacepolicy.EffectAllow {
+		job.State = pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_FAILED
+		job.FinishedAtUnix = time.Now().Unix()
+		job.ErrorMessage = fmt.Sprintf("policy denied: %s", policyResult.Reason)
+		entry := &workspaceSyncJobEntry{job: job}
+		r.storeWorkspaceSyncJob(entry)
+		routerWorkspaceSyncJobsTotal.WithLabelValues(actionLabel, "denied").Inc()
+		return stream.Send(&pb.WorkspaceSyncEvent{
+			EventType: pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_JOB_COMPLETED,
+			Job:       job,
+			Message:   fmt.Sprintf("push denied by policy: %s", policyResult.Reason),
+		})
+	}
+
 	entry := &workspaceSyncJobEntry{job: job}
 	r.storeWorkspaceSyncJob(entry)
 	routerWorkspaceSyncJobsTotal.WithLabelValues(actionLabel, "started").Inc()
@@ -243,4 +271,21 @@ func resolveSourcePushMode(requested pb.SourcePushMode, configDefault string) st
 		return sourcePushModePreserve
 	}
 	return sourcePushModeSquash
+}
+
+func storageIDsFromSourceBundle(bundle *workspacebundle.SourceCommitBundle) []string {
+	if bundle == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var ids []string
+	for _, c := range bundle.Commits {
+		for _, r := range c.Repositories {
+			if r.StorageID != "" && !seen[r.StorageID] {
+				seen[r.StorageID] = true
+				ids = append(ids, r.StorageID)
+			}
+		}
+	}
+	return ids
 }
