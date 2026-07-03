@@ -251,6 +251,7 @@ message StartWorkspaceCommitPushRequest {
     string workspace_id = 2;
     string bundle_id = 3;
     string logical_branch = 4;
+    string source_push_mode = 5;
 }
 
 message ProbeWorkspaceRefreshRequest {
@@ -277,6 +278,8 @@ message RepoSyncProgress {
     string pushed_commit = 6;
     string target_branch = 7;
     string conflict_reason = 8;
+    string local_commit_id = 9;
+    int32 local_commit_index = 10;
 }
 
 message SyncWorkerStatsRequest {}

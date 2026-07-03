@@ -1116,13 +1116,14 @@ func (x *StartWorkspacePublishRequest) GetRequestedBranchStrategy() string {
 }
 
 type StartWorkspaceCommitPushRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	WorkspaceId   string                 `protobuf:"bytes,2,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
-	BundleId      string                 `protobuf:"bytes,3,opt,name=bundle_id,json=bundleId,proto3" json:"bundle_id,omitempty"`
-	LogicalBranch string                 `protobuf:"bytes,4,opt,name=logical_branch,json=logicalBranch,proto3" json:"logical_branch,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	JobId          string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	WorkspaceId    string                 `protobuf:"bytes,2,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	BundleId       string                 `protobuf:"bytes,3,opt,name=bundle_id,json=bundleId,proto3" json:"bundle_id,omitempty"`
+	LogicalBranch  string                 `protobuf:"bytes,4,opt,name=logical_branch,json=logicalBranch,proto3" json:"logical_branch,omitempty"`
+	SourcePushMode string                 `protobuf:"bytes,5,opt,name=source_push_mode,json=sourcePushMode,proto3" json:"source_push_mode,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *StartWorkspaceCommitPushRequest) Reset() {
@@ -1179,6 +1180,13 @@ func (x *StartWorkspaceCommitPushRequest) GetBundleId() string {
 func (x *StartWorkspaceCommitPushRequest) GetLogicalBranch() string {
 	if x != nil {
 		return x.LogicalBranch
+	}
+	return ""
+}
+
+func (x *StartWorkspaceCommitPushRequest) GetSourcePushMode() string {
+	if x != nil {
+		return x.SourcePushMode
 	}
 	return ""
 }
@@ -1340,17 +1348,19 @@ func (x *DiscardWorkspaceBundleResponse) GetMessage() string {
 }
 
 type RepoSyncProgress struct {
-	state          protoimpl.MessageState  `protogen:"open.v1"`
-	JobId          string                  `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	Repository     *WorkspaceRepositoryRef `protobuf:"bytes,2,opt,name=repository,proto3" json:"repository,omitempty"`
-	Status         RepoSyncStatus          `protobuf:"varint,3,opt,name=status,proto3,enum=monofs.RepoSyncStatus" json:"status,omitempty"`
-	RemoteCommit   string                  `protobuf:"bytes,4,opt,name=remote_commit,json=remoteCommit,proto3" json:"remote_commit,omitempty"`
-	Message        string                  `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
-	PushedCommit   string                  `protobuf:"bytes,6,opt,name=pushed_commit,json=pushedCommit,proto3" json:"pushed_commit,omitempty"`
-	TargetBranch   string                  `protobuf:"bytes,7,opt,name=target_branch,json=targetBranch,proto3" json:"target_branch,omitempty"`
-	ConflictReason string                  `protobuf:"bytes,8,opt,name=conflict_reason,json=conflictReason,proto3" json:"conflict_reason,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state            protoimpl.MessageState  `protogen:"open.v1"`
+	JobId            string                  `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	Repository       *WorkspaceRepositoryRef `protobuf:"bytes,2,opt,name=repository,proto3" json:"repository,omitempty"`
+	Status           RepoSyncStatus          `protobuf:"varint,3,opt,name=status,proto3,enum=monofs.RepoSyncStatus" json:"status,omitempty"`
+	RemoteCommit     string                  `protobuf:"bytes,4,opt,name=remote_commit,json=remoteCommit,proto3" json:"remote_commit,omitempty"`
+	Message          string                  `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+	PushedCommit     string                  `protobuf:"bytes,6,opt,name=pushed_commit,json=pushedCommit,proto3" json:"pushed_commit,omitempty"`
+	TargetBranch     string                  `protobuf:"bytes,7,opt,name=target_branch,json=targetBranch,proto3" json:"target_branch,omitempty"`
+	ConflictReason   string                  `protobuf:"bytes,8,opt,name=conflict_reason,json=conflictReason,proto3" json:"conflict_reason,omitempty"`
+	LocalCommitId    string                  `protobuf:"bytes,9,opt,name=local_commit_id,json=localCommitId,proto3" json:"local_commit_id,omitempty"`
+	LocalCommitIndex int32                   `protobuf:"varint,10,opt,name=local_commit_index,json=localCommitIndex,proto3" json:"local_commit_index,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RepoSyncProgress) Reset() {
@@ -1437,6 +1447,20 @@ func (x *RepoSyncProgress) GetConflictReason() string {
 		return x.ConflictReason
 	}
 	return ""
+}
+
+func (x *RepoSyncProgress) GetLocalCommitId() string {
+	if x != nil {
+		return x.LocalCommitId
+	}
+	return ""
+}
+
+func (x *RepoSyncProgress) GetLocalCommitIndex() int32 {
+	if x != nil {
+		return x.LocalCommitIndex
+	}
+	return 0
 }
 
 type SyncWorkerStatsRequest struct {
@@ -2751,12 +2775,13 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\vauthor_name\x18\x05 \x01(\tR\n" +
 	"authorName\x12!\n" +
 	"\fauthor_email\x18\x06 \x01(\tR\vauthorEmail\x12:\n" +
-	"\x19requested_branch_strategy\x18\a \x01(\tR\x17requestedBranchStrategy\"\x9f\x01\n" +
+	"\x19requested_branch_strategy\x18\a \x01(\tR\x17requestedBranchStrategy\"\xc9\x01\n" +
 	"\x1fStartWorkspaceCommitPushRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12\x1b\n" +
 	"\tbundle_id\x18\x03 \x01(\tR\bbundleId\x12%\n" +
-	"\x0elogical_branch\x18\x04 \x01(\tR\rlogicalBranch\"\x9c\x01\n" +
+	"\x0elogical_branch\x18\x04 \x01(\tR\rlogicalBranch\x12(\n" +
+	"\x10source_push_mode\x18\x05 \x01(\tR\x0esourcePushMode\"\x9c\x01\n" +
 	"\x1cProbeWorkspaceRefreshRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12B\n" +
@@ -2765,7 +2790,7 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\tbundle_id\x18\x01 \x01(\tR\bbundleId\"T\n" +
 	"\x1eDiscardWorkspaceBundleResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\xcb\x02\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xa1\x03\n" +
 	"\x10RepoSyncProgress\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12>\n" +
 	"\n" +
@@ -2776,7 +2801,10 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\amessage\x18\x05 \x01(\tR\amessage\x12#\n" +
 	"\rpushed_commit\x18\x06 \x01(\tR\fpushedCommit\x12#\n" +
 	"\rtarget_branch\x18\a \x01(\tR\ftargetBranch\x12'\n" +
-	"\x0fconflict_reason\x18\b \x01(\tR\x0econflictReason\"\x18\n" +
+	"\x0fconflict_reason\x18\b \x01(\tR\x0econflictReason\x12&\n" +
+	"\x0flocal_commit_id\x18\t \x01(\tR\rlocalCommitId\x12,\n" +
+	"\x12local_commit_index\x18\n" +
+	" \x01(\x05R\x10localCommitIndex\"\x18\n" +
 	"\x16SyncWorkerStatsRequest\"\xae\x04\n" +
 	"\x0fSyncWorkerStats\x12\x1d\n" +
 	"\n" +

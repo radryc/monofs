@@ -1023,7 +1023,6 @@ func (sc *SessionCommand) pushSource(args []string) error {
 	}
 
 	fmt.Println("Pushing local commits...")
-	fmt.Println("Warning: pending local commits are currently squashed into one upstream Git commit per affected repository.")
 
 	resp, err := sc.sendCommand("push")
 	if err != nil {
