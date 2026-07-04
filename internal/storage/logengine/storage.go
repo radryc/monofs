@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	chunkListCacheTTL = 10 * time.Second
-	manifestCacheTTL  = time.Minute
+	chunkListCacheTTL  = 10 * time.Second
+	manifestCacheTTL   = time.Minute
 	cacheSweepInterval = 30 * time.Second
 )
 

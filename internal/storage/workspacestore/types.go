@@ -63,13 +63,17 @@ type AuditEvent struct {
 
 type Checkpoint struct {
 	LastCompactedSeq uint64 `json:"last_compacted_seq"`
+	SnapshotFile     string `json:"snapshot_file,omitempty"`
 }
 
 type compactedSnapshot struct {
+	Version       int               `json:"version"`
+	CreatedAtUnix int64             `json:"created_at_unix"`
 	CheckpointSeq uint64            `json:"checkpoint_seq"`
 	Jobs          []*jobSnapshot    `json:"jobs"`
 	Bundles       []*BundleMetadata `json:"bundles"`
 	AuditEvents   []*AuditEvent     `json:"audit_events"`
+	LedgerEntries [][]byte          `json:"ledger_entries,omitempty"`
 }
 
 type jobSnapshot struct {

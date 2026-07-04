@@ -18,11 +18,11 @@ type TagStore struct {
 	blobs  *BlobStore
 
 	// in-memory caches avoid MonoFS directory-listing inconsistency
-	repoCache    map[string]bool
-	tagCache     map[string][]string
-	cacheExpiry  map[string]time.Time
-	mu           sync.RWMutex
-	stopCleanup  chan struct{}
+	repoCache   map[string]bool
+	tagCache    map[string][]string
+	cacheExpiry map[string]time.Time
+	mu          sync.RWMutex
+	stopCleanup chan struct{}
 }
 
 const cacheTTL = 30 * time.Minute

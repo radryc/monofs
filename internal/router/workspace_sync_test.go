@@ -365,7 +365,9 @@ func TestWorkspaceSyncJobsAPIListsStoredJobs(t *testing.T) {
 			RepositoriesSucceeded: 1,
 		},
 	}}
-	router.storeWorkspaceSyncJob(entry)
+	if err := router.storeWorkspaceSyncJob(entry); err != nil {
+		t.Fatalf("store workspace sync job: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workspace-sync/jobs", nil)
 	resp := httptest.NewRecorder()

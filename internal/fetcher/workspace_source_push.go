@@ -430,11 +430,11 @@ func (s *Service) pushSourceCommitsPreserve(ctx context.Context, req *pb.StartWo
 				rw.root, err = cloneSourcePushWorktree(ctx, repo)
 				if err != nil {
 					progress := &pb.RepoSyncProgress{
-						JobId:           req.GetJobId(),
-						Repository:      repoRefFromSourceCommitRepo(repo),
-						Status:          pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED,
-						Message:         err.Error(),
-						LocalCommitId:   commit.ID,
+						JobId:            req.GetJobId(),
+						Repository:       repoRefFromSourceCommitRepo(repo),
+						Status:           pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED,
+						Message:          err.Error(),
+						LocalCommitId:    commit.ID,
 						LocalCommitIndex: int32(commitIdx),
 					}
 					progress.Status, progress.ConflictReason = mapPublishError(err)

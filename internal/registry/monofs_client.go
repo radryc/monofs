@@ -42,14 +42,14 @@ type Client struct {
 	logger     *slog.Logger
 	rpcTimeout time.Duration
 
-	mu           sync.Mutex
-	routerConn   *grpc.ClientConn
-	router       pb.MonoFSRouterClient
-	nodeConns    map[string]*grpc.ClientConn
-	nodeClients  map[string]pb.MonoFSClient
-	nodeAddrs    map[string]string
-	lastRefresh  time.Time
-	refreshTTL   time.Duration
+	mu          sync.Mutex
+	routerConn  *grpc.ClientConn
+	router      pb.MonoFSRouterClient
+	nodeConns   map[string]*grpc.ClientConn
+	nodeClients map[string]pb.MonoFSClient
+	nodeAddrs   map[string]string
+	lastRefresh time.Time
+	refreshTTL  time.Duration
 
 	stopHeartbeat chan struct{}
 	stopOnce      sync.Once
@@ -85,18 +85,18 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 	}
 
 	c := &Client{
-		routerAddr:   cfg.RouterAddr,
-		clientID:     cfg.ClientID,
-		token:        cfg.Token,
-		dataNS:       cfg.DataNS,
-		logger:       logger,
-		rpcTimeout:   defaultRPCTimeout,
-		routerConn:   conn,
-		router:       pb.NewMonoFSRouterClient(conn),
-		nodeConns:    map[string]*grpc.ClientConn{},
-		nodeClients:  map[string]pb.MonoFSClient{},
-		nodeAddrs:    map[string]string{},
-		refreshTTL:   defaultTopologyRefresh,
+		routerAddr:    cfg.RouterAddr,
+		clientID:      cfg.ClientID,
+		token:         cfg.Token,
+		dataNS:        cfg.DataNS,
+		logger:        logger,
+		rpcTimeout:    defaultRPCTimeout,
+		routerConn:    conn,
+		router:        pb.NewMonoFSRouterClient(conn),
+		nodeConns:     map[string]*grpc.ClientConn{},
+		nodeClients:   map[string]pb.MonoFSClient{},
+		nodeAddrs:     map[string]string{},
+		refreshTTL:    defaultTopologyRefresh,
 		stopHeartbeat: make(chan struct{}),
 	}
 

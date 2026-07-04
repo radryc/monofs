@@ -1,0 +1,25 @@
+No database/migration strategy — Phase 1 proposes atomic JSON snapshots (copying Guardian's pattern), but never addresses when JSON-file persistence becomes insufficient as job/audit volume grows. A SQLite emergency path should be discussed.
+
+Concurrency model absent for audit events — Phase 1 says "append-only event chain semantics" but doesn't specify how concurrent appends are ordered (mutex? channel? file-lock?). This matters because ordering is the core correctness guarantee.
+
+Policy engine config schema undefined — Phase 3 describes abstract inputs/outputs but never defines a concrete policy configuration format (YAML/JSON structure, rule composition, precedence). The implementation section skips this.
+
+No performance/SLO targets — Zero scale assumptions anywhere. How many workspaces, jobs, audit events, concurrent pushes per minute are we designing for? Without target numbers, storage format, locking, and pruning decisions are guesses.
+
+Auto-PR provider integration unspecified — Phase 3 references "post-push hook for auto-PR creation" and "provider integration" but never names which Git hosts, defines the API surface, or specifies what the "deterministic compare URL" fallback looks like.
+
+Documentation Gaps (Missing Cross-References)
+
+Phase 6 commit/diff ledger underspecified — ~15 lines of design for "cross-workspace searchable listing" is thin. Missing: what table(s) get stored, the ingestion path (which RPC calls trigger writes), and the query API surface.
+
+Bundle schema versioning handwaved — Phase 6 says "include format version in bundle payload" but the current Bundle struct has no Version field. No migration/backward-compat story for old clients sending versionless bundles.
+
+State-directory naming ambiguity — Phase 1 introduces a new durable store in --state-dir but the router already has GuardianStateDir. Are these the same directory? Different subdirectories? Not clarified.
+
+No security threat model — Policy bypass, unauthorized auto-push triggering, audit log tampering are all new attack surfaces introduced by Phases 1-3. No analysis.
+
+10. Session CLI docs gap — cmd/monofs-session/README.md doesn't mention squash behavior, yet Phase 2 references an existing squash warning in the CLI. Phase 5 plans doc updates but only partially fixes this — the squash/preserve modes need their own documented UX.
+
+Structural Issues
+11. TODO.md granularity mismatch — TODO.md has finer-grained steps (e.g., Steps 1.1, 1.2, 1.3) than the readiness docs, which flatten them. No cross-map to track which readiness sections satisfy which TODO steps — makes acceptance criteria tracing harder.
+12. No ADR directory — Architecture decisions are embedded in phase docs rather than formal docs/adr/ records. If a decision changes mid-implementation, there's no single place to find the current state.

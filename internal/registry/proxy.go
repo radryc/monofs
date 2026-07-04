@@ -21,12 +21,12 @@ type UpstreamConfig struct {
 }
 
 type Proxy struct {
-	config  UpstreamConfig
-	blobs   *BlobStore
-	tags    *TagStore
-	stats   *Stats
-	logger  *slog.Logger
-	client  *http.Client
+	config UpstreamConfig
+	blobs  *BlobStore
+	tags   *TagStore
+	stats  *Stats
+	logger *slog.Logger
+	client *http.Client
 }
 
 func NewProxy(config UpstreamConfig, blobs *BlobStore, tags *TagStore, stats *Stats, logger *slog.Logger) *Proxy {
@@ -321,4 +321,3 @@ func (p *Proxy) fetchManifestFromUpstream(ctx context.Context, upstream, repo, r
 	contentType := resp.Header.Get("Content-Type")
 	return data, contentType, nil
 }
-

@@ -60,7 +60,9 @@ func (r *Router) UploadWorkspaceCommitBundle(stream grpc.ClientStreamingServer[p
 		createdAt:    time.Now(),
 		expiresAt:    time.Now().Add(workspaceBundleTTL),
 	}
-	r.storeWorkspaceBundle(entry)
+	if err := r.storeWorkspaceBundle(entry); err != nil {
+		return err
+	}
 	routerWorkspaceSyncBundleBytesTotal.Add(float64(len(entry.data)))
 
 	return stream.SendAndClose(&pb.UploadWorkspaceBundleResponse{
@@ -106,7 +108,9 @@ func (r *Router) PushWorkspaceCommits(req *pb.PushWorkspaceCommitsRequest, strea
 		job.FinishedAtUnix = time.Now().Unix()
 		job.ErrorMessage = fmt.Sprintf("policy denied: %s", policyResult.Reason)
 		entry := &workspaceSyncJobEntry{job: job}
-		r.storeWorkspaceSyncJob(entry)
+		if err := r.storeWorkspaceSyncJob(entry); err != nil {
+			return err
+		}
 		routerWorkspaceSyncJobsTotal.WithLabelValues(actionLabel, "denied").Inc()
 		return stream.Send(&pb.WorkspaceSyncEvent{
 			EventType: pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_JOB_COMPLETED,
@@ -116,7 +120,9 @@ func (r *Router) PushWorkspaceCommits(req *pb.PushWorkspaceCommitsRequest, strea
 	}
 
 	entry := &workspaceSyncJobEntry{job: job}
-	r.storeWorkspaceSyncJob(entry)
+	if err := r.storeWorkspaceSyncJob(entry); err != nil {
+		return err
+	}
 	routerWorkspaceSyncJobsTotal.WithLabelValues(actionLabel, "started").Inc()
 	routerWorkspaceSyncActiveJobs.WithLabelValues(actionLabel).Inc()
 	defer routerWorkspaceSyncActiveJobs.WithLabelValues(actionLabel).Dec()
@@ -149,10 +155,12 @@ func (r *Router) PushWorkspaceCommits(req *pb.PushWorkspaceCommitsRequest, strea
 
 func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspaceSyncJobEntry, req *pb.PushWorkspaceCommitsRequest, logicalBranch string, bundleEntry *stagedWorkspaceBundle, send func(*pb.WorkspaceSyncEvent) error) error {
 	actionLabel := workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH)
-	r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
+	if err := r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
 		job.State = pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_RUNNING
 		job.StartedAtUnix = time.Now().Unix()
-	})
+	}); err != nil {
+		return err
+	}
 	if err := send(&pb.WorkspaceSyncEvent{
 		EventType: pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_JOB_STARTED,
 		Job:       entry.snapshot(),
@@ -163,7 +171,9 @@ func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspace
 
 	fetcherClient := r.getFetcherClient()
 	if fetcherClient == nil {
-		r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH), "fetcher cluster not configured")
+		if err := r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH), "fetcher cluster not configured"); err != nil {
+			return err
+		}
 		return sendWorkspaceSyncTerminalEvent(send, entry, "workspace source push job failed")
 	}
 	defer func() {
@@ -171,7 +181,9 @@ func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspace
 	}()
 
 	if _, err := fetcherClient.StageWorkspaceCommitBundle(ctx, req.GetBundleId(), bundleEntry.workspaceID, bundleEntry.data); err != nil {
-		r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH), err.Error())
+		if err2 := r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH), err.Error()); err2 != nil {
+			return err2
+		}
 		return sendWorkspaceSyncTerminalEvent(send, entry, "workspace source push job failed")
 	}
 
@@ -184,20 +196,26 @@ func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspace
 		SourcePushMode: pushMode,
 	})
 	if err != nil {
-		r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH), err.Error())
+		if err2 := r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH), err.Error()); err2 != nil {
+			return err2
+		}
 		return sendWorkspaceSyncTerminalEvent(send, entry, "workspace source push job failed")
 	}
 
 	for _, progress := range pushResults {
 		select {
 		case <-ctx.Done():
-			r.cancelWorkspaceSyncJob(entry)
+			if err := r.cancelWorkspaceSyncJob(entry); err != nil {
+				return err
+			}
 			return sendWorkspaceSyncTerminalEvent(send, entry, "workspace source push job cancelled")
 		default:
 		}
 
 		repoResult := workspaceRepositoryResultFromPublish(progress, actionLabel)
-		r.updateWorkspaceSyncRepository(entry, repoResult)
+		if err := r.updateWorkspaceSyncRepository(entry, repoResult); err != nil {
+			return err
+		}
 
 		r.ledger.InsertPushOutcome(&pb.PushOutcome{
 			PushOutcomeId:      fmt.Sprintf("%s:%s", entry.job.GetJobId(), repoResult.GetStorageId()),
@@ -220,7 +238,9 @@ func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspace
 		}
 	}
 
-	r.finalizeWorkspaceSyncJob(entry)
+	if err := r.finalizeWorkspaceSyncJob(entry); err != nil {
+		return err
+	}
 	routerWorkspaceSyncJobsTotal.WithLabelValues(workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH), workspaceSyncResultLabel(entry.snapshot().GetState())).Inc()
 	return sendWorkspaceSyncTerminalEvent(send, entry, "workspace source push job completed")
 }

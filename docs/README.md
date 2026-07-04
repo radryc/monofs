@@ -11,6 +11,7 @@ MonoFS is a distributed source workspace, code search, and publish engine for mo
 | Mount a workspace, develop, and publish                   | [usage.md](usage.md)                                 |
 | See the `monofs-session` command reference                | [../cmd/monofs-session/README.md](../cmd/monofs-session/README.md) |
 | Read about the experimental native VFS protocol           | [native-protocol-v1.md](native-protocol-v1.md)       |
+| Review the phased readiness design + implementation plans | [readiness/README.md](readiness/README.md)            |
 | Understand the VS Code extension workflow                 | [../vscode-monofs/](../vscode-monofs/)               |
 
 ## Diagrams
