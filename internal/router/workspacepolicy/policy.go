@@ -24,16 +24,16 @@ const (
 	BranchStrategyWorkspace     = "workspace_branch"
 	BranchStrategyPerRepoBranch = "per_repo_branch"
 
-	ReasonPolicyDenied              = "POLICY_DENIED"
-	ReasonPolicyProtectedBranch     = "POLICY_PROTECTED_BRANCH"
-	ReasonPolicyProtectedWorkspace  = "POLICY_PROTECTED_WORKSPACE"
-	ReasonPolicyModeRestricted      = "POLICY_MODE_RESTRICTED"
-	ReasonPolicyStrategyRestricted  = "POLICY_STRATEGY_RESTRICTED"
-	ReasonPolicyRepoRestricted      = "POLICY_REPO_RESTRICTED"
-	ReasonPolicyPrincipalNotAuth    = "POLICY_PRINCIPAL_NOT_AUTHORIZED"
-	ReasonPolicyDefaultDeny         = "POLICY_DEFAULT_DENY"
-	ReasonPolicyAllowed             = "POLICY_ALLOWED"
-	ReasonPolicyDefaultAllow        = "POLICY_DEFAULT_ALLOW"
+	ReasonPolicyDenied             = "POLICY_DENIED"
+	ReasonPolicyProtectedBranch    = "POLICY_PROTECTED_BRANCH"
+	ReasonPolicyProtectedWorkspace = "POLICY_PROTECTED_WORKSPACE"
+	ReasonPolicyModeRestricted     = "POLICY_MODE_RESTRICTED"
+	ReasonPolicyStrategyRestricted = "POLICY_STRATEGY_RESTRICTED"
+	ReasonPolicyRepoRestricted     = "POLICY_REPO_RESTRICTED"
+	ReasonPolicyPrincipalNotAuth   = "POLICY_PRINCIPAL_NOT_AUTHORIZED"
+	ReasonPolicyDefaultDeny        = "POLICY_DEFAULT_DENY"
+	ReasonPolicyAllowed            = "POLICY_ALLOWED"
+	ReasonPolicyDefaultAllow       = "POLICY_DEFAULT_ALLOW"
 )
 
 type PolicyConfig struct {
@@ -43,11 +43,11 @@ type PolicyConfig struct {
 }
 
 type Rule struct {
-	Name     string     `yaml:"name"`
-	Match    MatchSet   `yaml:"match"`
-	MatchNot MatchSet   `yaml:"match_not"`
-	Effect   string     `yaml:"effect"`
-	Reason   string     `yaml:"reason"`
+	Name     string   `yaml:"name"`
+	Match    MatchSet `yaml:"match"`
+	MatchNot MatchSet `yaml:"match_not"`
+	Effect   string   `yaml:"effect"`
+	Reason   string   `yaml:"reason"`
 }
 
 type MatchSet struct {
@@ -57,22 +57,22 @@ type MatchSet struct {
 	RepositoryIDs    []string `yaml:"repository_ids"`
 	Actions          []string `yaml:"actions"`
 	PushModes        []string `yaml:"push_modes"`
-	BranchStrategies  []string `yaml:"branch_strategies"`
+	BranchStrategies []string `yaml:"branch_strategies"`
 }
 
 type EvaluationRequest struct {
-	PrincipalID     string
-	WorkspaceID     string
-	LogicalBranch   string
-	RepositoryIDs   []string
-	Action          string
-	PushMode        string
-	BranchStrategy  string
+	PrincipalID    string
+	WorkspaceID    string
+	LogicalBranch  string
+	RepositoryIDs  []string
+	Action         string
+	PushMode       string
+	BranchStrategy string
 }
 
 type EvaluationResult struct {
 	Effect     string
-	ReasonCode  string
+	ReasonCode string
 	Reason     string
 	RuleName   string
 }
@@ -167,24 +167,24 @@ func Evaluate(cfg *PolicyConfig, req *EvaluationRequest) *EvaluationResult {
 			reasonCode = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(rule.Name, " ", "_"), "-", "_"))
 		}
 		return &EvaluationResult{
-			Effect:    rule.Effect,
+			Effect:     rule.Effect,
 			ReasonCode: reasonCode,
-			Reason:    rule.Reason,
-			RuleName:  rule.Name,
+			Reason:     rule.Reason,
+			RuleName:   rule.Name,
 		}
 	}
 
 	if cfg.Default == EffectDeny {
 		return &EvaluationResult{
-			Effect:    EffectDeny,
+			Effect:     EffectDeny,
 			ReasonCode: ReasonPolicyDefaultDeny,
-			Reason:    "no matching rule and default=deny",
+			Reason:     "no matching rule and default=deny",
 		}
 	}
 	return &EvaluationResult{
-		Effect:    EffectAllow,
+		Effect:     EffectAllow,
 		ReasonCode: ReasonPolicyDefaultAllow,
-		Reason:    "no matching rule and default=allow",
+		Reason:     "no matching rule and default=allow",
 	}
 }
 
@@ -195,13 +195,27 @@ func matchesRule(ms *MatchSet, req *EvaluationRequest) bool {
 	if ms.isEmpty() {
 		return true
 	}
-	if !matchStringGlob(ms.PrincipalIDs, req.PrincipalID) { return false }
-	if !matchStringGlob(ms.WorkspaceIDs, req.WorkspaceID) { return false }
-	if !matchStringGlob(ms.LogicalBranches, req.LogicalBranch) { return false }
-	if !matchAnyStringGlob(ms.RepositoryIDs, req.RepositoryIDs) { return false }
-	if !matchStringExact(ms.Actions, req.Action) { return false }
-	if !matchStringExact(ms.PushModes, req.PushMode) { return false }
-	if !matchStringExact(ms.BranchStrategies, req.BranchStrategy) { return false }
+	if !matchStringGlob(ms.PrincipalIDs, req.PrincipalID) {
+		return false
+	}
+	if !matchStringGlob(ms.WorkspaceIDs, req.WorkspaceID) {
+		return false
+	}
+	if !matchStringGlob(ms.LogicalBranches, req.LogicalBranch) {
+		return false
+	}
+	if !matchAnyStringGlob(ms.RepositoryIDs, req.RepositoryIDs) {
+		return false
+	}
+	if !matchStringExact(ms.Actions, req.Action) {
+		return false
+	}
+	if !matchStringExact(ms.PushModes, req.PushMode) {
+		return false
+	}
+	if !matchStringExact(ms.BranchStrategies, req.BranchStrategy) {
+		return false
+	}
 	return true
 }
 

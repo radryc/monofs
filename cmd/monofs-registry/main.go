@@ -23,18 +23,18 @@ var (
 
 func main() {
 	var (
-		listen         = flag.String("addr", ":5000", "HTTP listen address")
-		routerAddr     = flag.String("router-addr", os.Getenv("MONOFS_ROUTER_ADDR"), "MonoFS router gRPC address")
-		token          = flag.String("token", os.Getenv("MONOFS_TOKEN"), "MonoFS guardian token")
-		dataNS         = flag.String("data-ns", "docker-registry", "MonoFS data namespace prefix")
-		logLevel       = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-		debug          = flag.Bool("debug", false, "Enable debug logging")
+		listen     = flag.String("addr", ":5000", "HTTP listen address")
+		routerAddr = flag.String("router-addr", os.Getenv("MONOFS_ROUTER_ADDR"), "MonoFS router gRPC address")
+		token      = flag.String("token", os.Getenv("MONOFS_TOKEN"), "MonoFS guardian token")
+		dataNS     = flag.String("data-ns", "docker-registry", "MonoFS data namespace prefix")
+		logLevel   = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+		debug      = flag.Bool("debug", false, "Enable debug logging")
 
-		defaultUpstream   = flag.String("upstream-default", os.Getenv("MONOFS_REGISTRY_DEFAULT_UPSTREAM"), "Default upstream registry URL for pull-through cache")
-		upstreamMappings  = flag.String("upstreams", os.Getenv("MONOFS_REGISTRY_UPSTREAMS"), "Per-repo upstream mappings: prefix=url,prefix=url,...")
-		upstreamUsername   = flag.String("upstream-username", os.Getenv("MONOFS_REGISTRY_UPSTREAM_USERNAME"), "Username for upstream registry auth")
-		upstreamPassword   = flag.String("upstream-password", os.Getenv("MONOFS_REGISTRY_UPSTREAM_PASSWORD"), "Password for upstream registry auth")
-		upstreamCooldown   = flag.Duration("upstream-cooldown", 10*time.Minute, "Time before re-checking upstream for updates")
+		defaultUpstream  = flag.String("upstream-default", os.Getenv("MONOFS_REGISTRY_DEFAULT_UPSTREAM"), "Default upstream registry URL for pull-through cache")
+		upstreamMappings = flag.String("upstreams", os.Getenv("MONOFS_REGISTRY_UPSTREAMS"), "Per-repo upstream mappings: prefix=url,prefix=url,...")
+		upstreamUsername = flag.String("upstream-username", os.Getenv("MONOFS_REGISTRY_UPSTREAM_USERNAME"), "Username for upstream registry auth")
+		upstreamPassword = flag.String("upstream-password", os.Getenv("MONOFS_REGISTRY_UPSTREAM_PASSWORD"), "Password for upstream registry auth")
+		upstreamCooldown = flag.Duration("upstream-cooldown", 10*time.Minute, "Time before re-checking upstream for updates")
 
 		diagnosticsAddr = flag.String("diagnostics-addr", ":5001", "Listen address for Prometheus /metrics and pprof endpoints (empty disables)")
 	)

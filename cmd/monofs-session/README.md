@@ -36,7 +36,8 @@ git -C /tmp/monofs status
 git -C /tmp/monofs diff
 
 # Publish source changes.
-./bin/monofs-session commit -m "Update search path"
+./bin/monofs-session commit -m "Update search path" --push-mode squash
+./bin/monofs-session commit -m "Feature work" --push-mode preserve
 
 # Refresh when upstream moves.
 ./bin/monofs-session pull
@@ -44,7 +45,7 @@ git -C /tmp/monofs diff
 
 ## Which Command To Use
 
-- Use `commit` when you changed source files in repositories mounted through MonoFS.
+- Use `commit` when you changed source files in repositories mounted through MonoFS. Pass `--push-mode=preserve` to retain individual commit history upstream, or `--push-mode=squash` (default) to combine all local commits into one upstream commit per repository.
 - Use `push` when you changed dependency or blob-backed files under `dependency/**`.
 - Use `pull` when upstream repositories changed after your mount was created, or after publishing with a non-`direct` branch strategy.
 - Use `discard` when you want to reset the current overlay session instead of publishing it.
@@ -58,7 +59,7 @@ If a session contains both source edits and dependency changes, run `push` first
 ./bin/monofs-session status
 ./bin/monofs-session branch
 ./bin/monofs-session diff
-./bin/monofs-session commit -m "Update search path"
+./bin/monofs-session commit -m "Update search path" --push-mode squash
 ./bin/monofs-session pull
 ./bin/monofs-session push
 ./bin/monofs-session discard
@@ -74,7 +75,8 @@ If a session contains both source edits and dependency changes, run `push` first
   -m "Refactor router sync jobs" \
   --author-name "Jane Developer" \
   --author-email "jane@example.com" \
-  --branch-strategy direct
+  --branch-strategy direct \
+  --push-mode squash
 ```
 
 Supported flags:
@@ -83,6 +85,7 @@ Supported flags:
 - `--author-name`: author name for the publish commit
 - `--author-email`: author email for the publish commit
 - `--branch-strategy`: one of `direct`, `workspace_branch`, or `per_repo_branch`
+- `--push-mode`: how local commits are replayed upstream — `squash` (default) or `preserve`
 
 Author fields fall back in this order:
 
@@ -96,6 +99,59 @@ Author fields fall back in this order:
 `commit` keeps the session active on failure and archives it only after a successful publish.
 
 If the mount is running in virtual-monorepo mode, a successful `direct` publish also refreshes the mounted workspace and re-baselines the synthetic root Git metadata so `git status` returns clean again.
+
+## Push Modes
+
+`--push-mode` controls how your local commits are replayed onto the upstream repository.
+
+### `squash` (default)
+
+All local commits in a repository are combined into **one upstream commit per repository**. This is the current default and preserves existing behavior.
+
+```
+Local commits:         [c1] [c2] [c3]
+Upstream result:  ---> [single squashed commit]
+```
+
+The upstream commit message is auto-generated: `"MonoFS workspace push for <message>"`. If multiple commits were squashed, the CLI prints a warning:
+
+```
+⚠  Squashing 3 local commits into 1 upstream commit per repository.
+   Use --push-mode=preserve to replay each commit individually.
+```
+
+This warning is **not printed** when `--push-mode=preserve` is explicitly set.
+
+**When to use squash:** Quick iterations where individual commit history is noise. CI workspaces. Feature branches destined for squash-merge.
+
+### `preserve`
+
+Each local commit is replayed individually in deterministic order (by `created_at_unix`, then commit ID). Author name, email, message, and ordering are all preserved.
+
+```
+Local commits:         [c1] [c2] [c3]
+Upstream result:  ---> [c1'] [c2'] [c3']   (replayed in order)
+```
+
+Each upstream commit body includes **provenance trailers** for traceability:
+
+```
+MonoFS-Local-Commit: c0a1b2c3d4e5...
+MonoFS-Workspace: ws-prod-frontend
+MonoFS-Job: job-xyz-abc123
+```
+
+These trailers link every upstream commit back to the exact local commit, workspace, and sync job that produced it. They never appear in squash mode.
+
+**When to use preserve:** Feature work where individual commit history matters. Code review workflows. Any situation where "who wrote what and when" needs to survive the push to upstream.
+
+**Conflict behavior:** If a local commit cannot be applied (upstream diverged), replay stops at that commit. The job result marks the specific commit ID and index. On retry, replay resumes from the first unpushed commit — already-pushed commits are never duplicated.
+
+### Interaction with branch strategy
+
+Push mode is **independent of branch strategy**. Both `squash` and `preserve` work with `direct`, `workspace_branch`, and `per_repo_branch`.
+
+When using `preserve` + `per_repo_branch`, each repository receives its own replayed commit sequence on its own `monofs/<workspace>/<storage-id>` branch. When using `preserve` + `direct`, commits are replayed directly onto each repo's tracked branch.
 
 ## Branch
 

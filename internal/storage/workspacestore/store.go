@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,9 +20,10 @@ type Store struct {
 	mu      sync.RWMutex
 	nextSeq uint64
 
-	jobs        map[string]*jobEntry
-	bundles     map[string]*BundleMetadata
-	auditEvents []*AuditEvent
+	jobs          map[string]*jobEntry
+	bundles       map[string]*BundleMetadata
+	auditEvents   []*AuditEvent
+	ledgerEntries [][]byte
 
 	wal *walWriter
 
@@ -37,13 +39,14 @@ func New(cfg StoreConfig, logger *slog.Logger) (*Store, error) {
 	logger = logger.With("component", "workspacestore")
 
 	s := &Store{
-		cfg:         cfg,
-		logger:      logger,
-		jobs:        make(map[string]*jobEntry),
-		bundles:     make(map[string]*BundleMetadata),
-		auditEvents: make([]*AuditEvent, 0),
-		stopCompact: make(chan struct{}),
-		nextSeq:     1,
+		cfg:           cfg,
+		logger:        logger,
+		jobs:          make(map[string]*jobEntry),
+		bundles:       make(map[string]*BundleMetadata),
+		auditEvents:   make([]*AuditEvent, 0),
+		ledgerEntries: make([][]byte, 0),
+		stopCompact:   make(chan struct{}),
+		nextSeq:       1,
 	}
 
 	if cfg.StateDir == "" {
@@ -215,6 +218,7 @@ func (s *Store) InsertLedger(data []byte) error {
 	s.mu.Lock()
 	seq := s.nextSeq
 	s.nextSeq++
+	s.ledgerEntries = append(s.ledgerEntries, append([]byte(nil), data...))
 
 	walEntry := WALEntry{
 		Seq:  seq,
@@ -232,26 +236,16 @@ func (s *Store) InsertLedger(data []byte) error {
 }
 
 func (s *Store) ReplayLedgerEntries(callback func([]byte) error) error {
-	if s.wal == nil {
-		return nil
+	s.mu.RLock()
+	entries := make([][]byte, len(s.ledgerEntries))
+	for i := range s.ledgerEntries {
+		entries[i] = append([]byte(nil), s.ledgerEntries[i]...)
 	}
+	s.mu.RUnlock()
 
-	fromSeq := uint64(0)
-	if s.checkpoint != nil {
-		fromSeq = s.checkpoint.LastCompactedSeq
-	}
-
-	entries, err := s.wal.ReplayEntries(fromSeq)
-	if err != nil {
-		return fmt.Errorf("replay ledger WAL: %w", err)
-	}
-
-	for _, entry := range entries {
-		if entry.Kind != KindLedger {
-			continue
-		}
-		if err := callback(entry.Data); err != nil {
-			return fmt.Errorf("replay ledger entry seq=%d: %w", entry.Seq, err)
+	for i, entry := range entries {
+		if err := callback(entry); err != nil {
+			return fmt.Errorf("replay ledger entry index=%d: %w", i, err)
 		}
 	}
 	return nil
@@ -292,6 +286,12 @@ func (s *Store) recover() error {
 	fromSeq := uint64(0)
 	if s.checkpoint != nil {
 		fromSeq = s.checkpoint.LastCompactedSeq
+		if err := s.loadSnapshot(); err != nil {
+			return fmt.Errorf("load snapshot: %w", err)
+		}
+		if s.nextSeq <= s.checkpoint.LastCompactedSeq {
+			s.nextSeq = s.checkpoint.LastCompactedSeq + 1
+		}
 	}
 
 	entries, err := s.wal.ReplayEntries(fromSeq)
@@ -333,6 +333,11 @@ func (s *Store) recover() error {
 			}
 			ae.Seq = entry.Seq
 			s.auditEvents = append(s.auditEvents, &ae)
+		case KindLedger:
+			if entry.Op != OpInsert {
+				continue
+			}
+			s.ledgerEntries = append(s.ledgerEntries, append([]byte(nil), entry.Data...))
 		}
 		if entry.Seq >= s.nextSeq {
 			s.nextSeq = entry.Seq + 1
@@ -383,7 +388,11 @@ func (s *Store) compact() error {
 		return nil
 	}
 
-	snapshot := &compactedSnapshot{CheckpointSeq: checkpointSeq}
+	snapshot := &compactedSnapshot{
+		Version:       1,
+		CreatedAtUnix: time.Now().Unix(),
+		CheckpointSeq: checkpointSeq,
+	}
 
 	for _, entry := range s.jobs {
 		jobData, err := json.Marshal(entry.snapshot())
@@ -395,10 +404,18 @@ func (s *Store) compact() error {
 	}
 
 	for _, b := range s.bundles {
-		snapshot.Bundles = append(snapshot.Bundles, b)
+		cp := *b
+		cp.LocalCommitIDs = append([]string(nil), b.LocalCommitIDs...)
+		snapshot.Bundles = append(snapshot.Bundles, &cp)
 	}
 
-	snapshot.AuditEvents = s.auditEvents
+	for _, event := range s.auditEvents {
+		cp := *event
+		snapshot.AuditEvents = append(snapshot.AuditEvents, &cp)
+	}
+	for _, entry := range s.ledgerEntries {
+		snapshot.LedgerEntries = append(snapshot.LedgerEntries, append([]byte(nil), entry...))
+	}
 	s.mu.RUnlock()
 
 	checkpointDir := s.statePath("checkpoints", "")
@@ -406,8 +423,13 @@ func (s *Store) compact() error {
 		return fmt.Errorf("create checkpoint dir: %w", err)
 	}
 
+	snapshotFile, err := s.writeSnapshot(snapshot)
+	if err != nil {
+		return fmt.Errorf("write snapshot: %w", err)
+	}
+
 	checkpointPath := s.statePath("checkpoints", "checkpoint.json")
-	chk := &Checkpoint{LastCompactedSeq: checkpointSeq}
+	chk := &Checkpoint{LastCompactedSeq: checkpointSeq, SnapshotFile: snapshotFile}
 
 	tmpPath := checkpointPath + ".tmp"
 	f, err := os.Create(tmpPath)
@@ -432,9 +454,126 @@ func (s *Store) compact() error {
 	s.logger.Info("compaction complete",
 		"checkpoint_seq", checkpointSeq,
 		"wal_size_before", totalSize,
-		"jobs_in_snapshot", len(snapshot.Jobs))
+		"jobs_in_snapshot", len(snapshot.Jobs),
+		"ledger_entries_in_snapshot", len(snapshot.LedgerEntries),
+		"snapshot_file", snapshotFile)
+
+	s.cleanupOldSnapshots(snapshotFile)
 
 	return nil
+}
+
+func (s *Store) loadSnapshot() error {
+	if s.checkpoint == nil || s.checkpoint.LastCompactedSeq == 0 {
+		return nil
+	}
+
+	snapshotFile := s.checkpoint.SnapshotFile
+	if snapshotFile == "" {
+		snapshotFile = fmt.Sprintf("snapshot-%020d.json", s.checkpoint.LastCompactedSeq)
+	}
+
+	path := s.statePath("checkpoints", snapshotFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read snapshot %s: %w", path, err)
+	}
+
+	var snapshot compactedSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return fmt.Errorf("decode snapshot %s: %w", path, err)
+	}
+
+	if snapshot.Version != 1 {
+		return fmt.Errorf("unsupported snapshot version %d", snapshot.Version)
+	}
+
+	s.jobs = make(map[string]*jobEntry, len(snapshot.Jobs))
+	for _, js := range snapshot.Jobs {
+		var job pb.WorkspaceSyncJob
+		if err := json.Unmarshal(js.Data, &job); err != nil {
+			s.logger.Warn("skip corrupt job in snapshot", "error", err)
+			continue
+		}
+		cloned := proto.Clone(&job).(*pb.WorkspaceSyncJob)
+		s.jobs[job.GetJobId()] = &jobEntry{job: cloned}
+	}
+
+	s.bundles = make(map[string]*BundleMetadata, len(snapshot.Bundles))
+	for _, b := range snapshot.Bundles {
+		cp := *b
+		cp.LocalCommitIDs = append([]string(nil), b.LocalCommitIDs...)
+		s.bundles[b.BundleID] = &cp
+	}
+
+	s.auditEvents = make([]*AuditEvent, 0, len(snapshot.AuditEvents))
+	for _, event := range snapshot.AuditEvents {
+		cp := *event
+		s.auditEvents = append(s.auditEvents, &cp)
+	}
+
+	s.ledgerEntries = make([][]byte, 0, len(snapshot.LedgerEntries))
+	for _, entry := range snapshot.LedgerEntries {
+		s.ledgerEntries = append(s.ledgerEntries, append([]byte(nil), entry...))
+	}
+
+	if snapshot.CheckpointSeq >= s.nextSeq {
+		s.nextSeq = snapshot.CheckpointSeq + 1
+	}
+
+	s.logger.Info("loaded snapshot",
+		"file", snapshotFile,
+		"checkpoint_seq", snapshot.CheckpointSeq,
+		"jobs", len(s.jobs),
+		"bundles", len(s.bundles),
+		"audit_events", len(s.auditEvents),
+		"ledger_entries", len(s.ledgerEntries))
+
+	return nil
+}
+
+func (s *Store) writeSnapshot(snapshot *compactedSnapshot) (string, error) {
+	snapshotFile := fmt.Sprintf("snapshot-%020d.json", snapshot.CheckpointSeq)
+	path := s.statePath("checkpoints", snapshotFile)
+	tmpPath := path + ".tmp"
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return "", err
+	}
+	enc := json.NewEncoder(f)
+	if err := enc.Encode(snapshot); err != nil {
+		f.Close()
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+
+	return snapshotFile, nil
+}
+
+func (s *Store) cleanupOldSnapshots(currentSnapshotFile string) {
+	pattern := filepath.Join(s.statePath("checkpoints", ""), "snapshot-*.json")
+	files, err := filepath.Glob(pattern)
+	if err != nil {
+		s.logger.Warn("failed to enumerate snapshots", "error", err)
+		return
+	}
+	for _, file := range files {
+		if filepath.Base(file) == currentSnapshotFile {
+			continue
+		}
+		if err := os.Remove(file); err != nil {
+			s.logger.Warn("failed to remove old snapshot", "file", file, "error", err)
+		}
+	}
 }
 
 func (s *Store) statePath(parts ...string) string {

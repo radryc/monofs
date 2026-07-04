@@ -13,7 +13,7 @@ type noopReadDirStream struct {
 	grpc.ServerStream
 }
 
-func (noopReadDirStream) Send(*pb.DirEntry) error { return nil }
+func (noopReadDirStream) Send(*pb.DirEntry) error  { return nil }
 func (noopReadDirStream) Context() context.Context { return context.Background() }
 
 func newBenchStub(b *testing.B) *StubServer {

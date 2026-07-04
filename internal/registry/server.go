@@ -16,14 +16,14 @@ import (
 )
 
 type Server struct {
-	blobs    *BlobStore
-	tags     *TagStore
-	uploads  *UploadManager
-	proxy    *Proxy
-	stats    *Stats
-	client   *Client
-	logger   *slog.Logger
-	dataNS   string
+	blobs   *BlobStore
+	tags    *TagStore
+	uploads *UploadManager
+	proxy   *Proxy
+	stats   *Stats
+	client  *Client
+	logger  *slog.Logger
+	dataNS  string
 
 	blobDownloadCount atomic.Int64
 	blobUploadCount   atomic.Int64

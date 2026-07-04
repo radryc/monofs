@@ -101,7 +101,7 @@ func TestMultiSegmentRecoveryWithCheckpoint(t *testing.T) {
 
 	cfg := DefaultStoreConfig(dir)
 	cfg.CompactionInterval = 24 * time.Hour
-	cfg.CompactionSizeThreshold = 1 << 60
+	cfg.CompactionSizeThreshold = 1
 	cfg.FsyncEnabled = true
 
 	store, err := New(cfg, nil)
@@ -206,7 +206,7 @@ func TestCompactionNoDoubleCountingOnReplay(t *testing.T) {
 
 	cfg := DefaultStoreConfig(dir)
 	cfg.CompactionInterval = 24 * time.Hour
-	cfg.CompactionSizeThreshold = 1 << 60
+	cfg.CompactionSizeThreshold = 1
 
 	store, err := New(cfg, nil)
 	if err != nil {
@@ -249,6 +249,63 @@ func TestCompactionNoDoubleCountingOnReplay(t *testing.T) {
 
 	if store2.JobCount() != 1000 {
 		t.Fatalf("expected 1000 jobs, got %d", store2.JobCount())
+	}
+}
+
+func TestRecoveryFromSnapshotAfterCompaction(t *testing.T) {
+	dir := tempDir(t)
+
+	cfg := DefaultStoreConfig(dir)
+	cfg.CompactionInterval = 24 * time.Hour
+	cfg.CompactionSizeThreshold = 1
+	cfg.FsyncEnabled = true
+
+	store, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 1; i <= 20; i++ {
+		if err := store.UpsertJob(&pb.WorkspaceSyncJob{
+			JobId:         idFor(i),
+			WorkspaceId:   "ws-snapshot",
+			CreatedAtUnix: int64(i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := store.InsertLedger([]byte(`{"event":"one"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.compact(); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	store2, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store2.Close()
+
+	if got := store2.JobCount(); got != 20 {
+		t.Fatalf("expected 20 jobs after snapshot recovery, got %d", got)
+	}
+
+	ledger := make([]string, 0)
+	if err := store2.ReplayLedgerEntries(func(data []byte) error {
+		ledger = append(ledger, string(data))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ledger) != 1 {
+		t.Fatalf("expected 1 ledger entry after snapshot recovery, got %d", len(ledger))
+	}
+	if ledger[0] != `{"event":"one"}` {
+		t.Fatalf("unexpected ledger entry: %s", ledger[0])
 	}
 }
 

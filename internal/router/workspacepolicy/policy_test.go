@@ -102,11 +102,11 @@ func TestMatchNotNegation(t *testing.T) {
 		Default: EffectAllow,
 		Rules: []Rule{
 			{
-				Name:  "deny non-staging per-repo-branch",
-				Match: MatchSet{BranchStrategies: []string{BranchStrategyPerRepoBranch}},
+				Name:     "deny non-staging per-repo-branch",
+				Match:    MatchSet{BranchStrategies: []string{BranchStrategyPerRepoBranch}},
 				MatchNot: MatchSet{WorkspaceIDs: []string{"staging-*"}},
-				Effect: EffectDeny,
-				Reason: "per-repo-branch restricted to staging",
+				Effect:   EffectDeny,
+				Reason:   "per-repo-branch restricted to staging",
 			},
 		},
 	}
@@ -131,8 +131,8 @@ func TestRepositoryMatchAny(t *testing.T) {
 		Default: EffectAllow,
 		Rules: []Rule{
 			{
-				Name:  "block sensitive repos",
-				Match: MatchSet{RepositoryIDs: []string{"repo-secret", "repo-internal"}},
+				Name:   "block sensitive repos",
+				Match:  MatchSet{RepositoryIDs: []string{"repo-secret", "repo-internal"}},
 				Effect: EffectDeny,
 				Reason: "sensitive repo blocked",
 			},

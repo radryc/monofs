@@ -73,10 +73,10 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 
 func (s *Store) UploadSnapshot(ctx context.Context, key string, data []byte) error {
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:       aws.String(s.bucket),
-		Key:          aws.String(s.fullKey(key)),
-		Body:         bytes.NewReader(data),
-		ContentType:  aws.String("application/gzip"),
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(s.fullKey(key)),
+		Body:        bytes.NewReader(data),
+		ContentType: aws.String("application/gzip"),
 	})
 	return err
 }

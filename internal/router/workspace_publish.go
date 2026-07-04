@@ -71,7 +71,9 @@ func (r *Router) UploadWorkspaceBundle(stream grpc.ClientStreamingServer[pb.Work
 		createdAt:   time.Now(),
 		expiresAt:   time.Now().Add(workspaceBundleTTL),
 	}
-	r.storeWorkspaceBundle(entry)
+	if err := r.storeWorkspaceBundle(entry); err != nil {
+		return err
+	}
 	routerWorkspaceSyncBundleBytesTotal.Add(float64(len(entry.data)))
 
 	return stream.SendAndClose(&pb.UploadWorkspaceBundleResponse{
@@ -96,7 +98,9 @@ func (r *Router) PublishWorkspace(req *pb.PublishWorkspaceRequest, stream pb.Mon
 
 	job := r.newWorkspacePublishJob(req, bundleEntry.bundle, extractClientID(stream.Context()))
 	entry := &workspaceSyncJobEntry{job: job}
-	r.storeWorkspaceSyncJob(entry)
+	if err := r.storeWorkspaceSyncJob(entry); err != nil {
+		return err
+	}
 	routerWorkspaceSyncJobsTotal.WithLabelValues(actionLabel, "started").Inc()
 	routerWorkspaceSyncActiveJobs.WithLabelValues(actionLabel).Inc()
 	defer routerWorkspaceSyncActiveJobs.WithLabelValues(actionLabel).Dec()
@@ -129,10 +133,12 @@ func (r *Router) PublishWorkspace(req *pb.PublishWorkspaceRequest, stream pb.Mon
 
 func (r *Router) runWorkspacePublishJob(ctx context.Context, entry *workspaceSyncJobEntry, req *pb.PublishWorkspaceRequest, bundleEntry *stagedWorkspaceBundle, send func(*pb.WorkspaceSyncEvent) error) error {
 	actionLabel := workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_PUBLISH)
-	r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
+	if err := r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
 		job.State = pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_RUNNING
 		job.StartedAtUnix = time.Now().Unix()
-	})
+	}); err != nil {
+		return err
+	}
 	if err := send(&pb.WorkspaceSyncEvent{
 		EventType: pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_JOB_STARTED,
 		Job:       entry.snapshot(),
@@ -143,7 +149,9 @@ func (r *Router) runWorkspacePublishJob(ctx context.Context, entry *workspaceSyn
 
 	fetcherClient := r.getFetcherClient()
 	if fetcherClient == nil {
-		r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_PUBLISH), "fetcher cluster not configured")
+		if err := r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_PUBLISH), "fetcher cluster not configured"); err != nil {
+			return err
+		}
 		return sendWorkspaceSyncTerminalEvent(send, entry, "workspace publish job failed")
 	}
 	defer func() {
@@ -151,7 +159,9 @@ func (r *Router) runWorkspacePublishJob(ctx context.Context, entry *workspaceSyn
 	}()
 
 	if _, err := fetcherClient.StageWorkspaceBundle(ctx, req.GetBundleId(), bundleEntry.workspaceID, bundleEntry.data); err != nil {
-		r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_PUBLISH), err.Error())
+		if err2 := r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_PUBLISH), err.Error()); err2 != nil {
+			return err2
+		}
 		return sendWorkspaceSyncTerminalEvent(send, entry, "workspace publish job failed")
 	}
 
@@ -165,20 +175,26 @@ func (r *Router) runWorkspacePublishJob(ctx context.Context, entry *workspaceSyn
 		RequestedBranchStrategy: req.GetRequestedBranchStrategy(),
 	})
 	if err != nil {
-		r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_PUBLISH), err.Error())
+		if err2 := r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_PUBLISH), err.Error()); err2 != nil {
+			return err2
+		}
 		return sendWorkspaceSyncTerminalEvent(send, entry, "workspace publish job failed")
 	}
 
 	for _, progress := range publishResults {
 		select {
 		case <-ctx.Done():
-			r.cancelWorkspaceSyncJob(entry)
+			if err := r.cancelWorkspaceSyncJob(entry); err != nil {
+				return err
+			}
 			return sendWorkspaceSyncTerminalEvent(send, entry, "workspace publish job cancelled")
 		default:
 		}
 
 		repoResult := workspaceRepositoryResultFromPublish(progress, actionLabel)
-		r.updateWorkspaceSyncRepository(entry, repoResult)
+		if err := r.updateWorkspaceSyncRepository(entry, repoResult); err != nil {
+			return err
+		}
 		if err := send(&pb.WorkspaceSyncEvent{
 			EventType:  workspaceEventTypeForRepository(repoResult),
 			Job:        entry.snapshot(),
@@ -189,7 +205,9 @@ func (r *Router) runWorkspacePublishJob(ctx context.Context, entry *workspaceSyn
 		}
 	}
 
-	r.finalizeWorkspaceSyncJob(entry)
+	if err := r.finalizeWorkspaceSyncJob(entry); err != nil {
+		return err
+	}
 	routerWorkspaceSyncJobsTotal.WithLabelValues(workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_PUBLISH), workspaceSyncResultLabel(entry.snapshot().GetState())).Inc()
 	return sendWorkspaceSyncTerminalEvent(send, entry, "workspace publish job completed")
 }
@@ -217,21 +235,36 @@ func (r *Router) newWorkspacePublishJob(req *pb.PublishWorkspaceRequest, bundle 
 	}
 }
 
-func (r *Router) storeWorkspaceBundle(entry *stagedWorkspaceBundle) {
+func (r *Router) storeWorkspaceBundle(entry *stagedWorkspaceBundle) error {
+	if r.workspaceJobStore != nil {
+		repoCount := 0
+		kind := "publish"
+		localCommitIDs := []string(nil)
+		if entry.bundle != nil {
+			repoCount = len(entry.bundle.Repositories)
+		}
+		if entry.commitBundle != nil {
+			kind = "source_push"
+			repoCount = len(entry.commitBundle.RepositoryRefs())
+			localCommitIDs = entry.commitBundle.LocalCommitIDs()
+		}
+		if err := r.workspaceJobStore.UpsertBundle(&workspacestore.BundleMetadata{
+			BundleID:       entry.bundleID,
+			WorkspaceID:    entry.workspaceID,
+			Kind:           kind,
+			ByteSize:       int64(len(entry.data)),
+			RepoCount:      int32(repoCount),
+			LocalCommitIDs: localCommitIDs,
+			CreatedAtUnix:  entry.createdAt.Unix(),
+			ExpiresAtUnix:  entry.expiresAt.Unix(),
+		}); err != nil {
+			return fmt.Errorf("persist workspace bundle %q: %w", entry.bundleID, err)
+		}
+	}
 	r.workspaceBundleMu.Lock()
 	r.workspaceBundles[entry.bundleID] = entry
 	r.workspaceBundleMu.Unlock()
-	if r.workspaceJobStore != nil {
-		_ = r.workspaceJobStore.UpsertBundle(&workspacestore.BundleMetadata{
-			BundleID:       entry.bundleID,
-			WorkspaceID:    entry.workspaceID,
-			Kind:           "publish",
-			ByteSize:       int64(len(entry.data)),
-			RepoCount:      int32(len(entry.bundle.Repositories)),
-			CreatedAtUnix:  entry.createdAt.Unix(),
-			ExpiresAtUnix:  entry.expiresAt.Unix(),
-		})
-	}
+	return nil
 }
 
 func (r *Router) getWorkspaceBundle(bundleID string) *stagedWorkspaceBundle {

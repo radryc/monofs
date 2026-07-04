@@ -153,6 +153,16 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-registry ./cmd/monofs-registry
 
+FROM builder AS fuse-plugin-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
+    -o /bin/k8s-fuse-device-plugin ./cmd/k8s-fuse-device-plugin
+
 # OCI Registry image
 FROM alpine:3.19 AS registry
 
@@ -412,3 +422,13 @@ RUN chmod +x /start.sh
 
 USER root
 CMD ["/start.sh"]
+
+# FUSE device plugin image
+FROM alpine:3.19 AS fuse-plugin
+
+RUN apk add --no-cache ca-certificates
+
+COPY --from=fuse-plugin-builder /bin/k8s-fuse-device-plugin /usr/local/bin/k8s-fuse-device-plugin
+
+ENTRYPOINT ["k8s-fuse-device-plugin"]
+CMD ["--mounts-allowed=5000"]
