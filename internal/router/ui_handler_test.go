@@ -10,6 +10,9 @@ import (
 
 func TestBuildStatusDataIncludesKVSStatus(t *testing.T) {
 	r := NewRouter(DefaultRouterConfig(), nil)
+	r.config.WorkspaceStateDir = "/var/lib/monofs/workspace"
+	r.config.PolicyGateEnabled = true
+	r.config.AutoPushEnabled = true
 	r.nodes["node-a"] = &nodeState{
 		info:   &pb.NodeInfo{NodeId: "node-a", Address: "10.0.0.1:9000", Healthy: true, Weight: 100},
 		status: NodeActive,
@@ -67,6 +70,29 @@ func TestBuildStatusDataIncludesKVSStatus(t *testing.T) {
 	}
 	if got := kvsB["mode"]; got != "disabled" {
 		t.Fatalf("expected disabled kvs mode for node-b, got %#v", got)
+	}
+
+	if len(data.Features) == 0 {
+		t.Fatalf("expected status features, got %#v", data.Features)
+	}
+
+	if data.Metrics == nil {
+		t.Fatal("expected status metrics map, got nil")
+	}
+	if got := data.Metrics["nodes_total"]; got != 2 {
+		t.Fatalf("expected nodes_total=2, got %v", got)
+	}
+	if got := data.Metrics["nodes_healthy"]; got != 2 {
+		t.Fatalf("expected nodes_healthy=2, got %v", got)
+	}
+	if got := data.Metrics["workspace_wal_enabled"]; got != 1 {
+		t.Fatalf("expected workspace_wal_enabled=1, got %v", got)
+	}
+	if got := data.Metrics["policy_gate_enabled"]; got != 1 {
+		t.Fatalf("expected policy_gate_enabled=1, got %v", got)
+	}
+	if got := data.Metrics["auto_push_enabled"]; got != 1 {
+		t.Fatalf("expected auto_push_enabled=1, got %v", got)
 	}
 }
 

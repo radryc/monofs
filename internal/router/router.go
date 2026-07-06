@@ -15,7 +15,6 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
-	"github.com/radryc/monofs/internal/router/workspaceledger"
 	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
@@ -146,11 +145,8 @@ type Router struct {
 	workspaceJobStore *workspacestore.Store
 
 	// Phase 3: Policy evaluation
-	policyCfg    *workspacepolicy.PolicyConfig
-	policyCfgMu  sync.RWMutex
-
-	// Phase 6: Commit/diff ledger
-	ledger *workspaceledger.Ledger
+	policyCfg   *workspacepolicy.PolicyConfig
+	policyCfgMu sync.RWMutex
 
 	// Phase 3: Auto-push worker (nil when disabled)
 	autoPushWorker *autoPushWorker
@@ -384,7 +380,6 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		workspaceBundles:          make(map[string]*stagedWorkspaceBundle),
 		workspaceJobStore:         wjs,
 		policyCfg:                 policyCfg,
-		ledger:                    workspaceledger.New(),
 		failoverTimers:            make(map[string]*time.Timer),
 		failoverStartTimes:        make(map[string]time.Time),
 		config:                    cfg,
@@ -397,13 +392,6 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 	}
 	r.version.Store(1)
 	r.namespaceGeneration.Store(1)
-
-	if wjs != nil {
-		r.ledger = workspaceledger.NewWithWAL(wjs)
-		if err := wjs.ReplayLedgerEntries(r.ledger.ReplayFromWAL); err != nil {
-			logger.Error("failed to replay ledger from WAL", "error", err)
-		}
-	}
 
 	if cfg.AutoPushEnabled {
 		interval := cfg.AutoPushInterval

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/radryc/monofs/internal/workspacebundle"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 type workspaceSyncTestFetcherServer struct {
@@ -27,6 +29,55 @@ type workspaceSyncTestFetcherServer struct {
 	commitPushResponses     []*pb.RepoSyncProgress
 	stagedBundleBytes       int
 	stagedCommitBundleBytes int
+}
+
+type workspaceSyncLedgerNodeServer struct {
+	pb.UnimplementedMonoFSServer
+	mu          sync.Mutex
+	appendCalls int
+	lastAppend  *pb.AppendLedgerEntriesRequest
+}
+
+func (s *workspaceSyncLedgerNodeServer) AppendLedgerEntries(_ context.Context, req *pb.AppendLedgerEntriesRequest) (*pb.AppendLedgerEntriesResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.appendCalls++
+	s.lastAppend = req
+	accepted := len(req.GetCommits()) + len(req.GetPushOutcomes()) + len(req.GetRefreshEvents())
+	return &pb.AppendLedgerEntriesResponse{Success: true, Accepted: int32(accepted)}, nil
+}
+
+func (s *workspaceSyncLedgerNodeServer) QueryLedger(_ context.Context, _ *pb.QueryLedgerRequest) (*pb.QueryLedgerResponse, error) {
+	return &pb.QueryLedgerResponse{}, nil
+}
+
+func startWorkspaceSyncLedgerNode(t *testing.T) (pb.MonoFSClient, *workspaceSyncLedgerNodeServer, func()) {
+	t.Helper()
+
+	impl := &workspaceSyncLedgerNodeServer{}
+	grpcServer := grpc.NewServer()
+	pb.RegisterMonoFSServer(grpcServer, impl)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen ledger node: %v", err)
+	}
+	go func() { _ = grpcServer.Serve(lis) }()
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		grpcServer.Stop()
+		_ = lis.Close()
+		t.Fatalf("dial ledger node: %v", err)
+	}
+
+	cleanup := func() {
+		_ = conn.Close()
+		grpcServer.Stop()
+		_ = lis.Close()
+	}
+
+	return pb.NewMonoFSClient(conn), impl, cleanup
 }
 
 func (s *workspaceSyncTestFetcherServer) ProbeWorkspaceRefresh(req *pb.ProbeWorkspaceRefreshRequest, stream grpc.ServerStreamingServer[pb.RepoSyncProgress]) error {
@@ -526,5 +577,107 @@ func TestPushWorkspaceCommitsUploadsBundleAndStoresSourcePushJob(t *testing.T) {
 	}
 	if fetcherServer.stagedCommitBundleBytes != len(bundleBytes) {
 		t.Fatalf("expected staged commit bundle bytes %d, got %d", len(bundleBytes), fetcherServer.stagedCommitBundleBytes)
+	}
+}
+
+func TestPushWorkspaceCommitsPersistsOutcomeViaLedgerProxy(t *testing.T) {
+	commitPushResponses := []*pb.RepoSyncProgress{{
+		Repository: &pb.WorkspaceRepositoryRef{
+			StorageId:   "repo-1",
+			DisplayPath: "src/repo-1",
+			RepoUrl:     "https://example.com/repo-1.git",
+			Branch:      "main",
+			BaseCommit:  "abc123",
+		},
+		Status:       pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED,
+		RemoteCommit: "abc123",
+		PushedCommit: "def456",
+		TargetBranch: "feature/demo",
+		Message:      "repository pushed from local commits",
+	}}
+	fetcherAddr, _, cleanupFetcher := startWorkspaceSyncTestFetcher(t, nil, nil, commitPushResponses)
+	defer cleanupFetcher()
+
+	router := NewRouter(DefaultRouterConfig(), slog.Default())
+	defer func() { _ = router.Close() }()
+	if err := router.SetFetcherClient([]string{fetcherAddr}); err != nil {
+		t.Fatalf("set fetcher client: %v", err)
+	}
+
+	ledgerClient, ledgerServer, cleanupLedger := startWorkspaceSyncLedgerNode(t)
+	defer cleanupLedger()
+	router.nodes["ledger-node"] = &nodeState{
+		info:   &pb.NodeInfo{NodeId: "ledger-node", Address: "127.0.0.1", Weight: 100, Healthy: true},
+		status: NodeActive,
+		client: ledgerClient,
+	}
+
+	client, cleanupRouter := startWorkspaceSyncTestRouter(t, router)
+	defer cleanupRouter()
+
+	bundleBytes, err := json.Marshal(workspacebundle.SourceCommitBundle{
+		WorkspaceID:   "workspace-ledger",
+		LogicalBranch: "feature/demo",
+		Commits: []workspacebundle.SourceCommit{{
+			ID:      "local-1",
+			Message: "first local commit",
+			Repositories: []workspacebundle.SourceCommitRepository{{
+				StorageID:   "repo-1",
+				DisplayPath: "src/repo-1",
+				RepoURL:     "https://example.com/repo-1.git",
+				Branch:      "main",
+				BaseCommit:  "abc123",
+				Operations:  []workspacebundle.Operation{{Kind: workspacebundle.OperationUpsert, Path: "README.md", Content: []byte("first\n")}},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal source commit bundle: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("x-client-id", "client-ledger-proxy"))
+
+	upload, err := client.UploadWorkspaceCommitBundle(ctx)
+	if err != nil {
+		t.Fatalf("open source bundle upload stream: %v", err)
+	}
+	if err := upload.Send(&pb.WorkspaceBundleChunk{WorkspaceId: "workspace-ledger", Data: bundleBytes, IsLast: true}); err != nil {
+		t.Fatalf("send source bundle: %v", err)
+	}
+	uploadResp, err := upload.CloseAndRecv()
+	if err != nil {
+		t.Fatalf("close source bundle upload: %v", err)
+	}
+
+	stream, err := client.PushWorkspaceCommits(ctx, &pb.PushWorkspaceCommitsRequest{
+		WorkspaceId:   "workspace-ledger",
+		BundleId:      uploadResp.GetBundleId(),
+		LogicalBranch: "feature/demo",
+	})
+	if err != nil {
+		t.Fatalf("push workspace commits: %v", err)
+	}
+	for {
+		_, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("recv source push event: %v", err)
+		}
+	}
+
+	ledgerServer.mu.Lock()
+	defer ledgerServer.mu.Unlock()
+	if ledgerServer.appendCalls < 1 {
+		t.Fatalf("expected at least one AppendLedgerEntries call, got %d", ledgerServer.appendCalls)
+	}
+	if ledgerServer.lastAppend == nil || len(ledgerServer.lastAppend.GetPushOutcomes()) == 0 {
+		t.Fatalf("expected push outcome in append request, got %#v", ledgerServer.lastAppend)
+	}
+	if got := ledgerServer.lastAppend.GetPushOutcomes()[0].GetWorkspaceId(); got != "workspace-ledger" {
+		t.Fatalf("appended workspace id = %q, want workspace-ledger", got)
 	}
 }

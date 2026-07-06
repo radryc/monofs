@@ -10821,6 +10821,126 @@ func (x *QueryLedgerResponse) GetTotalMatches() int32 {
 	return 0
 }
 
+type AppendLedgerEntriesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Commits       []*LocalCommit         `protobuf:"bytes,1,rep,name=commits,proto3" json:"commits,omitempty"`
+	PushOutcomes  []*PushOutcome         `protobuf:"bytes,2,rep,name=push_outcomes,json=pushOutcomes,proto3" json:"push_outcomes,omitempty"`
+	RefreshEvents []*RefreshEvent        `protobuf:"bytes,3,rep,name=refresh_events,json=refreshEvents,proto3" json:"refresh_events,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppendLedgerEntriesRequest) Reset() {
+	*x = AppendLedgerEntriesRequest{}
+	mi := &file_api_proto_monofs_proto_msgTypes[158]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppendLedgerEntriesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppendLedgerEntriesRequest) ProtoMessage() {}
+
+func (x *AppendLedgerEntriesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[158]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppendLedgerEntriesRequest.ProtoReflect.Descriptor instead.
+func (*AppendLedgerEntriesRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{158}
+}
+
+func (x *AppendLedgerEntriesRequest) GetCommits() []*LocalCommit {
+	if x != nil {
+		return x.Commits
+	}
+	return nil
+}
+
+func (x *AppendLedgerEntriesRequest) GetPushOutcomes() []*PushOutcome {
+	if x != nil {
+		return x.PushOutcomes
+	}
+	return nil
+}
+
+func (x *AppendLedgerEntriesRequest) GetRefreshEvents() []*RefreshEvent {
+	if x != nil {
+		return x.RefreshEvents
+	}
+	return nil
+}
+
+type AppendLedgerEntriesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Accepted      int32                  `protobuf:"varint,2,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppendLedgerEntriesResponse) Reset() {
+	*x = AppendLedgerEntriesResponse{}
+	mi := &file_api_proto_monofs_proto_msgTypes[159]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppendLedgerEntriesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppendLedgerEntriesResponse) ProtoMessage() {}
+
+func (x *AppendLedgerEntriesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_monofs_proto_msgTypes[159]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppendLedgerEntriesResponse.ProtoReflect.Descriptor instead.
+func (*AppendLedgerEntriesResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{159}
+}
+
+func (x *AppendLedgerEntriesResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *AppendLedgerEntriesResponse) GetAccepted() int32 {
+	if x != nil {
+		return x.Accepted
+	}
+	return 0
+}
+
+func (x *AppendLedgerEntriesResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 type LocalCommit struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	LocalCommitId  string                 `protobuf:"bytes,1,opt,name=local_commit_id,json=localCommitId,proto3" json:"local_commit_id,omitempty"`
@@ -10842,7 +10962,7 @@ type LocalCommit struct {
 
 func (x *LocalCommit) Reset() {
 	*x = LocalCommit{}
-	mi := &file_api_proto_monofs_proto_msgTypes[158]
+	mi := &file_api_proto_monofs_proto_msgTypes[160]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10854,7 +10974,7 @@ func (x *LocalCommit) String() string {
 func (*LocalCommit) ProtoMessage() {}
 
 func (x *LocalCommit) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[158]
+	mi := &file_api_proto_monofs_proto_msgTypes[160]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10867,7 +10987,7 @@ func (x *LocalCommit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LocalCommit.ProtoReflect.Descriptor instead.
 func (*LocalCommit) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{158}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{160}
 }
 
 func (x *LocalCommit) GetLocalCommitId() string {
@@ -10982,7 +11102,7 @@ type PushOutcome struct {
 
 func (x *PushOutcome) Reset() {
 	*x = PushOutcome{}
-	mi := &file_api_proto_monofs_proto_msgTypes[159]
+	mi := &file_api_proto_monofs_proto_msgTypes[161]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10994,7 +11114,7 @@ func (x *PushOutcome) String() string {
 func (*PushOutcome) ProtoMessage() {}
 
 func (x *PushOutcome) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[159]
+	mi := &file_api_proto_monofs_proto_msgTypes[161]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11007,7 +11127,7 @@ func (x *PushOutcome) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushOutcome.ProtoReflect.Descriptor instead.
 func (*PushOutcome) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{159}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{161}
 }
 
 func (x *PushOutcome) GetPushOutcomeId() string {
@@ -11116,7 +11236,7 @@ type RefreshEvent struct {
 
 func (x *RefreshEvent) Reset() {
 	*x = RefreshEvent{}
-	mi := &file_api_proto_monofs_proto_msgTypes[160]
+	mi := &file_api_proto_monofs_proto_msgTypes[162]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11128,7 +11248,7 @@ func (x *RefreshEvent) String() string {
 func (*RefreshEvent) ProtoMessage() {}
 
 func (x *RefreshEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_monofs_proto_msgTypes[160]
+	mi := &file_api_proto_monofs_proto_msgTypes[162]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11141,7 +11261,7 @@ func (x *RefreshEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RefreshEvent.ProtoReflect.Descriptor instead.
 func (*RefreshEvent) Descriptor() ([]byte, []int) {
-	return file_api_proto_monofs_proto_rawDescGZIP(), []int{160}
+	return file_api_proto_monofs_proto_rawDescGZIP(), []int{162}
 }
 
 func (x *RefreshEvent) GetRefreshEventId() string {
@@ -12035,7 +12155,15 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\rpush_outcomes\x18\x02 \x03(\v2\x13.monofs.PushOutcomeR\fpushOutcomes\x12;\n" +
 	"\x0erefresh_events\x18\x03 \x03(\v2\x14.monofs.RefreshEventR\rrefreshEvents\x12&\n" +
 	"\x0fnext_page_token\x18\x04 \x01(\tR\rnextPageToken\x12#\n" +
-	"\rtotal_matches\x18\x05 \x01(\x05R\ftotalMatches\"\xd6\x03\n" +
+	"\rtotal_matches\x18\x05 \x01(\x05R\ftotalMatches\"\xc2\x01\n" +
+	"\x1aAppendLedgerEntriesRequest\x12-\n" +
+	"\acommits\x18\x01 \x03(\v2\x13.monofs.LocalCommitR\acommits\x128\n" +
+	"\rpush_outcomes\x18\x02 \x03(\v2\x13.monofs.PushOutcomeR\fpushOutcomes\x12;\n" +
+	"\x0erefresh_events\x18\x03 \x03(\v2\x14.monofs.RefreshEventR\rrefreshEvents\"m\n" +
+	"\x1bAppendLedgerEntriesResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x1a\n" +
+	"\baccepted\x18\x02 \x01(\x05R\baccepted\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"\xd6\x03\n" +
 	"\vLocalCommit\x12&\n" +
 	"\x0flocal_commit_id\x18\x01 \x01(\tR\rlocalCommitId\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12!\n" +
@@ -12197,7 +12325,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x13GetWorkspaceSyncJob\x12\".monofs.GetWorkspaceSyncJobRequest\x1a\x18.monofs.WorkspaceSyncJob\x12d\n" +
 	"\x15ListWorkspaceSyncJobs\x12$.monofs.ListWorkspaceSyncJobsRequest\x1a%.monofs.ListWorkspaceSyncJobsResponse\x12g\n" +
 	"\x16CancelWorkspaceSyncJob\x12%.monofs.CancelWorkspaceSyncJobRequest\x1a&.monofs.CancelWorkspaceSyncJobResponse\x12F\n" +
-	"\vQueryLedger\x12\x1a.monofs.QueryLedgerRequest\x1a\x1b.monofs.QueryLedgerResponse2\xfb\x14\n" +
+	"\vQueryLedger\x12\x1a.monofs.QueryLedgerRequest\x1a\x1b.monofs.QueryLedgerResponse2\xa3\x16\n" +
 	"\x06MonoFS\x127\n" +
 	"\x06Lookup\x12\x15.monofs.LookupRequest\x1a\x16.monofs.LookupResponse\x12:\n" +
 	"\aGetAttr\x12\x16.monofs.GetAttrRequest\x1a\x17.monofs.GetAttrResponse\x125\n" +
@@ -12235,7 +12363,9 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\n" +
 	"IngestLogs\x12\x19.monofs.IngestLogsRequest\x1a\x1a.monofs.IngestLogsResponse\x12L\n" +
 	"\rIngestMetrics\x12\x1c.monofs.IngestMetricsRequest\x1a\x1d.monofs.IngestMetricsResponse\x12I\n" +
-	"\fIngestTraces\x12\x1b.monofs.IngestTracesRequest\x1a\x1c.monofs.IngestTracesResponseB$Z\"github.com/radryc/monofs/api/protob\x06proto3"
+	"\fIngestTraces\x12\x1b.monofs.IngestTracesRequest\x1a\x1c.monofs.IngestTracesResponse\x12^\n" +
+	"\x13AppendLedgerEntries\x12\".monofs.AppendLedgerEntriesRequest\x1a#.monofs.AppendLedgerEntriesResponse\x12F\n" +
+	"\vQueryLedger\x12\x1a.monofs.QueryLedgerRequest\x1a\x1b.monofs.QueryLedgerResponseB$Z\"github.com/radryc/monofs/api/protob\x06proto3"
 
 var (
 	file_api_proto_monofs_proto_rawDescOnce sync.Once
@@ -12250,7 +12380,7 @@ func file_api_proto_monofs_proto_rawDescGZIP() []byte {
 }
 
 var file_api_proto_monofs_proto_enumTypes = make([]protoimpl.EnumInfo, 12)
-var file_api_proto_monofs_proto_msgTypes = make([]protoimpl.MessageInfo, 171)
+var file_api_proto_monofs_proto_msgTypes = make([]protoimpl.MessageInfo, 173)
 var file_api_proto_monofs_proto_goTypes = []any{
 	(IngestionType)(0),                       // 0: monofs.IngestionType
 	(SourceType)(0),                          // 1: monofs.SourceType
@@ -12422,42 +12552,44 @@ var file_api_proto_monofs_proto_goTypes = []any{
 	(*IngestTracesResponse)(nil),             // 167: monofs.IngestTracesResponse
 	(*QueryLedgerRequest)(nil),               // 168: monofs.QueryLedgerRequest
 	(*QueryLedgerResponse)(nil),              // 169: monofs.QueryLedgerResponse
-	(*LocalCommit)(nil),                      // 170: monofs.LocalCommit
-	(*PushOutcome)(nil),                      // 171: monofs.PushOutcome
-	(*RefreshEvent)(nil),                     // 172: monofs.RefreshEvent
-	nil,                                      // 173: monofs.NodeInfo.MetadataEntry
-	nil,                                      // 174: monofs.IngestRequest.IngestionConfigEntry
-	nil,                                      // 175: monofs.IngestRequest.FetchConfigEntry
-	nil,                                      // 176: monofs.FileMetadata.BackendMetadataEntry
-	nil,                                      // 177: monofs.RegisterRepositoryRequest.IngestionConfigEntry
-	nil,                                      // 178: monofs.RegisterRepositoryRequest.FetchConfigEntry
-	nil,                                      // 179: monofs.OnboardingStatusResponse.RepositoriesEntry
-	nil,                                      // 180: monofs.ClusterStatsResponse.FailoversEntry
-	nil,                                      // 181: monofs.MetricEntry.LabelsEntry
-	nil,                                      // 182: monofs.SpanEntry.AttributesEntry
+	(*AppendLedgerEntriesRequest)(nil),       // 170: monofs.AppendLedgerEntriesRequest
+	(*AppendLedgerEntriesResponse)(nil),      // 171: monofs.AppendLedgerEntriesResponse
+	(*LocalCommit)(nil),                      // 172: monofs.LocalCommit
+	(*PushOutcome)(nil),                      // 173: monofs.PushOutcome
+	(*RefreshEvent)(nil),                     // 174: monofs.RefreshEvent
+	nil,                                      // 175: monofs.NodeInfo.MetadataEntry
+	nil,                                      // 176: monofs.IngestRequest.IngestionConfigEntry
+	nil,                                      // 177: monofs.IngestRequest.FetchConfigEntry
+	nil,                                      // 178: monofs.FileMetadata.BackendMetadataEntry
+	nil,                                      // 179: monofs.RegisterRepositoryRequest.IngestionConfigEntry
+	nil,                                      // 180: monofs.RegisterRepositoryRequest.FetchConfigEntry
+	nil,                                      // 181: monofs.OnboardingStatusResponse.RepositoriesEntry
+	nil,                                      // 182: monofs.ClusterStatsResponse.FailoversEntry
+	nil,                                      // 183: monofs.MetricEntry.LabelsEntry
+	nil,                                      // 184: monofs.SpanEntry.AttributesEntry
 }
 var file_api_proto_monofs_proto_depIdxs = []int32{
 	14,  // 0: monofs.ClusterInfoResponse.nodes:type_name -> monofs.NodeInfo
-	173, // 1: monofs.NodeInfo.metadata:type_name -> monofs.NodeInfo.MetadataEntry
+	175, // 1: monofs.NodeInfo.metadata:type_name -> monofs.NodeInfo.MetadataEntry
 	19,  // 2: monofs.NodeInfoResponse.kvs:type_name -> monofs.KVSNodeStatus
 	104, // 3: monofs.NodeInfoResponse.log_engine:type_name -> monofs.LogEngineStats
 	0,   // 4: monofs.IngestRequest.ingestion_type:type_name -> monofs.IngestionType
 	1,   // 5: monofs.IngestRequest.fetch_type:type_name -> monofs.SourceType
-	174, // 6: monofs.IngestRequest.ingestion_config:type_name -> monofs.IngestRequest.IngestionConfigEntry
-	175, // 7: monofs.IngestRequest.fetch_config:type_name -> monofs.IngestRequest.FetchConfigEntry
+	176, // 6: monofs.IngestRequest.ingestion_config:type_name -> monofs.IngestRequest.IngestionConfigEntry
+	177, // 7: monofs.IngestRequest.fetch_config:type_name -> monofs.IngestRequest.FetchConfigEntry
 	11,  // 8: monofs.IngestProgress.stage:type_name -> monofs.IngestProgress.Stage
 	0,   // 9: monofs.FileMetadata.source_type:type_name -> monofs.IngestionType
 	1,   // 10: monofs.FileMetadata.fetch_type:type_name -> monofs.SourceType
-	176, // 11: monofs.FileMetadata.backend_metadata:type_name -> monofs.FileMetadata.BackendMetadataEntry
+	178, // 11: monofs.FileMetadata.backend_metadata:type_name -> monofs.FileMetadata.BackendMetadataEntry
 	36,  // 12: monofs.IngestFileRequest.metadata:type_name -> monofs.FileMetadata
 	36,  // 13: monofs.IngestFileBatchRequest.files:type_name -> monofs.FileMetadata
 	36,  // 14: monofs.IngestReplicaBatchRequest.files:type_name -> monofs.FileMetadata
 	0,   // 15: monofs.RegisterRepositoryRequest.ingestion_type:type_name -> monofs.IngestionType
 	1,   // 16: monofs.RegisterRepositoryRequest.fetch_type:type_name -> monofs.SourceType
-	177, // 17: monofs.RegisterRepositoryRequest.ingestion_config:type_name -> monofs.RegisterRepositoryRequest.IngestionConfigEntry
-	178, // 18: monofs.RegisterRepositoryRequest.fetch_config:type_name -> monofs.RegisterRepositoryRequest.FetchConfigEntry
+	179, // 17: monofs.RegisterRepositoryRequest.ingestion_config:type_name -> monofs.RegisterRepositoryRequest.IngestionConfigEntry
+	180, // 18: monofs.RegisterRepositoryRequest.fetch_config:type_name -> monofs.RegisterRepositoryRequest.FetchConfigEntry
 	111, // 19: monofs.SyncMetadataFromNodeRequest.files:type_name -> monofs.FileInfo
-	179, // 20: monofs.OnboardingStatusResponse.repositories:type_name -> monofs.OnboardingStatusResponse.RepositoriesEntry
+	181, // 20: monofs.OnboardingStatusResponse.repositories:type_name -> monofs.OnboardingStatusResponse.RepositoriesEntry
 	3,   // 21: monofs.PushWorkspaceCommitsRequest.source_push_mode:type_name -> monofs.SourcePushMode
 	70,  // 22: monofs.RefreshWorkspaceRequest.repositories:type_name -> monofs.WorkspaceRepositoryRef
 	6,   // 23: monofs.WorkspaceSyncRepositoryResult.status:type_name -> monofs.WorkspaceSyncRepositoryStatus
@@ -12474,7 +12606,7 @@ var file_api_proto_monofs_proto_depIdxs = []int32{
 	88,  // 34: monofs.RegisterClientRequest.guardian_config:type_name -> monofs.GuardianConfig
 	96,  // 35: monofs.ListClientsResponse.clients:type_name -> monofs.ClientInfo
 	7,   // 36: monofs.ClientInfo.state:type_name -> monofs.ClientState
-	180, // 37: monofs.ClusterStatsResponse.failovers:type_name -> monofs.ClusterStatsResponse.FailoversEntry
+	182, // 37: monofs.ClusterStatsResponse.failovers:type_name -> monofs.ClusterStatsResponse.FailoversEntry
 	103, // 38: monofs.NodeStatsResponse.nodes:type_name -> monofs.NodeStatInfo
 	19,  // 39: monofs.NodeStatInfo.kvs:type_name -> monofs.KVSNodeStatus
 	104, // 40: monofs.NodeStatInfo.log_engine:type_name -> monofs.LogEngineStats
@@ -12497,185 +12629,192 @@ var file_api_proto_monofs_proto_depIdxs = []int32{
 	9,   // 57: monofs.MetricLabelMatcher.type:type_name -> monofs.MetricLabelMatcherType
 	153, // 58: monofs.QueryMetricsRequest.label_matchers:type_name -> monofs.MetricLabelMatcher
 	159, // 59: monofs.IngestLogsRequest.logs:type_name -> monofs.LogEntry
-	181, // 60: monofs.MetricEntry.labels:type_name -> monofs.MetricEntry.LabelsEntry
+	183, // 60: monofs.MetricEntry.labels:type_name -> monofs.MetricEntry.LabelsEntry
 	162, // 61: monofs.IngestMetricsRequest.metrics:type_name -> monofs.MetricEntry
-	182, // 62: monofs.SpanEntry.attributes:type_name -> monofs.SpanEntry.AttributesEntry
+	184, // 62: monofs.SpanEntry.attributes:type_name -> monofs.SpanEntry.AttributesEntry
 	165, // 63: monofs.IngestTracesRequest.spans:type_name -> monofs.SpanEntry
 	10,  // 64: monofs.QueryLedgerRequest.result_kind:type_name -> monofs.LedgerResultKind
-	170, // 65: monofs.QueryLedgerResponse.commits:type_name -> monofs.LocalCommit
-	171, // 66: monofs.QueryLedgerResponse.push_outcomes:type_name -> monofs.PushOutcome
-	172, // 67: monofs.QueryLedgerResponse.refresh_events:type_name -> monofs.RefreshEvent
-	12,  // 68: monofs.MonoFSRouter.GetClusterInfo:input_type -> monofs.ClusterInfoRequest
-	15,  // 69: monofs.MonoFSRouter.Heartbeat:input_type -> monofs.HeartbeatRequest
-	34,  // 70: monofs.MonoFSRouter.IngestRepository:input_type -> monofs.IngestRequest
-	60,  // 71: monofs.MonoFSRouter.NotifyRepositoryIngested:input_type -> monofs.NotifyRepositoryIngestedRequest
-	62,  // 72: monofs.MonoFSRouter.DeleteRepository:input_type -> monofs.DeleteRepositoryRequest
-	64,  // 73: monofs.MonoFSRouter.GetNodeForFile:input_type -> monofs.GetNodeForFileRequest
-	87,  // 74: monofs.MonoFSRouter.RegisterClient:input_type -> monofs.RegisterClientRequest
-	90,  // 75: monofs.MonoFSRouter.UnregisterClient:input_type -> monofs.UnregisterClientRequest
-	92,  // 76: monofs.MonoFSRouter.ClientHeartbeat:input_type -> monofs.ClientHeartbeatRequest
-	94,  // 77: monofs.MonoFSRouter.ListClients:input_type -> monofs.ListClientsRequest
-	97,  // 78: monofs.MonoFSRouter.RequestFailover:input_type -> monofs.FailoverRequest
-	109, // 79: monofs.MonoFSRouter.GetNodeFiles:input_type -> monofs.GetNodeFilesRequest
-	99,  // 80: monofs.MonoFSRouter.GetClusterStats:input_type -> monofs.ClusterStatsRequest
-	101, // 81: monofs.MonoFSRouter.GetNodeStats:input_type -> monofs.NodeStatsRequest
-	105, // 82: monofs.MonoFSRouter.DrainCluster:input_type -> monofs.DrainClusterRequest
-	107, // 83: monofs.MonoFSRouter.UndrainCluster:input_type -> monofs.UndrainClusterRequest
-	127, // 84: monofs.MonoFSRouter.DeleteGuardianFile:input_type -> monofs.DeleteGuardianFileRequest
-	129, // 85: monofs.MonoFSRouter.DeleteGuardianDirectory:input_type -> monofs.DeleteGuardianDirectoryRequest
-	134, // 86: monofs.MonoFSRouter.InjectGuardianPartition:input_type -> monofs.InjectGuardianPartitionRequest
-	140, // 87: monofs.MonoFSRouter.UpsertGuardianPaths:input_type -> monofs.UpsertGuardianPathsRequest
-	141, // 88: monofs.MonoFSRouter.UpsertGuardianPathsStream:input_type -> monofs.GuardianPathWriteChunk
-	143, // 89: monofs.MonoFSRouter.DeleteGuardianPaths:input_type -> monofs.DeleteGuardianPathsRequest
-	145, // 90: monofs.MonoFSRouter.ListGuardianVersions:input_type -> monofs.ListGuardianVersionsRequest
-	147, // 91: monofs.MonoFSRouter.GetGuardianVersion:input_type -> monofs.GetGuardianVersionRequest
-	149, // 92: monofs.MonoFSRouter.SubscribeGuardianChanges:input_type -> monofs.SubscribeGuardianChangesRequest
-	151, // 93: monofs.MonoFSRouter.StreamQueryLogs:input_type -> monofs.QueryLogsRequest
-	154, // 94: monofs.MonoFSRouter.StreamQueryMetrics:input_type -> monofs.QueryMetricsRequest
-	156, // 95: monofs.MonoFSRouter.StreamQueryTraces:input_type -> monofs.QueryTracesRequest
-	151, // 96: monofs.MonoFSRouter.QueryLogs:input_type -> monofs.QueryLogsRequest
-	154, // 97: monofs.MonoFSRouter.QueryMetrics:input_type -> monofs.QueryMetricsRequest
-	156, // 98: monofs.MonoFSRouter.QueryTraces:input_type -> monofs.QueryTracesRequest
-	160, // 99: monofs.MonoFSRouter.IngestLogs:input_type -> monofs.IngestLogsRequest
-	163, // 100: monofs.MonoFSRouter.IngestMetrics:input_type -> monofs.IngestMetricsRequest
-	166, // 101: monofs.MonoFSRouter.IngestTraces:input_type -> monofs.IngestTracesRequest
-	114, // 102: monofs.MonoFSRouter.AddWhitelistedClient:input_type -> monofs.AddWhitelistedClientRequest
-	116, // 103: monofs.MonoFSRouter.RemoveWhitelistedClient:input_type -> monofs.RemoveWhitelistedClientRequest
-	118, // 104: monofs.MonoFSRouter.ListWhitelistedClients:input_type -> monofs.ListWhitelistedClientsRequest
-	121, // 105: monofs.MonoFSRouter.SetWhitelistEnabled:input_type -> monofs.SetWhitelistEnabledRequest
-	123, // 106: monofs.MonoFSRouter.GetWhitelistStatus:input_type -> monofs.GetWhitelistStatusRequest
-	131, // 107: monofs.MonoFSRouter.SubscribeToChanges:input_type -> monofs.SubscribeChangesRequest
-	71,  // 108: monofs.MonoFSRouter.UploadWorkspaceBundle:input_type -> monofs.WorkspaceBundleChunk
-	71,  // 109: monofs.MonoFSRouter.UploadWorkspaceCommitBundle:input_type -> monofs.WorkspaceBundleChunk
-	73,  // 110: monofs.MonoFSRouter.PublishWorkspace:input_type -> monofs.PublishWorkspaceRequest
-	74,  // 111: monofs.MonoFSRouter.PushWorkspaceCommits:input_type -> monofs.PushWorkspaceCommitsRequest
-	75,  // 112: monofs.MonoFSRouter.RefreshWorkspace:input_type -> monofs.RefreshWorkspaceRequest
-	80,  // 113: monofs.MonoFSRouter.GetWorkspaceSyncJob:input_type -> monofs.GetWorkspaceSyncJobRequest
-	81,  // 114: monofs.MonoFSRouter.ListWorkspaceSyncJobs:input_type -> monofs.ListWorkspaceSyncJobsRequest
-	83,  // 115: monofs.MonoFSRouter.CancelWorkspaceSyncJob:input_type -> monofs.CancelWorkspaceSyncJobRequest
-	168, // 116: monofs.MonoFSRouter.QueryLedger:input_type -> monofs.QueryLedgerRequest
-	20,  // 117: monofs.MonoFS.Lookup:input_type -> monofs.LookupRequest
-	22,  // 118: monofs.MonoFS.GetAttr:input_type -> monofs.GetAttrRequest
-	24,  // 119: monofs.MonoFS.ReadDir:input_type -> monofs.ReadDirRequest
-	26,  // 120: monofs.MonoFS.Read:input_type -> monofs.ReadRequest
-	28,  // 121: monofs.MonoFS.Create:input_type -> monofs.CreateRequest
-	30,  // 122: monofs.MonoFS.Write:input_type -> monofs.WriteRequest
-	32,  // 123: monofs.MonoFS.Authenticate:input_type -> monofs.AuthRequest
-	17,  // 124: monofs.MonoFS.GetNodeInfo:input_type -> monofs.NodeInfoRequest
-	37,  // 125: monofs.MonoFS.IngestFile:input_type -> monofs.IngestFileRequest
-	39,  // 126: monofs.MonoFS.IngestFileBatch:input_type -> monofs.IngestFileBatchRequest
-	41,  // 127: monofs.MonoFS.IngestReplicaBatch:input_type -> monofs.IngestReplicaBatchRequest
-	43,  // 128: monofs.MonoFS.RegisterRepository:input_type -> monofs.RegisterRepositoryRequest
-	45,  // 129: monofs.MonoFS.StreamRepositoryFiles:input_type -> monofs.GetRepositoryFilesRequest
-	45,  // 130: monofs.MonoFS.GetRepositoryFiles:input_type -> monofs.GetRepositoryFilesRequest
-	48,  // 131: monofs.MonoFS.SyncMetadataFromNode:input_type -> monofs.SyncMetadataFromNodeRequest
-	50,  // 132: monofs.MonoFS.ClearFailoverCache:input_type -> monofs.ClearFailoverCacheRequest
-	52,  // 133: monofs.MonoFS.ListRepositories:input_type -> monofs.ListRepositoriesRequest
-	54,  // 134: monofs.MonoFS.GetRepositoryInfo:input_type -> monofs.GetRepositoryInfoRequest
-	56,  // 135: monofs.MonoFS.GetOnboardingStatus:input_type -> monofs.OnboardingStatusRequest
-	58,  // 136: monofs.MonoFS.MarkRepositoryOnboarded:input_type -> monofs.MarkRepositoryOnboardedRequest
-	66,  // 137: monofs.MonoFS.DeleteFile:input_type -> monofs.DeleteFileRequest
-	85,  // 138: monofs.MonoFS.DeleteRepository:input_type -> monofs.DeleteRepositoryOnNodeRequest
-	125, // 139: monofs.MonoFS.DeleteDirectoryRecursive:input_type -> monofs.DeleteDirectoryRecursiveRequest
-	68,  // 140: monofs.MonoFS.BuildDirectoryIndexes:input_type -> monofs.BuildDirectoryIndexesRequest
-	112, // 141: monofs.MonoFS.GetPredictorStats:input_type -> monofs.PredictorStatsRequest
-	151, // 142: monofs.MonoFS.StreamQueryLogs:input_type -> monofs.QueryLogsRequest
-	154, // 143: monofs.MonoFS.StreamQueryMetrics:input_type -> monofs.QueryMetricsRequest
-	156, // 144: monofs.MonoFS.StreamQueryTraces:input_type -> monofs.QueryTracesRequest
-	151, // 145: monofs.MonoFS.QueryLogs:input_type -> monofs.QueryLogsRequest
-	154, // 146: monofs.MonoFS.QueryMetrics:input_type -> monofs.QueryMetricsRequest
-	156, // 147: monofs.MonoFS.QueryTraces:input_type -> monofs.QueryTracesRequest
-	160, // 148: monofs.MonoFS.IngestLogs:input_type -> monofs.IngestLogsRequest
-	163, // 149: monofs.MonoFS.IngestMetrics:input_type -> monofs.IngestMetricsRequest
-	166, // 150: monofs.MonoFS.IngestTraces:input_type -> monofs.IngestTracesRequest
-	13,  // 151: monofs.MonoFSRouter.GetClusterInfo:output_type -> monofs.ClusterInfoResponse
-	16,  // 152: monofs.MonoFSRouter.Heartbeat:output_type -> monofs.HeartbeatResponse
-	35,  // 153: monofs.MonoFSRouter.IngestRepository:output_type -> monofs.IngestProgress
-	61,  // 154: monofs.MonoFSRouter.NotifyRepositoryIngested:output_type -> monofs.NotifyRepositoryIngestedResponse
-	63,  // 155: monofs.MonoFSRouter.DeleteRepository:output_type -> monofs.DeleteRepositoryResponse
-	65,  // 156: monofs.MonoFSRouter.GetNodeForFile:output_type -> monofs.GetNodeForFileResponse
-	89,  // 157: monofs.MonoFSRouter.RegisterClient:output_type -> monofs.RegisterClientResponse
-	91,  // 158: monofs.MonoFSRouter.UnregisterClient:output_type -> monofs.UnregisterClientResponse
-	93,  // 159: monofs.MonoFSRouter.ClientHeartbeat:output_type -> monofs.ClientHeartbeatResponse
-	95,  // 160: monofs.MonoFSRouter.ListClients:output_type -> monofs.ListClientsResponse
-	98,  // 161: monofs.MonoFSRouter.RequestFailover:output_type -> monofs.FailoverResponse
-	110, // 162: monofs.MonoFSRouter.GetNodeFiles:output_type -> monofs.GetNodeFilesResponse
-	100, // 163: monofs.MonoFSRouter.GetClusterStats:output_type -> monofs.ClusterStatsResponse
-	102, // 164: monofs.MonoFSRouter.GetNodeStats:output_type -> monofs.NodeStatsResponse
-	106, // 165: monofs.MonoFSRouter.DrainCluster:output_type -> monofs.DrainClusterResponse
-	108, // 166: monofs.MonoFSRouter.UndrainCluster:output_type -> monofs.UndrainClusterResponse
-	128, // 167: monofs.MonoFSRouter.DeleteGuardianFile:output_type -> monofs.DeleteGuardianFileResponse
-	130, // 168: monofs.MonoFSRouter.DeleteGuardianDirectory:output_type -> monofs.DeleteGuardianDirectoryResponse
-	135, // 169: monofs.MonoFSRouter.InjectGuardianPartition:output_type -> monofs.InjectGuardianPartitionResponse
-	142, // 170: monofs.MonoFSRouter.UpsertGuardianPaths:output_type -> monofs.UpsertGuardianPathsResponse
-	142, // 171: monofs.MonoFSRouter.UpsertGuardianPathsStream:output_type -> monofs.UpsertGuardianPathsResponse
-	144, // 172: monofs.MonoFSRouter.DeleteGuardianPaths:output_type -> monofs.DeleteGuardianPathsResponse
-	146, // 173: monofs.MonoFSRouter.ListGuardianVersions:output_type -> monofs.ListGuardianVersionsResponse
-	148, // 174: monofs.MonoFSRouter.GetGuardianVersion:output_type -> monofs.GetGuardianVersionResponse
-	150, // 175: monofs.MonoFSRouter.SubscribeGuardianChanges:output_type -> monofs.GuardianChangeEvent
-	158, // 176: monofs.MonoFSRouter.StreamQueryLogs:output_type -> monofs.QueryResultItem
-	158, // 177: monofs.MonoFSRouter.StreamQueryMetrics:output_type -> monofs.QueryResultItem
-	158, // 178: monofs.MonoFSRouter.StreamQueryTraces:output_type -> monofs.QueryResultItem
-	152, // 179: monofs.MonoFSRouter.QueryLogs:output_type -> monofs.QueryLogsResponse
-	155, // 180: monofs.MonoFSRouter.QueryMetrics:output_type -> monofs.QueryMetricsResponse
-	157, // 181: monofs.MonoFSRouter.QueryTraces:output_type -> monofs.QueryTracesResponse
-	161, // 182: monofs.MonoFSRouter.IngestLogs:output_type -> monofs.IngestLogsResponse
-	164, // 183: monofs.MonoFSRouter.IngestMetrics:output_type -> monofs.IngestMetricsResponse
-	167, // 184: monofs.MonoFSRouter.IngestTraces:output_type -> monofs.IngestTracesResponse
-	115, // 185: monofs.MonoFSRouter.AddWhitelistedClient:output_type -> monofs.AddWhitelistedClientResponse
-	117, // 186: monofs.MonoFSRouter.RemoveWhitelistedClient:output_type -> monofs.RemoveWhitelistedClientResponse
-	119, // 187: monofs.MonoFSRouter.ListWhitelistedClients:output_type -> monofs.ListWhitelistedClientsResponse
-	122, // 188: monofs.MonoFSRouter.SetWhitelistEnabled:output_type -> monofs.SetWhitelistEnabledResponse
-	124, // 189: monofs.MonoFSRouter.GetWhitelistStatus:output_type -> monofs.GetWhitelistStatusResponse
-	132, // 190: monofs.MonoFSRouter.SubscribeToChanges:output_type -> monofs.ChangeEvent
-	72,  // 191: monofs.MonoFSRouter.UploadWorkspaceBundle:output_type -> monofs.UploadWorkspaceBundleResponse
-	72,  // 192: monofs.MonoFSRouter.UploadWorkspaceCommitBundle:output_type -> monofs.UploadWorkspaceBundleResponse
-	79,  // 193: monofs.MonoFSRouter.PublishWorkspace:output_type -> monofs.WorkspaceSyncEvent
-	79,  // 194: monofs.MonoFSRouter.PushWorkspaceCommits:output_type -> monofs.WorkspaceSyncEvent
-	79,  // 195: monofs.MonoFSRouter.RefreshWorkspace:output_type -> monofs.WorkspaceSyncEvent
-	78,  // 196: monofs.MonoFSRouter.GetWorkspaceSyncJob:output_type -> monofs.WorkspaceSyncJob
-	82,  // 197: monofs.MonoFSRouter.ListWorkspaceSyncJobs:output_type -> monofs.ListWorkspaceSyncJobsResponse
-	84,  // 198: monofs.MonoFSRouter.CancelWorkspaceSyncJob:output_type -> monofs.CancelWorkspaceSyncJobResponse
-	169, // 199: monofs.MonoFSRouter.QueryLedger:output_type -> monofs.QueryLedgerResponse
-	21,  // 200: monofs.MonoFS.Lookup:output_type -> monofs.LookupResponse
-	23,  // 201: monofs.MonoFS.GetAttr:output_type -> monofs.GetAttrResponse
-	25,  // 202: monofs.MonoFS.ReadDir:output_type -> monofs.DirEntry
-	27,  // 203: monofs.MonoFS.Read:output_type -> monofs.DataChunk
-	29,  // 204: monofs.MonoFS.Create:output_type -> monofs.CreateResponse
-	31,  // 205: monofs.MonoFS.Write:output_type -> monofs.WriteResponse
-	33,  // 206: monofs.MonoFS.Authenticate:output_type -> monofs.AuthResponse
-	18,  // 207: monofs.MonoFS.GetNodeInfo:output_type -> monofs.NodeInfoResponse
-	38,  // 208: monofs.MonoFS.IngestFile:output_type -> monofs.IngestFileResponse
-	40,  // 209: monofs.MonoFS.IngestFileBatch:output_type -> monofs.IngestFileBatchResponse
-	42,  // 210: monofs.MonoFS.IngestReplicaBatch:output_type -> monofs.IngestReplicaBatchResponse
-	44,  // 211: monofs.MonoFS.RegisterRepository:output_type -> monofs.RegisterRepositoryResponse
-	47,  // 212: monofs.MonoFS.StreamRepositoryFiles:output_type -> monofs.RepositoryFileItem
-	46,  // 213: monofs.MonoFS.GetRepositoryFiles:output_type -> monofs.GetRepositoryFilesResponse
-	49,  // 214: monofs.MonoFS.SyncMetadataFromNode:output_type -> monofs.SyncMetadataFromNodeResponse
-	51,  // 215: monofs.MonoFS.ClearFailoverCache:output_type -> monofs.ClearFailoverCacheResponse
-	53,  // 216: monofs.MonoFS.ListRepositories:output_type -> monofs.ListRepositoriesResponse
-	55,  // 217: monofs.MonoFS.GetRepositoryInfo:output_type -> monofs.GetRepositoryInfoResponse
-	57,  // 218: monofs.MonoFS.GetOnboardingStatus:output_type -> monofs.OnboardingStatusResponse
-	59,  // 219: monofs.MonoFS.MarkRepositoryOnboarded:output_type -> monofs.MarkRepositoryOnboardedResponse
-	67,  // 220: monofs.MonoFS.DeleteFile:output_type -> monofs.DeleteFileResponse
-	86,  // 221: monofs.MonoFS.DeleteRepository:output_type -> monofs.DeleteRepositoryOnNodeResponse
-	126, // 222: monofs.MonoFS.DeleteDirectoryRecursive:output_type -> monofs.DeleteDirectoryRecursiveResponse
-	69,  // 223: monofs.MonoFS.BuildDirectoryIndexes:output_type -> monofs.BuildDirectoryIndexesResponse
-	113, // 224: monofs.MonoFS.GetPredictorStats:output_type -> monofs.PredictorStatsResponse
-	158, // 225: monofs.MonoFS.StreamQueryLogs:output_type -> monofs.QueryResultItem
-	158, // 226: monofs.MonoFS.StreamQueryMetrics:output_type -> monofs.QueryResultItem
-	158, // 227: monofs.MonoFS.StreamQueryTraces:output_type -> monofs.QueryResultItem
-	152, // 228: monofs.MonoFS.QueryLogs:output_type -> monofs.QueryLogsResponse
-	155, // 229: monofs.MonoFS.QueryMetrics:output_type -> monofs.QueryMetricsResponse
-	157, // 230: monofs.MonoFS.QueryTraces:output_type -> monofs.QueryTracesResponse
-	161, // 231: monofs.MonoFS.IngestLogs:output_type -> monofs.IngestLogsResponse
-	164, // 232: monofs.MonoFS.IngestMetrics:output_type -> monofs.IngestMetricsResponse
-	167, // 233: monofs.MonoFS.IngestTraces:output_type -> monofs.IngestTracesResponse
-	151, // [151:234] is the sub-list for method output_type
-	68,  // [68:151] is the sub-list for method input_type
-	68,  // [68:68] is the sub-list for extension type_name
-	68,  // [68:68] is the sub-list for extension extendee
-	0,   // [0:68] is the sub-list for field type_name
+	172, // 65: monofs.QueryLedgerResponse.commits:type_name -> monofs.LocalCommit
+	173, // 66: monofs.QueryLedgerResponse.push_outcomes:type_name -> monofs.PushOutcome
+	174, // 67: monofs.QueryLedgerResponse.refresh_events:type_name -> monofs.RefreshEvent
+	172, // 68: monofs.AppendLedgerEntriesRequest.commits:type_name -> monofs.LocalCommit
+	173, // 69: monofs.AppendLedgerEntriesRequest.push_outcomes:type_name -> monofs.PushOutcome
+	174, // 70: monofs.AppendLedgerEntriesRequest.refresh_events:type_name -> monofs.RefreshEvent
+	12,  // 71: monofs.MonoFSRouter.GetClusterInfo:input_type -> monofs.ClusterInfoRequest
+	15,  // 72: monofs.MonoFSRouter.Heartbeat:input_type -> monofs.HeartbeatRequest
+	34,  // 73: monofs.MonoFSRouter.IngestRepository:input_type -> monofs.IngestRequest
+	60,  // 74: monofs.MonoFSRouter.NotifyRepositoryIngested:input_type -> monofs.NotifyRepositoryIngestedRequest
+	62,  // 75: monofs.MonoFSRouter.DeleteRepository:input_type -> monofs.DeleteRepositoryRequest
+	64,  // 76: monofs.MonoFSRouter.GetNodeForFile:input_type -> monofs.GetNodeForFileRequest
+	87,  // 77: monofs.MonoFSRouter.RegisterClient:input_type -> monofs.RegisterClientRequest
+	90,  // 78: monofs.MonoFSRouter.UnregisterClient:input_type -> monofs.UnregisterClientRequest
+	92,  // 79: monofs.MonoFSRouter.ClientHeartbeat:input_type -> monofs.ClientHeartbeatRequest
+	94,  // 80: monofs.MonoFSRouter.ListClients:input_type -> monofs.ListClientsRequest
+	97,  // 81: monofs.MonoFSRouter.RequestFailover:input_type -> monofs.FailoverRequest
+	109, // 82: monofs.MonoFSRouter.GetNodeFiles:input_type -> monofs.GetNodeFilesRequest
+	99,  // 83: monofs.MonoFSRouter.GetClusterStats:input_type -> monofs.ClusterStatsRequest
+	101, // 84: monofs.MonoFSRouter.GetNodeStats:input_type -> monofs.NodeStatsRequest
+	105, // 85: monofs.MonoFSRouter.DrainCluster:input_type -> monofs.DrainClusterRequest
+	107, // 86: monofs.MonoFSRouter.UndrainCluster:input_type -> monofs.UndrainClusterRequest
+	127, // 87: monofs.MonoFSRouter.DeleteGuardianFile:input_type -> monofs.DeleteGuardianFileRequest
+	129, // 88: monofs.MonoFSRouter.DeleteGuardianDirectory:input_type -> monofs.DeleteGuardianDirectoryRequest
+	134, // 89: monofs.MonoFSRouter.InjectGuardianPartition:input_type -> monofs.InjectGuardianPartitionRequest
+	140, // 90: monofs.MonoFSRouter.UpsertGuardianPaths:input_type -> monofs.UpsertGuardianPathsRequest
+	141, // 91: monofs.MonoFSRouter.UpsertGuardianPathsStream:input_type -> monofs.GuardianPathWriteChunk
+	143, // 92: monofs.MonoFSRouter.DeleteGuardianPaths:input_type -> monofs.DeleteGuardianPathsRequest
+	145, // 93: monofs.MonoFSRouter.ListGuardianVersions:input_type -> monofs.ListGuardianVersionsRequest
+	147, // 94: monofs.MonoFSRouter.GetGuardianVersion:input_type -> monofs.GetGuardianVersionRequest
+	149, // 95: monofs.MonoFSRouter.SubscribeGuardianChanges:input_type -> monofs.SubscribeGuardianChangesRequest
+	151, // 96: monofs.MonoFSRouter.StreamQueryLogs:input_type -> monofs.QueryLogsRequest
+	154, // 97: monofs.MonoFSRouter.StreamQueryMetrics:input_type -> monofs.QueryMetricsRequest
+	156, // 98: monofs.MonoFSRouter.StreamQueryTraces:input_type -> monofs.QueryTracesRequest
+	151, // 99: monofs.MonoFSRouter.QueryLogs:input_type -> monofs.QueryLogsRequest
+	154, // 100: monofs.MonoFSRouter.QueryMetrics:input_type -> monofs.QueryMetricsRequest
+	156, // 101: monofs.MonoFSRouter.QueryTraces:input_type -> monofs.QueryTracesRequest
+	160, // 102: monofs.MonoFSRouter.IngestLogs:input_type -> monofs.IngestLogsRequest
+	163, // 103: monofs.MonoFSRouter.IngestMetrics:input_type -> monofs.IngestMetricsRequest
+	166, // 104: monofs.MonoFSRouter.IngestTraces:input_type -> monofs.IngestTracesRequest
+	114, // 105: monofs.MonoFSRouter.AddWhitelistedClient:input_type -> monofs.AddWhitelistedClientRequest
+	116, // 106: monofs.MonoFSRouter.RemoveWhitelistedClient:input_type -> monofs.RemoveWhitelistedClientRequest
+	118, // 107: monofs.MonoFSRouter.ListWhitelistedClients:input_type -> monofs.ListWhitelistedClientsRequest
+	121, // 108: monofs.MonoFSRouter.SetWhitelistEnabled:input_type -> monofs.SetWhitelistEnabledRequest
+	123, // 109: monofs.MonoFSRouter.GetWhitelistStatus:input_type -> monofs.GetWhitelistStatusRequest
+	131, // 110: monofs.MonoFSRouter.SubscribeToChanges:input_type -> monofs.SubscribeChangesRequest
+	71,  // 111: monofs.MonoFSRouter.UploadWorkspaceBundle:input_type -> monofs.WorkspaceBundleChunk
+	71,  // 112: monofs.MonoFSRouter.UploadWorkspaceCommitBundle:input_type -> monofs.WorkspaceBundleChunk
+	73,  // 113: monofs.MonoFSRouter.PublishWorkspace:input_type -> monofs.PublishWorkspaceRequest
+	74,  // 114: monofs.MonoFSRouter.PushWorkspaceCommits:input_type -> monofs.PushWorkspaceCommitsRequest
+	75,  // 115: monofs.MonoFSRouter.RefreshWorkspace:input_type -> monofs.RefreshWorkspaceRequest
+	80,  // 116: monofs.MonoFSRouter.GetWorkspaceSyncJob:input_type -> monofs.GetWorkspaceSyncJobRequest
+	81,  // 117: monofs.MonoFSRouter.ListWorkspaceSyncJobs:input_type -> monofs.ListWorkspaceSyncJobsRequest
+	83,  // 118: monofs.MonoFSRouter.CancelWorkspaceSyncJob:input_type -> monofs.CancelWorkspaceSyncJobRequest
+	168, // 119: monofs.MonoFSRouter.QueryLedger:input_type -> monofs.QueryLedgerRequest
+	20,  // 120: monofs.MonoFS.Lookup:input_type -> monofs.LookupRequest
+	22,  // 121: monofs.MonoFS.GetAttr:input_type -> monofs.GetAttrRequest
+	24,  // 122: monofs.MonoFS.ReadDir:input_type -> monofs.ReadDirRequest
+	26,  // 123: monofs.MonoFS.Read:input_type -> monofs.ReadRequest
+	28,  // 124: monofs.MonoFS.Create:input_type -> monofs.CreateRequest
+	30,  // 125: monofs.MonoFS.Write:input_type -> monofs.WriteRequest
+	32,  // 126: monofs.MonoFS.Authenticate:input_type -> monofs.AuthRequest
+	17,  // 127: monofs.MonoFS.GetNodeInfo:input_type -> monofs.NodeInfoRequest
+	37,  // 128: monofs.MonoFS.IngestFile:input_type -> monofs.IngestFileRequest
+	39,  // 129: monofs.MonoFS.IngestFileBatch:input_type -> monofs.IngestFileBatchRequest
+	41,  // 130: monofs.MonoFS.IngestReplicaBatch:input_type -> monofs.IngestReplicaBatchRequest
+	43,  // 131: monofs.MonoFS.RegisterRepository:input_type -> monofs.RegisterRepositoryRequest
+	45,  // 132: monofs.MonoFS.StreamRepositoryFiles:input_type -> monofs.GetRepositoryFilesRequest
+	45,  // 133: monofs.MonoFS.GetRepositoryFiles:input_type -> monofs.GetRepositoryFilesRequest
+	48,  // 134: monofs.MonoFS.SyncMetadataFromNode:input_type -> monofs.SyncMetadataFromNodeRequest
+	50,  // 135: monofs.MonoFS.ClearFailoverCache:input_type -> monofs.ClearFailoverCacheRequest
+	52,  // 136: monofs.MonoFS.ListRepositories:input_type -> monofs.ListRepositoriesRequest
+	54,  // 137: monofs.MonoFS.GetRepositoryInfo:input_type -> monofs.GetRepositoryInfoRequest
+	56,  // 138: monofs.MonoFS.GetOnboardingStatus:input_type -> monofs.OnboardingStatusRequest
+	58,  // 139: monofs.MonoFS.MarkRepositoryOnboarded:input_type -> monofs.MarkRepositoryOnboardedRequest
+	66,  // 140: monofs.MonoFS.DeleteFile:input_type -> monofs.DeleteFileRequest
+	85,  // 141: monofs.MonoFS.DeleteRepository:input_type -> monofs.DeleteRepositoryOnNodeRequest
+	125, // 142: monofs.MonoFS.DeleteDirectoryRecursive:input_type -> monofs.DeleteDirectoryRecursiveRequest
+	68,  // 143: monofs.MonoFS.BuildDirectoryIndexes:input_type -> monofs.BuildDirectoryIndexesRequest
+	112, // 144: monofs.MonoFS.GetPredictorStats:input_type -> monofs.PredictorStatsRequest
+	151, // 145: monofs.MonoFS.StreamQueryLogs:input_type -> monofs.QueryLogsRequest
+	154, // 146: monofs.MonoFS.StreamQueryMetrics:input_type -> monofs.QueryMetricsRequest
+	156, // 147: monofs.MonoFS.StreamQueryTraces:input_type -> monofs.QueryTracesRequest
+	151, // 148: monofs.MonoFS.QueryLogs:input_type -> monofs.QueryLogsRequest
+	154, // 149: monofs.MonoFS.QueryMetrics:input_type -> monofs.QueryMetricsRequest
+	156, // 150: monofs.MonoFS.QueryTraces:input_type -> monofs.QueryTracesRequest
+	160, // 151: monofs.MonoFS.IngestLogs:input_type -> monofs.IngestLogsRequest
+	163, // 152: monofs.MonoFS.IngestMetrics:input_type -> monofs.IngestMetricsRequest
+	166, // 153: monofs.MonoFS.IngestTraces:input_type -> monofs.IngestTracesRequest
+	170, // 154: monofs.MonoFS.AppendLedgerEntries:input_type -> monofs.AppendLedgerEntriesRequest
+	168, // 155: monofs.MonoFS.QueryLedger:input_type -> monofs.QueryLedgerRequest
+	13,  // 156: monofs.MonoFSRouter.GetClusterInfo:output_type -> monofs.ClusterInfoResponse
+	16,  // 157: monofs.MonoFSRouter.Heartbeat:output_type -> monofs.HeartbeatResponse
+	35,  // 158: monofs.MonoFSRouter.IngestRepository:output_type -> monofs.IngestProgress
+	61,  // 159: monofs.MonoFSRouter.NotifyRepositoryIngested:output_type -> monofs.NotifyRepositoryIngestedResponse
+	63,  // 160: monofs.MonoFSRouter.DeleteRepository:output_type -> monofs.DeleteRepositoryResponse
+	65,  // 161: monofs.MonoFSRouter.GetNodeForFile:output_type -> monofs.GetNodeForFileResponse
+	89,  // 162: monofs.MonoFSRouter.RegisterClient:output_type -> monofs.RegisterClientResponse
+	91,  // 163: monofs.MonoFSRouter.UnregisterClient:output_type -> monofs.UnregisterClientResponse
+	93,  // 164: monofs.MonoFSRouter.ClientHeartbeat:output_type -> monofs.ClientHeartbeatResponse
+	95,  // 165: monofs.MonoFSRouter.ListClients:output_type -> monofs.ListClientsResponse
+	98,  // 166: monofs.MonoFSRouter.RequestFailover:output_type -> monofs.FailoverResponse
+	110, // 167: monofs.MonoFSRouter.GetNodeFiles:output_type -> monofs.GetNodeFilesResponse
+	100, // 168: monofs.MonoFSRouter.GetClusterStats:output_type -> monofs.ClusterStatsResponse
+	102, // 169: monofs.MonoFSRouter.GetNodeStats:output_type -> monofs.NodeStatsResponse
+	106, // 170: monofs.MonoFSRouter.DrainCluster:output_type -> monofs.DrainClusterResponse
+	108, // 171: monofs.MonoFSRouter.UndrainCluster:output_type -> monofs.UndrainClusterResponse
+	128, // 172: monofs.MonoFSRouter.DeleteGuardianFile:output_type -> monofs.DeleteGuardianFileResponse
+	130, // 173: monofs.MonoFSRouter.DeleteGuardianDirectory:output_type -> monofs.DeleteGuardianDirectoryResponse
+	135, // 174: monofs.MonoFSRouter.InjectGuardianPartition:output_type -> monofs.InjectGuardianPartitionResponse
+	142, // 175: monofs.MonoFSRouter.UpsertGuardianPaths:output_type -> monofs.UpsertGuardianPathsResponse
+	142, // 176: monofs.MonoFSRouter.UpsertGuardianPathsStream:output_type -> monofs.UpsertGuardianPathsResponse
+	144, // 177: monofs.MonoFSRouter.DeleteGuardianPaths:output_type -> monofs.DeleteGuardianPathsResponse
+	146, // 178: monofs.MonoFSRouter.ListGuardianVersions:output_type -> monofs.ListGuardianVersionsResponse
+	148, // 179: monofs.MonoFSRouter.GetGuardianVersion:output_type -> monofs.GetGuardianVersionResponse
+	150, // 180: monofs.MonoFSRouter.SubscribeGuardianChanges:output_type -> monofs.GuardianChangeEvent
+	158, // 181: monofs.MonoFSRouter.StreamQueryLogs:output_type -> monofs.QueryResultItem
+	158, // 182: monofs.MonoFSRouter.StreamQueryMetrics:output_type -> monofs.QueryResultItem
+	158, // 183: monofs.MonoFSRouter.StreamQueryTraces:output_type -> monofs.QueryResultItem
+	152, // 184: monofs.MonoFSRouter.QueryLogs:output_type -> monofs.QueryLogsResponse
+	155, // 185: monofs.MonoFSRouter.QueryMetrics:output_type -> monofs.QueryMetricsResponse
+	157, // 186: monofs.MonoFSRouter.QueryTraces:output_type -> monofs.QueryTracesResponse
+	161, // 187: monofs.MonoFSRouter.IngestLogs:output_type -> monofs.IngestLogsResponse
+	164, // 188: monofs.MonoFSRouter.IngestMetrics:output_type -> monofs.IngestMetricsResponse
+	167, // 189: monofs.MonoFSRouter.IngestTraces:output_type -> monofs.IngestTracesResponse
+	115, // 190: monofs.MonoFSRouter.AddWhitelistedClient:output_type -> monofs.AddWhitelistedClientResponse
+	117, // 191: monofs.MonoFSRouter.RemoveWhitelistedClient:output_type -> monofs.RemoveWhitelistedClientResponse
+	119, // 192: monofs.MonoFSRouter.ListWhitelistedClients:output_type -> monofs.ListWhitelistedClientsResponse
+	122, // 193: monofs.MonoFSRouter.SetWhitelistEnabled:output_type -> monofs.SetWhitelistEnabledResponse
+	124, // 194: monofs.MonoFSRouter.GetWhitelistStatus:output_type -> monofs.GetWhitelistStatusResponse
+	132, // 195: monofs.MonoFSRouter.SubscribeToChanges:output_type -> monofs.ChangeEvent
+	72,  // 196: monofs.MonoFSRouter.UploadWorkspaceBundle:output_type -> monofs.UploadWorkspaceBundleResponse
+	72,  // 197: monofs.MonoFSRouter.UploadWorkspaceCommitBundle:output_type -> monofs.UploadWorkspaceBundleResponse
+	79,  // 198: monofs.MonoFSRouter.PublishWorkspace:output_type -> monofs.WorkspaceSyncEvent
+	79,  // 199: monofs.MonoFSRouter.PushWorkspaceCommits:output_type -> monofs.WorkspaceSyncEvent
+	79,  // 200: monofs.MonoFSRouter.RefreshWorkspace:output_type -> monofs.WorkspaceSyncEvent
+	78,  // 201: monofs.MonoFSRouter.GetWorkspaceSyncJob:output_type -> monofs.WorkspaceSyncJob
+	82,  // 202: monofs.MonoFSRouter.ListWorkspaceSyncJobs:output_type -> monofs.ListWorkspaceSyncJobsResponse
+	84,  // 203: monofs.MonoFSRouter.CancelWorkspaceSyncJob:output_type -> monofs.CancelWorkspaceSyncJobResponse
+	169, // 204: monofs.MonoFSRouter.QueryLedger:output_type -> monofs.QueryLedgerResponse
+	21,  // 205: monofs.MonoFS.Lookup:output_type -> monofs.LookupResponse
+	23,  // 206: monofs.MonoFS.GetAttr:output_type -> monofs.GetAttrResponse
+	25,  // 207: monofs.MonoFS.ReadDir:output_type -> monofs.DirEntry
+	27,  // 208: monofs.MonoFS.Read:output_type -> monofs.DataChunk
+	29,  // 209: monofs.MonoFS.Create:output_type -> monofs.CreateResponse
+	31,  // 210: monofs.MonoFS.Write:output_type -> monofs.WriteResponse
+	33,  // 211: monofs.MonoFS.Authenticate:output_type -> monofs.AuthResponse
+	18,  // 212: monofs.MonoFS.GetNodeInfo:output_type -> monofs.NodeInfoResponse
+	38,  // 213: monofs.MonoFS.IngestFile:output_type -> monofs.IngestFileResponse
+	40,  // 214: monofs.MonoFS.IngestFileBatch:output_type -> monofs.IngestFileBatchResponse
+	42,  // 215: monofs.MonoFS.IngestReplicaBatch:output_type -> monofs.IngestReplicaBatchResponse
+	44,  // 216: monofs.MonoFS.RegisterRepository:output_type -> monofs.RegisterRepositoryResponse
+	47,  // 217: monofs.MonoFS.StreamRepositoryFiles:output_type -> monofs.RepositoryFileItem
+	46,  // 218: monofs.MonoFS.GetRepositoryFiles:output_type -> monofs.GetRepositoryFilesResponse
+	49,  // 219: monofs.MonoFS.SyncMetadataFromNode:output_type -> monofs.SyncMetadataFromNodeResponse
+	51,  // 220: monofs.MonoFS.ClearFailoverCache:output_type -> monofs.ClearFailoverCacheResponse
+	53,  // 221: monofs.MonoFS.ListRepositories:output_type -> monofs.ListRepositoriesResponse
+	55,  // 222: monofs.MonoFS.GetRepositoryInfo:output_type -> monofs.GetRepositoryInfoResponse
+	57,  // 223: monofs.MonoFS.GetOnboardingStatus:output_type -> monofs.OnboardingStatusResponse
+	59,  // 224: monofs.MonoFS.MarkRepositoryOnboarded:output_type -> monofs.MarkRepositoryOnboardedResponse
+	67,  // 225: monofs.MonoFS.DeleteFile:output_type -> monofs.DeleteFileResponse
+	86,  // 226: monofs.MonoFS.DeleteRepository:output_type -> monofs.DeleteRepositoryOnNodeResponse
+	126, // 227: monofs.MonoFS.DeleteDirectoryRecursive:output_type -> monofs.DeleteDirectoryRecursiveResponse
+	69,  // 228: monofs.MonoFS.BuildDirectoryIndexes:output_type -> monofs.BuildDirectoryIndexesResponse
+	113, // 229: monofs.MonoFS.GetPredictorStats:output_type -> monofs.PredictorStatsResponse
+	158, // 230: monofs.MonoFS.StreamQueryLogs:output_type -> monofs.QueryResultItem
+	158, // 231: monofs.MonoFS.StreamQueryMetrics:output_type -> monofs.QueryResultItem
+	158, // 232: monofs.MonoFS.StreamQueryTraces:output_type -> monofs.QueryResultItem
+	152, // 233: monofs.MonoFS.QueryLogs:output_type -> monofs.QueryLogsResponse
+	155, // 234: monofs.MonoFS.QueryMetrics:output_type -> monofs.QueryMetricsResponse
+	157, // 235: monofs.MonoFS.QueryTraces:output_type -> monofs.QueryTracesResponse
+	161, // 236: monofs.MonoFS.IngestLogs:output_type -> monofs.IngestLogsResponse
+	164, // 237: monofs.MonoFS.IngestMetrics:output_type -> monofs.IngestMetricsResponse
+	167, // 238: monofs.MonoFS.IngestTraces:output_type -> monofs.IngestTracesResponse
+	171, // 239: monofs.MonoFS.AppendLedgerEntries:output_type -> monofs.AppendLedgerEntriesResponse
+	169, // 240: monofs.MonoFS.QueryLedger:output_type -> monofs.QueryLedgerResponse
+	156, // [156:241] is the sub-list for method output_type
+	71,  // [71:156] is the sub-list for method input_type
+	71,  // [71:71] is the sub-list for extension type_name
+	71,  // [71:71] is the sub-list for extension extendee
+	0,   // [0:71] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_monofs_proto_init() }
@@ -12689,7 +12828,7 @@ func file_api_proto_monofs_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_monofs_proto_rawDesc), len(file_api_proto_monofs_proto_rawDesc)),
 			NumEnums:      12,
-			NumMessages:   171,
+			NumMessages:   173,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

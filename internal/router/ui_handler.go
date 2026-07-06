@@ -236,8 +236,36 @@ func (r *Router) buildStatusData() *StatusData {
 
 	// Build response without holding lock
 	nodes := make([]map[string]interface{}, 0, len(nodesSnapshot))
+	var (
+		nodesTotal      float64
+		nodesHealthy    float64
+		nodesUnhealthy  float64
+		kvsEnabledNodes float64
+		kvsHealthyNodes float64
+		filesTotal      float64
+		diskTotalBytes  float64
+		diskUsedBytes   float64
+		diskFreeBytes   float64
+	)
 	for _, state := range nodesSnapshot {
 		kvsStatus := normalizedKVSNodeStatus(state.kvsStatus)
+		nodesTotal++
+		if state.info.Healthy {
+			nodesHealthy++
+		} else {
+			nodesUnhealthy++
+		}
+		if kvsStatus.GetEnabled() {
+			kvsEnabledNodes++
+		}
+		if kvsStatus.GetHealthy() {
+			kvsHealthyNodes++
+		}
+		filesTotal += float64(state.ownedFilesCount)
+		diskTotalBytes += float64(state.diskTotalBytes)
+		diskUsedBytes += float64(state.diskUsedBytes)
+		diskFreeBytes += float64(state.diskFreeBytes)
+
 		nodeInfo := map[string]interface{}{
 			"id":         state.info.NodeId,
 			"address":    state.info.Address,
@@ -290,6 +318,7 @@ func (r *Router) buildStatusData() *StatusData {
 		failovers[key.(string)] = value.(string)
 		return true
 	})
+	failoversActive := float64(len(failovers))
 
 	// Add drain status
 	drainStatus := make(map[string]interface{})
@@ -304,6 +333,96 @@ func (r *Router) buildStatusData() *StatusData {
 		drainStatus["active"] = false
 	}
 
+	statusMetrics := map[string]float64{
+		"nodes_total":           nodesTotal,
+		"nodes_healthy":         nodesHealthy,
+		"nodes_unhealthy":       nodesUnhealthy,
+		"kvs_enabled_nodes":     kvsEnabledNodes,
+		"kvs_healthy_nodes":     kvsHealthyNodes,
+		"files_total":           filesTotal,
+		"failovers_active":      failoversActive,
+		"disk_total_bytes":      diskTotalBytes,
+		"disk_used_bytes":       diskUsedBytes,
+		"disk_free_bytes":       diskFreeBytes,
+		"drain_active":          0,
+		"policy_gate_enabled":   0,
+		"auto_push_enabled":     0,
+		"workspace_wal_enabled": 0,
+	}
+
+	features := []FeatureInfo{
+		{
+			ID:          "storage_node_wal_ledger",
+			Name:        "Storage-node WAL Ledger",
+			Description: "Commit/push ledger persistence is owned by storage nodes and proxied by routers.",
+			Enabled:     true,
+			Status:      "always-on",
+			HelpHint:    "Core data-safety feature. This is always enabled and cannot be toggled from runtime config.",
+		},
+		{
+			ID:          "workspace_job_wal",
+			Name:        "Workspace Job WAL Persistence",
+			Description: "Workspace sync jobs persist to WAL when workspace-state-dir is configured.",
+			Enabled:     strings.TrimSpace(r.config.WorkspaceStateDir) != "",
+			Status:      "runtime-config",
+			EnableHint:  "--workspace-state-dir=/var/lib/monofs/workspace",
+			DisableHint: "--workspace-state-dir=",
+			HelpHint:    "Set a persistent path so workspace sync job history survives router restarts.",
+		},
+		{
+			ID:          "hrw_routing",
+			Name:        "Rendezvous (HRW) Routing",
+			Description: "Node ownership and ledger proxy placement use deterministic HRW hashing.",
+			Enabled:     true,
+			Status:      "always-on",
+			HelpHint:    "Core routing algorithm. This is always enabled and cannot be toggled.",
+		},
+		{
+			ID:          "policy_gate",
+			Name:        "Policy-gated Sync",
+			Description: "Publish/push/refresh operations are evaluated against workspace policy rules.",
+			Enabled:     r.config.PolicyGateEnabled,
+			Status:      "runtime-config",
+			EnableHint:  "--policy-gate --policy-config=/etc/monofs/workspace-policy.yaml",
+			DisableHint: "--policy-gate=false",
+			HelpHint:    "Enable this to enforce allow/deny rules for workspace publish, push, and refresh operations.",
+		},
+		{
+			ID:          "auto_push",
+			Name:        "Auto Push Worker",
+			Description: "Background worker scans pending workspace bundles and pushes when allowed.",
+			Enabled:     r.config.AutoPushEnabled,
+			Status:      "runtime-config",
+			EnableHint:  "--auto-push --auto-push-interval=60s",
+			DisableHint: "--auto-push=false",
+			HelpHint:    "Runs background push jobs after policy checks. Tune interval based on your CI/CD throughput.",
+		},
+	}
+
+	if drainStatus["active"] == true {
+		statusMetrics["drain_active"] = 1
+	}
+	if r.config.PolicyGateEnabled {
+		statusMetrics["policy_gate_enabled"] = 1
+	}
+	if r.config.AutoPushEnabled {
+		statusMetrics["auto_push_enabled"] = 1
+	}
+	if strings.TrimSpace(r.config.WorkspaceStateDir) != "" {
+		statusMetrics["workspace_wal_enabled"] = 1
+	}
+
+	routerClusterNodes.WithLabelValues("total").Set(nodesTotal)
+	routerClusterNodes.WithLabelValues("healthy").Set(nodesHealthy)
+	routerClusterNodes.WithLabelValues("unhealthy").Set(nodesUnhealthy)
+	routerClusterNodes.WithLabelValues("kvs_enabled").Set(kvsEnabledNodes)
+	routerClusterNodes.WithLabelValues("kvs_healthy").Set(kvsHealthyNodes)
+	routerClusterFilesTotal.Set(filesTotal)
+	routerClusterFailoversTotal.Set(failoversActive)
+	routerClusterDiskBytes.WithLabelValues("total").Set(diskTotalBytes)
+	routerClusterDiskBytes.WithLabelValues("used").Set(diskUsedBytes)
+	routerClusterDiskBytes.WithLabelValues("free").Set(diskFreeBytes)
+
 	return &StatusData{
 		Nodes:     nodes,
 		Failovers: failovers,
@@ -313,6 +432,8 @@ func (r *Router) buildStatusData() *StatusData {
 			"commit":     r.buildCommit,
 			"build_time": r.buildTime,
 		},
+		Features: features,
+		Metrics:  statusMetrics,
 	}
 }
 

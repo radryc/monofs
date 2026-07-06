@@ -119,7 +119,7 @@ func TestDataPersistence(t *testing.T) {
 	t.Run("Phase2_VerifyPersistence", func(t *testing.T) {
 		port2 := port + 1 // Use different port to avoid bind issues
 
-		srv, err := server.NewServer("persist-node", fmt.Sprintf("localhost:%d", port2), dbPath, gitCache, logger)
+		srv, err := server.NewServer("persist-node", fmt.Sprintf("localhost:%d", port2), dbPath, gitCache, false, logger)
 		if err != nil {
 			t.Fatalf("Failed to create server: %v", err)
 		}

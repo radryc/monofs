@@ -163,6 +163,10 @@ service MonoFS {
     rpc IngestLogs(IngestLogsRequest) returns (IngestLogsResponse);
     rpc IngestMetrics(IngestMetricsRequest) returns (IngestMetricsResponse);
     rpc IngestTraces(IngestTracesRequest) returns (IngestTracesResponse);
+
+    // Phase 1B/6: node-owned workspace ledger persistence and query.
+    rpc AppendLedgerEntries(AppendLedgerEntriesRequest) returns (AppendLedgerEntriesResponse);
+    rpc QueryLedger(QueryLedgerRequest) returns (QueryLedgerResponse);
 }
 
 // Cluster topology messages
@@ -1336,6 +1340,18 @@ message QueryLedgerResponse {
     repeated RefreshEvent refresh_events = 3;
     string next_page_token = 4;
     int32 total_matches = 5;
+}
+
+message AppendLedgerEntriesRequest {
+    repeated LocalCommit commits = 1;
+    repeated PushOutcome push_outcomes = 2;
+    repeated RefreshEvent refresh_events = 3;
+}
+
+message AppendLedgerEntriesResponse {
+    bool success = 1;
+    int32 accepted = 2;
+    string message = 3;
 }
 
 message LocalCommit {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -18,7 +19,9 @@ import (
 	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/router/workspaceledger"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/storage/workspacestore"
 	"google.golang.org/grpc"
 )
 
@@ -70,6 +73,10 @@ type Server struct {
 
 	// Doctor telemetry backend
 	logEngine DoctorBackend
+
+	// Phase 1B/6: node-owned ledger (WAL-backed when initialization succeeds).
+	workspaceStore *workspacestore.Store
+	ledger         *workspaceledger.Ledger
 }
 
 type repoInfo struct {
@@ -372,6 +379,23 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, dbSync bool, logger 
 		startTime:    time.Now(),
 		logger:       logger,
 		db:           db,
+		ledger:       workspaceledger.New(),
+	}
+
+	workspaceStateDir := filepath.Join(dbPath, "workspace-ledger")
+	wsCfg := workspacestore.DefaultStoreConfig(workspaceStateDir)
+	ws, wsErr := workspacestore.New(wsCfg, logger)
+	if wsErr != nil {
+		logger.Error("failed to initialize node ledger WAL store, falling back to in-memory ledger",
+			"state_dir", workspaceStateDir,
+			"error", wsErr)
+	} else {
+		s.workspaceStore = ws
+		s.ledger = workspaceledger.NewWithWAL(ws)
+		if err := ws.ReplayLedgerEntries(s.ledger.ReplayFromWAL); err != nil {
+			logger.Error("failed to replay node ledger WAL, continuing with empty in-memory ledger", "error", err)
+			s.ledger = workspaceledger.NewWithWAL(ws)
+		}
 	}
 
 	// Initialize ownership counters from database.
@@ -1691,6 +1715,9 @@ func (s *Server) NodeID() string {
 // Close closes the server resources.
 func (s *Server) Close() error {
 	var closeErr error
+	if s.workspaceStore != nil {
+		s.workspaceStore.Close()
+	}
 	if s.kvsStore != nil {
 		if err := s.kvsStore.Close(); err != nil {
 			closeErr = err

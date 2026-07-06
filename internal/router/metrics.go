@@ -152,4 +152,32 @@ var (
 		Name:      "workspace_sync_reingest_total",
 		Help:      "Total repository re-ingest attempts triggered by workspace refresh.",
 	}, []string{"result"})
+
+	routerClusterNodes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "cluster_nodes",
+		Help:      "Cluster node counts by state as seen by the router.",
+	}, []string{"state"})
+
+	routerClusterFilesTotal = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "cluster_files_total",
+		Help:      "Total files currently attributed to active/known nodes.",
+	})
+
+	routerClusterFailoversTotal = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "cluster_failovers_total",
+		Help:      "Active failover mappings (failed node -> covering node).",
+	})
+
+	routerClusterDiskBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "cluster_disk_bytes",
+		Help:      "Aggregated disk bytes across nodes by kind.",
+	}, []string{"kind"})
 )
