@@ -217,7 +217,7 @@ func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspace
 			return err
 		}
 
-		r.ledger.InsertPushOutcome(&pb.PushOutcome{
+		if err := r.appendPushOutcome(ctx, &pb.PushOutcome{
 			PushOutcomeId:      fmt.Sprintf("%s:%s", entry.job.GetJobId(), repoResult.GetStorageId()),
 			JobId:              entry.job.GetJobId(),
 			WorkspaceId:        entry.job.GetWorkspaceId(),
@@ -227,7 +227,12 @@ func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspace
 			UpstreamCommitHash: repoResult.GetPushedCommit(),
 			LocalCommitIds:     entry.job.GetLocalCommitIds(),
 			Status:             pushStatusFromRepositoryResult(repoResult),
-		})
+		}); err != nil {
+			if err2 := r.failWorkspaceSyncJob(entry, workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_SOURCE_PUSH), "failed to persist push outcome: "+err.Error()); err2 != nil {
+				return err2
+			}
+			return sendWorkspaceSyncTerminalEvent(send, entry, "workspace source push job failed")
+		}
 		if err := send(&pb.WorkspaceSyncEvent{
 			EventType:  workspaceEventTypeForRepository(repoResult),
 			Job:        entry.snapshot(),

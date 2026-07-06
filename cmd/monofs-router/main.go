@@ -77,7 +77,6 @@ func main() {
 		policyConfigPath  = flag.String("policy-config", "", "Path to policy YAML config file (Phase 3)")
 		autoPushEnabled   = flag.Bool("auto-push", false, "Enable automatic push of pending commits (Phase 3)")
 		autoPushInterval  = flag.Duration("auto-push-interval", 60*time.Second, "Interval between auto-push scans (Phase 3)")
-
 		// Replication and failover configuration
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
 		rebalanceDelay        = flag.Duration("rebalance-delay", 10*time.Minute, "Wait time before permanent rebalancing after node failure")

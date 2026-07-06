@@ -61,6 +61,14 @@ const healthyNodes = computed(() => dedupedNodes.value.filter((n) => n.healthy).
 const totalFiles = computed(() => dedupedNodes.value.reduce((s: number, n: any) => s + (n.file_count || 0), 0))
 const totalRepos = ref(0)
 
+const primaryRouterStatus = computed(() => {
+  const all = routers.value?.routers ?? []
+  const local = all.find((entry) => entry.local && entry.status)
+  return local?.status ?? all.find((entry) => entry.status)?.status ?? null
+})
+
+const statusMetrics = computed<Record<string, number>>(() => primaryRouterStatus.value?.metrics ?? {})
+
 function diskFree(node: { disk_free?: number; disk_total?: number; disk_used?: number }) {
   if (typeof node.disk_free === 'number') return node.disk_free
   return Math.max((node.disk_total || 0) - (node.disk_used || 0), 0)
@@ -237,6 +245,8 @@ function shortHash(value: string | undefined): string {
         { icon: '📊', label: 'Total Searches',    value: searchStats ? formatNumber(searchStats.searches_total) : '-' },
         { icon: '⚡', label: 'Avg Search',        value: searchStats ? `${searchStats.avg_search_duration_ms?.toFixed(0) ?? 0}ms` : '-' },
         { icon: '📥', label: 'Data Fetched',      value: fetcherStats ? formatBytes(fetcherStats.total_bytes_fetched || 0) : '-' },
+        { icon: '🛡️', label: 'Active Failovers',  value: statusMetrics.failovers_active ?? '-' },
+        { icon: '🧾', label: 'Workspace WAL',      value: statusMetrics.workspace_wal_enabled === 1 ? 'enabled' : 'memory' },
       ]" :key="stat.label"
         :icon="stat.icon"
         :label="stat.label"

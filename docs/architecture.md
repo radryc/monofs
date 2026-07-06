@@ -1,451 +1,218 @@
 # MonoFS Architecture
 
-> Distributed source workspaces, code search, and publish engine for monolithic repositories.
+## Overview
 
-This document explains **how MonoFS works**. For day-to-day commands and developer workflows, see [usage.md](usage.md). For the Strata platform context, see the top-level [README](../README.md).
+MonoFS is a distributed filesystem that projects many repositories and managed namespaces into a single mounted workspace.
 
-![MonoFS architecture overview](assets/architecture-overview.svg)
+At a high level, MonoFS has two jobs:
 
----
+1. store and serve repository content through a clustered filesystem
+2. project that content as a writable virtual monorepo with publish and refresh workflows
 
-## Table of Contents
+## System Model
 
-1. [What MonoFS Is](#1-what-monofs-is)
-2. [The Big Picture](#2-the-big-picture)
-3. [Components](#3-components)
-   - [Router (Control Plane)](#router-control-plane)
-   - [Storage Nodes (Data Plane)](#storage-nodes-data-plane)
-   - [Fetcher Tier (Upstream Bridge)](#fetcher-tier-upstream-bridge)
-   - [Search Service](#search-service)
-   - [FUSE Client](#fuse-client)
-   - [Admin CLI and Session CLI](#admin-cli-and-session-cli)
-4. [Data Model](#4-data-model)
-   - [Namespaces](#namespaces)
-   - [Storage IDs and Shards](#storage-ids-and-shards)
-   - [WORM / Indexed-Tail Format](#worm--indexed-tail-format)
-5. [Request Flows](#5-request-flows)
-   - [Read Path](#read-path)
-   - [Write Path (Overlay + Publish)](#write-path-overlay--publish)
-   - [Refresh Path](#refresh-path)
-6. [Replication, Failover, and Rebalancing](#6-replication-failover-and-rebalancing)
-7. [Native Protocol (Experimental)](#7-native-protocol-experimental)
-8. [Built-in Namespaces: Doctor and Guardian](#8-built-in-namespaces-doctor-and-guardian)
-9. [Encryption at Rest](#9-encryption-at-rest)
-10. [Dual Addressing](#10-dual-addressing)
-11. [Observability](#11-observability)
-12. [Where to Read the Code](#12-where-to-read-the-code)
+MonoFS is composed of these major layers:
 
----
+- **Router**: cluster coordination, repository ingestion, workspace sync orchestration, managed namespace operations, and client lifecycle handling
+- **Storage nodes**: authoritative file metadata storage, directory indexes, repository registration, and shard ownership
+- **Fetchers**: remote source retrieval, caching, bundle staging, publish execution, and refresh execution
+- **Search**: repository and workspace indexing for query and navigation
+- **FUSE client**: local mounted filesystem view, overlay session handling, and virtual-monorepo projection
 
-## 1. What MonoFS Is
+## End-to-End Flow Diagram
 
-MonoFS solves a single problem: **make a giant monorepo feel local**.
+The diagram below shows how an upstream source repository, Guardian-managed deployment intent, Doctor telemetry, and the mounted workspace fit together in one operational loop.
 
-Instead of `git clone`-ing the world onto every laptop and watching IDE indexers choke, MonoFS projects exactly the subset of files you need through a FUSE mount. Storage, indexing, and ingestion live on a horizontally scalable backend. The local machine only ever holds the files it is actively touching.
+```mermaid
+flowchart LR
+    subgraph Upstream[Upstream Systems]
+        Repo[Source repo\nGitLab or GitHub]
+        Guardian[Guardian partition\nintent YAML]
+        Doctor[Doctor telemetry\nlogs metrics traces]
+    end
 
-The system is composed of five services, three CLI tools, and two supplementary binaries:
+    subgraph MonoFS[MonoFS Cluster]
+        Router[Router\ningest sync namespace ops]
+        Fetchers[Fetchers\nclone publish refresh]
+        Servers[Storage nodes\nsharded metadata and reads]
+        Search[Search\nindex and query]
+    end
 
-| Service          | Binary              | Role                                                        |
-|------------------|---------------------|-------------------------------------------------------------|
-| Router           | `monofs-router`     | Control plane: topology, health, ingest, publish/refresh, UI |
-| Storage Node     | `monofs-server`     | Sharded WORM backend, file serving, replication             |
-| Fetcher          | `monofs-fetcher`    | Stateless DMZ bridge to upstream Git, S3, GCS, MinIO        |
-| Search           | `monofs-search`     | Out-of-band Zoekt code indexing and query                   |
-| FUSE Client      | `monofs-client`     | Local mount with writable overlay and session socket        |
-| Session CLI      | `monofs-session`    | Developer: status, diff, commit, pull, push, search, discard |
-| Admin CLI        | `monofs-admin`      | Operator: ingest, failover, drain, rebalance, rebuild-index |
-| Loadtest         | `monofs-loadtest`   | Filesystem load generator                                   |
-| Trace Dump       | `monofs-trace-dump` | Storage log engine query tool                               |
+    subgraph Workstation[User Workspace]
+        Mount[Mounted virtual monorepo\nsre/foo guardian/... doctor/v1/...]
+        Session[monofs-session\nstatus diff commit pull]
+    end
 
-Plus: a [VS Code extension](../vscode-monofs/) for build/deploy/status commands, and an experimental [kernel module](../monofs-kmod/) for a native VFS path.
-
----
-
-## 2. The Big Picture
-
-```
-┌─────────────────────────────┐
-│   Developer Machine         │
-│                             │
-│   ┌─────────────────────┐   │
-│   │   FUSE Client       │◀──┐
-│   │   (monofs-client)   │   │  gRPC (control + data)
-│   └─────────────────────┘   │
-│            ▲                │
-│   ┌────────┴────────┐       │   gRPC (session socket)
-│   │ Session CLI     │       │
-│   │ (monofs-session)│───────┘
-│   └─────────────────┘
-└────────────┬────────────────┘
-             │
-             ▼
-┌────────────────────────────────────────────────────┐
-│                MONOFS CLUSTER                      │
-│                                                    │
-│   ┌──────────────┐                                 │
-│   │   Router     │  control plane + UI (HTTP/8080) │
-│   │              │  gRPC API (9090)                │
-│   └──────┬───────┘                                 │
-│          │                                         │
-│          ├──▶ ┌──────────────┐  ←─ upstream Git    │
-│          │    │  Fetcher(s)  │     / object store  │
-│          │    └──────────────┘                     │
-│          │                                         │
-│          ├──▶ ┌──────────────┐                     │
-│          │    │   Search     │  (out-of-band)      │
-│          │    └──────────────┘                     │
-│          │                                         │
-│          ▼                                         │
-│   ┌──────────────────────────────┐                 │
-│   │   Storage Nodes (sharded)    │                 │
-│   │   • Indexed-Tail WORM        │                 │
-│   │   • HRW-sharded by path      │                 │
-│   │   • Replicated (factor N)    │                 │
-│   └──────────────────────────────┘                 │
-└────────────────────────────────────────────────────┘
+    Repo -->|ingest source| Router
+    Router --> Fetchers
+    Fetchers --> Servers
+    Servers --> Search
+    Servers -->|mount via FUSE client| Mount
+    Guardian -->|managed namespace sync| Router
+    Router -->|guardian/<partition>/...| Mount
+    Doctor -->|ingest query APIs| Router
+    Router -->|doctor/v1/... and query results| Mount
+    Mount --> Session
+    Session -->|publish source changes| Router
+    Router -->|push refresh| Fetchers
+    Fetchers -->|update upstream repo| Repo
 ```
 
-A user mounts a directory and edits files like they are local. Reads stream from the cluster; writes are captured in a local overlay and explicitly published upstream.
+The key point is that the user works from one mounted workspace, but that workspace is fed by multiple platform surfaces through the MonoFS cluster.
 
----
+## Data Model
 
-## 3. Components
+MonoFS distinguishes between several repository identities:
 
-### Router (Control Plane)
+- **Source**: the upstream location such as a Git URL, Go module path, or S3 bucket
+- **Display path**: the user-visible filesystem path, either auto-generated from the source or explicitly assigned through `source_id`
+- **Storage ID**: the internal stable identifier derived from the display path and used for sharding and lookup
 
-**Binary:** `monofs-router`
-**Source:** `cmd/monofs-router/main.go`, `internal/router/`
+This separation allows MonoFS to preserve upstream repository boundaries while presenting a workspace-oriented path model.
 
-The router is stateless from the data perspective, but owns the **cluster view**:
+## Repository Ingestion Flow
 
-- Tracks healthy storage nodes via periodic health checks
-- Computes HRW (Rendezvous / Highest Random Weight) shard placement for paths
-- Serves cluster topology to FUSE clients (`--use-external-addrs`)
-- Drives publish and refresh jobs through the fetcher tier
-- Hosts the web UI on `:8080` (cluster status, workspace jobs, pprof collection)
-- Hosts the gRPC API on `:9090` (ingest, status, failover, delete, drain, …)
-- Exposes the built-in `doctor/` and `guardian/` namespaces as virtual root entries
+Repository ingestion begins at the router.
 
-Key files:
-- `internal/router/router.go` — gRPC service, health, topology
-- `internal/router/ingest.go` — repository and blob ingestion
-- `internal/router/workspace_sync.go` — publish and refresh orchestration
-- `internal/router/native_gateway.go` — experimental native-protocol gateway
-- `internal/router/ui.go` — embedded web UI
+1. A client submits an ingest request with `source`, optional `ref`, optional `source_id`, and backend configuration.
+2. The router validates the request and determines the display path.
+3. The router derives a storage ID from that display path.
+4. Repository metadata is registered across storage nodes.
+5. Files are ingested into the cluster, sharded by storage ID and path.
+6. Directory indexes and repository lookup state are updated.
 
-### Storage Nodes (Data Plane)
+The important consequence is that the display path is not cosmetic. It becomes the visible identity used for workspace resolution.
 
-**Binary:** `monofs-server`
-**Source:** `cmd/monofs-server/main.go`, `internal/server/`, `internal/storage/`
+## Filesystem Resolution
 
-Storage nodes hold the actual file data. Each node:
+Path resolution uses the display path as the primary user-facing identity.
 
-- Serves a gRPC API for `lookup`, `getattr`, `readdir`, `read`, `statfs`, …
-- Stores content in the **Indexed-Tail** WORM format
-- Republishes via the [WORM / Indexed-Tail Format](#worm--indexed-tail-format) below
-- Reports health and capacity metrics to the router
-- Runs the **ingest** path for new repository data
-- Maintains replica state for paths it is a backup of
+- Root and intermediate directories are synthesized from registered repository display paths.
+- MonoFS resolves paths by longest-prefix matching against known display paths.
+- Once the repository is identified, the remaining suffix is the repo-relative file path.
 
-Key files:
-- `internal/server/fs.go`, `internal/server/directory.go` — filesystem semantics
-- `internal/server/replication.go` — replica sync
-- `internal/server/failover.go` — drain, drain, takeover
-- `internal/storage/logengine/` — Indexed-Tail engine
-- `internal/storage/blob/`, `internal/storage/git/` — pluggable backends
+This is what makes the workspace feel monorepo-like even though the underlying sources remain separate.
 
-### Fetcher Tier (Upstream Bridge)
+## Sharding and Ownership
 
-**Binary:** `monofs-fetcher`
-**Source:** `cmd/monofs-fetcher/main.go`, `internal/fetcher/`
+MonoFS distributes repository content across storage nodes.
 
-Fetchers are stateless proxies that have **outbound network access**. They:
+- repositories are registered cluster-wide
+- individual file ownership is assigned per shard
+- metadata and data locality are coordinated through the router
+- failover paths can redirect reads when the primary owner is unavailable
 
-- Clone Git remotes and stage workspace bundles
-- Push/pull from upstream for the publish and refresh flows
-- Cache blobs locally for re-use across nodes
-- Prefetch queue to keep popular content warm
-- Run in the DMZ; storage nodes stay on the internal network only
+The router and node services also expose cluster health, node health, maintenance controls, and failover support.
 
-The fetcher speaks to storage nodes for staged bundles and to the upstream world (Git, S3, GCS, MinIO) for source data.
+## Writable Workspace Model
 
-Key files:
-- `internal/fetcher/service.go` — gRPC service
-- `internal/fetcher/workspace_publish.go` — `commit` / `pull` jobs
-- `internal/fetcher/backend.go` — multi-backend dispatch
+The mounted MonoFS workspace is not directly editing cluster state on every write.
 
-### Search Service
+Instead, writable sessions use a local overlay model:
 
-**Binary:** `monofs-search`
-**Source:** `cmd/monofs-search/main.go`, `internal/search/`
+- local creates, writes, deletes, and renames are tracked in a session layer
+- pending changes can be inspected through `monofs-session`
+- source-backed repository changes are published upstream through workspace sync flows
+- dependency and blob-backed changes use separate push flows
+- discarded sessions remove local overlay state without mutating upstream repositories
 
-Search runs **out of band** so heavy indexing never impacts FUSE read latency:
+This design keeps the mounted workspace responsive and makes publish workflows explicit.
 
-- Builds Zoekt indexes on a worker pool
-- Re-clones repositories from the cluster as needed
-- Serves regex and literal queries over the index
-- Exposes a CLI proxy through `monofs-session search`
+## Virtual Monorepo Projection
 
-The router’s UI calls into the search service for the Code Search tab.
+The virtual-monorepo mode is a workspace projection strategy.
 
-### FUSE Client
+It presents multiple repositories as one coherent root while still preserving repository metadata behind the scenes.
 
-**Binary:** `monofs-client`
-**Source:** `cmd/monofs-client/main.go`, `internal/fuse/`, `internal/client/`
+Key traits:
 
-The client is the developer’s local interface. It:
+- a unified mounted root for many repositories
+- synthetic workspace Git behavior for developer ergonomics
+- selective hiding of system-oriented paths from the main developer surface
+- support for writable overlays and session-based publish workflows
 
-- Mounts the projected workspace as a normal POSIX filesystem
-- Resolves cluster topology from the router on every operation
-- Fans directory listings out to all healthy nodes and merges the result
-- Streams file data directly from the storage node that owns the path
-- (Optional) hosts a writable overlay that captures local edits
-- (Optional) exposes a session Unix socket for `monofs-session`
+MonoFS therefore behaves like a monorepo from the user point of view while remaining multi-repo at the source-of-truth level.
 
-Key files:
-- `cmd/monofs-client/main.go` — flags, mount setup, overlay
-- `internal/fuse/` — `lookup`, `readdir`, `read`, `write`, `commit`, …
-- `internal/client/sharded.go` — HRW-aware gRPC fan-out
-- `internal/client/workspace.go` — workspace bundle assembly
-- `internal/fuse/session_socket.go` — Unix socket RPC
+## Guardian Integration
 
-### Admin CLI and Session CLI
+Guardian is integrated as a managed filesystem namespace.
 
-**Binaries:** `monofs-admin`, `monofs-session`
+Guardian-managed partition content appears under:
 
-- `monofs-admin` is the **operator** tool: ingest, status, delete, failover, rebalance, drain, rebuild-index, repos, stats, node-files, fetchers.
-- `monofs-session` is the **developer** tool: status, diff, commit, pull, push, discard, search. It runs against a mounted client’s session socket.
+- `guardian/<partition>/...`
 
-Full flag reference: see [usage.md](usage.md).
+This namespace is not a normal ingested source repository. It is a managed operational surface backed by router-controlled partition operations and change tracking.
 
----
+Effects of this model:
 
-## 4. Data Model
+- partition intent becomes filesystem-visible
+- partition updates can propagate through cluster APIs rather than Git-only workflows
+- tools and users can inspect or watch operational desired state using filesystem semantics
 
-### Namespaces
-
-A *namespace* is a path tree under the mount root. MonoFS exposes a few native namespaces plus everything you ingest:
-
-| Path prefix                | Source                       | Notes                                              |
-|----------------------------|------------------------------|----------------------------------------------------|
-| `/<git-source-path>/...`   | Ingested Git repository      | Virtual paths preserved from `monofs-admin ingest` |
-| `/blob/...`                | Packager blob archive        | Content-addressed uploads                          |
-| `/s3/...`                  | Ingested S3 prefix           | Read-through view                                  |
-| `/dependency/...`          | Developer-pushed blobs       | Build caches, lockfiles, generated artifacts       |
-| `/doctor/...`              | Doctor observability view    | Built-in cross-account telemetry                   |
-| `/guardian/...`            | Guardian deployment view     | Tenant-scoped deployment tree                      |
-| `/guardian-system/...`     | Guardian system view         | Internal control-plane state                       |
-| `/`.monofs/...`            | Internal metadata            | Hidden from `virtual-monorepo` mounts              |
-
-A full namespace tree (the “raw” view) is what the router UI shows. A **virtual-monorepo** mount projects a source-first view that hides `doctor`, `guardian`, `guardian-system`, and nested `.git` directories, synthesizes a root `.git` and `.gitignore`, and keeps `dependency/` visible.
-
-See [usage.md — What the Projected Root Looks Like](usage.md#what-the-projected-root-looks-like) for the exact shape of a virtual-monorepo mount.
-
-### Storage IDs and Shards
-
-When a repository is ingested, MonoFS assigns it a stable **storage ID**. Paths are placed on storage nodes using **HRW (Rendezvous) hashing** over `(cluster_version, path)`:
-
-- Adding or removing a node only reshuffles a small fraction of paths.
-- The router can compute placement deterministically for any path given the current healthy node set.
-- The client receives placement hints from the router and streams reads directly to the owning node.
+MonoFS also reserves Guardian-related paths so unmanaged repository ingestion does not collide with managed namespaces.
 
-Implementation: `internal/sharding/hrw.go`.
+## Doctor Integration
 
-### WORM / Indexed-Tail Format
+Doctor is integrated as a managed operational namespace and query surface.
 
-Storage nodes persist data using a **Write-Once, Read-Many** Indexed-Tail format. Each commit appends a small immutable "tail" record (file create/modify/delete, directory mutation, symlink op) and a new index entry. Reads walk the index and resolve the latest tail entry for a path.
+Doctor-managed content appears under:
 
-Properties:
+- `doctor/v1/...`
 
-- **Append-only** — no in-place rewrites, so replication and backups are simple
-- **Densely packed** — files in a commit are compressed and encrypted as a group, so a directory of small files costs about one object read
-- **HRW-placed** — each commit lands on a small, deterministic set of storage nodes
-- **Failable mid-append** — a partial commit is detectable and ignorable; readers fall back to the previous valid commit
+In addition to the filesystem namespace, MonoFS exposes Doctor log, metric, and trace ingest/query RPCs. This makes observability part of the platform surface rather than a disconnected side system.
 
-The engine is in `internal/storage/logengine/`. Blobs are stored via pluggable backends in `internal/storage/blob/` and `internal/storage/git/`.
+Effects of this model:
 
----
+- operational data is discoverable from the same platform boundary as source and config
+- platform workflows can connect code, desired state, and telemetry more directly
+- SRE workflows can move from source inspection to operational debugging without changing systems
 
-## 5. Request Flows
-
-### Read Path
-
-```
-App / IDE / shell
-      │
-      ▼
-FUSE VFS (kernel) ─── page cache
-      │
-      ▼
-monofs-client
-  • looks up node for path (HRW + router hint)
-  • issues gRPC Read / ReadDir / GetAttr
-      │
-      ▼
-monofs-server
-  • resolves latest tail for path
-  • returns data (streamed)
-      │
-      ▼
-back to FUSE → app
-```
+## Workspace Sync
 
-A `ReadDir` fans out to all healthy nodes because directories can be sharded across them; results are merged in the client. This merge is **authoritative** — the client never returns a partial listing. If any required node is unavailable, the operation fails fast and the client retries.
+Workspace sync is the mechanism that turns a writable projected workspace into an upstream publishing system.
 
-See `internal/client/sharded.go` for the merge implementation.
+MonoFS supports:
 
-### Write Path (Overlay + Publish)
+- staging workspace bundles
+- publishing workspace changes back to upstream repositories
+- pushing source commits with preserved or squashed history semantics
+- refreshing mounted repositories from upstream state
+- tracking sync jobs and results through router APIs
 
-Writes never go directly to the storage backend. They go to a local **overlay** attached to the mount.
+The publish path requires known workspace repositories with source, branch, and base commit metadata. That is why MonoFS supports publishing changes to existing repositories but does not provision entirely new upstream repositories from scratch.
 
-```
-App writes file
-      │
-      ▼
-FUSE VFS
-      │
-      ▼
-monofs-client (writable)
-  • stores delta in overlay db (--overlay=...)
-  • serves subsequent reads from overlay on top of remote data
-      │
-      ▼ (user runs `monofs-session commit`)
-monofs-session
-  • collects overlay changes
-  • builds a workspace bundle (file ops, deletes, dirs, symlinks)
-  • uploads bundle to router
-      │
-      ▼
-monofs-router
-  • picks a fetcher for the workspace shard
-  • hands off the bundle
-      │
-      ▼
-monofs-fetcher
-  • checks out upstream repos
-  • applies bundle
-  • commits + pushes upstream
-  • reports back to router
-      │
-      ▼
-monofs-session
-  • archives overlay on success, keeps it on failure
-```
+## Search and Discovery
 
-The session remains active until publish succeeds, so you can inspect, retry, or `discard`.
+Search services index ingested content so the mounted workspace remains usable at scale.
 
-### Refresh Path
+This matters because the value of a virtual monorepo is not only path unification. It is also the ability to discover code and operational content across repository boundaries.
 
-`monofs-session pull` brings upstream changes back into the mount:
+## Operational Characteristics
 
-1. Client sends its current refs and base commits to the router.
-2. Router asks a fetcher to check upstream state.
-3. Changed repositories are re-ingested into the cluster.
-4. The mount and the synthetic root Git baseline are updated together.
+MonoFS is intended to run as a distributed service, including on Kubernetes.
 
-For `direct` branch strategy, a successful `commit` triggers an automatic refresh.
+Typical deployment shape:
 
----
+- one router deployment with persistent state for Guardian and workspace sync metadata
+- multiple storage nodes with persistent volumes
+- multiple fetchers with shared operational behavior and local cache state
+- a search deployment
+- FUSE-capable clients or device-plugin support where required
 
-## 6. Replication, Failover, and Rebalancing
+Persistence is important for:
 
-Replication is configured at the router (`--replication-factor`, default `2`):
+- router Guardian state
+- router workspace sync state
+- storage node repository and file metadata
+- fetcher caches
 
-- The router computes the **top N HRW nodes** for each path. The first is the **primary**; the rest are **replicas**.
-- Writes (WORM appends) are sent to all replicas in parallel and acked once a quorum writes.
-- If a primary is unhealthy, reads failover to the next replica.
-- After `--rebalance-delay` of permanent failure, the router re-replicates the orphaned paths to a new healthy node.
+## Design Tradeoffs
 
-Operations to control this:
+MonoFS intentionally chooses:
 
-| Command                          | What it does                                  |
-|----------------------------------|-----------------------------------------------|
-| `monofs-admin status`            | Show cluster state                            |
-| `monofs-admin failover`          | List / inspect failover regions               |
-| `monofs-admin trigger-failover`  | Inject a planned failover for a region        |
-| `monofs-admin clear-failover`    | Resume normal operation                      |
-| `monofs-admin drain`             | Drain a node for maintenance                 |
-| `monofs-admin undrain`           | Restore a drained node                       |
-| `monofs-admin rebalance`         | Trigger shard rebalancing                    |
-| `monofs-admin node-files`        | Inspect files owned by a node                |
-| `monofs-admin rebuild-index`     | Rebuild directory index for a storage ID     |
+- multi-repo upstream ownership over a single monolithic Git history
+- explicit publish flows over implicit remote mutation
+- managed namespaces for platform state instead of overloading normal repositories
+- distributed storage and lookup over single-node simplicity
 
-See `internal/router/drain.go` and `internal/server/failover.go` for implementation.
-
----
-
-## 7. Native Protocol (Experimental)
-
-There is a new experimental native VFS protocol designed to eventually replace the FUSE client’s lower and read path. It is implemented as a small, framed binary protocol over TCP that keeps namespace aggregation, HRW failover, and topology handling in the gateway rather than the kernel.
-
-This is **internal and not part of the public ABI**. The full spec lives in [native-protocol-v1.md](native-protocol-v1.md). The Go gateway implementation is in `internal/router/native_gateway.go`.
-
----
-
-## 8. Built-in Namespaces: Doctor and Guardian
-
-MonoFS is the foundational storage and workspace layer of the **Strata Platform**. The router natively exposes:
-
-- **`/doctor/...`** — cross-account observability data from [Doctor](https://github.com/radryc/doctor)
-- **`/guardian/...`** — tenant-scoped deployment data from [Guardian](https://github.com/radryc/guardian)
-- **`/guardian-system/...`** — Guardian control-plane state
-
-These namespaces are first-class in the mount, the UI, and the gRPC API. They are hidden in `--virtual-monorepo` mounts so that source development sees a clean repo tree.
-
-See `internal/router/guardian_paths.go` and `internal/router/guardian_path_mapper.go`.
-
----
-
-## 9. Encryption at Rest
-
-All packager archives are encrypted with **ChaCha20-Poly1305**. The encryption key is a 32-byte value configured via the `MONOFS_ENCRYPTION_KEY` environment variable. It must be identical across all services in the cluster. Docker deployments require it; local dev can skip encryption by omitting the variable.
-
-Key files: `internal/storage/blob/crypto.go`.
-
-## 10. Dual Addressing
-
-Storage nodes register both an internal pod-network address and an optional external host-reachable address with the router. The router advertises the correct set per client:
-- Cluster-internal clients get pod-network addresses for low-latency routing.
-- External clients (WSL, Docker, remote workstations) get external addresses when `--use-external-addrs` is set.
-
-This enables the same cluster to serve both internal services and developer workstations without a separate ingress layer.
-
-## 11. Observability
-
-Every service ships with a Prometheus `/metrics` endpoint and `net/http/pprof` debug endpoints. The router UI bundles all of them into a **Performance** tab.
-
-| Service         | Default diagnostics address |
-|-----------------|-----------------------------|
-| `monofs-router` | `:8080/debug/pprof/`, `:8080/metrics` |
-| `monofs-server` | `--metrics-addr` (default `:9100`) |
-| `monofs-search` | `--diagnostics-addr` (default `:9101`) |
-| `monofs-fetcher`| `--diagnostics-addr` (default `:9201`) |
-
-The UI calls `POST /api/pprof/collect` to grab a zip of named profiles from all services in one shot. Default profiles: `cpu` (30s), `heap`, `goroutine`. Optional: `allocs`, `mutex`, `block`, `threadcreate`, `trace`.
-
-Additionally, all services export OpenTelemetry traces, metrics, and logs via OTLP (`internal/telemetry/`). The `monofs-trace-dump` tool provides a CLI for querying the storage node's log engine.
-
----
-
-## 12. Where to Read the Code
-
-| Concern               | Start here                                                  |
-|-----------------------|-------------------------------------------------------------|
-| gRPC API              | `api/proto/`                                                |
-| Router service        | `internal/router/router.go`                                 |
-| Workspace publish     | `internal/router/workspace_publish.go`, `internal/router/workspace_sync.go` |
-| Workspace refresh     | `internal/router/workspace_sync.go`                         |
-| Fetcher jobs          | `internal/fetcher/workspace_publish.go`                     |
-| Client gRPC fan-out   | `internal/client/sharded.go`                                |
-| Client identity       | `internal/client/identity.go`                               |
-| FUSE ops              | `internal/fuse/op_*.go`                                     |
-| Writable overlay      | `internal/fuse/writable.go`, `internal/fuse/overlay.go`     |
-| Session socket RPC    | `internal/fuse/session_socket.go`                           |
-| Sharding / HRW        | `internal/sharding/hrw.go`                                  |
-| Storage engine        | `internal/storage/logengine/engine.go`                      |
-| Blob backends         | `internal/storage/blob/backend.go`, `internal/storage/git/` |
-| Search                | `internal/search/service.go`                                |
-| Native gateway        | `internal/router/native_gateway.go`                         |
-| Guardian namespaces   | `internal/router/guardian_paths.go`                         |
-
-For day-to-day usage, jump to [usage.md](usage.md).
+Those tradeoffs make sense for SRE Tool Hub because the goal is not only source hosting. The goal is a coherent workspace for code, control-plane data, and operations.
