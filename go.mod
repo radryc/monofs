@@ -1,6 +1,6 @@
 module github.com/radryc/monofs
 
-go 1.26.3
+go 1.26.4
 
 require (
 	cloud.google.com/go/storage v1.61.3
@@ -37,6 +37,7 @@ require (
 	golang.org/x/sync v0.20.0
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
+	k8s.io/kubelet v0.32.3
 )
 
 replace github.com/rydzu/ainfra/kvs => ../kvs

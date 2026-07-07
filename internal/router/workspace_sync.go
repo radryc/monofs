@@ -23,7 +23,9 @@ func (r *Router) RefreshWorkspace(req *pb.RefreshWorkspaceRequest, stream pb.Mon
 	actionLabel := workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_REFRESH)
 	job := r.newWorkspaceSyncJob(req, extractClientID(stream.Context()))
 	entry := &workspaceSyncJobEntry{job: job}
-	r.storeWorkspaceSyncJob(entry)
+	if err := r.storeWorkspaceSyncJob(entry); err != nil {
+		return err
+	}
 	routerWorkspaceSyncJobsTotal.WithLabelValues(actionLabel, "started").Inc()
 	routerWorkspaceSyncActiveJobs.WithLabelValues(actionLabel).Inc()
 	defer routerWorkspaceSyncActiveJobs.WithLabelValues(actionLabel).Dec()
@@ -78,9 +80,17 @@ func (r *Router) CancelWorkspaceSyncJob(ctx context.Context, req *pb.CancelWorks
 		entry.mu.Unlock()
 		return &pb.CancelWorkspaceSyncJobResponse{Success: false, Message: "job already finished"}, nil
 	}
+	prev := proto.Clone(entry.job).(*pb.WorkspaceSyncJob)
 	entry.job.State = pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_CANCELLED
 	entry.job.FinishedAtUnix = time.Now().Unix()
 	entry.job.ErrorMessage = "cancelled"
+	if r.workspaceJobStore != nil {
+		if err := r.workspaceJobStore.UpsertJob(proto.Clone(entry.job).(*pb.WorkspaceSyncJob)); err != nil {
+			entry.job = prev
+			entry.mu.Unlock()
+			return nil, fmt.Errorf("persist cancelled workspace sync job %q: %w", req.GetJobId(), err)
+		}
+	}
 	entry.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -89,10 +99,12 @@ func (r *Router) CancelWorkspaceSyncJob(ctx context.Context, req *pb.CancelWorks
 }
 
 func (r *Router) runWorkspaceRefreshJob(ctx context.Context, entry *workspaceSyncJobEntry, req *pb.RefreshWorkspaceRequest, send func(*pb.WorkspaceSyncEvent) error) error {
-	r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
+	if err := r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
 		job.State = pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_RUNNING
 		job.StartedAtUnix = time.Now().Unix()
-	})
+	}); err != nil {
+		return err
+	}
 	if err := send(&pb.WorkspaceSyncEvent{
 		EventType: pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_JOB_STARTED,
 		Job:       entry.snapshot(),
@@ -103,7 +115,9 @@ func (r *Router) runWorkspaceRefreshJob(ctx context.Context, entry *workspaceSyn
 
 	fetcherClient := r.getFetcherClient()
 	if fetcherClient == nil {
-		r.failWorkspaceSyncJob(entry, "refresh", "fetcher cluster not configured")
+		if err := r.failWorkspaceSyncJob(entry, "refresh", "fetcher cluster not configured"); err != nil {
+			return err
+		}
 		return nil
 	}
 
@@ -114,20 +128,26 @@ func (r *Router) runWorkspaceRefreshJob(ctx context.Context, entry *workspaceSyn
 	}
 	probeResults, err := fetcherClient.ProbeWorkspaceRefresh(ctx, probeReq)
 	if err != nil {
-		r.failWorkspaceSyncJob(entry, "refresh", err.Error())
+		if err := r.failWorkspaceSyncJob(entry, "refresh", err.Error()); err != nil {
+			return err
+		}
 		return nil
 	}
 
 	for _, result := range probeResults {
 		select {
 		case <-ctx.Done():
-			r.cancelWorkspaceSyncJob(entry)
+			if err := r.cancelWorkspaceSyncJob(entry); err != nil {
+				return err
+			}
 			return nil
 		default:
 		}
 
 		repoResult := workspaceRepositoryResultFromProbe(result)
-		r.updateWorkspaceSyncRepository(entry, repoResult)
+		if err := r.updateWorkspaceSyncRepository(entry, repoResult); err != nil {
+			return err
+		}
 		if err := send(&pb.WorkspaceSyncEvent{
 			EventType:  workspaceEventTypeForRepository(repoResult),
 			Job:        entry.snapshot(),
@@ -161,7 +181,9 @@ func (r *Router) runWorkspaceRefreshJob(ctx context.Context, entry *workspaceSyn
 			repoCopy := cloneWorkspaceSyncRepositoryResult(repoResult)
 			repoCopy.Status = pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_FAILED
 			repoCopy.Message = ingestErr.Error()
-			r.updateWorkspaceSyncRepository(entry, repoCopy)
+			if err := r.updateWorkspaceSyncRepository(entry, repoCopy); err != nil {
+				return err
+			}
 			routerWorkspaceSyncReingestTotal.WithLabelValues("failed").Inc()
 			if err := send(&pb.WorkspaceSyncEvent{
 				EventType:  pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_REPOSITORY_FAILED,
@@ -177,7 +199,9 @@ func (r *Router) runWorkspaceRefreshJob(ctx context.Context, entry *workspaceSyn
 		repoCopy := cloneWorkspaceSyncRepositoryResult(repoResult)
 		repoCopy.Status = pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_REFRESHED
 		repoCopy.Message = "repository refreshed"
-		r.updateWorkspaceSyncRepository(entry, repoCopy)
+		if err := r.updateWorkspaceSyncRepository(entry, repoCopy); err != nil {
+			return err
+		}
 		routerWorkspaceSyncReingestTotal.WithLabelValues("succeeded").Inc()
 		if err := send(&pb.WorkspaceSyncEvent{
 			EventType:  pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_REINGEST_COMPLETED,
@@ -189,7 +213,9 @@ func (r *Router) runWorkspaceRefreshJob(ctx context.Context, entry *workspaceSyn
 		}
 	}
 
-	r.finalizeWorkspaceRefreshJob(entry)
+	if err := r.finalizeWorkspaceRefreshJob(entry); err != nil {
+		return err
+	}
 	if err := send(&pb.WorkspaceSyncEvent{
 		EventType: pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_JOB_COMPLETED,
 		Job:       entry.snapshot(),
@@ -215,10 +241,16 @@ func (r *Router) newWorkspaceSyncJob(req *pb.RefreshWorkspaceRequest, clientID s
 	}
 }
 
-func (r *Router) storeWorkspaceSyncJob(entry *workspaceSyncJobEntry) {
+func (r *Router) storeWorkspaceSyncJob(entry *workspaceSyncJobEntry) error {
+	if r.workspaceJobStore != nil {
+		if err := r.workspaceJobStore.UpsertJob(entry.snapshot()); err != nil {
+			return fmt.Errorf("persist workspace sync job %q: %w", entry.job.GetJobId(), err)
+		}
+	}
 	r.workspaceSyncMu.Lock()
 	r.workspaceSyncJobs[entry.job.GetJobId()] = entry
 	r.workspaceSyncMu.Unlock()
+	return nil
 }
 
 func (r *Router) getWorkspaceSyncJob(jobID string) *workspaceSyncJobEntry {
@@ -255,16 +287,25 @@ func (e *workspaceSyncJobEntry) snapshot() *pb.WorkspaceSyncJob {
 	return proto.Clone(e.job).(*pb.WorkspaceSyncJob)
 }
 
-func (r *Router) updateWorkspaceSyncJob(entry *workspaceSyncJobEntry, update func(*pb.WorkspaceSyncJob)) {
+func (r *Router) updateWorkspaceSyncJob(entry *workspaceSyncJobEntry, update func(*pb.WorkspaceSyncJob)) error {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
+	prev := proto.Clone(entry.job).(*pb.WorkspaceSyncJob)
 	update(entry.job)
+	if r.workspaceJobStore != nil {
+		if err := r.workspaceJobStore.UpsertJob(proto.Clone(entry.job).(*pb.WorkspaceSyncJob)); err != nil {
+			entry.job = prev
+			return fmt.Errorf("persist workspace sync job update %q: %w", prev.GetJobId(), err)
+		}
+	}
+	return nil
 }
 
-func (r *Router) updateWorkspaceSyncRepository(entry *workspaceSyncJobEntry, repo *pb.WorkspaceSyncRepositoryResult) {
+func (r *Router) updateWorkspaceSyncRepository(entry *workspaceSyncJobEntry, repo *pb.WorkspaceSyncRepositoryResult) error {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	actionLabel := workspaceSyncActionMetricLabel(entry.job.GetAction())
+	prev := proto.Clone(entry.job).(*pb.WorkspaceSyncJob)
 	updated := false
 	for i := range entry.job.Repositories {
 		if entry.job.Repositories[i].GetStorageId() == repo.GetStorageId() {
@@ -276,37 +317,53 @@ func (r *Router) updateWorkspaceSyncRepository(entry *workspaceSyncJobEntry, rep
 	if !updated {
 		entry.job.Repositories = append(entry.job.Repositories, cloneWorkspaceSyncRepositoryResult(repo))
 	}
-	routerWorkspaceSyncRepositoriesTotal.WithLabelValues(actionLabel, workspaceSyncRepositoryMetricLabel(repo.GetStatus())).Inc()
 	updateWorkspaceSyncSummary(entry.job)
+	if r.workspaceJobStore != nil {
+		if err := r.workspaceJobStore.UpsertJob(proto.Clone(entry.job).(*pb.WorkspaceSyncJob)); err != nil {
+			entry.job = prev
+			return fmt.Errorf("persist workspace sync repository update %q: %w", prev.GetJobId(), err)
+		}
+	}
+	routerWorkspaceSyncRepositoriesTotal.WithLabelValues(actionLabel, workspaceSyncRepositoryMetricLabel(repo.GetStatus())).Inc()
+	return nil
 }
 
-func (r *Router) failWorkspaceSyncJob(entry *workspaceSyncJobEntry, actionLabel, message string) {
-	r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
+func (r *Router) failWorkspaceSyncJob(entry *workspaceSyncJobEntry, actionLabel, message string) error {
+	if err := r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
 		job.State = pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_FAILED
 		job.FinishedAtUnix = time.Now().Unix()
 		job.ErrorMessage = message
-	})
+	}); err != nil {
+		return err
+	}
 	routerWorkspaceSyncJobsTotal.WithLabelValues(actionLabel, "failed").Inc()
+	return nil
 }
 
-func (r *Router) cancelWorkspaceSyncJob(entry *workspaceSyncJobEntry) {
+func (r *Router) cancelWorkspaceSyncJob(entry *workspaceSyncJobEntry) error {
 	actionLabel := workspaceSyncActionMetricLabel(entry.snapshot().GetAction())
-	r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
+	if err := r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
 		job.State = pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_CANCELLED
 		job.FinishedAtUnix = time.Now().Unix()
 		job.ErrorMessage = "cancelled"
-	})
+	}); err != nil {
+		return err
+	}
 	routerWorkspaceSyncJobsTotal.WithLabelValues(actionLabel, "cancelled").Inc()
+	return nil
 }
 
-func (r *Router) finalizeWorkspaceRefreshJob(entry *workspaceSyncJobEntry) {
-	r.finalizeWorkspaceSyncJob(entry)
+func (r *Router) finalizeWorkspaceRefreshJob(entry *workspaceSyncJobEntry) error {
+	if err := r.finalizeWorkspaceSyncJob(entry); err != nil {
+		return err
+	}
 	result := workspaceSyncResultLabel(entry.snapshot().GetState())
 	routerWorkspaceSyncJobsTotal.WithLabelValues(workspaceSyncActionMetricLabel(pb.WorkspaceSyncAction_WORKSPACE_SYNC_ACTION_REFRESH), result).Inc()
+	return nil
 }
 
-func (r *Router) finalizeWorkspaceSyncJob(entry *workspaceSyncJobEntry) {
-	r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
+func (r *Router) finalizeWorkspaceSyncJob(entry *workspaceSyncJobEntry) error {
+	return r.updateWorkspaceSyncJob(entry, func(job *pb.WorkspaceSyncJob) {
 		job.FinishedAtUnix = time.Now().Unix()
 		updateWorkspaceSyncSummary(job)
 		if job.GetSummary().GetRepositoriesFailed() > 0 || job.GetSummary().GetRepositoriesConflicted() > 0 {

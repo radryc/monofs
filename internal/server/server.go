@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -18,7 +19,9 @@ import (
 	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/router/workspaceledger"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/storage/workspacestore"
 	"google.golang.org/grpc"
 )
 
@@ -70,6 +73,10 @@ type Server struct {
 
 	// Doctor telemetry backend
 	logEngine DoctorBackend
+
+	// Phase 1B/6: node-owned ledger (WAL-backed when initialization succeeds).
+	workspaceStore *workspacestore.Store
+	ledger         *workspaceledger.Ledger
 }
 
 type repoInfo struct {
@@ -268,7 +275,7 @@ func (s *Server) getHashFromPath(storageID, filePath string) ([]byte, bool) {
 }
 
 // NewServer creates a new MonoFS server.
-func NewServer(nodeID, address, dbPath, gitCacheDir string, logger *slog.Logger) (*Server, error) {
+func NewServer(nodeID, address, dbPath, gitCacheDir string, dbSync bool, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -280,7 +287,7 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, logger *slog.Logger)
 	opt.SegmentSize = 64 * 1024 * 1024             // 64MB segments
 	opt.EntryIdxMode = nutsdb.HintKeyAndRAMIdxMode // Use hint file for faster startup (only keys in RAM)
 	opt.RWMode = nutsdb.MMap                       // Use mmap for faster reads
-	opt.SyncEnable = false                         // Async writes for better performance (trade durability for speed)
+	opt.SyncEnable = dbSync
 	db, err := nutsdb.Open(opt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open nutsdb: %w", err)
@@ -372,6 +379,23 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, logger *slog.Logger)
 		startTime:    time.Now(),
 		logger:       logger,
 		db:           db,
+		ledger:       workspaceledger.New(),
+	}
+
+	workspaceStateDir := filepath.Join(dbPath, "workspace-ledger")
+	wsCfg := workspacestore.DefaultStoreConfig(workspaceStateDir)
+	ws, wsErr := workspacestore.New(wsCfg, logger)
+	if wsErr != nil {
+		logger.Error("failed to initialize node ledger WAL store, falling back to in-memory ledger",
+			"state_dir", workspaceStateDir,
+			"error", wsErr)
+	} else {
+		s.workspaceStore = ws
+		s.ledger = workspaceledger.NewWithWAL(ws)
+		if err := ws.ReplayLedgerEntries(s.ledger.ReplayFromWAL); err != nil {
+			logger.Error("failed to replay node ledger WAL, continuing with empty in-memory ledger", "error", err)
+			s.ledger = workspaceledger.NewWithWAL(ws)
+		}
 	}
 
 	// Initialize ownership counters from database.
@@ -1691,6 +1715,9 @@ func (s *Server) NodeID() string {
 // Close closes the server resources.
 func (s *Server) Close() error {
 	var closeErr error
+	if s.workspaceStore != nil {
+		s.workspaceStore.Close()
+	}
 	if s.kvsStore != nil {
 		if err := s.kvsStore.Close(); err != nil {
 			closeErr = err

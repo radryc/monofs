@@ -67,6 +67,7 @@ const (
 	MonoFSRouter_GetWorkspaceSyncJob_FullMethodName         = "/monofs.MonoFSRouter/GetWorkspaceSyncJob"
 	MonoFSRouter_ListWorkspaceSyncJobs_FullMethodName       = "/monofs.MonoFSRouter/ListWorkspaceSyncJobs"
 	MonoFSRouter_CancelWorkspaceSyncJob_FullMethodName      = "/monofs.MonoFSRouter/CancelWorkspaceSyncJob"
+	MonoFSRouter_QueryLedger_FullMethodName                 = "/monofs.MonoFSRouter/QueryLedger"
 )
 
 // MonoFSRouterClient is the client API for MonoFSRouter service.
@@ -143,6 +144,7 @@ type MonoFSRouterClient interface {
 	GetWorkspaceSyncJob(ctx context.Context, in *GetWorkspaceSyncJobRequest, opts ...grpc.CallOption) (*WorkspaceSyncJob, error)
 	ListWorkspaceSyncJobs(ctx context.Context, in *ListWorkspaceSyncJobsRequest, opts ...grpc.CallOption) (*ListWorkspaceSyncJobsResponse, error)
 	CancelWorkspaceSyncJob(ctx context.Context, in *CancelWorkspaceSyncJobRequest, opts ...grpc.CallOption) (*CancelWorkspaceSyncJobResponse, error)
+	QueryLedger(ctx context.Context, in *QueryLedgerRequest, opts ...grpc.CallOption) (*QueryLedgerResponse, error)
 }
 
 type monoFSRouterClient struct {
@@ -723,6 +725,16 @@ func (c *monoFSRouterClient) CancelWorkspaceSyncJob(ctx context.Context, in *Can
 	return out, nil
 }
 
+func (c *monoFSRouterClient) QueryLedger(ctx context.Context, in *QueryLedgerRequest, opts ...grpc.CallOption) (*QueryLedgerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryLedgerResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_QueryLedger_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MonoFSRouterServer is the server API for MonoFSRouter service.
 // All implementations must embed UnimplementedMonoFSRouterServer
 // for forward compatibility.
@@ -797,6 +809,7 @@ type MonoFSRouterServer interface {
 	GetWorkspaceSyncJob(context.Context, *GetWorkspaceSyncJobRequest) (*WorkspaceSyncJob, error)
 	ListWorkspaceSyncJobs(context.Context, *ListWorkspaceSyncJobsRequest) (*ListWorkspaceSyncJobsResponse, error)
 	CancelWorkspaceSyncJob(context.Context, *CancelWorkspaceSyncJobRequest) (*CancelWorkspaceSyncJobResponse, error)
+	QueryLedger(context.Context, *QueryLedgerRequest) (*QueryLedgerResponse, error)
 	mustEmbedUnimplementedMonoFSRouterServer()
 }
 
@@ -950,6 +963,9 @@ func (UnimplementedMonoFSRouterServer) ListWorkspaceSyncJobs(context.Context, *L
 }
 func (UnimplementedMonoFSRouterServer) CancelWorkspaceSyncJob(context.Context, *CancelWorkspaceSyncJobRequest) (*CancelWorkspaceSyncJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelWorkspaceSyncJob not implemented")
+}
+func (UnimplementedMonoFSRouterServer) QueryLedger(context.Context, *QueryLedgerRequest) (*QueryLedgerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryLedger not implemented")
 }
 func (UnimplementedMonoFSRouterServer) mustEmbedUnimplementedMonoFSRouterServer() {}
 func (UnimplementedMonoFSRouterServer) testEmbeddedByValue()                      {}
@@ -1740,6 +1756,24 @@ func _MonoFSRouter_CancelWorkspaceSyncJob_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFSRouter_QueryLedger_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryLedgerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).QueryLedger(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_QueryLedger_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).QueryLedger(ctx, req.(*QueryLedgerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MonoFSRouter_ServiceDesc is the grpc.ServiceDesc for MonoFSRouter service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1891,6 +1925,10 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "CancelWorkspaceSyncJob",
 			Handler:    _MonoFSRouter_CancelWorkspaceSyncJob_Handler,
 		},
+		{
+			MethodName: "QueryLedger",
+			Handler:    _MonoFSRouter_QueryLedger_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -1992,6 +2030,8 @@ const (
 	MonoFS_IngestLogs_FullMethodName               = "/monofs.MonoFS/IngestLogs"
 	MonoFS_IngestMetrics_FullMethodName            = "/monofs.MonoFS/IngestMetrics"
 	MonoFS_IngestTraces_FullMethodName             = "/monofs.MonoFS/IngestTraces"
+	MonoFS_AppendLedgerEntries_FullMethodName      = "/monofs.MonoFS/AppendLedgerEntries"
+	MonoFS_QueryLedger_FullMethodName              = "/monofs.MonoFS/QueryLedger"
 )
 
 // MonoFSClient is the client API for MonoFS service.
@@ -2052,6 +2092,9 @@ type MonoFSClient interface {
 	IngestLogs(ctx context.Context, in *IngestLogsRequest, opts ...grpc.CallOption) (*IngestLogsResponse, error)
 	IngestMetrics(ctx context.Context, in *IngestMetricsRequest, opts ...grpc.CallOption) (*IngestMetricsResponse, error)
 	IngestTraces(ctx context.Context, in *IngestTracesRequest, opts ...grpc.CallOption) (*IngestTracesResponse, error)
+	// Phase 1B/6: node-owned workspace ledger persistence and query.
+	AppendLedgerEntries(ctx context.Context, in *AppendLedgerEntriesRequest, opts ...grpc.CallOption) (*AppendLedgerEntriesResponse, error)
+	QueryLedger(ctx context.Context, in *QueryLedgerRequest, opts ...grpc.CallOption) (*QueryLedgerResponse, error)
 }
 
 type monoFSClient struct {
@@ -2459,6 +2502,26 @@ func (c *monoFSClient) IngestTraces(ctx context.Context, in *IngestTracesRequest
 	return out, nil
 }
 
+func (c *monoFSClient) AppendLedgerEntries(ctx context.Context, in *AppendLedgerEntriesRequest, opts ...grpc.CallOption) (*AppendLedgerEntriesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AppendLedgerEntriesResponse)
+	err := c.cc.Invoke(ctx, MonoFS_AppendLedgerEntries_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSClient) QueryLedger(ctx context.Context, in *QueryLedgerRequest, opts ...grpc.CallOption) (*QueryLedgerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryLedgerResponse)
+	err := c.cc.Invoke(ctx, MonoFS_QueryLedger_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MonoFSServer is the server API for MonoFS service.
 // All implementations must embed UnimplementedMonoFSServer
 // for forward compatibility.
@@ -2517,6 +2580,9 @@ type MonoFSServer interface {
 	IngestLogs(context.Context, *IngestLogsRequest) (*IngestLogsResponse, error)
 	IngestMetrics(context.Context, *IngestMetricsRequest) (*IngestMetricsResponse, error)
 	IngestTraces(context.Context, *IngestTracesRequest) (*IngestTracesResponse, error)
+	// Phase 1B/6: node-owned workspace ledger persistence and query.
+	AppendLedgerEntries(context.Context, *AppendLedgerEntriesRequest) (*AppendLedgerEntriesResponse, error)
+	QueryLedger(context.Context, *QueryLedgerRequest) (*QueryLedgerResponse, error)
 	mustEmbedUnimplementedMonoFSServer()
 }
 
@@ -2628,6 +2694,12 @@ func (UnimplementedMonoFSServer) IngestMetrics(context.Context, *IngestMetricsRe
 }
 func (UnimplementedMonoFSServer) IngestTraces(context.Context, *IngestTracesRequest) (*IngestTracesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method IngestTraces not implemented")
+}
+func (UnimplementedMonoFSServer) AppendLedgerEntries(context.Context, *AppendLedgerEntriesRequest) (*AppendLedgerEntriesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AppendLedgerEntries not implemented")
+}
+func (UnimplementedMonoFSServer) QueryLedger(context.Context, *QueryLedgerRequest) (*QueryLedgerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryLedger not implemented")
 }
 func (UnimplementedMonoFSServer) mustEmbedUnimplementedMonoFSServer() {}
 func (UnimplementedMonoFSServer) testEmbeddedByValue()                {}
@@ -3209,6 +3281,42 @@ func _MonoFS_IngestTraces_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFS_AppendLedgerEntries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AppendLedgerEntriesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSServer).AppendLedgerEntries(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFS_AppendLedgerEntries_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSServer).AppendLedgerEntries(ctx, req.(*AppendLedgerEntriesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFS_QueryLedger_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryLedgerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSServer).QueryLedger(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFS_QueryLedger_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSServer).QueryLedger(ctx, req.(*QueryLedgerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MonoFS_ServiceDesc is the grpc.ServiceDesc for MonoFS service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3323,6 +3431,14 @@ var MonoFS_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "IngestTraces",
 			Handler:    _MonoFS_IngestTraces_Handler,
+		},
+		{
+			MethodName: "AppendLedgerEntries",
+			Handler:    _MonoFS_AppendLedgerEntries_Handler,
+		},
+		{
+			MethodName: "QueryLedger",
+			Handler:    _MonoFS_QueryLedger_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

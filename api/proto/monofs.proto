@@ -89,6 +89,7 @@ service MonoFSRouter {
     rpc GetWorkspaceSyncJob(GetWorkspaceSyncJobRequest) returns (WorkspaceSyncJob);
     rpc ListWorkspaceSyncJobs(ListWorkspaceSyncJobsRequest) returns (ListWorkspaceSyncJobsResponse);
     rpc CancelWorkspaceSyncJob(CancelWorkspaceSyncJobRequest) returns (CancelWorkspaceSyncJobResponse);
+    rpc QueryLedger(QueryLedgerRequest) returns (QueryLedgerResponse);
 }
 
 // MonoFS is the backend node service for filesystem operations
@@ -162,6 +163,10 @@ service MonoFS {
     rpc IngestLogs(IngestLogsRequest) returns (IngestLogsResponse);
     rpc IngestMetrics(IngestMetricsRequest) returns (IngestMetricsResponse);
     rpc IngestTraces(IngestTracesRequest) returns (IngestTracesResponse);
+
+    // Phase 1B/6: node-owned workspace ledger persistence and query.
+    rpc AppendLedgerEntries(AppendLedgerEntriesRequest) returns (AppendLedgerEntriesResponse);
+    rpc QueryLedger(QueryLedgerRequest) returns (QueryLedgerResponse);
 }
 
 // Cluster topology messages
@@ -594,6 +599,12 @@ enum WorkspaceSyncAction {
     WORKSPACE_SYNC_ACTION_SOURCE_PUSH = 3;
 }
 
+enum SourcePushMode {
+    SOURCE_PUSH_MODE_UNSPECIFIED = 0;
+    SOURCE_PUSH_MODE_SQUASH = 1;
+    SOURCE_PUSH_MODE_PRESERVE = 2;
+}
+
 enum WorkspaceSyncState {
     WORKSPACE_SYNC_STATE_UNSPECIFIED = 0;
     WORKSPACE_SYNC_STATE_QUEUED = 1;
@@ -663,6 +674,7 @@ message PushWorkspaceCommitsRequest {
     string workspace_id = 1;
     string bundle_id = 2;
     string logical_branch = 3;
+    SourcePushMode source_push_mode = 4;
 }
 
 message RefreshWorkspaceRequest {
@@ -693,6 +705,8 @@ message WorkspaceSyncRepositoryResult {
     string conflict_reason = 9;
     string target_branch = 10;
     string pushed_commit = 11;
+    string local_commit_id = 12;
+    int32 local_commit_index = 13;
 }
 
 message WorkspaceSyncJob {
@@ -1295,4 +1309,89 @@ message IngestTracesRequest {
 
 message IngestTracesResponse {
     bool ok = 1;
+}
+
+enum LedgerResultKind {
+    LEDGER_RESULT_KIND_UNSPECIFIED = 0;
+    LEDGER_RESULT_KIND_ALL = 1;
+    LEDGER_RESULT_KIND_COMMITS_ONLY = 2;
+    LEDGER_RESULT_KIND_PUSH_OUTCOMES_ONLY = 3;
+    LEDGER_RESULT_KIND_REFRESH_EVENTS_ONLY = 4;
+}
+
+message QueryLedgerRequest {
+    string workspace_id = 1;
+    string principal_id = 2;
+    string repo_storage_id = 3;
+    string local_commit_id = 4;
+    string job_id = 5;
+    string push_status = 6;
+    string branch = 7;
+    int64 created_after = 10;
+    int64 created_before = 11;
+    int32 page_size = 20;
+    string page_token = 21;
+    LedgerResultKind result_kind = 30;
+}
+
+message QueryLedgerResponse {
+    repeated LocalCommit commits = 1;
+    repeated PushOutcome push_outcomes = 2;
+    repeated RefreshEvent refresh_events = 3;
+    string next_page_token = 4;
+    int32 total_matches = 5;
+}
+
+message AppendLedgerEntriesRequest {
+    repeated LocalCommit commits = 1;
+    repeated PushOutcome push_outcomes = 2;
+    repeated RefreshEvent refresh_events = 3;
+}
+
+message AppendLedgerEntriesResponse {
+    bool success = 1;
+    int32 accepted = 2;
+    string message = 3;
+}
+
+message LocalCommit {
+    string local_commit_id = 1;
+    string workspace_id = 2;
+    string principal_id = 3;
+    string repo_storage_id = 4;
+    string author_name = 5;
+    string author_email = 6;
+    string message = 7;
+    string message_full = 8;
+    int32 files_changed = 9;
+    int32 additions = 10;
+    int32 deletions = 11;
+    string parent_commit_id = 12;
+    int64 timestamp_unix = 13;
+}
+
+message PushOutcome {
+    string push_outcome_id = 1;
+    string job_id = 2;
+    string workspace_id = 3;
+    string repo_storage_id = 4;
+    string branch = 5;
+    string push_mode = 6;
+    string branch_strategy = 7;
+    string upstream_commit_hash = 8;
+    repeated string local_commit_ids = 9;
+    string status = 10;
+    string error_message = 11;
+    string pr_url = 12;
+    int64 timestamp_unix = 13;
+}
+
+message RefreshEvent {
+    string refresh_event_id = 1;
+    string workspace_id = 2;
+    string repo_storage_id = 3;
+    string previous_upstream_hash = 4;
+    string new_upstream_hash = 5;
+    int32 incoming_commits = 6;
+    int64 timestamp_unix = 7;
 }

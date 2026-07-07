@@ -26,7 +26,7 @@ func TestFileUpdateReplacesEntry(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestDirectoryMtimePropagation(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestConcurrentDirectoryOperations(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestSingleComponentPath(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestLargeDirectory(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -522,7 +522,7 @@ func TestMixedBatchAndSingleOperations(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -634,7 +634,7 @@ func TestReadDirAfterIngestion(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -716,7 +716,7 @@ func TestGetAttrConsistency(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -799,7 +799,7 @@ func TestSpecialCharactersInPath(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -912,7 +912,7 @@ func TestVirtualDirectoryMtime(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -980,7 +980,7 @@ func TestEmptyRepositoryReadDir(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -1020,7 +1020,7 @@ func TestNonExistentPathLookup(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -1102,7 +1102,7 @@ func TestMultipleRepositoriesIsolation(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -1229,7 +1229,7 @@ func TestIncrementalIndexing(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}

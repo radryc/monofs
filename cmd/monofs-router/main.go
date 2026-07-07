@@ -50,28 +50,33 @@ func init() {
 
 func main() {
 	var (
-		port             = flag.Int("port", 9090, "Router service port")
-		httpPort         = flag.Int("http-port", 8080, "HTTP UI port")
-		nativeAddr       = flag.String("native-addr", "", "Native protocol listen address (disabled when empty)")
-		clusterID        = flag.String("cluster-id", "monofs-cluster", "Cluster identifier")
-		routerName       = flag.String("router-name", "local", "Router instance name for UI identification")
-		nodes            = flag.String("nodes", "", "Initial nodes: node1=host1:port1,node2=host2:port2,...")
-		weights          = flag.String("weights", "", "Node weights: node1=100,node2=100,...")
-		externalAddrs    = flag.String("external-addrs", "", "External addresses for host clients: node1=localhost:9001,node2=localhost:9002,...")
-		peerRouters      = flag.String("peer-routers", "", "Peer routers for UI aggregation: name=http://host:port or host:port,...")
-		searchAddr       = flag.String("search-addr", "", "Search service address (e.g., search:9100)")
-		searchDiagAddr   = flag.String("search-diagnostics-addr", "", "Search diagnostics address for pprof collection (e.g., search:9101)")
-		fetcherAddrs     = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
-		fetcherDiagAddrs = flag.String("fetcher-diagnostics-addrs", "", "Fetcher diagnostics addresses for pprof collection (e.g., fetcher1:9201,fetcher2:9201)")
-		registryAddr     = flag.String("registry-addr", "", "Monofs-registry address for UI proxy (e.g., monofs-registry:5000)")
-		registryDiagAddr = flag.String("registry-diagnostics-addr", "", "Registry diagnostics address for pprof collection (e.g., registry:5001)")
-		serverDiagAddrs  = flag.String("server-diagnostics-addrs", "", "Server diagnostics addresses for pprof collection (e.g., node-a=node-a:9100,node-b=node-b:9100)")
-		healthInt        = flag.Duration("health-interval", 2*time.Second, "Health check interval")
-		unhealthyThr     = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
-		debug            = flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
-		logLevel         = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-		guardianStateDir = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
-
+		port              = flag.Int("port", 9090, "Router service port")
+		httpPort          = flag.Int("http-port", 8080, "HTTP UI port")
+		nativeAddr        = flag.String("native-addr", "", "Native protocol listen address (disabled when empty)")
+		clusterID         = flag.String("cluster-id", "monofs-cluster", "Cluster identifier")
+		routerName        = flag.String("router-name", "local", "Router instance name for UI identification")
+		nodes             = flag.String("nodes", "", "Initial nodes: node1=host1:port1,node2=host2:port2,...")
+		weights           = flag.String("weights", "", "Node weights: node1=100,node2=100,...")
+		externalAddrs     = flag.String("external-addrs", "", "External addresses for host clients: node1=localhost:9001,node2=localhost:9002,...")
+		peerRouters       = flag.String("peer-routers", "", "Peer routers for UI aggregation: name=http://host:port or host:port,...")
+		searchAddr        = flag.String("search-addr", "", "Search service address (e.g., search:9100)")
+		searchDiagAddr    = flag.String("search-diagnostics-addr", "", "Search diagnostics address for pprof collection (e.g., search:9101)")
+		fetcherAddrs      = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
+		fetcherDiagAddrs  = flag.String("fetcher-diagnostics-addrs", "", "Fetcher diagnostics addresses for pprof collection (e.g., fetcher1:9201,fetcher2:9201)")
+		registryAddr      = flag.String("registry-addr", "", "Monofs-registry address for UI proxy (e.g., monofs-registry:5000)")
+		registryDiagAddr  = flag.String("registry-diagnostics-addr", "", "Registry diagnostics address for pprof collection (e.g., registry:5001)")
+		serverDiagAddrs   = flag.String("server-diagnostics-addrs", "", "Server diagnostics addresses for pprof collection (e.g., node-a=node-a:9100,node-b=node-b:9100)")
+		healthInt         = flag.Duration("health-interval", 2*time.Second, "Health check interval")
+		unhealthyThr      = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
+		debug             = flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
+		logLevel          = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+		guardianStateDir  = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
+		workspaceStateDir = flag.String("workspace-state-dir", "", "Directory for persistent workspace job state (Phase 1), separate from Guardian state")
+		sourcePushMode    = flag.String("source-push-mode", "squash", "Source push mode: squash or preserve")
+		policyGateEnabled = flag.Bool("policy-gate", false, "Enable policy-gated push/publish/refresh (Phase 3)")
+		policyConfigPath  = flag.String("policy-config", "", "Path to policy YAML config file (Phase 3)")
+		autoPushEnabled   = flag.Bool("auto-push", false, "Enable automatic push of pending commits (Phase 3)")
+		autoPushInterval  = flag.Duration("auto-push-interval", 60*time.Second, "Interval between auto-push scans (Phase 3)")
 		// Replication and failover configuration
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
 		rebalanceDelay        = flag.Duration("rebalance-delay", 10*time.Minute, "Wait time before permanent rebalancing after node failure")
@@ -166,6 +171,12 @@ func main() {
 		ServerDiagnostics:     parseServerDiagnostics(*serverDiagAddrs),
 		RegistryDiagnostics:   strings.TrimSpace(*registryDiagAddr),
 		GuardianStateDir:      *guardianStateDir,
+		WorkspaceStateDir:     *workspaceStateDir,
+		SourcePushMode:        *sourcePushMode,
+		PolicyGateEnabled:     *policyGateEnabled,
+		PolicyConfigPath:      *policyConfigPath,
+		AutoPushEnabled:       *autoPushEnabled,
+		AutoPushInterval:      *autoPushInterval,
 		EncryptionKey:         encryptionKey,
 		ReplicationFactor:     *replicationFactor,
 		RebalanceDelay:        *rebalanceDelay,

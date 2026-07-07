@@ -21,7 +21,7 @@ func TestKVSBackedRepositoryBypassesFetcher(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	server, err := NewServer("test-node", ":9000", filepath.Join(tmpDir, "db"), filepath.Join(tmpDir, "git-cache"), nil)
+	server, err := NewServer("test-node", ":9000", filepath.Join(tmpDir, "db"), filepath.Join(tmpDir, "git-cache"), false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestKVSBackedRepositoryDeleteRepositoryCleansUpStore(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	server, err := NewServer("test-node", ":9000", filepath.Join(tmpDir, "db"), filepath.Join(tmpDir, "git-cache"), nil)
+	server, err := NewServer("test-node", ":9000", filepath.Join(tmpDir, "db"), filepath.Join(tmpDir, "git-cache"), false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestKVSBackedRepositoriesStayIsolatedAcrossPartitions(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	server, err := NewServer("test-node", ":9000", filepath.Join(tmpDir, "db"), filepath.Join(tmpDir, "git-cache"), nil)
+	server, err := NewServer("test-node", ":9000", filepath.Join(tmpDir, "db"), filepath.Join(tmpDir, "git-cache"), false, nil)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}

@@ -9,7 +9,7 @@ COPY internal/router/ui/ ./
 RUN npm run build
 
 # Build stage
-FROM golang:1.26.3-alpine AS builder
+FROM golang:1.26.4-alpine AS builder
 
 WORKDIR /app
 
@@ -153,6 +153,16 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-registry ./cmd/monofs-registry
 
+FROM builder AS fuse-plugin-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
+    -o /bin/k8s-fuse-device-plugin ./cmd/k8s-fuse-device-plugin
+
 # OCI Registry image
 FROM alpine:3.19 AS registry
 
@@ -265,7 +275,7 @@ RUN curl -fsSL https://github.com/bazelbuild/bazelisk/releases/latest/download/b
     -o /usr/local/bin/bazel && \
     chmod +x /usr/local/bin/bazel
 
-# Copy Go 1.25 toolchain from the builder stage
+# Copy Go 1.26.4 toolchain from the builder stage
 COPY --from=builder /usr/local/go /usr/local/go
 ENV GOROOT=/usr/local/go
 ENV PATH=$GOROOT/bin:$PATH
@@ -412,3 +422,13 @@ RUN chmod +x /start.sh
 
 USER root
 CMD ["/start.sh"]
+
+# FUSE device plugin image
+FROM alpine:3.19 AS fuse-plugin
+
+RUN apk add --no-cache ca-certificates
+
+COPY --from=fuse-plugin-builder /bin/k8s-fuse-device-plugin /usr/local/bin/k8s-fuse-device-plugin
+
+ENTRYPOINT ["k8s-fuse-device-plugin"]
+CMD ["--mounts-allowed=5000"]

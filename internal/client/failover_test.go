@@ -117,7 +117,6 @@ func (m *mockNode) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb
 	return &pb.QueryLogsResponse{}, nil
 }
 
-
 func (m *mockNode) setFail(fail bool) {
 	m.mu.Lock()
 	m.shouldFail = fail

@@ -35,6 +35,20 @@ type StatusData struct {
 	Failovers map[string]string        `json:"failovers"`
 	DrainMode map[string]interface{}   `json:"drain_mode"`
 	Version   map[string]string        `json:"version"`
+	Features  []FeatureInfo            `json:"features"`
+	Metrics   map[string]float64       `json:"metrics"`
+}
+
+// FeatureInfo describes a runtime capability exposed in the UI.
+type FeatureInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+	Status      string `json:"status"`
+	EnableHint  string `json:"enable_hint,omitempty"`
+	DisableHint string `json:"disable_hint,omitempty"`
+	HelpHint    string `json:"help_hint,omitempty"`
 }
 
 // RouterSnapshot holds UI data for a single router.

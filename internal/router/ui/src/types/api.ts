@@ -35,6 +35,19 @@ export interface StatusData {
   failovers: Record<string, string>
   drain_mode: { active: boolean; reason?: string; drained_at?: number; duration?: number }
   version: { version: string; commit: string; build_time: string }
+  features?: FeatureInfo[]
+  metrics?: Record<string, number>
+}
+
+export interface FeatureInfo {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+  status: string
+  enable_hint?: string
+  disable_hint?: string
+  help_hint?: string
 }
 
 export interface Repository {

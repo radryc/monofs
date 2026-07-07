@@ -142,37 +142,46 @@ func (s *Service) StartWorkspaceCommitPush(req *pb.StartWorkspaceCommitPushReque
 
 	ctx := stream.Context()
 	jobFailed := false
-	plans := sourcePushRepositoryPlans(bundleEntry.commitBundle)
-	for _, plan := range plans {
-		select {
-		case <-ctx.Done():
-			resultLabel = "failed"
-			jobFailed = true
-			break
-		default:
-		}
+	pushMode := strings.ToLower(strings.TrimSpace(req.GetSourcePushMode()))
 
-		progress := s.pushSourceCommitRepository(ctx, req, plan)
-		if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED ||
-			progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_TRANSIENT_ERROR ||
-			progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_AUTH_FAILED ||
-			progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_CONFLICT ||
-			progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_DIVERGED ||
-			progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_MISSING_BRANCH {
+	if pushMode == sourcePushModePreserve {
+		if err := s.pushSourceCommitsPreserve(ctx, req, bundleEntry, stream); err != nil {
 			jobFailed = true
 			resultLabel = "failed"
 		}
-		if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED {
-			s.syncPublishedRepos.Add(1)
-		}
-		if progress.GetConflictReason() != "" {
-			fetcherGitSyncConflictsTotal.WithLabelValues("source_push", progress.GetConflictReason()).Inc()
-		}
-		if err := stream.Send(progress); err != nil {
-			resultLabel = "failed"
-			s.syncFailedJobs.Add(1)
-			fetcherGitSyncJobsTotal.WithLabelValues("source_push", "failed").Inc()
-			return err
+	} else {
+		plans := sourcePushRepositoryPlans(bundleEntry.commitBundle)
+		for _, plan := range plans {
+			select {
+			case <-ctx.Done():
+				resultLabel = "failed"
+				jobFailed = true
+				break
+			default:
+			}
+
+			progress := s.pushSourceCommitRepository(ctx, req, plan)
+			if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED ||
+				progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_TRANSIENT_ERROR ||
+				progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_AUTH_FAILED ||
+				progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_CONFLICT ||
+				progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_DIVERGED ||
+				progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_MISSING_BRANCH {
+				jobFailed = true
+				resultLabel = "failed"
+			}
+			if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED {
+				s.syncPublishedRepos.Add(1)
+			}
+			if progress.GetConflictReason() != "" {
+				fetcherGitSyncConflictsTotal.WithLabelValues("source_push", progress.GetConflictReason()).Inc()
+			}
+			if err := stream.Send(progress); err != nil {
+				resultLabel = "failed"
+				s.syncFailedJobs.Add(1)
+				fetcherGitSyncJobsTotal.WithLabelValues("source_push", "failed").Inc()
+				return err
+			}
 		}
 	}
 
@@ -384,4 +393,206 @@ func sourcePushCommitMessage(plan sourcePushRepositoryPlan) string {
 		return fmt.Sprintf("%s\n\nMonoFS source push squashed %d local commits for %s", message, plan.commitCount, plan.repo.DisplayPath)
 	}
 	return fmt.Sprintf("MonoFS source push %s (%d local commits)", plan.repo.DisplayPath, plan.commitCount)
+}
+
+const sourcePushModePreserve = "preserve"
+
+func (s *Service) pushSourceCommitsPreserve(ctx context.Context, req *pb.StartWorkspaceCommitPushRequest, bundleEntry *syncWorkerBundle, stream pb.RepoSyncWorker_StartWorkspaceCommitPushServer) error {
+	bundle := bundleEntry.commitBundle
+	sort.Slice(bundle.Commits, func(i, j int) bool {
+		if bundle.Commits[i].CreatedAtUnix == bundle.Commits[j].CreatedAtUnix {
+			return bundle.Commits[i].ID < bundle.Commits[j].ID
+		}
+		return bundle.Commits[i].CreatedAtUnix < bundle.Commits[j].CreatedAtUnix
+	})
+
+	repoWorktrees := make(map[string]*repoWorktree)
+	defer func() {
+		for _, rw := range repoWorktrees {
+			if rw.root != "" {
+				os.RemoveAll(rw.root)
+			}
+		}
+	}()
+
+	for commitIdx, commit := range bundle.Commits {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		for _, repo := range commit.Repositories {
+			rw, ok := repoWorktrees[repo.StorageID]
+			if !ok {
+				rw = &repoWorktree{}
+				var err error
+				rw.root, err = cloneSourcePushWorktree(ctx, repo)
+				if err != nil {
+					progress := &pb.RepoSyncProgress{
+						JobId:            req.GetJobId(),
+						Repository:       repoRefFromSourceCommitRepo(repo),
+						Status:           pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED,
+						Message:          err.Error(),
+						LocalCommitId:    commit.ID,
+						LocalCommitIndex: int32(commitIdx),
+					}
+					progress.Status, progress.ConflictReason = mapPublishError(err)
+					if err := stream.Send(progress); err != nil {
+						return err
+					}
+					return nil
+				}
+				repoWorktrees[repo.StorageID] = rw
+			}
+
+			progress := s.pushSinglePreserveCommit(ctx, req, rw, commitIdx, commit, repo, bundleEntry.workspaceID, len(bundle.Commits))
+			if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED {
+				s.syncPublishedRepos.Add(1)
+			}
+			if progress.GetConflictReason() != "" {
+				fetcherGitSyncConflictsTotal.WithLabelValues("source_push", progress.GetConflictReason()).Inc()
+			}
+			if err := stream.Send(progress); err != nil {
+				return err
+			}
+			if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_CONFLICT ||
+				progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_DIVERGED {
+				return nil
+			}
+			if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED {
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+type repoWorktree struct {
+	root       string
+	repoHandle *gogit.Repository
+	wt         *gogit.Worktree
+}
+
+func (s *Service) pushSinglePreserveCommit(ctx context.Context, req *pb.StartWorkspaceCommitPushRequest, rw *repoWorktree, commitIdx int, commit workspacebundle.SourceCommit, repo workspacebundle.SourceCommitRepository, workspaceID string, totalCommits int) *pb.RepoSyncProgress {
+	targetBranch := chooseSourcePushTargetBranch(req.GetLogicalBranch(), repo)
+	progress := &pb.RepoSyncProgress{
+		JobId:            req.GetJobId(),
+		Repository:       repoRefFromSourceCommitRepo(repo),
+		TargetBranch:     targetBranch,
+		LocalCommitId:    commit.ID,
+		LocalCommitIndex: int32(commitIdx),
+	}
+	if len(repo.Operations) == 0 {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED
+		progress.Message = fmt.Sprintf("commit %s had no operations for %s", commit.ID, repo.DisplayPath)
+		return progress
+	}
+
+	if rw.repoHandle == nil {
+		rh, err := gogit.PlainOpen(rw.root)
+		if err != nil {
+			progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+			progress.Message = fmt.Sprintf("open source push worktree: %v", err)
+			return progress
+		}
+		rw.repoHandle = rh
+
+		headRef, headErr := rh.Head()
+		if headErr != nil {
+			progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+			progress.Message = fmt.Sprintf("read source push head: %v", headErr)
+			return progress
+		}
+		progress.RemoteCommit = headRef.Hash().String()
+		if progress.RemoteCommit != repo.BaseCommit {
+			progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_CONFLICT
+			progress.ConflictReason = "base_commit_mismatch"
+			progress.Message = fmt.Sprintf("remote head %s does not match base commit %s", progress.RemoteCommit, repo.BaseCommit)
+			return progress
+		}
+
+		wt, wtErr := rh.Worktree()
+		if wtErr != nil {
+			progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+			progress.Message = fmt.Sprintf("open git worktree: %v", wtErr)
+			return progress
+		}
+		if err := checkoutPublishBranch(wt, targetBranch); err != nil {
+			progress.Status, progress.ConflictReason = mapPublishError(err)
+			progress.Message = fmt.Sprintf("checkout source push branch: %v", err)
+			return progress
+		}
+		rw.wt = wt
+	}
+
+	if err := applyRepositoryOperations(rw.root, repo.Operations); err != nil {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = fmt.Sprintf("apply commit %s operations: %v", commit.ID, err)
+		return progress
+	}
+
+	hasChanges, err := stageWorktreeChanges(rw.wt)
+	if err != nil {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = fmt.Sprintf("stage commit %s changes: %v", commit.ID, err)
+		return progress
+	}
+	if !hasChanges {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED
+		progress.Message = fmt.Sprintf("commit %s produced no changes", commit.ID)
+		return progress
+	}
+
+	authorName := strings.TrimSpace(commit.AuthorName)
+	if authorName == "" {
+		authorName = "MonoFS"
+	}
+	authorEmail := strings.TrimSpace(commit.AuthorEmail)
+	if authorEmail == "" {
+		authorEmail = "monofs@local"
+	}
+
+	commitMsg := buildPreserveCommitMessage(commit, req.GetJobId(), workspaceID)
+	commitHash, err := rw.wt.Commit(commitMsg, &gogit.CommitOptions{
+		Author: &object.Signature{Name: authorName, Email: authorEmail, When: time.Now()},
+	})
+	if err != nil {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = fmt.Sprintf("commit %s changes: %v", commit.ID, err)
+		return progress
+	}
+	progress.PushedCommit = commitHash.String()
+
+	pushRef := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", targetBranch, targetBranch))
+	fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "started").Inc()
+	if err := rw.repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}}); err != nil {
+		progress.Status, progress.ConflictReason = mapPublishError(err)
+		progress.Message = fmt.Sprintf("push commit %s: %v", commit.ID, err)
+		fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "failed").Inc()
+		return progress
+	}
+	fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "succeeded").Inc()
+	progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED
+	progress.Message = fmt.Sprintf("pushed local commit %s (%d/%d)", commit.ID, commitIdx+1, totalCommits)
+	return progress
+}
+
+func buildPreserveCommitMessage(commit workspacebundle.SourceCommit, jobID, workspaceID string) string {
+	msg := strings.TrimSpace(commit.Message)
+	if msg == "" {
+		msg = fmt.Sprintf("MonoFS local commit %s", commit.ID)
+	}
+	msg += fmt.Sprintf("\n\nMonoFS-Local-Commit: %s\nMonoFS-Workspace: %s\nMonoFS-Job: %s", commit.ID, workspaceID, jobID)
+	return msg
+}
+
+func repoRefFromSourceCommitRepo(repo workspacebundle.SourceCommitRepository) *pb.WorkspaceRepositoryRef {
+	return &pb.WorkspaceRepositoryRef{
+		StorageId:   repo.StorageID,
+		DisplayPath: repo.DisplayPath,
+		RepoUrl:     repo.RepoURL,
+		Branch:      repo.Branch,
+		BaseCommit:  repo.BaseCommit,
+	}
 }

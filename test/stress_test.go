@@ -370,7 +370,7 @@ func TestClusterConcurrentOperations(t *testing.T) {
 		srv, err := server.NewServer(
 			fmt.Sprintf("stress-node-%d", i+1),
 			fmt.Sprintf("localhost:%d", port),
-			dbPath, gitCache, logger,
+			dbPath, gitCache, false, logger,
 		)
 		if err != nil {
 			t.Fatalf("Failed to create node %d: %v", i+1, err)

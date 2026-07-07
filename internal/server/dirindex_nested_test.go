@@ -16,7 +16,7 @@ func TestDeeplyNestedDirectoryLookup(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestEmptyIntermediateDirectory(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	gitCache := filepath.Join(tmpDir, "git")
 
-	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	s, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}

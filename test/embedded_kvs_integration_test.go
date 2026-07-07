@@ -57,7 +57,7 @@ func newEmbeddedKVSServerTestEnv(t *testing.T, nodeID string) *embeddedKVSServer
 	apiAddr := listener.Addr().String()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv, err := server.NewServer(nodeID, apiAddr, dbPath, gitCache, logger)
+	srv, err := server.NewServer(nodeID, apiAddr, dbPath, gitCache, false, logger)
 	if err != nil {
 		_ = listener.Close()
 		t.Fatalf("failed to create server: %v", err)

@@ -20,7 +20,7 @@ func TestHooksDirectorySharding(t *testing.T) {
 	gitCache := filepath.Join(tmpDir, "git")
 
 	// Create server
-	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, nil)
+	server, err := NewServer("test-node", "localhost:9000", dbPath, gitCache, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
