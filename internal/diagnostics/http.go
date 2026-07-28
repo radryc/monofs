@@ -13,7 +13,7 @@ import (
 )
 
 // NewHandler returns a diagnostics HTTP handler exposing /metrics and pprof routes.
-func NewHandler() http.Handler {
+func NewHandler() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
@@ -33,10 +33,17 @@ func NewHandler() http.Handler {
 // StartServer starts a diagnostics server when addr is non-empty.
 // It returns nil when diagnostics are disabled.
 func StartServer(logger *slog.Logger, component, addr string) *http.Server {
+	return StartServerWithMux(logger, component, addr, NewHandler())
+}
+
+// StartServerWithMux starts a diagnostics server using the provided mux.
+// Callers can add custom routes to the mux before starting the server.
+// It returns nil when addr is empty.
+func StartServerWithMux(logger *slog.Logger, component, addr string, mux *http.ServeMux) *http.Server {
 	if strings.TrimSpace(addr) == "" {
 		return nil
 	}
-	server := &http.Server{Addr: addr, Handler: NewHandler()}
+	server := &http.Server{Addr: addr, Handler: mux}
 	go func() {
 		logger.Info("diagnostics server listening", "component", component, "addr", addr, "pprof_path", "/debug/pprof/")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

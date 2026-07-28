@@ -15,6 +15,7 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 )
 
 // Client provides access to the fetcher pool with repo-affinity routing.
@@ -118,12 +119,13 @@ func NewClient(config ClientConfig, logger *slog.Logger) (*Client, error) {
 }
 
 func (c *Client) connectFetcher(address string) (*fetcherConn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.config.ConnectionTimeout)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, address,
+	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
 	)
 	if err != nil {
 		return nil, err
@@ -136,7 +138,16 @@ func (c *Client) connectFetcher(address string) (*fetcherConn, error) {
 		sync:          pb.NewRepoSyncWorkerClient(conn),
 		cachedSources: make(map[string]bool),
 	}
-	fc.healthy.Store(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.config.ConnectionTimeout)
+	defer cancel()
+	_, err = fc.client.GetStats(ctx, &pb.FetcherStatsRequest{})
+	if err != nil {
+		fc.healthy.Store(false)
+		c.logger.Warn("fetcher not responsive (will retry)", "address", address, "error", err)
+	} else {
+		fc.healthy.Store(true)
+	}
 
 	return fc, nil
 }
@@ -381,12 +392,14 @@ func (c *Client) FetchBlob(ctx context.Context, req *FetchRequest, sourceType So
 		return nil, fmt.Errorf("no healthy fetchers available")
 	}
 
-	// Fetch with retries
+	// Fetch with retries — cycle through all healthy fetchers, tracking
+	// which have been tried to avoid the oscillating pair bug in selectFetcherExcluding.
 	var lastErr error
+	tried := make(map[*fetcherConn]bool)
 	for attempt := 0; attempt < c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
-			// Switch to different fetcher on retry
-			fetcher = c.selectFetcherExcluding(req.SourceKey, fetcher)
+			tried[fetcher] = true
+			fetcher = c.nextHealthyFetcherExcluding(req.SourceKey, tried)
 			if fetcher == nil {
 				break
 			}
@@ -394,12 +407,12 @@ func (c *Client) FetchBlob(ctx context.Context, req *FetchRequest, sourceType So
 
 		data, err := c.doFetch(ctx, fetcher, protoReq)
 		if err == nil {
-			// Update affinity on success
 			c.updateAffinity(req.SourceKey, fetcher)
 			return data, nil
 		}
 
 		lastErr = err
+		tried[fetcher] = true
 		c.logger.Warn("fetch attempt failed",
 			"attempt", attempt+1,
 			"fetcher", fetcher.address,
@@ -558,6 +571,26 @@ func (c *Client) selectFetcherExcluding(sourceKey string, exclude *fetcherConn) 
 
 	for _, f := range fetchers {
 		if f != exclude && f.healthy.Load() {
+			return f
+		}
+	}
+	return nil
+}
+
+func (c *Client) nextHealthyFetcherExcluding(sourceKey string, tried map[*fetcherConn]bool) *fetcherConn {
+	c.mu.RLock()
+	fetchers := c.fetchers
+	c.mu.RUnlock()
+
+	// Hash-based initial selection, then scan past already-tried fetchers.
+	h := fnv.New32a()
+	h.Write([]byte(sourceKey))
+	start := int(h.Sum32()) % len(fetchers)
+
+	for i := 0; i < len(fetchers); i++ {
+		idx := (start + i) % len(fetchers)
+		f := fetchers[idx]
+		if !tried[f] && f.healthy.Load() {
 			return f
 		}
 	}
@@ -955,6 +988,8 @@ type FetcherStats struct {
 	SourceStats      map[string]SourceStatsInfo `json:"source_stats,omitempty"`
 	ErrorCount       int64                      `json:"error_count"`
 	LastError        string                     `json:"last_error,omitempty"`
+	StorageHealthy   bool                       `json:"storage_healthy"`
+	StorageError     string                     `json:"storage_error,omitempty"`
 }
 
 type SyncWorkerStatsInfo struct {
@@ -975,12 +1010,14 @@ type SyncWorkerStatsInfo struct {
 
 // SourceStatsInfo contains per-source statistics.
 type SourceStatsInfo struct {
-	Requests     int64   `json:"requests"`
-	Errors       int64   `json:"errors"`
-	BytesFetched int64   `json:"bytes_fetched"`
-	AvgLatencyMs float64 `json:"avg_latency_ms"`
-	CachedItems  int64   `json:"cached_items"`
-	CacheBytes   int64   `json:"cache_bytes"`
+	Requests         int64   `json:"requests"`
+	Errors           int64   `json:"errors"`
+	BytesFetched     int64   `json:"bytes_fetched"`
+	AvgLatencyMs     float64 `json:"avg_latency_ms"`
+	CachedItems      int64   `json:"cached_items"`
+	CacheBytes       int64   `json:"cache_bytes"`
+	ObjectsStored    int64   `json:"objects_stored"`
+	ObjectsRetrieved int64   `json:"objects_retrieved"`
 }
 
 // ClusterStats contains aggregated statistics for the entire fetcher cluster.
@@ -1006,6 +1043,23 @@ type ClusterStats struct {
 	// StorageBlobs maps storage ID to per-dependency blob count, aggregated
 	// across all fetcher instances.
 	StorageBlobs map[string]BlobBackendSum `json:"storage_blobs,omitempty"`
+	// TotalBlobs is the total number of individual blob objects stored in
+	// the backend, aggregated across all storage IDs and fetcher instances.
+	TotalBlobs int64 `json:"total_blobs"`
+	// TotalErrors is the sum of ErrorCount across all fetcher instances.
+	TotalErrors int64 `json:"total_errors"`
+	// LastError is the most recent non-empty LastError from any fetcher.
+	LastError string `json:"last_error,omitempty"`
+	// StorageHealthy is true when all fetchers report storage_healthy.
+	StorageHealthy bool `json:"storage_healthy"`
+	// StorageError is the first non-empty storage_error from any fetcher.
+	StorageError string `json:"storage_error,omitempty"`
+	// CloudObjectsStored is the total number of objects (archives) uploaded
+	// to the cloud object store, aggregated across all fetchers.
+	CloudObjectsStored int64 `json:"cloud_objects_stored"`
+	// CloudObjectsRetrieved is the total number of objects (archives)
+	// downloaded from the cloud object store, aggregated across all fetchers.
+	CloudObjectsRetrieved int64 `json:"cloud_objects_retrieved"`
 }
 
 // BlobBackendSum aggregates blob counts and sizes per backend type across
@@ -1071,6 +1125,8 @@ func (c *Client) GetClusterStats(ctx context.Context, includeSourceStats bool) (
 			fs.QueuedPrefetches = resp.QueuedPrefetches
 			fs.BytesFetched = resp.BytesFetched
 			fs.BytesServed = resp.BytesServed
+			fs.StorageHealthy = resp.StorageHealthy
+			fs.StorageError = resp.StorageError
 			if resp.SyncWorker != nil {
 				fs.SyncWorker = SyncWorkerStatsInfo{
 					TotalJobs:             resp.SyncWorker.TotalJobs,
@@ -1093,12 +1149,14 @@ func (c *Client) GetClusterStats(ctx context.Context, includeSourceStats bool) (
 				fs.SourceStats = make(map[string]SourceStatsInfo)
 				for k, v := range resp.SourceStats {
 					fs.SourceStats[k] = SourceStatsInfo{
-						Requests:     v.Requests,
-						Errors:       v.Errors,
-						BytesFetched: v.BytesFetched,
-						AvgLatencyMs: v.AvgLatencyMs,
-						CachedItems:  v.CachedItems,
-						CacheBytes:   v.CacheBytes,
+						Requests:         v.Requests,
+						Errors:           v.Errors,
+						BytesFetched:     v.BytesFetched,
+						AvgLatencyMs:     v.AvgLatencyMs,
+						CachedItems:      v.CachedItems,
+						CacheBytes:       v.CacheBytes,
+						ObjectsStored:    v.ObjectsStored,
+						ObjectsRetrieved: v.ObjectsRetrieved,
 					}
 				}
 			}
@@ -1142,6 +1200,13 @@ func (c *Client) GetClusterStats(ctx context.Context, includeSourceStats bool) (
 			stats.SyncWorker.StagedBundleBytes += result.stats.SyncWorker.StagedBundleBytes
 			stats.SyncWorker.WorktreeBytes += result.stats.SyncWorker.WorktreeBytes
 			stats.SyncWorker.BundleStageFailures += result.stats.SyncWorker.BundleStageFailures
+			stats.TotalErrors += result.stats.ErrorCount
+			if result.stats.LastError != "" && stats.LastError == "" {
+				stats.LastError = result.stats.LastError
+			}
+			if !result.stats.StorageHealthy && stats.StorageError == "" {
+				stats.StorageError = result.stats.StorageError
+			}
 
 			// Aggregate blob stats per backend type; separate per-storage-ID entries.
 			for srcType, ss := range result.stats.SourceStats {
@@ -1166,12 +1231,25 @@ func (c *Client) GetClusterStats(ctx context.Context, includeSourceStats bool) (
 	if len(storageAgg) > 0 {
 		stats.StorageBlobs = storageAgg
 	}
+	for _, entry := range storageAgg {
+		stats.TotalBlobs += entry.BlobCount
+	}
+
+	// Aggregate cloud objects stored/retrieved from per-source stats.
+	for _, fs := range stats.Fetchers {
+		for _, ss := range fs.SourceStats {
+			stats.CloudObjectsStored += ss.ObjectsStored
+			stats.CloudObjectsRetrieved += ss.ObjectsRetrieved
+		}
+	}
 
 	// Calculate aggregate hit rate
 	totalOps := stats.TotalCacheHits + stats.TotalCacheMisses
 	if totalOps > 0 {
 		stats.AggregatedHitRate = float64(stats.TotalCacheHits) / float64(totalOps)
 	}
+
+	stats.StorageHealthy = stats.StorageError == "" && stats.HealthyFetchers == stats.TotalFetchers
 
 	// Sort fetchers by address for consistent output
 	sort.Slice(stats.Fetchers, func(i, j int) bool {

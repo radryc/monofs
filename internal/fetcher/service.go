@@ -413,12 +413,14 @@ func (s *Service) GetStats(ctx context.Context, req *pb.FetcherStatsRequest) (*p
 		for _, backend := range s.registry.All() {
 			stats := backend.Stats()
 			resp.SourceStats[backend.Type().String()] = &pb.SourceStats{
-				Requests:     stats.Requests,
-				Errors:       stats.Errors,
-				BytesFetched: stats.BytesFetched,
-				AvgLatencyMs: stats.AvgLatencyMs,
-				CachedItems:  stats.CachedItems,
-				CacheBytes:   stats.CacheBytes,
+				Requests:         stats.Requests,
+				Errors:           stats.Errors,
+				BytesFetched:     stats.BytesFetched,
+				AvgLatencyMs:     stats.AvgLatencyMs,
+				CachedItems:      stats.CachedItems,
+				CacheBytes:       stats.CacheBytes,
+				ObjectsStored:    stats.CloudStores,
+				ObjectsRetrieved: stats.CloudRetrieves,
 			}
 			resp.CacheHits += stats.CacheHits
 			resp.CacheMisses += stats.CacheMisses
@@ -440,6 +442,19 @@ func (s *Service) GetStats(ctx context.Context, req *pb.FetcherStatsRequest) (*p
 		resp.CacheHitRate = float64(resp.CacheHits) / float64(resp.CacheHits+resp.CacheMisses)
 	}
 	resp.SyncWorker = s.syncWorkerStats()
+
+	// Check storage backend health.
+	resp.StorageHealthy = true
+	resp.StorageError = ""
+	for _, backend := range s.registry.All() {
+		if blobBackend, ok := backend.(*blob.BlobBackend); ok {
+			healthy, errMsg := blobBackend.StorageHealth()
+			if !healthy {
+				resp.StorageHealthy = false
+				resp.StorageError = errMsg
+			}
+		}
+	}
 
 	return resp, nil
 }

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,8 +20,10 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/router"
 	"github.com/radryc/monofs/internal/storage"
+	filestorage "github.com/radryc/monofs/internal/storage/file"
 	gitstorage "github.com/radryc/monofs/internal/storage/git"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/pkg/authz"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -42,6 +45,12 @@ func init() {
 	storage.DefaultRegistry.RegisterFetchBackend(
 		storage.FetchTypeGit,
 		gitstorage.NewGitFetchBackend,
+	)
+
+	// Register file backend
+	storage.DefaultRegistry.RegisterIngestionBackend(
+		storage.IngestionTypeFile,
+		filestorage.NewFileIngestionBackend,
 	)
 
 	// Future backends will be registered here:
@@ -85,6 +94,14 @@ func main() {
 
 		// Packager encryption
 		encryptionKeyHex = flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
+
+		// Partition authorization + SSO (authz epics A/C)
+		authzEnforceIngest = flag.Bool("authz-enforce-ingest", false, "Enforce partition-scoped ingest authorization")
+		authzGrantsPath    = flag.String("authz-grants-path", "", "Path to authz grant store JSON (defaults to <state-dir>/authz_grants.json)")
+		oidcIssuer         = flag.String("oidc-issuer", "", "OIDC issuer URL for SSO token verification")
+		oidcAudience       = flag.String("oidc-audience", "", "Expected OIDC audience for SSO tokens")
+		oidcJWKSURL        = flag.String("oidc-jwks-url", "", "OIDC JWKS URL (discovered from issuer when empty)")
+		devDisableAuth     = flag.Bool("insecure-dev-disable-auth", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_INSECURE_DEV_DISABLE_AUTH")), "true"), "Disable all UI/API authentication (development only; insecure)")
 	)
 	flag.Parse()
 	telemetryCfg, err := telemetry.LoadConfig("monofs-router")
@@ -182,6 +199,9 @@ func main() {
 		RebalanceDelay:        *rebalanceDelay,
 		GracefulFailoverDelay: *gracefulFailoverDelay,
 		GuardianIngestTimeout: *guardianIngestTimeout,
+		AuthzEnforceIngest:    *authzEnforceIngest,
+		AuthzGrantsPath:       strings.TrimSpace(*authzGrantsPath),
+		AuthzGrantsJSON:       strings.TrimSpace(os.Getenv("MONOFS_AUTHZ_GRANTS_JSON")),
 	}
 	r := router.NewRouter(cfg, logger)
 	r.SetVersion(Version, Commit, BuildTime)
@@ -244,6 +264,64 @@ func main() {
 	// Start health checking
 	r.StartHealthCheck()
 
+	// Build the SSO verifier. It accepts OIDC tokens (when configured) and,
+	// as a break-glass path, a static admin token supplied via MONOFS_TOKEN.
+	// Authentication is enforced by default for HTTP (UI + CLI API); use
+	// --insecure-dev-disable-auth only in local development to allow anonymous
+	// access. gRPC service-to-service traffic remains in observe mode because
+	// those connections already use their own transport credentials.
+	var verifiers []authz.TokenVerifier
+	if strings.TrimSpace(*oidcIssuer) != "" && strings.TrimSpace(*oidcAudience) != "" {
+		oidcVerifier, oidcErr := authz.NewOIDCVerifier(authz.OIDCConfig{
+			Issuer:   strings.TrimSpace(*oidcIssuer),
+			Audience: strings.TrimSpace(*oidcAudience),
+			JWKSURL:  strings.TrimSpace(*oidcJWKSURL),
+		})
+		if oidcErr != nil {
+			logger.Error("failed to configure OIDC verifier", "error", oidcErr)
+			os.Exit(1)
+		}
+		verifiers = append(verifiers, oidcVerifier)
+		logger.Info("OIDC SSO verification enabled", "issuer", *oidcIssuer, "audience", *oidcAudience)
+	}
+	const breakGlassClientID = "break-glass-admin"
+	if bg := strings.TrimSpace(os.Getenv("MONOFS_TOKEN")); bg != "" {
+		verifiers = append(verifiers, authz.NewBreakGlassVerifier(bg, breakGlassClientID))
+		r.AddBreakGlassAdmin(breakGlassClientID)
+		logger.Warn("break-glass admin token enabled via MONOFS_TOKEN; all usage is audited")
+	}
+
+	requireToken := !*devDisableAuth
+	if requireToken && len(verifiers) == 0 {
+		logger.Error("no authentication configured: set --oidc-issuer and --oidc-audience, set MONOFS_TOKEN for break-glass access, or use --insecure-dev-disable-auth for local development")
+		os.Exit(1)
+	}
+
+	var verifier authz.TokenVerifier = authz.NoopVerifier{}
+	switch len(verifiers) {
+	case 0:
+		// Development mode: anonymous identities allowed.
+	case 1:
+		verifier = verifiers[0]
+	default:
+		verifier = authz.NewChainVerifier(verifiers...)
+	}
+	// HTTP routes (UI + CLI API) enforce authentication when not in dev mode.
+	// gRPC routes are used for internal service-to-service traffic which already
+	// has its own transport security, so they remain in observe mode.
+	httpAuthenticator := authz.NewAuthenticator(verifier, logger, requireToken)
+	grpcAuthenticator := authz.NewAuthenticator(verifier, logger, false)
+
+	// Emit Prometheus metrics for authentication outcomes on both protocols.
+	// outcome is one of: authenticated, anonymous, rejected.
+	observe := func(protocol string) func(string) {
+		return func(outcome string) {
+			router.RecordAuthOutcome(outcome, protocol)
+		}
+	}
+	httpAuthenticator.Observe = observe("http")
+	grpcAuthenticator.Observe = observe("grpc")
+
 	// Create gRPC server with keepalive enforcement policy
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
@@ -254,6 +332,8 @@ func main() {
 		grpc.MaxRecvMsgSize(1024*1024*1024),
 		grpc.MaxSendMsgSize(1024*1024*1024),
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
+		grpc.ChainUnaryInterceptor(grpcAuthenticator.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(grpcAuthenticator.StreamServerInterceptor()),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second, // Allow pings every 5s (prevents too_many_pings)
 			PermitWithoutStream: true,            // Allow pings even when no streams active
@@ -275,9 +355,98 @@ func main() {
 	}()
 
 	// Start HTTP UI server
+	base := r.ServeHTTP()
+
+	// Public paths must remain reachable without authentication so probes,
+	// scrapers, and static login-page assets keep working.
+	publicPaths := []string{
+		"/health", "/healthz", "/livez", "/readyz", "/-/health",
+		"/metrics",
+		"/favicon.ico", "/favicon.svg", "/icons.svg",
+		"/assets/", "/static/",
+	}
+	// The WebAuthenticator only exempts /healthz variants by default, not /health.
+	webAuthExemptPaths := []string{"/health"}
+	publicExempt := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for _, p := range publicPaths {
+				if r.URL.Path == p || strings.HasPrefix(r.URL.Path, p) {
+					base.ServeHTTP(w, r)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	// API endpoints must not be anonymous when auth is enforced. The
+	// WebAuthenticator attaches the identity (session cookie or bearer token) to
+	// the request context before this check runs.
+	apiIdentityCheck := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !*devDisableAuth && strings.HasPrefix(r.URL.Path, "/api/") {
+				if id, ok := authz.IdentityFromContext(r.Context()); !ok || id.IsAnonymous() {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	// Base handler chain: public paths bypass auth, everything else needs a token.
+	authChecked := publicExempt(httpAuthenticator.HTTPMiddleware(base))
+	var uiHandler http.Handler = authChecked
+
+	// Browser login (Authorization Code + PKCE) for the router UI. When OIDC is
+	// configured, anonymous browsers are redirected to the IdP by default.
+	routerRedirect := strings.TrimSpace(os.Getenv("MONOFS_ROUTER_OIDC_REDIRECT_URL"))
+	routerSecret := strings.TrimSpace(os.Getenv("MONOFS_OIDC_CLIENT_SECRET"))
+	routerAuthURL := strings.TrimSpace(os.Getenv("MONOFS_ROUTER_OIDC_AUTH_URL"))
+	if routerAuthURL == "" {
+		routerAuthURL = strings.TrimSpace(os.Getenv("MONOFS_OIDC_AUTH_URL"))
+	}
+	if strings.TrimSpace(*oidcIssuer) != "" && strings.TrimSpace(*oidcAudience) != "" && routerSecret != "" && routerRedirect != "" {
+		clientID := strings.TrimSpace(os.Getenv("MONOFS_OIDC_CLIENT_ID"))
+		if clientID == "" {
+			clientID = "monofs"
+		}
+		waCfg := authz.WebAuthConfig{
+			Issuer:       strings.TrimSpace(*oidcIssuer),
+			ClientID:     clientID,
+			ClientSecret: routerSecret,
+			RedirectURL:  routerRedirect,
+			Verifier:     verifier,
+			RequireLogin: !*devDisableAuth,
+			ExemptPaths:  webAuthExemptPaths,
+		}
+		if routerAuthURL != "" {
+			waCfg.Endpoints.AuthURL = routerAuthURL
+		}
+		// Default session persistence under the state dir so browser logins
+		// survive router restarts. Explicit MONOFS_SESSION_DIR overrides this.
+		if os.Getenv("MONOFS_SESSION_DIR") == "" && *guardianStateDir != "" {
+			if ps, err := authz.NewPersistentSessionStore(filepath.Join(*guardianStateDir, "sessions"), 12*time.Hour); err == nil {
+				waCfg.Sessions = ps
+			}
+		}
+		if wa, werr := authz.NewWebAuthenticator(context.Background(), waCfg); werr != nil {
+			logger.Error("router ui browser login disabled", "error", werr)
+		} else {
+			// Browser auth handles the UI and attaches identity from session
+			// cookie or bearer token. API calls must carry a non-anonymous
+			// identity. Public paths bypass auth entirely.
+			uiHandler = wa.Handler(publicExempt(apiIdentityCheck(base)))
+			if routerAuthURL != "" {
+				logger.Info("router ui browser login enabled", "redirect", routerRedirect, "auth_url", routerAuthURL)
+			} else {
+				logger.Info("router ui browser login enabled", "redirect", routerRedirect)
+			}
+		}
+	}
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", *httpPort),
-		Handler: r.ServeHTTP(),
+		Handler: uiHandler,
 	}
 	if telemetryHandle.Enabled() {
 		httpServer.Handler = otelhttp.NewHandler(httpServer.Handler, "monofs-router-http")
@@ -334,7 +503,9 @@ func parseWeights(weightsStr string) map[string]uint32 {
 		}
 		nodeID := strings.TrimSpace(parts[0])
 		var weight uint32
-		fmt.Sscanf(parts[1], "%d", &weight)
+		if _, err := fmt.Sscanf(parts[1], "%d", &weight); err != nil {
+			continue
+		}
 		if weight > 0 {
 			result[nodeID] = weight
 		}

@@ -154,6 +154,7 @@ export interface FetcherClusterStats {
   total_queued_prefetch: number
   total_bytes_fetched: number
   total_bytes_served: number
+  total_blobs: number
   client_affinity_hits: number
   client_affinity_misses: number
   client_total_requests: number
@@ -161,6 +162,8 @@ export interface FetcherClusterStats {
   fetchers: FetcherInstanceStats[]
   blob_stats?: Record<string, BlobBackendSum>
   storage_blobs?: Record<string, BlobBackendSum>
+  cloud_objects_stored: number
+  cloud_objects_retrieved: number
 }
 
 // FetcherInstanceStats matches fetcher.FetcherStats from Go
@@ -183,6 +186,8 @@ export interface FetcherInstanceStats {
   source_stats?: Record<string, SourceStatsInfo>
   error_count: number
   last_error?: string
+  storage_healthy: boolean
+  storage_error?: string
 }
 
 export interface SyncWorkerStatsInfo {
@@ -258,10 +263,53 @@ export interface SourceStatsInfo {
   avg_latency_ms: number
   cached_items: number
   cache_bytes: number
+  objects_stored: number
+  objects_retrieved: number
+}
+
+export interface StorageObject {
+  key: string
+  size: number
+  last_modified: number
+  storage_type: string
+  bucket?: string
+}
+
+export interface FetcherStorageObjectEntry {
+  address: string
+  healthy: boolean
+  error?: string
+  objects: StorageObject[]
+  objects_count: number
+}
+
+export interface FetcherStorageObjectsResponse {
+  fetchers: FetcherStorageObjectEntry[]
+  total_objects: number
+  healthy: boolean
+  generated_at: number
 }
 
 // Keep FetcherStats as alias for backwards compatibility
 export type FetcherStats = FetcherClusterStats
+
+export interface FetcherKeyStatus {
+  fetchers: {
+    address: string
+    healthy: boolean
+    state: string
+    key_source?: string
+    current_fingerprint?: string
+    accepted_fingerprint?: string
+    error?: string
+    can_confirm: boolean
+  }[]
+  pending_count: number
+  healthy_count: number
+  total_count: number
+  all_good: boolean
+  generated_at: number
+}
 
 export interface LogEngineData {
   enabled: boolean
@@ -460,4 +508,60 @@ export interface RegistryRepoTag {
 export interface RegistryRepoDetail {
   name: string
   tags: RegistryRepoTag[]
+}
+
+export interface PipelineSummary {
+  name: string
+  source_dir?: string
+  last_run_state: string
+  last_run_id?: string
+  run_count: number
+}
+
+export interface PipelineListResponse {
+  pipelines: PipelineSummary[]
+}
+
+export interface PipelineRunData {
+  run_id: string
+  pipeline_name: string
+  state: string
+  trigger: string
+  commit_sha: string
+  branch: string
+  tag?: string
+  pr_number?: number
+  created_at: string
+  started_at?: string
+  finished_at?: string
+  jobs: JobStatusData[]
+  affected?: string[]
+}
+
+export interface JobStatusData {
+  job_name: string
+  state: string
+  needs?: string[]
+  worker_id?: string
+  retries: number
+  max_retries: number
+  error?: string
+  exit_code?: number
+  started_at?: string
+  finished_at?: string
+  duration_ms?: number
+}
+
+export interface PipelineRunsResponse {
+  runs: PipelineRunData[]
+}
+
+export interface PipelineStatsData {
+  total_runs: number
+  succeeded_runs: number
+  failed_runs: number
+  success_rate: number
+  avg_duration_ms: number
+  p50_duration_ms: number
+  p95_duration_ms: number
 }

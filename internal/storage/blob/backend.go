@@ -7,6 +7,7 @@ package blob
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gcStorage "cloud.google.com/go/storage"
@@ -26,6 +28,7 @@ import (
 	"github.com/radryc/packager/pipeline"
 	pkgstorage "github.com/radryc/packager/storage"
 	"golang.org/x/sync/singleflight"
+	"google.golang.org/api/iterator"
 )
 
 const (
@@ -101,6 +104,24 @@ type BlobBackend struct {
 	uploadArchiveFunc func(ctx context.Context, archivePath string) error
 	cloudUploadQueue  chan cloudArchiveUploadJob
 	cloudUploadWG     sync.WaitGroup
+
+	cloudStores    atomic.Int64
+	cloudRetrieves atomic.Int64
+
+	storageHealthy atomic.Bool
+	lastStorageErr atomic.Value // string
+
+	// Background cloud-backup integrity scanner.
+	scannerStop chan struct{}
+	scannerWG   sync.WaitGroup
+
+	// Encryption-key guard. The accepted key fingerprint is stored durably so
+	// that a secret rotation cannot silently change the key and make existing
+	// archives unreadable.
+	keyGuardMu             sync.RWMutex
+	keyGuardPending        atomic.Bool
+	acceptedKeyFingerprint string
+	currentKeyFingerprint  string
 }
 
 // NewBlobBackend creates a new packager-based blob backend.
@@ -113,6 +134,8 @@ func NewBlobBackend() *BlobBackend {
 		archivePaths:      make(map[string]bool),
 		stats:             storage.NewAtomicStats(),
 	}
+	bb.storageHealthy.Store(true)
+	bb.lastStorageErr.Store("")
 	return bb
 }
 
@@ -194,6 +217,14 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 	}
 
 	bb.startCloudUploadWorkers()
+	bb.startCloudBackupScanner()
+
+	// Verify the encryption key against the durably-stored accepted fingerprint.
+	// A mismatch means the secret was rotated; we require explicit confirmation
+	// before serving blobs so existing archives are not silently lost.
+	if err := bb.verifyEncryptionKey(); err != nil {
+		return fmt.Errorf("encryption key verification failed: %w", err)
+	}
 
 	return nil
 }
@@ -222,11 +253,19 @@ func (bb *BlobBackend) cloudUploadWorker(workerID int) {
 	defer bb.cloudUploadWG.Done()
 
 	for job := range bb.cloudUploadQueue {
-		if err := bb.uploadArchiveFunc(context.Background(), job.archivePath); err != nil && bb.logger != nil {
-			bb.logger.Error("failed to upload archive to cloud",
-				"archive_path", job.archivePath,
-				"worker", workerID,
-				"error", err)
+		if err := bb.uploadArchiveFunc(context.Background(), job.archivePath); err != nil {
+			bb.storageHealthy.Store(false)
+			bb.lastStorageErr.Store(err.Error())
+			if bb.logger != nil {
+				bb.logger.Error("failed to upload archive to cloud",
+					"archive_path", job.archivePath,
+					"worker", workerID,
+					"error", err)
+			}
+		} else {
+			bb.cloudStores.Add(1)
+			bb.storageHealthy.Store(true)
+			bb.lastStorageErr.Store("")
 		}
 	}
 }
@@ -237,10 +276,18 @@ func (bb *BlobBackend) queueCloudUpload(archivePath string) {
 	}
 
 	if bb.cloudUploadQueue == nil {
-		if err := bb.uploadArchiveFunc(context.Background(), archivePath); err != nil && bb.logger != nil {
-			bb.logger.Error("failed to upload archive to cloud",
-				"archive_path", archivePath,
-				"error", err)
+		if err := bb.uploadArchiveFunc(context.Background(), archivePath); err != nil {
+			bb.storageHealthy.Store(false)
+			bb.lastStorageErr.Store(err.Error())
+			if bb.logger != nil {
+				bb.logger.Error("failed to upload archive to cloud",
+					"archive_path", archivePath,
+					"error", err)
+			}
+		} else {
+			bb.cloudStores.Add(1)
+			bb.storageHealthy.Store(true)
+			bb.lastStorageErr.Store("")
 		}
 		return
 	}
@@ -258,6 +305,341 @@ func (bb *BlobBackend) queueCloudUpload(archivePath string) {
 	}
 }
 
+// startCloudBackupScanner starts a background goroutine that periodically
+// verifies every local archive has a corresponding cloud object, and re-uploads
+// any that are missing. This closes the gap left by best-effort async uploads.
+func (bb *BlobBackend) startCloudBackupScanner() {
+	if !bb.isCloudConfigured() || bb.scannerStop != nil {
+		return
+	}
+
+	bb.scannerStop = make(chan struct{})
+	bb.scannerWG.Add(1)
+	go bb.cloudBackupScannerLoop()
+}
+
+func (bb *BlobBackend) cloudBackupScannerLoop() {
+	defer bb.scannerWG.Done()
+
+	// First scan soon after startup to backfill anything that was written
+	// before the scanner existed or while it was down.
+	time.Sleep(30 * time.Second)
+	bb.runCloudBackupScan()
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-bb.scannerStop:
+			return
+		case <-ticker.C:
+			bb.runCloudBackupScan()
+		}
+	}
+}
+
+func (bb *BlobBackend) runCloudBackupScan() {
+	start := time.Now()
+
+	bb.mu.RLock()
+	archives := make([]string, 0, len(bb.archivePaths))
+	for path := range bb.archivePaths {
+		archives = append(archives, path)
+	}
+	bb.mu.RUnlock()
+
+	var missing int64
+	var repaired int64
+	for _, archivePath := range archives {
+		if bb.cloudArchiveExists(archivePath) {
+			continue
+		}
+		missing++
+		packagerCloudBackupMissingTotal.Inc()
+		if bb.logger != nil {
+			bb.logger.Warn("cloud backup missing for local archive; repairing",
+				"archive_path", archivePath)
+		}
+		uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		err := bb.ensureArchiveInCloud(uploadCtx, archivePath)
+		cancel()
+		if err != nil {
+			if bb.logger != nil {
+				bb.logger.Error("failed to repair cloud backup",
+					"archive_path", archivePath,
+					"error", err)
+			}
+			continue
+		}
+		repaired++
+		packagerCloudBackupRepairedTotal.Inc()
+		if bb.logger != nil {
+			bb.logger.Info("repaired cloud backup for local archive",
+				"archive_path", archivePath)
+		}
+	}
+
+	packagerCloudBackupScanDurationSeconds.Observe(time.Since(start).Seconds())
+	if bb.logger != nil && (missing > 0 || repaired > 0) {
+		bb.logger.Info("cloud backup scan complete",
+			"archives_checked", len(archives),
+			"missing", missing,
+			"repaired", repaired,
+			"duration", time.Since(start))
+	}
+}
+
+// EncryptionKeyStatus describes the state of the encryption-key guard.
+type EncryptionKeyStatus struct {
+	Pending              bool   `json:"pending"`
+	State                string `json:"state"`
+	KeySource            string `json:"key_source"`
+	CurrentFingerprint   string `json:"current_fingerprint"`
+	AcceptedFingerprint  string `json:"accepted_fingerprint"`
+	StorageLocation      string `json:"storage_location"`
+	FirstKeyAutoAccepted bool   `json:"first_key_auto_accepted"`
+	CanConfirm           bool   `json:"can_confirm"`
+	Error                string `json:"error"`
+}
+
+const acceptedKeyFingerprintPath = "_meta/accepted-key-fingerprint"
+
+// acceptedKeyFingerprintFile returns the local filesystem path used to store
+// the accepted key fingerprint when cloud storage is not configured.
+func (bb *BlobBackend) acceptedKeyFingerprintFile() string {
+	return filepath.Join(bb.config.CacheDir, ".accepted-key-fingerprint")
+}
+
+// verifyEncryptionKey compares the configured key against the durably stored
+// accepted fingerprint. If no fingerprint has been stored yet, the current key
+// is accepted automatically (first-key behaviour). If the fingerprint differs,
+// the backend enters a pending state and refuses to serve blobs until an
+// operator explicitly confirms the new key.
+func (bb *BlobBackend) verifyEncryptionKey() error {
+	current := fmt.Sprintf("%x", sha256.Sum256(bb.config.EncryptionKey))
+	bb.currentKeyFingerprint = current
+
+	accepted, location, err := bb.readAcceptedKeyFingerprint()
+	if err != nil {
+		return fmt.Errorf("read accepted key fingerprint: %w", err)
+	}
+
+	bb.keyGuardMu.Lock()
+	bb.acceptedKeyFingerprint = accepted
+	bb.keyGuardMu.Unlock()
+
+	if accepted == "" {
+		// First key ever seen: auto-accept and persist.
+		if err := bb.writeAcceptedKeyFingerprint(current); err != nil {
+			return fmt.Errorf("persist first accepted key fingerprint: %w", err)
+		}
+		bb.keyGuardMu.Lock()
+		bb.acceptedKeyFingerprint = current
+		bb.keyGuardMu.Unlock()
+		if bb.logger != nil {
+			bb.logger.Info("first encryption key auto-accepted",
+				"fingerprint", current,
+				"location", location)
+		}
+		packagerEncryptionKeyPending.Set(0)
+		bb.keyGuardPending.Store(false)
+		return nil
+	}
+
+	if strings.EqualFold(accepted, current) {
+		packagerEncryptionKeyPending.Set(0)
+		bb.keyGuardPending.Store(false)
+		if bb.logger != nil {
+			bb.logger.Info("encryption key verified against accepted fingerprint",
+				"fingerprint", current,
+				"location", location)
+		}
+		return nil
+	}
+
+	packagerEncryptionKeyPending.Set(1)
+	bb.keyGuardPending.Store(true)
+	if bb.logger != nil {
+		bb.logger.Error("encryption key mismatch: explicit confirmation required",
+			"current_fingerprint", current,
+			"accepted_fingerprint", accepted,
+			"location", location)
+	}
+	return nil
+}
+
+// readAcceptedKeyFingerprint reads the durably stored accepted fingerprint.
+// It returns the fingerprint, the storage location description, and any error.
+// An empty fingerprint with a nil error means no accepted key has been stored yet.
+func (bb *BlobBackend) readAcceptedKeyFingerprint() (string, string, error) {
+	if bb.hasCloudDownload() {
+		location := fmt.Sprintf("%s://%s/%s", bb.config.StorageType, bb.bucketName(), acceptedKeyFingerprintPath)
+		rc, err := bb.openCloudReader(acceptedKeyFingerprintPath)
+		if err != nil {
+			// A missing cloud object is expected on first startup.
+			if bb.isMissingCloudObject(err) {
+				return "", location, nil
+			}
+			return "", location, fmt.Errorf("read cloud accepted key fingerprint: %w", err)
+		}
+		defer rc.Close()
+		data, err := io.ReadAll(rc)
+		if err != nil {
+			return "", location, fmt.Errorf("read cloud accepted key fingerprint body: %w", err)
+		}
+		return strings.TrimSpace(string(data)), location, nil
+	}
+
+	// Local-only storage.
+	path := bb.acceptedKeyFingerprintFile()
+	location := "local://" + path
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", location, nil
+		}
+		return "", location, fmt.Errorf("read local accepted key fingerprint: %w", err)
+	}
+	return strings.TrimSpace(string(data)), location, nil
+}
+
+// writeAcceptedKeyFingerprint durably stores the accepted key fingerprint.
+func (bb *BlobBackend) writeAcceptedKeyFingerprint(fingerprint string) error {
+	if bb.hasCloudUpload() {
+		return bb.writeCloudAcceptedKeyFingerprint(fingerprint)
+	}
+	path := bb.acceptedKeyFingerprintFile()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create accepted key fingerprint dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(fingerprint), 0600); err != nil {
+		return fmt.Errorf("write local accepted key fingerprint: %w", err)
+	}
+	return nil
+}
+
+func (bb *BlobBackend) writeCloudAcceptedKeyFingerprint(fingerprint string) error {
+	data := []byte(fingerprint)
+	switch bb.config.StorageType {
+	case storage.StorageTypeS3:
+		_, err := bb.s3Client.PutObject(context.Background(), &s3.PutObjectInput{
+			Bucket: aws.String(bb.config.Cloud.S3Bucket),
+			Key:    aws.String(acceptedKeyFingerprintPath),
+			Body:   bytes.NewReader(data),
+		})
+		if err != nil {
+			return fmt.Errorf("s3 PutObject %s: %w", acceptedKeyFingerprintPath, err)
+		}
+		return nil
+	case storage.StorageTypeGCS:
+		bucket := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket)
+		writer := bucket.Object(acceptedKeyFingerprintPath).NewWriter(context.Background())
+		if _, err := writer.Write(data); err != nil {
+			writer.Close()
+			return fmt.Errorf("gcs write %s: %w", acceptedKeyFingerprintPath, err)
+		}
+		if err := writer.Close(); err != nil {
+			return fmt.Errorf("gcs close %s: %w", acceptedKeyFingerprintPath, err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported cloud storage type %q", bb.config.StorageType)
+	}
+}
+
+// isMissingCloudObject returns true when an error from openCloudReader indicates
+// that the object simply does not exist.
+func (bb *BlobBackend) isMissingCloudObject(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	// S3 and GCS return well-known codes/messages for missing objects.
+	return strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "nosuchkey") ||
+		strings.Contains(lower, "statuscode=404") ||
+		strings.Contains(lower, "storage: object doesn't exist")
+}
+
+// bucketName returns the configured bucket name for logging/status purposes.
+func (bb *BlobBackend) bucketName() string {
+	switch bb.config.StorageType {
+	case storage.StorageTypeS3:
+		return bb.config.Cloud.S3Bucket
+	case storage.StorageTypeGCS:
+		return bb.config.Cloud.GCSBucket
+	default:
+		return ""
+	}
+}
+
+// ConfirmEncryptionKey explicitly accepts the currently configured encryption
+// key as the new authoritative key. After confirmation the backend will serve
+// blobs again, but archives encrypted with the previous key will be unreadable.
+func (bb *BlobBackend) ConfirmEncryptionKey() (EncryptionKeyStatus, error) {
+	current := fmt.Sprintf("%x", sha256.Sum256(bb.config.EncryptionKey))
+	if err := bb.writeAcceptedKeyFingerprint(current); err != nil {
+		return bb.EncryptionKeyStatus(), fmt.Errorf("persist confirmed key fingerprint: %w", err)
+	}
+	bb.keyGuardMu.Lock()
+	bb.acceptedKeyFingerprint = current
+	bb.keyGuardMu.Unlock()
+	bb.keyGuardPending.Store(false)
+	packagerEncryptionKeyPending.Set(0)
+	if bb.logger != nil {
+		bb.logger.Info("encryption key explicitly confirmed",
+			"new_fingerprint", current)
+	}
+	return bb.EncryptionKeyStatus(), nil
+}
+
+// EncryptionKeyStatus returns the current key-guard state.
+func (bb *BlobBackend) EncryptionKeyStatus() EncryptionKeyStatus {
+	bb.keyGuardMu.RLock()
+	accepted := bb.acceptedKeyFingerprint
+	bb.keyGuardMu.RUnlock()
+
+	location := "local://" + bb.acceptedKeyFingerprintFile()
+	if bb.isCloudConfigured() {
+		location = fmt.Sprintf("%s://%s/%s", bb.config.StorageType, bb.bucketName(), acceptedKeyFingerprintPath)
+	}
+
+	pending := bb.keyGuardPending.Load()
+	state := "ok"
+	firstAuto := false
+	if pending {
+		state = "pending"
+	} else if accepted == "" {
+		state = "no_key"
+	} else if accepted == bb.currentKeyFingerprint {
+		firstAuto = true
+		state = "auto_accepted"
+	}
+
+	return EncryptionKeyStatus{
+		Pending:              pending,
+		State:                state,
+		KeySource:            bb.config.EncryptionKeySource,
+		CurrentFingerprint:   bb.currentKeyFingerprint,
+		AcceptedFingerprint:  accepted,
+		StorageLocation:      location,
+		FirstKeyAutoAccepted: firstAuto,
+		CanConfirm:           pending,
+	}
+}
+
+// keyGuardCheck returns an error when the encryption key has not been
+// explicitly accepted. Callers should use this before mutating or serving
+// archive data.
+func (bb *BlobBackend) keyGuardCheck() error {
+	if bb.keyGuardPending.Load() {
+		return fmt.Errorf("encryption key %s is pending confirmation; existing archives may be unreadable", bb.currentKeyFingerprint)
+	}
+	return nil
+}
+
 // scanArchives discovers all .pack files on disk and indexes their contents.
 func (bb *BlobBackend) scanArchives(archiveDir string) error {
 	entries, err := os.ReadDir(archiveDir)
@@ -270,6 +652,7 @@ func (bb *BlobBackend) scanArchives(archiveDir string) error {
 
 	var totalFiles int64
 	var totalBytes int64
+	var scanErrors []error
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -296,6 +679,7 @@ func (bb *BlobBackend) scanArchives(archiveDir string) error {
 
 			count, err := bb.indexArchive(packPath)
 			if err != nil {
+				scanErrors = append(scanErrors, fmt.Errorf("archive %s: %w", filepath.Base(packPath), err))
 				if bb.logger != nil {
 					bb.logger.Warn("failed to index archive during scan (wrong encryption key? corrupt file?)", "path", packPath, "error", err)
 				}
@@ -305,6 +689,33 @@ func (bb *BlobBackend) scanArchives(archiveDir string) error {
 			bb.storageBlobCounts[storageID] += int64(count)
 			bb.archivePaths[packPath] = true
 		}
+	}
+
+	if len(scanErrors) > 0 {
+		hasDecrypt := false
+		joined := errors.Join(scanErrors...)
+		for _, e := range scanErrors {
+			if errors.Is(e, pipeline.ErrDecryption) || errors.Is(e, pipeline.ErrDecompression) {
+				hasDecrypt = true
+				break
+			}
+		}
+		if bb.logger != nil {
+			if hasDecrypt {
+				bb.logger.Error("some archives could not be decrypted (wrong encryption key?); continuing with remaining archives",
+					"count", len(scanErrors),
+					"errors", joined)
+			} else {
+				bb.logger.Error("some archives could not be indexed; continuing with remaining archives",
+					"count", len(scanErrors),
+					"errors", joined)
+			}
+		}
+		// Do not fail initialization because of individual corrupt archives.
+		// Once the encryption-key guard is in place, a global key mismatch is
+		// caught before scanArchives runs. Skipping bad archives lets the
+		// backend start and lets the cloud-backup scanner repair/backfill
+		// whatever is still readable.
 	}
 
 	bb.stats.Store(&storage.BackendStats{
@@ -326,7 +737,7 @@ func (bb *BlobBackend) indexArchive(archivePath string) (int, error) {
 	ar, err := packager.OpenArchive(store, bb.pipeline)
 	if err != nil {
 		store.Close()
-		return 0, fmt.Errorf("parse archive %s: %w", archivePath, err)
+		return 0, fmt.Errorf("open/decrypt archive %s: %w", archivePath, err)
 	}
 
 	files := ar.ListFiles()
@@ -472,6 +883,7 @@ func (bb *BlobBackend) downloadFromCloud(archivePath string) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename local cache: %w", err)
 	}
+	bb.cloudRetrieves.Add(1)
 	return nil
 }
 
@@ -483,6 +895,35 @@ func (bb *BlobBackend) hasCloudDownload() bool {
 	return bb.openCloudReader != nil
 }
 
+// cloudArchiveExists returns true if the archive has a corresponding object in
+// the configured cloud storage backend. It returns false when cloud is not
+// configured or when the object cannot be reached.
+func (bb *BlobBackend) cloudArchiveExists(archivePath string) bool {
+	if !bb.hasCloudDownload() {
+		return false
+	}
+	key := bb.cloudKey(archivePath)
+	rc, err := bb.openCloudReader(key)
+	if err != nil {
+		return false
+	}
+	_ = rc.Close()
+	return true
+}
+
+// ensureArchiveInCloud uploads the local archive to cloud storage if a cloud
+// object does not already exist. It returns nil when the archive is already
+// backed up or after a successful upload.
+func (bb *BlobBackend) ensureArchiveInCloud(ctx context.Context, archivePath string) error {
+	if !bb.hasCloudUpload() {
+		return fmt.Errorf("cloud upload not configured")
+	}
+	if bb.cloudArchiveExists(archivePath) {
+		return nil
+	}
+	return bb.uploadArchiveFunc(ctx, archivePath)
+}
+
 // isCloudConfigured returns true when archives should be replicated to cloud.
 func (bb *BlobBackend) isCloudConfigured() bool {
 	return bb.hasCloudUpload() || bb.hasCloudDownload()
@@ -492,6 +933,9 @@ func (bb *BlobBackend) isCloudConfigured() bool {
 // uploads it to cloud storage, and indexes its contents.
 // Called during ingestion when the router pushes pre-built archives.
 func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Reader) (int64, int, error) {
+	if err := bb.keyGuardCheck(); err != nil {
+		return 0, 0, err
+	}
 	archiveDir := filepath.Join(bb.config.CacheDir, "archives", storageID)
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		return 0, 0, fmt.Errorf("create archive dir: %w", err)
@@ -551,6 +995,9 @@ func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Re
 
 // StoreBlob writes a single blob to a "loose" archive.
 func (bb *BlobBackend) StoreBlob(blobHash string, content []byte) error {
+	if err := bb.keyGuardCheck(); err != nil {
+		return err
+	}
 	bb.mu.RLock()
 	_, exists := bb.blobIndex[blobHash]
 	bb.mu.RUnlock()
@@ -826,6 +1273,9 @@ func (w *StoreBlobBatchWriter) Finish() (*StoreBlobBatchResult, error) {
 
 // StoreBlobBatch packs all blobs in the map into archive(s).
 func (bb *BlobBackend) StoreBlobBatch(blobs map[string][]byte) (*StoreBlobBatchResult, error) {
+	if err := bb.keyGuardCheck(); err != nil {
+		return nil, err
+	}
 	w, err := bb.NewStoreBlobBatchWriter()
 	if err != nil {
 		return nil, err
@@ -848,6 +1298,7 @@ func (bb *BlobBackend) StoreBlobBatch(blobs map[string][]byte) (*StoreBlobBatchR
 type DeleteBlobsResult struct {
 	Deleted         int
 	NotFound        int
+	Failed          int
 	ArchivesRemoved int
 }
 
@@ -855,6 +1306,13 @@ type DeleteBlobsResult struct {
 // If compact is true, empty archive files are deleted from disk.
 func (bb *BlobBackend) DeleteBlobs(hashes []string, compact bool) *DeleteBlobsResult {
 	result := &DeleteBlobsResult{}
+	if err := bb.keyGuardCheck(); err != nil {
+		result.Failed = len(hashes)
+		if bb.logger != nil {
+			bb.logger.Warn("DeleteBlobs blocked by pending encryption key", "error", err)
+		}
+		return result
+	}
 
 	bb.mu.Lock()
 
@@ -887,6 +1345,26 @@ func (bb *BlobBackend) DeleteBlobs(hashes []string, compact bool) *DeleteBlobsRe
 
 		for archivePath := range affectedArchives {
 			if archiveEntryCount[archivePath] == 0 {
+				// Before removing the local archive, make sure it is durably backed
+				// up to cloud storage. If the backup is missing, try to upload it.
+				// Only delete the local file once the cloud copy is verified.
+				if bb.isCloudConfigured() {
+					if !bb.cloudArchiveExists(archivePath) {
+						uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+						uploadErr := bb.ensureArchiveInCloud(uploadCtx, archivePath)
+						cancel()
+						if uploadErr != nil {
+							if bb.logger != nil {
+								bb.logger.Error("refusing to delete local archive without verified cloud backup",
+									"archive_path", archivePath,
+									"error", uploadErr)
+							}
+							packagerLocalArchiveDeletionBlockedTotal.Inc()
+							continue
+						}
+					}
+				}
+
 				bb.archiveMu.Lock()
 				if cached, ok := bb.archiveCache[archivePath]; ok {
 					cached.reader.Close()
@@ -948,7 +1426,7 @@ func (bb *BlobBackend) getArchiveReader(archivePath string) (*packager.ArchiveRe
 	ar, err := packager.OpenArchive(store, bb.pipeline)
 	if err != nil {
 		store.Close()
-		return nil, fmt.Errorf("parse archive: %w", err)
+		return nil, fmt.Errorf("open/decrypt archive: %w", err)
 	}
 
 	bb.archiveCache[archivePath] = &openArchive{
@@ -992,6 +1470,9 @@ func (bb *BlobBackend) evictArchiveReader(archivePath string) {
 
 // FetchBlob reads a blob from a packager archive.
 func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest) (*storage.FetchResult, error) {
+	if err := bb.keyGuardCheck(); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	stats := bb.stats.Load()
 	newStats := *stats
@@ -1023,6 +1504,15 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 			if bb.logger != nil {
 				bb.logger.Info("recovered blob from disk", "content_id", req.ContentID, "archive_path", ref.archivePath)
 			}
+		} else if err != nil {
+			newStats.CacheMisses++
+			newStats.Errors++
+			bb.stats.Store(&newStats)
+			packagerFetchErrorsTotal.WithLabelValues(string(bb.config.StorageType)).Inc()
+			if errors.Is(err, pipeline.ErrDecryption) || errors.Is(err, pipeline.ErrDecompression) {
+				return nil, fmt.Errorf("blob %s: archives exist but cannot be decrypted (wrong encryption key?): %w", req.ContentID, err)
+			}
+			return nil, fmt.Errorf("blob %s: archives exist but failed to open: %w", req.ContentID, err)
 		}
 	}
 
@@ -1047,7 +1537,7 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 		newStats.Errors++
 		bb.stats.Store(&newStats)
 		packagerFetchErrorsTotal.WithLabelValues(string(bb.config.StorageType)).Inc()
-		return nil, fmt.Errorf("read blob %s from archive: %w", req.ContentID, err)
+		return nil, fmt.Errorf("read/decrypt blob %s from archive: %w", req.ContentID, err)
 	}
 
 	newStats.CacheHits++
@@ -1079,6 +1569,8 @@ func (bb *BlobBackend) findBlobOnDisk(blobHash string) (archiveRef, bool, error)
 		return archiveRef{}, false, err
 	}
 
+	var openErrors []error
+
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -1100,6 +1592,7 @@ func (bb *BlobBackend) findBlobOnDisk(blobHash string) (archiveRef, bool, error)
 			ar, err := packager.OpenArchive(store, bb.pipeline)
 			if err != nil {
 				store.Close()
+				openErrors = append(openErrors, fmt.Errorf("archive %s: %w", filepath.Base(packPath), err))
 				if bb.logger != nil {
 					bb.logger.Warn("findBlobOnDisk: failed to open archive (wrong encryption key?)", "path", packPath, "error", err)
 				}
@@ -1123,6 +1616,20 @@ func (bb *BlobBackend) findBlobOnDisk(blobHash string) (archiveRef, bool, error)
 				}, true, nil
 			}
 		}
+	}
+
+	if len(openErrors) > 0 {
+		hasDecrypt := false
+		for _, e := range openErrors {
+			if errors.Is(e, pipeline.ErrDecryption) || errors.Is(e, pipeline.ErrDecompression) {
+				hasDecrypt = true
+				break
+			}
+		}
+		if hasDecrypt {
+			return archiveRef{}, false, fmt.Errorf("failed to open archives (decryption/authentication error — wrong encryption key?): %w", errors.Join(openErrors...))
+		}
+		return archiveRef{}, false, fmt.Errorf("failed to open archives (parse/IO errors): %w", errors.Join(openErrors...))
 	}
 
 	return archiveRef{}, false, nil
@@ -1185,6 +1692,12 @@ func (bb *BlobBackend) Cleanup(ctx context.Context, sourceKey string) error {
 
 // Close shuts down the backend, closing all open archive readers and cloud clients.
 func (bb *BlobBackend) Close() error {
+	if bb.scannerStop != nil {
+		close(bb.scannerStop)
+		bb.scannerWG.Wait()
+		bb.scannerStop = nil
+	}
+
 	if bb.cloudUploadQueue != nil {
 		close(bb.cloudUploadQueue)
 		bb.cloudUploadWG.Wait()
@@ -1216,7 +1729,19 @@ func (bb *BlobBackend) Stats() storage.BackendStats {
 	bb.mu.RUnlock()
 	s := *bb.stats.Load()
 	s.CachedItems = packCount
+	s.CloudStores = bb.cloudStores.Load()
+	s.CloudRetrieves = bb.cloudRetrieves.Load()
 	return s
+}
+
+// StorageHealth returns whether the cloud storage backend is reachable
+// and the last error message (empty string if healthy).
+func (bb *BlobBackend) StorageHealth() (bool, string) {
+	errVal := bb.lastStorageErr.Load()
+	if errVal == nil {
+		return bb.storageHealthy.Load(), ""
+	}
+	return bb.storageHealthy.Load(), errVal.(string)
 }
 
 // StorageStats returns a snapshot of the file count per storage ID.
@@ -1244,6 +1769,154 @@ func (bb *BlobBackend) ArchiveCount() int {
 	bb.mu.RLock()
 	defer bb.mu.RUnlock()
 	return len(bb.storageIDs)
+}
+
+// ListStorageObjects enumerates archives stored in the configured backend.
+// For cloud storage it lists objects from the S3/GCS bucket (respecting the
+// configured prefix). For local storage it enumerates .pack files under the
+// local archive directory.
+func (bb *BlobBackend) ListStorageObjects(ctx context.Context) ([]storage.StorageObject, error) {
+	switch bb.config.StorageType {
+	case storage.StorageTypeS3:
+		return bb.listS3Objects(ctx)
+	case storage.StorageTypeGCS:
+		return bb.listGCSObjects(ctx)
+	case storage.StorageTypeLocal, "":
+		return bb.listLocalObjects()
+	default:
+		return nil, fmt.Errorf("unsupported storage type %q for object listing", bb.config.StorageType)
+	}
+}
+
+func (bb *BlobBackend) listS3Objects(ctx context.Context) ([]storage.StorageObject, error) {
+	if bb.s3Client == nil {
+		return nil, fmt.Errorf("s3 client not initialized")
+	}
+
+	prefix := strings.TrimRight(bb.config.Cloud.S3Prefix, "/")
+	if prefix != "" {
+		prefix = prefix + "/"
+	}
+
+	var objects []storage.StorageObject
+	var continuationToken *string
+	const maxPerPage = 1000
+	const maxTotal = 10000
+
+	for {
+		if len(objects) >= maxTotal {
+			break
+		}
+		out, err := bb.s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bb.config.Cloud.S3Bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: continuationToken,
+			MaxKeys:           aws.Int32(maxPerPage),
+		})
+		if err != nil {
+			return objects, fmt.Errorf("list s3 objects: %w", err)
+		}
+		for _, obj := range out.Contents {
+			key := aws.ToString(obj.Key)
+			if key == "" {
+				continue
+			}
+			var mtime int64
+			if obj.LastModified != nil {
+				mtime = obj.LastModified.Unix()
+			}
+			objects = append(objects, storage.StorageObject{
+				Key:          key,
+				Size:         aws.ToInt64(obj.Size),
+				LastModified: mtime,
+				StorageType:  string(storage.StorageTypeS3),
+				Bucket:       bb.config.Cloud.S3Bucket,
+			})
+			if len(objects) >= maxTotal {
+				break
+			}
+		}
+		if !aws.ToBool(out.IsTruncated) {
+			break
+		}
+		continuationToken = out.NextContinuationToken
+	}
+
+	return objects, nil
+}
+
+func (bb *BlobBackend) listGCSObjects(ctx context.Context) ([]storage.StorageObject, error) {
+	if bb.gcsClient == nil {
+		return nil, fmt.Errorf("gcs client not initialized")
+	}
+
+	prefix := strings.TrimRight(bb.config.Cloud.GCSPrefix, "/")
+	if prefix != "" {
+		prefix = prefix + "/"
+	}
+
+	var objects []storage.StorageObject
+	const maxTotal = 10000
+
+	it := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket).Objects(ctx, &gcStorage.Query{
+		Prefix: prefix,
+	})
+	for {
+		if len(objects) >= maxTotal {
+			break
+		}
+		attrs, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return objects, fmt.Errorf("list gcs objects: %w", err)
+		}
+		objects = append(objects, storage.StorageObject{
+			Key:          attrs.Name,
+			Size:         attrs.Size,
+			LastModified: attrs.Updated.Unix(),
+			StorageType:  string(storage.StorageTypeGCS),
+			Bucket:       bb.config.Cloud.GCSBucket,
+		})
+	}
+
+	return objects, nil
+}
+
+func (bb *BlobBackend) listLocalObjects() ([]storage.StorageObject, error) {
+	archiveDir := filepath.Join(bb.config.CacheDir, "archives")
+	var objects []storage.StorageObject
+
+	err := filepath.WalkDir(archiveDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // keep walking
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(archiveDir, path)
+		if err != nil {
+			rel = filepath.Base(path)
+		}
+		rel = strings.ReplaceAll(rel, string(filepath.Separator), "/")
+		objects = append(objects, storage.StorageObject{
+			Key:          rel,
+			Size:         info.Size(),
+			LastModified: info.ModTime().Unix(),
+			StorageType:  string(storage.StorageTypeLocal),
+		})
+		return nil
+	})
+	if err != nil {
+		return objects, fmt.Errorf("list local archives: %w", err)
+	}
+
+	return objects, nil
 }
 
 func isHexString(s string) bool {

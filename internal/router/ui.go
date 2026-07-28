@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -130,6 +131,7 @@ func (r *Router) ServeHTTP() http.Handler {
 
 	// API routes
 	mux.HandleFunc("/api/ingest", r.handleIngest)
+	mux.HandleFunc("/api/ingest/file", r.handleIngestFileUpload)
 	mux.HandleFunc("/api/workspace-sync/jobs", r.handleWorkspaceSyncJobsAPI)
 	mux.HandleFunc("/api/workspace-sync/jobs/", r.handleWorkspaceSyncJobsAPI)
 	mux.HandleFunc("/api/status", r.handleStatus)
@@ -139,12 +141,17 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/clients", r.handleClientsAPI)
 	mux.HandleFunc("/api/local-clients", r.handleLocalClientsAPI)
 	mux.HandleFunc("/api/fetchers", r.handleFetchersAPI)
+	mux.HandleFunc("/api/fetchers/storage-objects", r.handleFetcherStorageObjects)
+	mux.HandleFunc("/api/fetcher-key-status", r.handleFetcherKeyStatus)
+	mux.HandleFunc("/api/confirm-fetcher-key", r.handleConfirmFetcherKey)
 	mux.HandleFunc("/api/logengine", r.handleLogEngineAPI)
-	mux.HandleFunc("/api/dependencies", r.handleDependenciesAPI)
+	mux.HandleFunc("/api/fs/ls", r.handleFSList)
 
 	// Whitelist API routes
 	mux.HandleFunc("/api/whitelist", r.handleWhitelistAPI)
 	mux.HandleFunc("/api/whitelist/toggle", r.handleWhitelistToggleAPI)
+	mux.HandleFunc("/api/authz/ingest", r.handleAuthzIngestStatusAPI)
+	mux.HandleFunc("/api/authz/ingest/toggle", r.handleAuthzIngestToggleAPI)
 
 	// Predictor API route
 	mux.HandleFunc("/api/predictor", r.handlePredictorAPI)
@@ -170,6 +177,12 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/registry/stats", r.handleRegistryStats)
 	mux.HandleFunc("/api/registry/repos", r.handleRegistryRepos)
 	mux.HandleFunc("/api/registry/repos/", r.handleRegistryRepoDetail)
+
+	mux.HandleFunc("/api/pipelines", r.handlePipelinesAPI)
+	mux.HandleFunc("/api/pipelines/", r.handlePipelinesAPI)
+
+	mux.HandleFunc("/api/webhooks/github", r.handleGitHubWebhook)
+	mux.HandleFunc("/api/webhooks/gitlab", r.handleGitLabWebhook)
 
 	// Health check endpoint for HAProxy
 	mux.HandleFunc("/health", r.handleHealth)
@@ -329,6 +342,118 @@ func (r *Router) handleIngest(w http.ResponseWriter, req *http.Request) {
 		"success": true,
 		"message": "Ingestion started",
 		"status":  "in_progress",
+	})
+}
+
+func (r *Router) handleIngestFileUpload(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := req.ParseMultipartForm(500 << 20); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"message": fmt.Sprintf("failed to parse upload: %v", err),
+		})
+		return
+	}
+
+	sourceID := req.FormValue("source_id")
+	ref := req.FormValue("ref")
+
+	tempDir, err := os.MkdirTemp("/tmp", "monofs-upload-")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"message": "failed to create temp directory",
+		})
+		return
+	}
+
+	fileCount := 0
+	for _, headers := range req.MultipartForm.File {
+		for _, header := range headers {
+			relPath := header.Filename
+			if relPath == "" {
+				continue
+			}
+
+			destPath := filepath.Join(tempDir, relPath)
+			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+				r.logger.Error("failed to create upload subdirectory", "path", filepath.Dir(destPath), "error", err)
+				continue
+			}
+
+			src, err := header.Open()
+			if err != nil {
+				r.logger.Error("failed to open uploaded file", "name", header.Filename, "error", err)
+				continue
+			}
+
+			dst, err := os.Create(destPath)
+			if err != nil {
+				src.Close()
+				r.logger.Error("failed to create destination file", "path", destPath, "error", err)
+				continue
+			}
+
+			_, copyErr := io.Copy(dst, src)
+			src.Close()
+			dst.Close()
+
+			if copyErr != nil {
+				r.logger.Error("failed to write uploaded file", "path", destPath, "error", copyErr)
+				continue
+			}
+
+			fileCount++
+		}
+	}
+
+	if fileCount == 0 {
+		os.RemoveAll(tempDir)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"message": "no files were uploaded",
+		})
+		return
+	}
+
+	go func() {
+		defer os.RemoveAll(tempDir)
+
+		stream := &mockIngestStream{ctx: context.Background()}
+		err := r.IngestRepository(&pb.IngestRequest{
+			Source:        tempDir,
+			Ref:           ref,
+			SourceId:      sourceID,
+			IngestionType: pb.IngestionType_INGESTION_FILE,
+			FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
+			IngestionConfig: map[string]string{
+				"source_id": sourceID,
+			},
+		}, stream)
+
+		if err != nil {
+			r.logger.Error("async file upload ingestion failed",
+				"source", tempDir,
+				"error", err)
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":    true,
+		"message":    fmt.Sprintf("Ingestion started with %d files", fileCount),
+		"status":     "in_progress",
+		"file_count": fileCount,
 	})
 }
 
@@ -944,6 +1069,337 @@ func (r *Router) handleFetchersAPI(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(stats)
 }
 
+// fetcherStorageObjectEntry is a single object as reported by one fetcher.
+type fetcherStorageObjectEntry struct {
+	Address      string                  `json:"address"`
+	Healthy      bool                    `json:"healthy"`
+	Error        string                  `json:"error,omitempty"`
+	Objects      []storage.StorageObject `json:"objects"`
+	ObjectsCount int                     `json:"objects_count"`
+}
+
+// handleFetcherStorageObjects aggregates the list of objects stored in the
+// configured backend (S3/GCS/local archives) from every fetcher diagnostics
+// endpoint. Returns best-effort data: individual fetcher errors are captured
+// per-entry without failing the whole response.
+func (r *Router) handleFetcherStorageObjects(w http.ResponseWriter, req *http.Request) {
+	ctx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
+	defer cancel()
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	var entries []fetcherStorageObjectEntry
+
+	addFromConfigured := func(configured []string) {
+		for _, raw := range configured {
+			baseURL, _ := diagnosticsEndpoint(raw)
+			if baseURL == "" {
+				continue
+			}
+			entries = append(entries, r.queryFetcherStorageObjects(ctx, client, baseURL, raw))
+		}
+	}
+
+	r.mu.RLock()
+	configured := r.config.FetcherDiagnostics
+	r.mu.RUnlock()
+
+	if len(configured) > 0 {
+		addFromConfigured(configured)
+	} else if fetcherClient := r.getFetcherClient(); fetcherClient != nil {
+		for _, fetcherAddr := range fetcherClient.AllFetchers() {
+			diagAddr, err := addressWithOffset(fetcherAddr, 1)
+			if err != nil {
+				entries = append(entries, fetcherStorageObjectEntry{
+					Address: fetcherAddr,
+					Healthy: false,
+					Error:   fmt.Sprintf("cannot compute diagnostics address: %v", err),
+				})
+				continue
+			}
+			entries = append(entries, r.queryFetcherStorageObjects(ctx, client, "http://"+diagAddr, fetcherAddr))
+		}
+	}
+
+	var totalObjects int64
+	var anyHealthy bool
+	for _, e := range entries {
+		if e.Healthy {
+			anyHealthy = true
+		}
+		totalObjects += int64(e.ObjectsCount)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"fetchers":      entries,
+		"total_objects": totalObjects,
+		"healthy":       anyHealthy,
+		"generated_at":  time.Now().UTC().Unix(),
+	})
+}
+
+func (r *Router) queryFetcherStorageObjects(ctx context.Context, client *http.Client, baseURL, address string) fetcherStorageObjectEntry {
+	entry := fetcherStorageObjectEntry{Address: address, Healthy: false}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/storage-objects", nil)
+	if err != nil {
+		entry.Error = fmt.Sprintf("build request: %v", err)
+		return entry
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		entry.Error = fmt.Sprintf("connect: %v", err)
+		return entry
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		Objects []storage.StorageObject `json:"objects"`
+		Error   string                  `json:"error"`
+		Healthy bool                    `json:"healthy"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		entry.Error = fmt.Sprintf("decode response: %v", err)
+		return entry
+	}
+
+	entry.Healthy = data.Healthy && resp.StatusCode == http.StatusOK
+	entry.Error = data.Error
+	entry.Objects = data.Objects
+	entry.ObjectsCount = len(data.Objects)
+	return entry
+}
+
+// fetcherKeyStatusEntry is the per-fetcher result for /api/fetcher-key-status.
+type fetcherKeyStatusEntry struct {
+	Address     string `json:"address"`
+	Healthy     bool   `json:"healthy"`
+	State       string `json:"state"`
+	KeySource   string `json:"key_source,omitempty"`
+	Fingerprint string `json:"current_fingerprint,omitempty"`
+	Accepted    string `json:"accepted_fingerprint,omitempty"`
+	Error       string `json:"error,omitempty"`
+	CanConfirm  bool   `json:"can_confirm"`
+}
+
+// fetcherKeyStatusResponse is the aggregated response for /api/fetcher-key-status.
+type fetcherKeyStatusResponse struct {
+	Fetchers    []fetcherKeyStatusEntry `json:"fetchers"`
+	Pending     int                     `json:"pending_count"`
+	Healthy     int                     `json:"healthy_count"`
+	Total       int                     `json:"total_count"`
+	AllGood     bool                    `json:"all_good"`
+	GeneratedAt int64                   `json:"generated_at"`
+}
+
+// handleFetcherKeyStatus aggregates encryption-key-guard status from every
+// configured fetcher diagnostics endpoint. Returns best-effort data: individual
+// fetcher errors are captured per-entry without failing the whole response.
+func (r *Router) handleFetcherKeyStatus(w http.ResponseWriter, req *http.Request) {
+	ctx, cancel := context.WithTimeout(req.Context(), 15*time.Second)
+	defer cancel()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	var entries []fetcherKeyStatusEntry
+
+	addFromConfigured := func(configured []string) {
+		for _, raw := range configured {
+			baseURL, _ := diagnosticsEndpoint(raw)
+			if baseURL == "" {
+				continue
+			}
+			entries = append(entries, r.queryFetcherKeyStatus(ctx, client, baseURL, raw))
+		}
+	}
+
+	r.mu.RLock()
+	configured := r.config.FetcherDiagnostics
+	r.mu.RUnlock()
+
+	if len(configured) > 0 {
+		addFromConfigured(configured)
+	} else if fetcherClient := r.getFetcherClient(); fetcherClient != nil {
+		for _, fetcherAddr := range fetcherClient.AllFetchers() {
+			diagAddr, err := addressWithOffset(fetcherAddr, 1)
+			if err != nil {
+				entries = append(entries, fetcherKeyStatusEntry{
+					Address: fetcherAddr,
+					Healthy: false,
+					State:   "unknown",
+					Error:   fmt.Sprintf("cannot compute diagnostics address: %v", err),
+				})
+				continue
+			}
+			entries = append(entries, r.queryFetcherKeyStatus(ctx, client, "http://"+diagAddr, fetcherAddr))
+		}
+	}
+
+	pending, healthy := 0, 0
+	for _, e := range entries {
+		if e.Healthy {
+			healthy++
+		}
+		if e.State == "pending" {
+			pending++
+		}
+	}
+
+	resp := fetcherKeyStatusResponse{
+		Fetchers:    entries,
+		Pending:     pending,
+		Healthy:     healthy,
+		Total:       len(entries),
+		AllGood:     len(entries) > 0 && pending == 0,
+		GeneratedAt: time.Now().UTC().Unix(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (r *Router) queryFetcherKeyStatus(ctx context.Context, client *http.Client, baseURL, address string) fetcherKeyStatusEntry {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/key-status", nil)
+	if err != nil {
+		return fetcherKeyStatusEntry{
+			Address: address, Healthy: false, State: "unknown",
+			Error: fmt.Sprintf("build request: %v", err),
+		}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fetcherKeyStatusEntry{
+			Address: address, Healthy: false, State: "unknown",
+			Error: fmt.Sprintf("connect: %v", err),
+		}
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		State               string `json:"state"`
+		KeySource           string `json:"key_source"`
+		CurrentFingerprint  string `json:"current_fingerprint"`
+		AcceptedFingerprint string `json:"accepted_fingerprint"`
+		CanConfirm          bool   `json:"can_confirm"`
+		Error               string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return fetcherKeyStatusEntry{
+			Address: address, Healthy: false, State: "unknown",
+			Error: fmt.Sprintf("decode response: %v", err),
+		}
+	}
+
+	return fetcherKeyStatusEntry{
+		Address:     address,
+		Healthy:     data.State == "ok" || data.State == "auto_accepted" || data.State == "no_key",
+		State:       data.State,
+		KeySource:   data.KeySource,
+		Fingerprint: data.CurrentFingerprint,
+		Accepted:    data.AcceptedFingerprint,
+		Error:       data.Error,
+		CanConfirm:  data.CanConfirm,
+	}
+}
+
+// handleConfirmFetcherKey forwards a key-confirmation request to every fetcher
+// diagnostics endpoint. Returns the aggregated results.
+func (r *Router) handleConfirmFetcherKey(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "POST required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
+	defer cancel()
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	type result struct {
+		Address string `json:"address"`
+		OK      bool   `json:"ok"`
+		State   string `json:"state,omitempty"`
+		Error   string `json:"error,omitempty"`
+	}
+	var results []result
+
+	sendTo := func(baseURL, address string) {
+		req2, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/confirm-key", nil)
+		var res result
+		res.Address = address
+		if err != nil {
+			res.Error = fmt.Sprintf("build request: %v", err)
+			results = append(results, res)
+			return
+		}
+		resp, err := client.Do(req2)
+		if err != nil {
+			res.Error = fmt.Sprintf("connect: %v", err)
+			results = append(results, res)
+			return
+		}
+		defer resp.Body.Close()
+
+		var data struct {
+			State string `json:"state"`
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			res.Error = fmt.Sprintf("decode response: %v", err)
+		} else {
+			res.OK = resp.StatusCode == http.StatusOK
+			res.State = data.State
+			if data.Error != "" {
+				res.Error = data.Error
+			}
+		}
+		results = append(results, res)
+	}
+
+	r.mu.RLock()
+	configured := r.config.FetcherDiagnostics
+	r.mu.RUnlock()
+
+	if len(configured) > 0 {
+		for _, raw := range configured {
+			baseURL, _ := diagnosticsEndpoint(raw)
+			if baseURL == "" {
+				continue
+			}
+			sendTo(baseURL, raw)
+		}
+	} else if fetcherClient := r.getFetcherClient(); fetcherClient != nil {
+		for _, fetcherAddr := range fetcherClient.AllFetchers() {
+			diagAddr, err := addressWithOffset(fetcherAddr, 1)
+			if err != nil {
+				results = append(results, result{
+					Address: fetcherAddr,
+					Error:   fmt.Sprintf("cannot compute diagnostics address: %v", err),
+				})
+				continue
+			}
+			sendTo("http://"+diagAddr, fetcherAddr)
+		}
+	}
+
+	allOK := len(results) > 0
+	for _, res := range results {
+		if !res.OK {
+			allOK = false
+			break
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if !allOK {
+		w.WriteHeader(http.StatusMultiStatus)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":      allOK,
+		"results": results,
+	})
+}
+
 // handleRegistryStats proxies to monofs-registry stats endpoint.
 func (r *Router) handleRegistryStats(w http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
@@ -984,7 +1440,11 @@ func (r *Router) handleRegistryRepos(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	resp, err := http.Get("http://" + addr + "/api/v1/repos")
+	u := "http://" + addr + "/api/v1/repos"
+	if q := req.URL.RawQuery; q != "" {
+		u += "?" + q
+	}
+	resp, err := http.Get(u)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"repositories": []string{}, "error": err.Error()})
@@ -1017,6 +1477,9 @@ func (r *Router) handleRegistryRepoDetail(w http.ResponseWriter, req *http.Reque
 	}
 
 	u := "http://" + addr + "/api/v1/repos/" + repo
+	if q := req.URL.RawQuery; q != "" {
+		u += "?" + q
+	}
 	resp, err := http.Get(u)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -2003,4 +2466,60 @@ func fetchPeerGuardianClients(peerURL, peerName string) []guardianClientJSON {
 		data.GuardianClients[i].Router = peerName
 	}
 	return data.GuardianClients
+}
+
+type fsEntryJSON struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"is_dir"`
+}
+
+type fsListResponse struct {
+	Path    string        `json:"path"`
+	Entries []fsEntryJSON `json:"entries"`
+	Error   string        `json:"error,omitempty"`
+}
+
+func (r *Router) handleFSList(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	dirPath := req.URL.Query().Get("path")
+	if dirPath == "" {
+		dirPath = "/"
+	}
+
+	dirPath = filepath.Clean(dirPath)
+
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(fsListResponse{
+			Path:  dirPath,
+			Error: err.Error(),
+		})
+		return
+	}
+
+	result := fsListResponse{
+		Path:    dirPath,
+		Entries: make([]fsEntryJSON, 0, len(entries)),
+	}
+	for _, e := range entries {
+		result.Entries = append(result.Entries, fsEntryJSON{
+			Name:  e.Name(),
+			IsDir: e.IsDir(),
+		})
+	}
+
+	sort.Slice(result.Entries, func(i, j int) bool {
+		if result.Entries[i].IsDir != result.Entries[j].IsDir {
+			return result.Entries[i].IsDir
+		}
+		return result.Entries[i].Name < result.Entries[j].Name
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
