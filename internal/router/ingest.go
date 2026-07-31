@@ -146,6 +146,10 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 		return err
 	}
 
+	if err := r.authorizeIngest(stream.Context(), req, displayPath); err != nil {
+		return err
+	}
+
 	// Step 2: Generate internal storage ID (SHA-256 hash)
 	storageID := sharding.GenerateStorageID(displayPath)
 
