@@ -7,11 +7,14 @@ require (
 	github.com/RoaringBitmap/roaring v1.9.4
 	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/aws/aws-sdk-go-v2 v1.41.4
+	github.com/aws/aws-sdk-go-v2/config v1.32.12
+	github.com/aws/aws-sdk-go-v2/credentials v1.19.12
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.1
 	github.com/aws/smithy-go v1.24.2
 	github.com/blugelabs/bluge v0.2.2
 	github.com/go-git/go-git/v5 v5.13.1
 	github.com/go-git/go-git/v6 v6.0.0-20260123133532-f99a98e81ce9
+	github.com/go-jose/go-jose/v4 v4.1.3
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.7.2
 	github.com/nutsdb/nutsdb v1.1.0
@@ -19,7 +22,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/prometheus v0.310.1-0.20260320085417-166d20151c0d
-	github.com/radryc/packager v0.0.0-20260314073213-ebce590b0ca7
+	github.com/radryc/packager v0.0.0-20260717082608-166697409efc
 	github.com/rydzu/ainfra/cfg v0.0.0
 	github.com/rydzu/ainfra/kvs v0.0.0
 	github.com/sourcegraph/zoekt v0.0.0-20260114143800-c747a3bccc2a
@@ -37,12 +40,15 @@ require (
 	golang.org/x/sync v0.20.0
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
+	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/kubelet v0.32.3
 )
 
 replace github.com/rydzu/ainfra/kvs => ../kvs
 
 replace github.com/rydzu/ainfra/cfg => ../cfg
+
+replace github.com/radryc/packager => ../packager
 
 require (
 	cel.dev/expr v0.25.1 // indirect
@@ -65,8 +71,6 @@ require (
 	github.com/apache/thrift v0.22.0 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.7 // indirect
-	github.com/aws/aws-sdk-go-v2/config v1.32.12 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.19.12 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.20 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.20 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.20 // indirect
@@ -123,7 +127,6 @@ require (
 	github.com/go-git/gcfg/v2 v2.0.2 // indirect
 	github.com/go-git/go-billy/v5 v5.6.2 // indirect
 	github.com/go-git/go-billy/v6 v6.0.0-20260114122816-19306b749ecc // indirect
-	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
@@ -204,7 +207,6 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260226221140-a57be14db171 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260311181403-84a4fc48630c // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace github.com/hashicorp/memberlist => github.com/grafana/memberlist v0.3.1-0.20251126142931-6f9f62ab6f86

@@ -82,6 +82,8 @@ type storageConfig struct {
 	GCSBucket          string `json:"gcs_bucket"`
 	GCSPrefix          string `json:"gcs_prefix"`
 	GCSCredentialsFile string `json:"gcs_credentials_file"` // empty = use ADC
+
+	CloudScannerIntervalSecs int64 `json:"cloud_scanner_interval_secs"` // >0 overrides default 3600s (1h)
 }
 
 // defaultConfig returns built-in defaults.
@@ -180,6 +182,12 @@ func main() {
 	}
 	if v := os.Getenv("MONOFS_S3_USE_PATH_STYLE"); v != "" {
 		cfg.Storage.S3UsePathStyle = v == "true" || v == "1"
+	}
+	if v := os.Getenv("MONOFS_CLOUD_SCANNER_INTERVAL_SECS"); v != "" {
+		var secs int64
+		if _, err := fmt.Sscanf(v, "%d", &secs); err == nil {
+			cfg.Storage.CloudScannerIntervalSecs = secs
+		}
 	}
 
 	// Apply CLI flags (highest precedence)
@@ -324,9 +332,10 @@ func main() {
 			S3SecretAccessKey:  cfg.Storage.S3SecretAccessKey,
 			S3SessionToken:     cfg.Storage.S3SessionToken,
 			S3UsePathStyle:     cfg.Storage.S3UsePathStyle,
-			GCSBucket:          cfg.Storage.GCSBucket,
-			GCSPrefix:          cfg.Storage.GCSPrefix,
-			GCSCredentialsFile: cfg.Storage.GCSCredentialsFile,
+			GCSBucket:                cfg.Storage.GCSBucket,
+			GCSPrefix:                cfg.Storage.GCSPrefix,
+			GCSCredentialsFile:       cfg.Storage.GCSCredentialsFile,
+			CloudScannerIntervalSecs: cfg.Storage.CloudScannerIntervalSecs,
 		},
 	}); err != nil {
 		logger.Error("failed to initialize blob backend", "error", err)

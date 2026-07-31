@@ -102,6 +102,7 @@ type BlobBackend struct {
 
 	openCloudReader   func(key string) (io.ReadCloser, error)
 	uploadArchiveFunc func(ctx context.Context, archivePath string) error
+	headCloudObject   func(key string) bool
 	cloudUploadQueue  chan cloudArchiveUploadJob
 	cloudUploadWG     sync.WaitGroup
 
@@ -179,6 +180,7 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 		bb.gcsClient = nil
 		bb.openCloudReader = bb.openS3Reader
 		bb.uploadArchiveFunc = bb.uploadArchiveToS3
+		bb.headCloudObject = bb.headS3Object
 
 	case storage.StorageTypeGCS:
 		c := config.Cloud
@@ -197,6 +199,7 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 		bb.s3Client = nil
 		bb.openCloudReader = bb.openGCSReader
 		bb.uploadArchiveFunc = bb.uploadArchiveToGCS
+		bb.headCloudObject = bb.headGCSObject
 
 	default:
 		bb.s3Client = nil
@@ -321,12 +324,15 @@ func (bb *BlobBackend) startCloudBackupScanner() {
 func (bb *BlobBackend) cloudBackupScannerLoop() {
 	defer bb.scannerWG.Done()
 
-	// First scan soon after startup to backfill anything that was written
-	// before the scanner existed or while it was down.
+	interval := 1 * time.Hour
+	if bb.config.Cloud.CloudScannerIntervalSecs > 0 {
+		interval = time.Duration(bb.config.Cloud.CloudScannerIntervalSecs) * time.Second
+	}
+
 	time.Sleep(30 * time.Second)
 	bb.runCloudBackupScan()
 
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -848,6 +854,19 @@ func (bb *BlobBackend) openGCSReader(key string) (io.ReadCloser, error) {
 	return rc, nil
 }
 
+func (bb *BlobBackend) headS3Object(key string) bool {
+	_, err := bb.s3Client.HeadObject(context.Background(), &s3.HeadObjectInput{
+		Bucket: aws.String(bb.config.Cloud.S3Bucket),
+		Key:    aws.String(key),
+	})
+	return err == nil
+}
+
+func (bb *BlobBackend) headGCSObject(key string) bool {
+	_, err := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket).Object(key).Attrs(context.Background())
+	return err == nil
+}
+
 // downloadFromCloud fetches an archive from the cloud and caches it locally.
 func (bb *BlobBackend) downloadFromCloud(archivePath string) error {
 	if !bb.hasCloudDownload() {
@@ -902,13 +921,11 @@ func (bb *BlobBackend) cloudArchiveExists(archivePath string) bool {
 	if !bb.hasCloudDownload() {
 		return false
 	}
-	key := bb.cloudKey(archivePath)
-	rc, err := bb.openCloudReader(key)
-	if err != nil {
+	if bb.headCloudObject == nil {
 		return false
 	}
-	_ = rc.Close()
-	return true
+	key := bb.cloudKey(archivePath)
+	return bb.headCloudObject(key)
 }
 
 // ensureArchiveInCloud uploads the local archive to cloud storage if a cloud
@@ -1126,6 +1143,7 @@ func (bb *BlobBackend) NewStoreBlobBatchWriter() (*StoreBlobBatchWriter, error) 
 }
 
 func (w *StoreBlobBatchWriter) startNewArchive() error {
+	w.bb.pipeline.ResetEncoder()
 	w.curHashes = w.curHashes[:0]
 	w.archivePath = filepath.Join(w.archiveDir,
 		fmt.Sprintf("batch-%d-%04d.pack", time.Now().UnixNano(), w.archiveSeq))

@@ -96,6 +96,11 @@ type CloudStorageConfig struct {
 	// GCSCredentialsJSON is inline service account JSON key content.
 	// Takes precedence over GCSCredentialsFile.
 	GCSCredentialsJSON []byte
+
+	// CloudScannerIntervalSecs is how often the cloud backup scanner
+	// verifies that every local archive has a corresponding cloud object.
+	// The first scan runs after this interval from startup. Default: 3600 (1h).
+	CloudScannerIntervalSecs int64
 }
 
 // BackendConfig holds common configuration for all fetch backends.
