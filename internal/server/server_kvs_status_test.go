@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	pb "github.com/radryc/monofs/api/proto"
-	"github.com/rydzu/ainfra/kvs/pkg/kvsapi"
-	"github.com/rydzu/ainfra/kvs/pkg/localstore"
+	"github.com/radryc/kvs/pkg/kvsapi"
+	"github.com/radryc/kvs/pkg/localstore"
 )
 
 func TestGetNodeInfoReportsEmbeddedKVSStatus(t *testing.T) {

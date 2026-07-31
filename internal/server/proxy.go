@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
@@ -241,6 +242,24 @@ func (s *Server) getTargetNode(storageID, filePath string) *sharding.Node {
 	}
 
 	return s.hrw.GetNode(shardKey)
+}
+
+// forwardableTarget returns the target node for forwarding based on the path's
+// namespace/repo prefix, or nil if this node should handle the request locally.
+func (s *Server) forwardableTarget(path string) *sharding.Node {
+	if !s.enableForwarding || s.hrw == nil {
+		return nil
+	}
+	parts := strings.SplitN(path, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return nil
+	}
+	shardKey := parts[0] + "/" + parts[1]
+	target := s.hrw.GetNode(shardKey)
+	if target != nil && target.ID == s.nodeID {
+		return nil
+	}
+	return target
 }
 
 // isNodeHealthy checks if a node is currently healthy.
