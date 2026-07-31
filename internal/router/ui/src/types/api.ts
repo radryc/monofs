@@ -1,5 +1,22 @@
 // API response types matching Go server exactly
 
+export interface BazelAdoptionRepo {
+  display_path: string
+  state: string
+  build_system: string
+  commit_hash: string
+}
+
+export interface BazelAdoptionData {
+  ok: boolean
+  total_repos: number
+  active_count: number
+  hermetic_count: number
+  adoption_pct: number
+  repos: BazelAdoptionRepo[]
+  message?: string
+}
+
 export interface NodeStatus {
   id: string
   address: string

@@ -180,4 +180,11 @@ var (
 		Name:      "cluster_disk_bytes",
 		Help:      "Aggregated disk bytes across nodes by kind.",
 	}, []string{"kind"})
+
+	authOutcomes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "auth_outcomes_total",
+		Help:      "authentication outcomes by result and protocol.",
+	}, []string{"outcome", "protocol"})
 )

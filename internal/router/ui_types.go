@@ -88,3 +88,65 @@ type DepsNodeInfo struct {
 	NodeID string `json:"node_id"`
 	Files  int    `json:"files"`
 }
+
+// PipelineSummary is a brief pipeline overview for the UI list.
+type PipelineSummary struct {
+	Name         string `json:"name"`
+	SourceDir    string `json:"source_dir,omitempty"`
+	LastRunState string `json:"last_run_state"`
+	LastRunID    string `json:"last_run_id,omitempty"`
+	RunCount     int    `json:"run_count"`
+}
+
+// PipelineListData wraps a list of pipeline summaries for JSON serialization.
+type PipelineListData struct {
+	Pipelines []PipelineSummary `json:"pipelines"`
+}
+
+// PipelineRunData serializes a pipeline run for the UI.
+type PipelineRunData struct {
+	RunID        string          `json:"run_id"`
+	PipelineName string          `json:"pipeline_name"`
+	State        string          `json:"state"`
+	Trigger      string          `json:"trigger"`
+	CommitSHA    string          `json:"commit_sha"`
+	Branch       string          `json:"branch"`
+	Tag          string          `json:"tag,omitempty"`
+	PRNumber     int             `json:"pr_number,omitempty"`
+	CreatedAt    string          `json:"created_at"`
+	StartedAt    string          `json:"started_at,omitempty"`
+	FinishedAt   string          `json:"finished_at,omitempty"`
+	Jobs         []JobStatusData `json:"jobs"`
+	Affected     []string        `json:"affected,omitempty"`
+}
+
+// PipelineRunsData wraps a list of pipeline runs for JSON serialization.
+type PipelineRunsData struct {
+	Runs []PipelineRunData `json:"runs"`
+}
+
+// JobStatusData serializes a single job status within a pipeline run.
+type JobStatusData struct {
+	JobName    string   `json:"job_name"`
+	State      string   `json:"state"`
+	Needs      []string `json:"needs,omitempty"`
+	WorkerID   string   `json:"worker_id,omitempty"`
+	Retries    int      `json:"retries"`
+	MaxRetries int      `json:"max_retries"`
+	Error      string   `json:"error,omitempty"`
+	ExitCode   int      `json:"exit_code,omitempty"`
+	StartedAt  string   `json:"started_at,omitempty"`
+	FinishedAt string   `json:"finished_at,omitempty"`
+	DurationMs int64    `json:"duration_ms,omitempty"`
+}
+
+// PipelineStatsData serializes aggregate pipeline statistics for the UI.
+type PipelineStatsData struct {
+	TotalRuns     int     `json:"total_runs"`
+	SucceededRuns int     `json:"succeeded_runs"`
+	FailedRuns    int     `json:"failed_runs"`
+	SuccessRate   float64 `json:"success_rate"`
+	AvgDurationMs int64   `json:"avg_duration_ms"`
+	P50DurationMs int64   `json:"p50_duration_ms"`
+	P95DurationMs int64   `json:"p95_duration_ms"`
+}

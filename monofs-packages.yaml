@@ -1,0 +1,84 @@
+packages:
+  server:
+    path: cmd/monofs-server
+    deps: [internal/server, internal/storage, internal/sharding, internal/git, internal/grpcutil, internal/telemetry, api/proto, internal/workspacebundle]
+    build: make build-server
+    test: make test-unit
+
+  router:
+    path: cmd/monofs-router
+    deps: [internal/router, internal/sharding, internal/fetcher, internal/fuse, api/proto, internal/registry]
+    build: make build-router
+    test: make test-unit
+
+  fetcher:
+    path: cmd/monofs-fetcher
+    deps: [internal/fetcher, api/proto, internal/telemetry]
+    build: make build-fetcher
+    test: make test-unit
+
+  search:
+    path: cmd/monofs-search
+    deps: [internal/search]
+    build: make build-search
+    test: make test-unit
+
+  registry:
+    path: cmd/monofs-registry
+    deps: [internal/registry]
+    build: make build-registry
+    test: make test-unit
+
+  session:
+    path: cmd/monofs-session
+    deps: [internal/fuse, internal/client, internal/git, internal/monopath]
+    build: make build-session
+    test: make test-unit
+
+  admin:
+    path: cmd/monofs-admin
+    deps: [internal/client, internal/sharding]
+    build: make build-admin
+    test: make test-unit
+
+  client:
+    path: cmd/monofs-client
+    deps: [internal/client, internal/fuse, internal/monopath]
+    build: make build-client
+    test: make test-unit
+
+  pipeline-worker:
+    path: cmd/monofs-pipeline-worker
+    deps: [internal/router/pipeline, internal/worker]
+    build: make build-pipeline-worker
+    test: make test-unit
+
+  guardianctl:
+    path: cmd/guardianctl
+    deps: [internal/guardianctl]
+    build: make build-guardianctl
+    test: make test-unit
+
+  loadtest:
+    path: cmd/monofs-loadtest
+    deps: [internal/client, internal/sharding, internal/fetcher]
+    build: make build-loadtest
+    test: make test-unit
+
+  trace-dump:
+    path: cmd/monofs-trace-dump
+    deps: [internal/telemetry]
+    build: make build-trace-dump
+    test: make test-unit
+
+  kmod:
+    path: monofs-kmod
+    deps: [monofs-kmod]
+    build: make build-kmod
+    test: make test-verify-kmod
+
+  ui:
+    path: internal/router/ui
+    deps: [internal/router/ui]
+    build: make build-ui
+    test: make test-unit

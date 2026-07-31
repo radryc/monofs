@@ -17,9 +17,9 @@ WORKDIR /app
 RUN apk add --no-cache git ca-certificates
 
 ARG KVS_REPO_URL=https://github.com/radryc/kvs.git
-ARG KVS_REF=caadee8dd6d809ba9e40cccb2e27e5ea44d068aa
+ARG KVS_REF=1cf406ad1da680ae06e3db84aa3a5aa3e95585b3
 ARG CFG_REPO_URL=https://github.com/radryc/cfg.git
-ARG CFG_REF=cc88020cecc3fac5f1548cba12bec1fd2c1c958f
+ARG CFG_REF=1772380a1c25a39e0fe06cd0c4265c5b45fb5930
 
 # Copy Monofs manifests from the local build context and fetch only the pinned module revisions.
 COPY go.mod go.sum ./

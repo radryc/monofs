@@ -15,9 +15,11 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/router/pipeline"
 	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
+	"github.com/radryc/monofs/pkg/authz"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -54,6 +56,11 @@ type RouterConfig struct {
 	RebalanceDelay        time.Duration // Wait before triggering permanent rebalance after failure, default: 10m
 	GracefulFailoverDelay time.Duration // Wait for planned restarts/upgrades, default: 60s
 	GuardianIngestTimeout time.Duration // Timeout for guardian batch ingestion to nodes, default: 5m
+
+	// Authz (partition-level authorization)
+	AuthzEnforceIngest bool
+	AuthzGrantsPath    string
+	AuthzGrantsJSON    string
 }
 
 // RouterPeer identifies another router instance to aggregate UI data from.
@@ -189,6 +196,17 @@ type Router struct {
 
 	// Registry integration
 	registryAddr string
+
+	// Authz (partition-level authorization)
+	ownershipResolver  ownershipChecker
+	grantEvaluator     authz.GrantEvaluator
+	authzEnforceRead   bool
+	authzEnforceIngest bool
+	breakGlassAdmins   map[string]bool
+
+	// Pipeline orchestration
+	pipelineOrchestrator   *pipeline.Orchestrator
+	pipelineWebhookHandler *pipeline.WebhookHandler
 }
 
 var fetcherReconnectInterval = 5 * time.Second
@@ -382,6 +400,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		policyCfg:                 policyCfg,
 		failoverTimers:            make(map[string]*time.Timer),
 		failoverStartTimes:        make(map[string]time.Time),
+		breakGlassAdmins:          make(map[string]bool),
 		config:                    cfg,
 		stopHealth:                make(chan struct{}),
 		stopClients:               make(chan struct{}),
@@ -418,6 +437,20 @@ func (r *Router) SetVersion(version, commit, buildTime string) {
 	r.buildVersion = version
 	r.buildCommit = commit
 	r.buildTime = buildTime
+}
+
+// SetAuthzEnforceIngest toggles partition-level ingest authorization enforcement.
+func (r *Router) SetAuthzEnforceIngest(enforce bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.authzEnforceIngest = enforce
+}
+
+// AuthzEnforceIngest returns whether partition-level ingest authorization is enforced.
+func (r *Router) AuthzEnforceIngest() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.authzEnforceIngest
 }
 
 // markForIndexRebuild marks a repository on a node for directory index rebuild.

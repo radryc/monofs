@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,27 +11,32 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/radryc/monofs/pkg/authz"
 )
 
 type guardianPrincipal struct {
-	PrincipalID string `json:"principal_id"`
-	TokenHash   string `json:"token_hash"`
-	Role        string `json:"role"`
-	DisplayName string `json:"display_name"`
-	CreatedAt   int64  `json:"created_at"`
-	Disabled    bool   `json:"disabled"`
-	BaseURL     string `json:"base_url,omitempty"`
+	PrincipalID string        `json:"principal_id"`
+	TokenHash   string        `json:"token_hash"`
+	Role        string        `json:"role"`
+	DisplayName string        `json:"display_name"`
+	CreatedAt   int64         `json:"created_at"`
+	Disabled    bool          `json:"disabled"`
+	BaseURL     string        `json:"base_url,omitempty"`
+	Grants      []authz.Grant `json:"grants,omitempty"`
 }
 
 type guardianPrincipalStore struct {
 	mu          sync.RWMutex
 	principals  map[string]*guardianPrincipal
+	grants      map[string][]authz.Grant
 	persistPath string
 }
 
 func newGuardianPrincipalStore(stateDir string) (*guardianPrincipalStore, error) {
 	store := &guardianPrincipalStore{
 		principals: make(map[string]*guardianPrincipal),
+		grants:     make(map[string][]authz.Grant),
 	}
 	if strings.TrimSpace(stateDir) == "" {
 		return store, nil
@@ -71,6 +77,11 @@ func (s *guardianPrincipalStore) load() error {
 		}
 		cloned := *principal
 		s.principals[principal.PrincipalID] = &cloned
+		if len(principal.Grants) > 0 {
+			grantsCopy := make([]authz.Grant, len(principal.Grants))
+			copy(grantsCopy, principal.Grants)
+			s.grants[principal.PrincipalID] = grantsCopy
+		}
 	}
 	return nil
 }
@@ -81,11 +92,18 @@ func (s *guardianPrincipalStore) saveLocked() error {
 	}
 
 	entries := make([]*guardianPrincipal, 0, len(s.principals))
-	for _, principal := range s.principals {
+	for pid, principal := range s.principals {
 		if principal == nil {
 			continue
 		}
 		cloned := *principal
+		if grants, ok := s.grants[pid]; ok && len(grants) > 0 {
+			cloneGrants := make([]authz.Grant, len(grants))
+			copy(cloneGrants, grants)
+			cloned.Grants = cloneGrants
+		} else {
+			cloned.Grants = nil
+		}
 		entries = append(entries, &cloned)
 	}
 
@@ -196,4 +214,76 @@ func inferGuardianPrincipalRole(clientID string) string {
 	default:
 		return "control-plane"
 	}
+}
+
+func (s *guardianPrincipalStore) setGrants(principalID string, grants []authz.Grant) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.principals[principalID]; !ok {
+		return fmt.Errorf("unknown principal %q", principalID)
+	}
+
+	if len(grants) == 0 {
+		delete(s.grants, principalID)
+	} else {
+		clone := make([]authz.Grant, len(grants))
+		copy(clone, grants)
+		s.grants[principalID] = clone
+	}
+
+	return s.saveLocked()
+}
+
+func (s *guardianPrincipalStore) grantsFor(principalID string) []authz.Grant {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	grants, ok := s.grants[principalID]
+	if !ok {
+		return nil
+	}
+	clone := make([]authz.Grant, len(grants))
+	copy(clone, grants)
+	return clone
+}
+
+type principalGrantEvaluator struct {
+	grants []authz.Grant
+}
+
+func (e *principalGrantEvaluator) Can(_ context.Context, id authz.Identity, partition string, action authz.Action) bool {
+	if id.IsAnonymous() {
+		return false
+	}
+	for _, g := range e.grants {
+		matchPartition := g.Partition == authz.WildcardPartition || g.Partition == partition
+		if !matchPartition {
+			continue
+		}
+		matchedSubject := false
+		if s := strings.TrimSpace(g.Subject); s != "" {
+			matchedSubject = s == id.Subject || s == id.ClientID || (id.Email != "" && s == id.Email)
+		}
+		matchedGroup := false
+		if grp := strings.TrimSpace(g.Group); grp != "" {
+			matchedGroup = id.HasGroup(grp)
+		}
+		if !matchedSubject && !matchedGroup {
+			continue
+		}
+		if g.Role.Allows(action) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *guardianPrincipalStore) grantEvaluator() authz.GrantEvaluator {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var allGrants []authz.Grant
+	for _, g := range s.grants {
+		allGrants = append(allGrants, g...)
+	}
+	return &principalGrantEvaluator{grants: allGrants}
 }
