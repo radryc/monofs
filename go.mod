@@ -22,7 +22,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/prometheus v0.310.1-0.20260320085417-166d20151c0d
-	github.com/radryc/packager v0.0.0-20260717082608-166697409efc
+	github.com/radryc/packager v0.0.0-20260731073206-39f33592a2fd
 	github.com/rydzu/ainfra/cfg v0.0.0
 	github.com/rydzu/ainfra/kvs v0.0.0
 	github.com/sourcegraph/zoekt v0.0.0-20260114143800-c747a3bccc2a
@@ -38,6 +38,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.42.0
 	go.opentelemetry.io/otel/trace v1.42.0
 	golang.org/x/sync v0.20.0
+	google.golang.org/api v0.272.0
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
@@ -47,8 +48,6 @@ require (
 replace github.com/rydzu/ainfra/kvs => ../kvs
 
 replace github.com/rydzu/ainfra/cfg => ../cfg
-
-replace github.com/radryc/packager => ../packager
 
 require (
 	cel.dev/expr v0.25.1 // indirect
@@ -202,7 +201,6 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
-	google.golang.org/api v0.272.0 // indirect
 	google.golang.org/genproto v0.0.0-20260217215200-42d3e9bedb6d // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260226221140-a57be14db171 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260311181403-84a4fc48630c // indirect
