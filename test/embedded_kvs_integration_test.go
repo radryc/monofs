@@ -14,9 +14,9 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/server"
-	kvsv1 "github.com/rydzu/ainfra/kvs/api/proto/kvs/v1"
-	kvsgrpc "github.com/rydzu/ainfra/kvs/pkg/grpcserver"
-	"github.com/rydzu/ainfra/kvs/pkg/raftstore"
+	kvsv1 "github.com/radryc/kvs/api/proto/kvs/v1"
+	kvsgrpc "github.com/radryc/kvs/pkg/grpcserver"
+	"github.com/radryc/kvs/pkg/raftstore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"

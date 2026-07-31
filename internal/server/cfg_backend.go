@@ -10,8 +10,8 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
-	"github.com/rydzu/ainfra/cfg"
-	"github.com/rydzu/ainfra/kvs/pkg/kvsapi"
+	"github.com/radryc/cfg"
+	"github.com/radryc/kvs/pkg/kvsapi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

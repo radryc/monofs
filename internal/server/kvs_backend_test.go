@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	pb "github.com/radryc/monofs/api/proto"
-	"github.com/rydzu/ainfra/kvs/pkg/localstore"
+	"github.com/radryc/kvs/pkg/localstore"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
