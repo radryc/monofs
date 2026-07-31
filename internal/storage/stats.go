@@ -24,14 +24,16 @@ func (s *AtomicStats) RecordSuccess(duration time.Duration, bytes int64) {
 	for {
 		old := s.ptr.Load()
 		newStats := &BackendStats{
-			Requests:     old.Requests + 1,
-			Errors:       old.Errors,
-			BytesFetched: old.BytesFetched + bytes,
-			CacheHits:    old.CacheHits,
-			CacheMisses:  old.CacheMisses,
-			CachedItems:  old.CachedItems,
-			CacheBytes:   old.CacheBytes,
-			AvgLatencyMs: (old.AvgLatencyMs*float64(old.Requests) + float64(latencyMs)) / float64(old.Requests+1),
+			Requests:       old.Requests + 1,
+			Errors:         old.Errors,
+			BytesFetched:   old.BytesFetched + bytes,
+			CacheHits:      old.CacheHits,
+			CacheMisses:    old.CacheMisses,
+			CachedItems:    old.CachedItems,
+			CacheBytes:     old.CacheBytes,
+			AvgLatencyMs:   (old.AvgLatencyMs*float64(old.Requests) + float64(latencyMs)) / float64(old.Requests+1),
+			CloudStores:    old.CloudStores,
+			CloudRetrieves: old.CloudRetrieves,
 		}
 		if s.ptr.CompareAndSwap(old, newStats) {
 			return
@@ -44,14 +46,16 @@ func (s *AtomicStats) RecordFetchHit() {
 	for {
 		old := s.ptr.Load()
 		newStats := &BackendStats{
-			Requests:     old.Requests + 1,
-			Errors:       old.Errors,
-			BytesFetched: old.BytesFetched,
-			CacheHits:    old.CacheHits + 1,
-			CacheMisses:  old.CacheMisses,
-			CachedItems:  old.CachedItems,
-			CacheBytes:   old.CacheBytes,
-			AvgLatencyMs: old.AvgLatencyMs,
+			Requests:       old.Requests + 1,
+			Errors:         old.Errors,
+			BytesFetched:   old.BytesFetched,
+			CacheHits:      old.CacheHits + 1,
+			CacheMisses:    old.CacheMisses,
+			CachedItems:    old.CachedItems,
+			CacheBytes:     old.CacheBytes,
+			AvgLatencyMs:   old.AvgLatencyMs,
+			CloudStores:    old.CloudStores,
+			CloudRetrieves: old.CloudRetrieves,
 		}
 		if s.ptr.CompareAndSwap(old, newStats) {
 			return
@@ -64,14 +68,16 @@ func (s *AtomicStats) RecordFetchMiss() {
 	for {
 		old := s.ptr.Load()
 		newStats := &BackendStats{
-			Requests:     old.Requests,
-			Errors:       old.Errors,
-			BytesFetched: old.BytesFetched,
-			CacheHits:    old.CacheHits,
-			CacheMisses:  old.CacheMisses + 1,
-			CachedItems:  old.CachedItems,
-			CacheBytes:   old.CacheBytes,
-			AvgLatencyMs: old.AvgLatencyMs,
+			Requests:       old.Requests,
+			Errors:         old.Errors,
+			BytesFetched:   old.BytesFetched,
+			CacheHits:      old.CacheHits,
+			CacheMisses:    old.CacheMisses + 1,
+			CachedItems:    old.CachedItems,
+			CacheBytes:     old.CacheBytes,
+			AvgLatencyMs:   old.AvgLatencyMs,
+			CloudStores:    old.CloudStores,
+			CloudRetrieves: old.CloudRetrieves,
 		}
 		if s.ptr.CompareAndSwap(old, newStats) {
 			return
@@ -84,14 +90,16 @@ func (s *AtomicStats) RecordError() {
 	for {
 		old := s.ptr.Load()
 		newStats := &BackendStats{
-			Requests:     old.Requests + 1,
-			Errors:       old.Errors + 1,
-			BytesFetched: old.BytesFetched,
-			CacheHits:    old.CacheHits,
-			CacheMisses:  old.CacheMisses,
-			CachedItems:  old.CachedItems,
-			CacheBytes:   old.CacheBytes,
-			AvgLatencyMs: old.AvgLatencyMs,
+			Requests:       old.Requests + 1,
+			Errors:         old.Errors + 1,
+			BytesFetched:   old.BytesFetched,
+			CacheHits:      old.CacheHits,
+			CacheMisses:    old.CacheMisses,
+			CachedItems:    old.CachedItems,
+			CacheBytes:     old.CacheBytes,
+			AvgLatencyMs:   old.AvgLatencyMs,
+			CloudStores:    old.CloudStores,
+			CloudRetrieves: old.CloudRetrieves,
 		}
 		if s.ptr.CompareAndSwap(old, newStats) {
 			return
@@ -104,14 +112,16 @@ func (s *AtomicStats) RecordNotFound() {
 	for {
 		old := s.ptr.Load()
 		newStats := &BackendStats{
-			Requests:     old.Requests + 1,
-			Errors:       old.Errors + 1,
-			BytesFetched: old.BytesFetched,
-			CacheHits:    old.CacheHits,
-			CacheMisses:  old.CacheMisses + 1,
-			CachedItems:  old.CachedItems,
-			CacheBytes:   old.CacheBytes,
-			AvgLatencyMs: old.AvgLatencyMs,
+			Requests:       old.Requests + 1,
+			Errors:         old.Errors + 1,
+			BytesFetched:   old.BytesFetched,
+			CacheHits:      old.CacheHits,
+			CacheMisses:    old.CacheMisses + 1,
+			CachedItems:    old.CachedItems,
+			CacheBytes:     old.CacheBytes,
+			AvgLatencyMs:   old.AvgLatencyMs,
+			CloudStores:    old.CloudStores,
+			CloudRetrieves: old.CloudRetrieves,
 		}
 		if s.ptr.CompareAndSwap(old, newStats) {
 			return

@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -46,6 +47,7 @@ import (
 	"github.com/radryc/monofs/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -80,6 +82,8 @@ type storageConfig struct {
 	GCSBucket          string `json:"gcs_bucket"`
 	GCSPrefix          string `json:"gcs_prefix"`
 	GCSCredentialsFile string `json:"gcs_credentials_file"` // empty = use ADC
+
+	CloudScannerIntervalSecs int64 `json:"cloud_scanner_interval_secs"` // >0 overrides default 3600s (1h)
 }
 
 // defaultConfig returns built-in defaults.
@@ -146,7 +150,9 @@ func main() {
 		cfg.EncryptionKey = v
 	}
 	if v := os.Getenv("MONOFS_FETCHER_PORT"); v != "" {
-		fmt.Sscanf(v, "%d", &cfg.Port)
+		if _, err := fmt.Sscanf(v, "%d", &cfg.Port); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: invalid MONOFS_FETCHER_PORT %q: %v\n", v, err)
+		}
 	}
 	if v := os.Getenv("MONOFS_FETCHER_CACHE_DIR"); v != "" {
 		cfg.CacheDir = v
@@ -177,6 +183,12 @@ func main() {
 	if v := os.Getenv("MONOFS_S3_USE_PATH_STYLE"); v != "" {
 		cfg.Storage.S3UsePathStyle = v == "true" || v == "1"
 	}
+	if v := os.Getenv("MONOFS_CLOUD_SCANNER_INTERVAL_SECS"); v != "" {
+		var secs int64
+		if _, err := fmt.Sscanf(v, "%d", &secs); err == nil {
+			cfg.Storage.CloudScannerIntervalSecs = secs
+		}
+	}
 
 	// Apply CLI flags (highest precedence)
 	if *port != 0 {
@@ -197,8 +209,13 @@ func main() {
 	if *prefetchWorkers != 0 {
 		cfg.PrefetchWorkers = *prefetchWorkers
 	}
+	encryptionKeySource := "config-file"
 	if *encryptionKeyHex != "" {
 		cfg.EncryptionKey = *encryptionKeyHex
+		encryptionKeySource = "cli-flag"
+	}
+	if os.Getenv("MONOFS_ENCRYPTION_KEY") != "" {
+		encryptionKeySource = "env-MONOFS_ENCRYPTION_KEY"
 	}
 	if *enableGit {
 		cfg.EnableGit = true
@@ -268,7 +285,10 @@ func main() {
 		"blob_storage", cfg.Storage.LocalPath,
 	)
 
-	diagServer := diagnostics.StartServer(logger, "monofs-fetcher", strings.TrimSpace(*diagnosticsAddr))
+	// Set up diagnostics server with custom key-guard routes so operators can
+	// see whether the encryption key has changed and confirm it explicitly.
+	diagMux := diagnostics.NewHandler()
+	diagServer := diagnostics.StartServerWithMux(logger, "monofs-fetcher", strings.TrimSpace(*diagnosticsAddr), diagMux)
 	defer diagnostics.ShutdownServer(logger, "monofs-fetcher", diagServer)
 
 	// Ensure cache directory exists
@@ -297,11 +317,12 @@ func main() {
 	// Initialize Blob backend (default, packager-based)
 	blobBackend := blob.NewBlobBackend()
 	if err := blobBackend.Initialize(ctx, fetcher.BackendConfig{
-		CacheDir:      cfg.Storage.LocalPath,
-		MaxCacheSize:  int64(cfg.MaxCacheGB) * 1024 * 1024 * 1024,
-		Concurrency:   10,
-		EncryptionKey: encryptionKey,
-		StorageType:   storage.StorageType(cfg.Storage.Type),
+		CacheDir:            cfg.Storage.LocalPath,
+		MaxCacheSize:        int64(cfg.MaxCacheGB) * 1024 * 1024 * 1024,
+		Concurrency:         10,
+		EncryptionKey:       encryptionKey,
+		EncryptionKeySource: encryptionKeySource,
+		StorageType:         storage.StorageType(cfg.Storage.Type),
 		Cloud: storage.CloudStorageConfig{
 			S3Region:           cfg.Storage.S3Region,
 			S3Bucket:           cfg.Storage.S3Bucket,
@@ -311,9 +332,10 @@ func main() {
 			S3SecretAccessKey:  cfg.Storage.S3SecretAccessKey,
 			S3SessionToken:     cfg.Storage.S3SessionToken,
 			S3UsePathStyle:     cfg.Storage.S3UsePathStyle,
-			GCSBucket:          cfg.Storage.GCSBucket,
-			GCSPrefix:          cfg.Storage.GCSPrefix,
-			GCSCredentialsFile: cfg.Storage.GCSCredentialsFile,
+			GCSBucket:                cfg.Storage.GCSBucket,
+			GCSPrefix:                cfg.Storage.GCSPrefix,
+			GCSCredentialsFile:       cfg.Storage.GCSCredentialsFile,
+			CloudScannerIntervalSecs: cfg.Storage.CloudScannerIntervalSecs,
 		},
 	}); err != nil {
 		logger.Error("failed to initialize blob backend", "error", err)
@@ -326,6 +348,56 @@ func main() {
 		"storage_path", cfg.Storage.LocalPath,
 		"archives", blobBackend.ArchiveCount(),
 	)
+
+	// Register encryption-key guard diagnostics endpoints.
+	diagMux.HandleFunc("/key-status", func(w http.ResponseWriter, r *http.Request) {
+		status := blobBackend.EncryptionKeyStatus()
+		w.Header().Set("Content-Type", "application/json")
+		if status.Pending {
+			w.WriteHeader(http.StatusLocked) // 423: resource locked until confirmed
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		_ = json.NewEncoder(w).Encode(status)
+	})
+	diagMux.HandleFunc("/confirm-key", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		status, err := blobBackend.ConfirmEncryptionKey()
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": status, "error": err.Error()})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": status})
+	})
+
+	// Expose objects stored in the configured backend (S3/GCS/local archives).
+	diagMux.HandleFunc("/storage-objects", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		objects, err := blobBackend.ListStorageObjects(ctx)
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"objects": objects,
+				"error":   err.Error(),
+				"healthy": false,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"objects": objects,
+			"error":   "",
+			"healthy": true,
+		})
+	})
 
 	// Optional Git backend
 	if cfg.EnableGit {
@@ -352,8 +424,16 @@ func main() {
 	// Create gRPC server
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.MaxRecvMsgSize(100*1024*1024), // 100MB max message
+		grpc.MaxRecvMsgSize(100*1024*1024),
 		grpc.MaxSendMsgSize(100*1024*1024),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second,
+			PermitWithoutStream: true,
+		}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    2 * time.Minute,
+			Timeout: 20 * time.Second,
+		}),
 	)
 	service.RegisterService(grpcServer)
 	reflection.Register(grpcServer) // For debugging

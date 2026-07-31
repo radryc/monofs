@@ -204,6 +204,10 @@ message FetcherStatsResponse {
 
     // Sync worker statistics for workspace refresh/publish operations.
     SyncWorkerStats sync_worker = 14;
+
+    // Storage backend health.
+    bool storage_healthy = 15;
+    string storage_error = 16;
 }
 
 message SourceStats {
@@ -213,6 +217,10 @@ message SourceStats {
     double avg_latency_ms = 4;
     int64 cached_items = 5;
     int64 cache_bytes = 6;
+    // Number of objects (archives) stored in the cloud object store.
+    int64 objects_stored = 7;
+    // Number of objects (archives) retrieved from the cloud object store.
+    int64 objects_retrieved = 8;
 }
 
 enum RepoSyncStatus {

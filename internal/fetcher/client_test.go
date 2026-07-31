@@ -551,14 +551,22 @@ func TestClient_EmptyFetchers(t *testing.T) {
 func TestClient_NoHealthyFetchers(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	// Try to connect to non-existent servers
 	config := DefaultClientConfig()
-	config.FetcherAddresses = []string{"127.0.0.1:1"} // Won't work
+	config.FetcherAddresses = []string{"127.0.0.1:1"}
 	config.ConnectionTimeout = 100 * time.Millisecond
 
-	_, err := NewClient(config, logger)
-	if err == nil {
-		t.Error("expected error connecting to invalid address")
+	client, err := NewClient(config, logger)
+	if err != nil {
+		t.Fatalf("NewClient should not fail with grpc.NewClient (non-blocking dial): %v", err)
+	}
+	defer client.Close()
+
+	stats := client.GetStats()
+	if stats.HealthyFetchers != 0 {
+		t.Errorf("expected 0 healthy fetchers for unreachable address, got %d", stats.HealthyFetchers)
+	}
+	if stats.TotalFetchers != 1 {
+		t.Errorf("expected 1 total fetcher, got %d", stats.TotalFetchers)
 	}
 }
 

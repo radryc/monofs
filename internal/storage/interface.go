@@ -96,6 +96,11 @@ type CloudStorageConfig struct {
 	// GCSCredentialsJSON is inline service account JSON key content.
 	// Takes precedence over GCSCredentialsFile.
 	GCSCredentialsJSON []byte
+
+	// CloudScannerIntervalSecs is how often the cloud backup scanner
+	// verifies that every local archive has a corresponding cloud object.
+	// The first scan runs after this interval from startup. Default: 3600 (1h).
+	CloudScannerIntervalSecs int64
 }
 
 // BackendConfig holds common configuration for all fetch backends.
@@ -117,6 +122,10 @@ type BackendConfig struct {
 	// EncryptionKey is the 32-byte ChaCha20-Poly1305 key for packager archives.
 	// Required for BlobBackend, ignored by other backends.
 	EncryptionKey []byte
+
+	// EncryptionKeySource is a human-readable description of where the key came
+	// from (e.g. "secret/fetcher-encryption-key"). Used by the key-guard UI.
+	EncryptionKeySource string
 
 	// StorageType selects where packager archives are persisted.
 	// "local" (default), "s3", or "gcs".
@@ -178,6 +187,35 @@ type BackendStats struct {
 	CachedItems  int64
 	CacheBytes   int64
 	AvgLatencyMs float64
+	// CloudStores is the number of objects (archives) successfully uploaded
+	// to the cloud object store (S3/GCS).
+	CloudStores int64
+	// CloudRetrieves is the number of objects (archives) downloaded
+	// from the cloud object store due to a local cache miss.
+	CloudRetrieves int64
+}
+
+// StorageObject describes a single object stored in a backend (S3, GCS, local).
+type StorageObject struct {
+	// Key is the object key / path.
+	Key string `json:"key"`
+	// Size is the object size in bytes.
+	Size int64 `json:"size"`
+	// LastModified is the Unix timestamp (seconds) of the last modification.
+	LastModified int64 `json:"last_modified"`
+	// StorageType is the backend storage type (local, s3, gcs).
+	StorageType string `json:"storage_type"`
+	// Bucket is the bucket name for S3/GCS; empty for local storage.
+	Bucket string `json:"bucket,omitempty"`
+}
+
+// ObjectLister is implemented by fetch backends that can enumerate the
+// objects they have stored remotely (cloud archives, local archives, etc.).
+type ObjectLister interface {
+	// ListStorageObjects returns the objects managed by this backend.
+	// Implementations should cap the result and return errors only when the
+	// underlying storage is unreachable; partial results are acceptable.
+	ListStorageObjects(ctx context.Context) ([]StorageObject, error)
 }
 
 // FileMetadata represents file metadata from any source

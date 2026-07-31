@@ -730,9 +730,12 @@ type FetcherStatsResponse struct {
 	BytesFetched int64 `protobuf:"varint,12,opt,name=bytes_fetched,json=bytesFetched,proto3" json:"bytes_fetched,omitempty"`
 	BytesServed  int64 `protobuf:"varint,13,opt,name=bytes_served,json=bytesServed,proto3" json:"bytes_served,omitempty"`
 	// Sync worker statistics for workspace refresh/publish operations.
-	SyncWorker    *SyncWorkerStats `protobuf:"bytes,14,opt,name=sync_worker,json=syncWorker,proto3" json:"sync_worker,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SyncWorker *SyncWorkerStats `protobuf:"bytes,14,opt,name=sync_worker,json=syncWorker,proto3" json:"sync_worker,omitempty"`
+	// Storage backend health.
+	StorageHealthy bool   `protobuf:"varint,15,opt,name=storage_healthy,json=storageHealthy,proto3" json:"storage_healthy,omitempty"`
+	StorageError   string `protobuf:"bytes,16,opt,name=storage_error,json=storageError,proto3" json:"storage_error,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *FetcherStatsResponse) Reset() {
@@ -863,16 +866,34 @@ func (x *FetcherStatsResponse) GetSyncWorker() *SyncWorkerStats {
 	return nil
 }
 
+func (x *FetcherStatsResponse) GetStorageHealthy() bool {
+	if x != nil {
+		return x.StorageHealthy
+	}
+	return false
+}
+
+func (x *FetcherStatsResponse) GetStorageError() string {
+	if x != nil {
+		return x.StorageError
+	}
+	return ""
+}
+
 type SourceStats struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Requests      int64                  `protobuf:"varint,1,opt,name=requests,proto3" json:"requests,omitempty"`
-	Errors        int64                  `protobuf:"varint,2,opt,name=errors,proto3" json:"errors,omitempty"`
-	BytesFetched  int64                  `protobuf:"varint,3,opt,name=bytes_fetched,json=bytesFetched,proto3" json:"bytes_fetched,omitempty"`
-	AvgLatencyMs  float64                `protobuf:"fixed64,4,opt,name=avg_latency_ms,json=avgLatencyMs,proto3" json:"avg_latency_ms,omitempty"`
-	CachedItems   int64                  `protobuf:"varint,5,opt,name=cached_items,json=cachedItems,proto3" json:"cached_items,omitempty"`
-	CacheBytes    int64                  `protobuf:"varint,6,opt,name=cache_bytes,json=cacheBytes,proto3" json:"cache_bytes,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Requests     int64                  `protobuf:"varint,1,opt,name=requests,proto3" json:"requests,omitempty"`
+	Errors       int64                  `protobuf:"varint,2,opt,name=errors,proto3" json:"errors,omitempty"`
+	BytesFetched int64                  `protobuf:"varint,3,opt,name=bytes_fetched,json=bytesFetched,proto3" json:"bytes_fetched,omitempty"`
+	AvgLatencyMs float64                `protobuf:"fixed64,4,opt,name=avg_latency_ms,json=avgLatencyMs,proto3" json:"avg_latency_ms,omitempty"`
+	CachedItems  int64                  `protobuf:"varint,5,opt,name=cached_items,json=cachedItems,proto3" json:"cached_items,omitempty"`
+	CacheBytes   int64                  `protobuf:"varint,6,opt,name=cache_bytes,json=cacheBytes,proto3" json:"cache_bytes,omitempty"`
+	// Number of objects (archives) stored in the cloud object store.
+	ObjectsStored int64 `protobuf:"varint,7,opt,name=objects_stored,json=objectsStored,proto3" json:"objects_stored,omitempty"`
+	// Number of objects (archives) retrieved from the cloud object store.
+	ObjectsRetrieved int64 `protobuf:"varint,8,opt,name=objects_retrieved,json=objectsRetrieved,proto3" json:"objects_retrieved,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *SourceStats) Reset() {
@@ -943,6 +964,20 @@ func (x *SourceStats) GetCachedItems() int64 {
 func (x *SourceStats) GetCacheBytes() int64 {
 	if x != nil {
 		return x.CacheBytes
+	}
+	return 0
+}
+
+func (x *SourceStats) GetObjectsStored() int64 {
+	if x != nil {
+		return x.ObjectsStored
+	}
+	return 0
+}
+
+func (x *SourceStats) GetObjectsRetrieved() int64 {
+	if x != nil {
+		return x.ObjectsRetrieved
 	}
 	return 0
 }
@@ -2730,7 +2765,7 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"w\n" +
 	"\x13FetcherStatsRequest\x120\n" +
 	"\x14include_source_stats\x18\x01 \x01(\bR\x12includeSourceStats\x12.\n" +
-	"\x13include_cache_stats\x18\x02 \x01(\bR\x11includeCacheStats\"\xb7\x05\n" +
+	"\x13include_cache_stats\x18\x02 \x01(\bR\x11includeCacheStats\"\x85\x06\n" +
 	"\x14FetcherStatsResponse\x12\x1d\n" +
 	"\n" +
 	"fetcher_id\x18\x01 \x01(\tR\tfetcherId\x12%\n" +
@@ -2749,10 +2784,12 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\rbytes_fetched\x18\f \x01(\x03R\fbytesFetched\x12!\n" +
 	"\fbytes_served\x18\r \x01(\x03R\vbytesServed\x128\n" +
 	"\vsync_worker\x18\x0e \x01(\v2\x17.monofs.SyncWorkerStatsR\n" +
-	"syncWorker\x1aS\n" +
+	"syncWorker\x12'\n" +
+	"\x0fstorage_healthy\x18\x0f \x01(\bR\x0estorageHealthy\x12#\n" +
+	"\rstorage_error\x18\x10 \x01(\tR\fstorageError\x1aS\n" +
 	"\x10SourceStatsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
-	"\x05value\x18\x02 \x01(\v2\x13.monofs.SourceStatsR\x05value:\x028\x01\"\xd0\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x13.monofs.SourceStatsR\x05value:\x028\x01\"\xa4\x02\n" +
 	"\vSourceStats\x12\x1a\n" +
 	"\brequests\x18\x01 \x01(\x03R\brequests\x12\x16\n" +
 	"\x06errors\x18\x02 \x01(\x03R\x06errors\x12#\n" +
@@ -2760,7 +2797,9 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\x0eavg_latency_ms\x18\x04 \x01(\x01R\favgLatencyMs\x12!\n" +
 	"\fcached_items\x18\x05 \x01(\x03R\vcachedItems\x12\x1f\n" +
 	"\vcache_bytes\x18\x06 \x01(\x03R\n" +
-	"cacheBytes\"\xd8\x01\n" +
+	"cacheBytes\x12%\n" +
+	"\x0eobjects_stored\x18\a \x01(\x03R\robjectsStored\x12+\n" +
+	"\x11objects_retrieved\x18\b \x01(\x03R\x10objectsRetrieved\"\xd8\x01\n" +
 	"\x1cStageWorkspaceBundleResponse\x12\x1b\n" +
 	"\tbundle_id\x18\x01 \x01(\tR\bbundleId\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12%\n" +
