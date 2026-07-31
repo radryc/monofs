@@ -1,0 +1,81 @@
+name: release
+on:
+  tags: ["v*"]
+jobs:
+  build:
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - run: make build
+
+  test:
+    needs: [build]
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - run: make test-all
+
+  containerize:
+    needs: [test]
+    strategy:
+      matrix:
+        service: [server, router, fetcher, search, registry, client, session, pipeline-worker, guardianctl]
+      max-parallel: 3
+    runs-on: docker
+    timeout-minutes: 30
+    steps:
+      - name: Build and tag release image
+        run: |
+          VERSION=$PIPELINE_TAG
+          make docker-build-${{ matrix.service }} VERSION=$VERSION
+          docker tag monofs-${{ matrix.service }}:$VERSION \
+            registry.strata.local:5000/monofs-${{ matrix.service }}:$VERSION
+          docker tag monofs-${{ matrix.service }}:$VERSION \
+            registry.strata.local:5000/monofs-${{ matrix.service }}:latest
+
+  push:
+    needs: [containerize]
+    strategy:
+      matrix:
+        service: [server, router, fetcher, search, registry, client, session, pipeline-worker, guardianctl]
+    runs-on: docker
+    timeout-minutes: 15
+    steps:
+      - name: Push release images
+        run: |
+          VERSION=$PIPELINE_TAG
+          docker push registry.strata.local:5000/monofs-${{ matrix.service }}:$VERSION
+          docker push registry.strata.local:5000/monofs-${{ matrix.service }}:latest
+
+  deploy-staging:
+    needs: [push]
+    runs-on: deployer
+    timeout-minutes: 15
+    steps:
+      - name: Deploy to staging
+        run: |
+          guardianctl deploy monofs --set-version=$PIPELINE_TAG
+          guardianctl rollout status monofs --timeout=10m
+
+      - name: Smoke tests
+        run: make test-smoke
+
+  deploy-production:
+    needs: [deploy-staging]
+    runs-on: deployer
+    timeout-minutes: 20
+    steps:
+      - name: Deploy to production
+        run: |
+          guardianctl deploy monofs \
+            --set-version=$PIPELINE_TAG \
+            --cluster=$PRODUCTION_CLUSTER
+          guardianctl rollout status monofs \
+            --timeout=15m \
+            --cluster=$PRODUCTION_CLUSTER
+
+      - name: Record release
+        run: |
+          curl -X POST https://api.github.com/repos/$GITHUB_REPOSITORY/releases \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -d "{\"tag_name\":\"$PIPELINE_TAG\",\"name\":\"Release $PIPELINE_TAG\"}"

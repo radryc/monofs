@@ -1,0 +1,44 @@
+name: pr-checks
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore: [docs/**, "*.md", .monofs/**]
+jobs:
+  detect:
+    runs-on: builder
+    steps:
+      - uses: monofs/affected@v1
+        id: affected
+        with:
+          packages: monofs-packages.yaml
+
+  lint:
+    needs: [detect]
+    if: "affected != ''"
+    runs-on: builder
+    timeout-minutes: 5
+    steps:
+      - run: make fmt-check
+      - run: make vet
+
+  test:
+    needs: [detect]
+    if: "affected != ''"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - run: make test-unit
+
+  build:
+    needs: [detect]
+    if: "affected != ''"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - run: make build-${{ matrix.package }}

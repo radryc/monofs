@@ -1,0 +1,41 @@
+name: image-build
+on:
+  push:
+    branches: [main]
+jobs:
+  detect:
+    runs-on: builder
+    steps:
+      - uses: monofs/affected@v1
+        id: affected
+        with:
+          packages: monofs-packages.yaml
+
+  build:
+    needs: [detect]
+    if: "affected != ''"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+      max-parallel: 4
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - run: make build-${{ matrix.package }}
+
+  containerize:
+    needs: [build]
+    if: "affected != ''"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+    runs-on: docker
+    timeout-minutes: 15
+    steps:
+      - run: |
+          VERSION_TAG=$(git rev-parse --short HEAD)
+          docker build \
+            --target ${{ matrix.package }} \
+            -t registry.strata.local:5000/${{ matrix.package }}:$VERSION_TAG \
+            -t registry.strata.local:5000/${{ matrix.package }}:latest \
+            -f Dockerfile .

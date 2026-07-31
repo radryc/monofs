@@ -1,0 +1,88 @@
+name: nightly
+on:
+  workflow_dispatch: {}
+jobs:
+  detect:
+    runs-on: builder
+    steps:
+      - uses: monofs/affected@v1
+        id: affected
+        with:
+          packages: monofs-packages.yaml
+
+  full-build:
+    needs: [detect]
+    if: "affected != ''"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+      max-parallel: 4
+    runs-on: builder
+    timeout-minutes: 15
+    steps:
+      - run: make build-${{ matrix.package }}
+
+  full-test:
+    needs: [full-build]
+    runs-on: builder
+    timeout-minutes: 30
+    steps:
+      - run: make test-all
+
+  benchmark:
+    needs: [full-build]
+    runs-on: builder
+    timeout-minutes: 20
+    steps:
+      - run: make bench
+
+  security:
+    needs: [full-build]
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - name: Vulnerability scan
+        run: make audit
+
+      - name: SAST analysis
+        run: make sast
+
+  image-build:
+    needs: [full-test, benchmark, security]
+    if: "push_to_branch == 'main'"
+    strategy:
+      matrix:
+        service: [server, router, fetcher, search]
+    runs-on: docker
+    timeout-minutes: 30
+    steps:
+      - run: make docker-build-${{ matrix.service }} VERSION=nightly
+
+  image-push:
+    needs: [image-build]
+    strategy:
+      matrix:
+        service: [server, router, fetcher, search]
+    runs-on: docker
+    timeout-minutes: 10
+    steps:
+      - name: Push nightly images
+        run: |
+          DATE_TAG=$(date +%Y%m%d)
+          docker tag monofs-${{ matrix.service }}:nightly \
+            registry.strata.local:5000/monofs-${{ matrix.service }}:nightly-$DATE_TAG
+          docker push registry.strata.local:5000/monofs-${{ matrix.service }}:nightly-$DATE_TAG
+
+  report:
+    needs: [image-push]
+    if: "always()"
+    runs-on: builder
+    steps:
+      - name: Generate nightly report
+        run: |
+          echo "=== Nightly Pipeline Report ==="
+          echo "Date: $(date)"
+          echo "Status: $PIPELINE_STATE"
+          echo "Commit: $PIPELINE_COMMIT"
+          echo "Duration: $PIPELINE_DURATION"
+          echo "Affected: $PIPELINE_AFFECTED"

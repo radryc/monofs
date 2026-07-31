@@ -1,0 +1,57 @@
+name: monorepo-matrix
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  detect:
+    runs-on: builder
+    steps:
+      - uses: monofs/affected@v1
+        id: affected
+        with:
+          packages: monofs-packages.yaml
+
+  build:
+    needs: [detect]
+    if: "affected != ''"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+        os: [linux]
+        arch: [amd64, arm64]
+      max-parallel: 6
+    runs-on: builder
+    timeout-minutes: 15
+    steps:
+      - name: Cross-platform build
+        run: |
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} \
+            make build-${{ matrix.package }}
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          tar -czf dist/${{ matrix.package }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz \
+            bin/${{ matrix.package }}
+
+  test:
+    needs: [build]
+    if: "affected != ''"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - run: make test-unit
+
+  integration:
+    needs: [test]
+    if: "affected != '' && push_to_branch == 'main'"
+    runs-on: builder
+    timeout-minutes: 20
+    steps:
+      - name: Integration tests
+        run: make test-e2e

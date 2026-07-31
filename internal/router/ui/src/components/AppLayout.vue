@@ -5,7 +5,8 @@ import { useAppStore } from '../stores/app'
 import ToastContainer from './ToastContainer.vue'
 import {
   LayoutDashboard, Server, Users, Zap, GitBranch,
-  BookOpen, Upload, Search, Layers, Download, Package, Container, SlidersHorizontal
+  BookOpen, Upload, Search, Layers, Download, Package, Container, SlidersHorizontal,
+  Cpu, Play
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -22,6 +23,8 @@ onMounted(async () => {
 const navItems = [
   { to: '/',             icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/cicd',         icon: SlidersHorizontal, label: 'CI/CD' },
+  { to: '/pipelines',    icon: Play,            label: 'Pipelines' },
+  { to: '/bazel',        icon: Cpu,             label: 'Bazel' },
   { to: '/cluster',      icon: Server,          label: 'MetaStores' },
   { to: '/clients',      icon: Users,           label: 'Clients' },
   { to: '/performance',  icon: Zap,             label: 'Performance' },

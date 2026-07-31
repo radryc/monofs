@@ -1,0 +1,54 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+jobs:
+  deploy-storage:
+    runs-on: deployer
+    timeout-minutes: 10
+    steps:
+      - name: Deploy MonoFS storage nodes
+        run: |
+          VERSION_TAG=$(git rev-parse --short HEAD)
+          guardianctl deploy monofs --set-version=$VERSION_TAG
+
+      - name: Wait for rollout
+        run: guardianctl rollout status monofs --timeout=5m
+
+  deploy-guardian:
+    needs: [deploy-storage]
+    runs-on: deployer
+    timeout-minutes: 5
+    steps:
+      - name: Deploy Guardian control plane
+        run: |
+          VERSION_TAG=$(git rev-parse --short HEAD)
+          guardianctl deploy guardian-configs --set-version=$VERSION_TAG
+
+      - name: Wait for rollout
+        run: guardianctl rollout status guardian-configs --timeout=3m
+
+  deploy-workers:
+    needs: [deploy-guardian]
+    runs-on: deployer
+    timeout-minutes: 5
+    steps:
+      - name: Deploy pipeline workers
+        run: |
+          VERSION_TAG=$(git rev-parse --short HEAD)
+          guardianctl deploy pipeline-workers --set-version=$VERSION_TAG
+
+      - name: Wait for rollout
+        run: guardianctl rollout status pipeline-workers --timeout=2m
+
+  deploy-services:
+    needs: [deploy-guardian]
+    runs-on: deployer
+    timeout-minutes: 5
+    steps:
+      - name: Deploy observability
+        run: guardianctl deploy monitoring opentelemetry doctor
+
+      - name: Deploy agents
+        run: guardianctl deploy agent

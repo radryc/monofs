@@ -42,11 +42,11 @@ func TestSetFetcherClientRetriesUntilFetcherBecomesAvailable(t *testing.T) {
 		_ = router.Close()
 	}()
 
-	if err := router.SetFetcherClient([]string{addr}); err == nil {
-		t.Fatalf("expected initial fetcher connection to fail")
+	if err := router.SetFetcherClient([]string{addr}); err != nil {
+		t.Fatalf("lazy gRPC connection should always succeed: %v", err)
 	}
-	if router.getFetcherClient() != nil {
-		t.Fatalf("fetcher client should not be configured yet")
+	if router.getFetcherClient() == nil {
+		t.Fatalf("fetcher client should be configured even when fetcher is unreachable (lazy connect)")
 	}
 
 	lis, err := net.Listen("tcp", addr)

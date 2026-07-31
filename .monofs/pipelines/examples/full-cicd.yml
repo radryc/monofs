@@ -1,0 +1,114 @@
+name: full-cicd
+on:
+  push:
+    branches: [main, "release/*"]
+  pull_request:
+    branches: [main]
+concurrency:
+  group: full-cicd-${{ branch }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: builder
+    steps:
+      - uses: monofs/affected@v1
+        id: affected
+        with:
+          packages: monofs-packages.yaml
+
+  build:
+    needs: [detect]
+    if: "affected != ''"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+      max-parallel: 4
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - name: Build binary
+        run: make build-${{ matrix.package }}
+
+  test:
+    needs: [build]
+    if: "affected != ''"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+      max-parallel: 4
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - name: Unit tests
+        run: make test-unit
+
+  lint:
+    needs: [detect]
+    runs-on: builder
+    timeout-minutes: 5
+    steps:
+      - run: make vet
+      - run: make fmt-check
+
+  containerize:
+    needs: [test, lint]
+    if: "affected != '' && push_to_branch == 'main'"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+      max-parallel: 3
+    runs-on: docker
+    timeout-minutes: 30
+    steps:
+      - name: Build Docker image
+        run: |
+          VERSION_TAG=$(git rev-parse --short HEAD)
+          docker build \
+            --target ${{ matrix.package }} \
+            -t registry.strata.local:5000/monofs-${{ matrix.package }}:$VERSION_TAG \
+            -t registry.strata.local:5000/monofs-${{ matrix.package }}:latest \
+            -f Dockerfile .
+
+  push:
+    needs: [containerize]
+    if: "affected != '' && push_to_branch == 'main'"
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+    runs-on: docker
+    timeout-minutes: 10
+    steps:
+      - name: Push to registry
+        run: |
+          VERSION_TAG=$(git rev-parse --short HEAD)
+          docker push registry.strata.local:5000/monofs-${{ matrix.package }}:$VERSION_TAG
+          docker push registry.strata.local:5000/monofs-${{ matrix.package }}:latest
+
+  deploy:
+    needs: [push]
+    if: "push_to_branch == 'main'"
+    runs-on: deployer
+    timeout-minutes: 15
+    steps:
+      - name: Deploy updated services
+        run: |
+          VERSION_TAG=$(git rev-parse --short HEAD)
+          guardianctl deploy monofs --set-version=$VERSION_TAG
+          guardianctl rollout status monofs --timeout=10m
+
+      - name: Deploy pipeline workers
+        run: |
+          VERSION_TAG=$(git rev-parse --short HEAD)
+          guardianctl deploy pipeline-workers --set-version=$VERSION_TAG
+
+  notify:
+    needs: [deploy]
+    if: "always()"
+    runs-on: builder
+    steps:
+      - name: Report status to Git host
+        run: |
+          echo "Pipeline $PIPELINE_NAME #$PIPELINE_RUN_ID: $PIPELINE_STATE"
+          echo "Branch: $PIPELINE_BRANCH | Commit: $PIPELINE_COMMIT"
+          echo "Affected packages: $PIPELINE_AFFECTED"

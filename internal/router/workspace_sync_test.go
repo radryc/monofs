@@ -159,6 +159,10 @@ func (s *workspaceSyncTestFetcherServer) DiscardWorkspaceBundle(ctx context.Cont
 	return &pb.DiscardWorkspaceBundleResponse{Success: true, Message: "discarded"}, nil
 }
 
+func (s *workspaceSyncTestFetcherServer) GetStats(ctx context.Context, req *pb.FetcherStatsRequest) (*pb.FetcherStatsResponse, error) {
+	return &pb.FetcherStatsResponse{}, nil
+}
+
 func startWorkspaceSyncTestFetcher(t *testing.T, responses []*pb.RepoSyncProgress, publishResponses []*pb.RepoSyncProgress, commitPushResponses []*pb.RepoSyncProgress) (string, *workspaceSyncTestFetcherServer, func()) {
 	t.Helper()
 
@@ -458,10 +462,19 @@ func TestPushWorkspaceCommitsUploadsBundleAndStoresSourcePushJob(t *testing.T) {
 	fetcherAddr, fetcherServer, cleanupFetcher := startWorkspaceSyncTestFetcher(t, nil, nil, commitPushResponses)
 	defer cleanupFetcher()
 
+	ledgerClient, _, cleanupLedger := startWorkspaceSyncLedgerNode(t)
+	defer cleanupLedger()
+
 	router := NewRouter(DefaultRouterConfig(), slog.Default())
 	defer func() { _ = router.Close() }()
 	if err := router.SetFetcherClient([]string{fetcherAddr}); err != nil {
 		t.Fatalf("set fetcher client: %v", err)
+	}
+
+	router.nodes["ledger-node"] = &nodeState{
+		info:   &pb.NodeInfo{NodeId: "ledger-node", Address: "127.0.0.1", Weight: 100, Healthy: true},
+		status: NodeActive,
+		client: ledgerClient,
 	}
 
 	client, cleanupRouter := startWorkspaceSyncTestRouter(t, router)
