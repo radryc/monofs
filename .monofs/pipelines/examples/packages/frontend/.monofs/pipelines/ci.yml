@@ -1,0 +1,30 @@
+name: frontend-ci
+source_dir: packages/frontend
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  install:
+    runs-on: builder
+    steps:
+      - run: npm ci
+
+  lint:
+    needs: [install]
+    runs-on: builder
+    steps:
+      - run: npm run lint
+
+  test:
+    needs: [install]
+    runs-on: builder
+    steps:
+      - run: npm run test
+
+  build:
+    needs: [lint, test]
+    runs-on: builder
+    steps:
+      - run: npm run build

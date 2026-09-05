@@ -1,0 +1,334 @@
+package router
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	pb "github.com/radryc/monofs/api/proto"
+)
+
+func TestBuildStatusDataIncludesKVSStatus(t *testing.T) {
+	r := NewRouter(DefaultRouterConfig(), nil)
+	r.config.WorkspaceStateDir = "/var/lib/monofs/workspace"
+	r.config.PolicyGateEnabled = true
+	r.config.AutoPushEnabled = true
+	r.nodes["node-a"] = &nodeState{
+		info:   &pb.NodeInfo{NodeId: "node-a", Address: "10.0.0.1:9000", Healthy: true, Weight: 100},
+		status: NodeActive,
+		kvsStatus: &pb.KVSNodeStatus{
+			Enabled:   true,
+			Healthy:   true,
+			Mode:      "raft",
+			Role:      "leader",
+			LeaderId:  "node-a",
+			PeerCount: 3,
+			KeyCount:  42,
+		},
+	}
+	r.nodes["node-b"] = &nodeState{
+		info:   &pb.NodeInfo{NodeId: "node-b", Address: "10.0.0.2:9000", Healthy: true, Weight: 100},
+		status: NodeActive,
+	}
+
+	data := r.buildStatusData()
+	if len(data.Nodes) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(data.Nodes))
+	}
+
+	nodeA := statusNodeByID(t, data.Nodes, "node-a")
+	kvsA, ok := nodeA["kvs"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected kvs status map for node-a, got %#v", nodeA["kvs"])
+	}
+	if got := kvsA["enabled"]; got != true {
+		t.Fatalf("expected kvs enabled for node-a, got %#v", got)
+	}
+	if got := kvsA["mode"]; got != "raft" {
+		t.Fatalf("expected raft kvs mode for node-a, got %#v", got)
+	}
+	if got := kvsA["role"]; got != "leader" {
+		t.Fatalf("expected leader kvs role for node-a, got %#v", got)
+	}
+	if got := kvsA["leader_id"]; got != "node-a" {
+		t.Fatalf("expected leader_id node-a, got %#v", got)
+	}
+	if got := kvsA["peer_count"]; got != int32(3) {
+		t.Fatalf("expected kvs peer count 3, got %#v", got)
+	}
+	if got := kvsA["key_count"]; got != int64(42) {
+		t.Fatalf("expected kvs key count 42, got %#v", got)
+	}
+
+	nodeB := statusNodeByID(t, data.Nodes, "node-b")
+	kvsB, ok := nodeB["kvs"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected kvs status map for node-b, got %#v", nodeB["kvs"])
+	}
+	if got := kvsB["enabled"]; got != false {
+		t.Fatalf("expected kvs disabled for node-b, got %#v", got)
+	}
+	if got := kvsB["mode"]; got != "disabled" {
+		t.Fatalf("expected disabled kvs mode for node-b, got %#v", got)
+	}
+
+	if len(data.Features) == 0 {
+		t.Fatalf("expected status features, got %#v", data.Features)
+	}
+
+	if data.Metrics == nil {
+		t.Fatal("expected status metrics map, got nil")
+	}
+	if got := data.Metrics["nodes_total"]; got != 2 {
+		t.Fatalf("expected nodes_total=2, got %v", got)
+	}
+	if got := data.Metrics["nodes_healthy"]; got != 2 {
+		t.Fatalf("expected nodes_healthy=2, got %v", got)
+	}
+	if got := data.Metrics["workspace_wal_enabled"]; got != 1 {
+		t.Fatalf("expected workspace_wal_enabled=1, got %v", got)
+	}
+	if got := data.Metrics["policy_gate_enabled"]; got != 1 {
+		t.Fatalf("expected policy_gate_enabled=1, got %v", got)
+	}
+	if got := data.Metrics["auto_push_enabled"]; got != 1 {
+		t.Fatalf("expected auto_push_enabled=1, got %v", got)
+	}
+}
+
+func statusNodeByID(t *testing.T, nodes []map[string]interface{}, nodeID string) map[string]interface{} {
+	t.Helper()
+	for _, node := range nodes {
+		if node["id"] == nodeID {
+			return node
+		}
+	}
+	t.Fatalf("node %q not found in status payload", nodeID)
+	return nil
+}
+
+func TestDedupeGuardianClientsPrefersFreshestEntry(t *testing.T) {
+	input := []guardianClientJSON{
+		{
+			ClientID:      "guardian-control-plane-123",
+			BaseURL:       "http://127.0.0.1:8090",
+			LastHeartbeat: 100,
+			State:         "stale",
+			Router:        "router-a",
+		},
+		{
+			ClientID:      "guardian-pusher-k8s-456",
+			LastHeartbeat: 150,
+			State:         "connected",
+			Router:        "router-a",
+		},
+		{
+			ClientID:      "guardian-control-plane-123",
+			BaseURL:       "http://127.0.0.1:8090",
+			LastHeartbeat: 200,
+			State:         "connected",
+			Router:        "router-b",
+		},
+	}
+
+	got := dedupeGuardianClients(input)
+	if len(got) != 2 {
+		t.Fatalf("dedupeGuardianClients() len = %d, want 2", len(got))
+	}
+
+	if got[0].ClientID != "guardian-control-plane-123" {
+		t.Fatalf("first client ID = %q, want guardian-control-plane-123", got[0].ClientID)
+	}
+	if got[0].State != "connected" {
+		t.Fatalf("guardian-control-plane state = %q, want connected", got[0].State)
+	}
+	if got[0].LastHeartbeat != 200 {
+		t.Fatalf("guardian-control-plane last heartbeat = %d, want 200", got[0].LastHeartbeat)
+	}
+	if got[0].Router != "router-b" {
+		t.Fatalf("guardian-control-plane router = %q, want router-b", got[0].Router)
+	}
+
+	if got[1].ClientID != "guardian-pusher-k8s-456" {
+		t.Fatalf("second client ID = %q, want guardian-pusher-k8s-456", got[1].ClientID)
+	}
+}
+
+func TestNormalizePprofProfiles(t *testing.T) {
+	profiles := normalizePprofProfiles([]string{"CPU", "heap", "goroutine", "invalid", "heap"})
+	if len(profiles) != 3 {
+		t.Fatalf("expected 3 normalized profiles, got %d", len(profiles))
+	}
+	if profiles[0] != "cpu" || profiles[1] != "heap" || profiles[2] != "goroutine" {
+		t.Fatalf("unexpected normalized profiles: %#v", profiles)
+	}
+}
+
+func TestAddressWithOffset(t *testing.T) {
+	addr, err := addressWithOffset("node-a:9000", 100)
+	if err != nil {
+		t.Fatalf("addressWithOffset returned error: %v", err)
+	}
+	if addr != "node-a:9100" {
+		t.Fatalf("addressWithOffset = %q, want %q", addr, "node-a:9100")
+	}
+}
+
+func TestRouterBaseURLFromRequest(t *testing.T) {
+	req := httptest.NewRequest("GET", "http://localhost:8080/api/pprof/collect", nil)
+	req.Header.Set("X-Forwarded-Host", "example.local:8080")
+	req.Header.Set("X-Forwarded-Proto", "https")
+
+	baseURL := routerBaseURLFromRequest(req)
+	if baseURL != "https://example.local:8080" {
+		t.Fatalf("routerBaseURLFromRequest = %q, want %q", baseURL, "https://example.local:8080")
+	}
+}
+
+func TestCollectPprofTargetsUsesExplicitDiagnosticsAddresses(t *testing.T) {
+	config := DefaultRouterConfig()
+	config.RouterName = "router-a"
+	config.SearchDiagnostics = "search-index:9101"
+	config.FetcherDiagnostics = []string{"fetcher-a:9201", "http://fetcher-b:9201"}
+	config.ServerDiagnostics = map[string]string{
+		"node-a": "node-a:9150",
+		"node-b": "http://node-b:9150",
+	}
+
+	r := NewRouter(config, nil)
+	r.RegisterNodeStatic("node-a", "node-a:9000", 100)
+	r.RegisterNodeStatic("node-b", "node-b:9000", 100)
+
+	req := httptest.NewRequest(http.MethodPost, "http://router-a:8080/api/pprof/collect", nil)
+	targets := r.collectPprofTargets(req)
+
+	if !hasTarget(targets, "search", "search-index:9101", "http://search-index:9101") {
+		t.Fatalf("expected explicit search diagnostics target, got %#v", targets)
+	}
+	if !hasTarget(targets, "fetcher", "fetcher-a:9201", "http://fetcher-a:9201") {
+		t.Fatalf("expected explicit fetcher target fetcher-a:9201, got %#v", targets)
+	}
+	if !hasTarget(targets, "fetcher", "fetcher-b:9201", "http://fetcher-b:9201") {
+		t.Fatalf("expected explicit fetcher target fetcher-b:9201, got %#v", targets)
+	}
+	if !hasTarget(targets, "server", "node-a:9150", "http://node-a:9150") {
+		t.Fatalf("expected explicit server diagnostics target node-a:9150, got %#v", targets)
+	}
+	if !hasTarget(targets, "server", "node-b:9150", "http://node-b:9150") {
+		t.Fatalf("expected explicit server diagnostics target node-b:9150, got %#v", targets)
+	}
+}
+
+func hasTarget(targets []pprofTarget, serviceType, address, baseURL string) bool {
+	for _, target := range targets {
+		if target.ServiceType == serviceType && target.Address == address && target.BaseURL == baseURL {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProxyRegistryGETUsesMachineToken(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if got := req.Header.Get("Authorization"); got != "Bearer machine-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	r := NewRouter(DefaultRouterConfig(), nil)
+	r.SetRegistryAuthToken("machine-token")
+
+	body, status, err := r.proxyRegistryGET(context.Background(), upstream.URL)
+	if err != nil {
+		t.Fatalf("proxyRegistryGET returned error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("proxyRegistryGET status = %d, want %d", status, http.StatusOK)
+	}
+	if string(body) != `{"ok":true}` {
+		t.Fatalf("proxyRegistryGET body = %q, want %q", string(body), `{"ok":true}`)
+	}
+}
+
+func TestProxyRegistryGETWithoutTokenSurfacesUpstreamUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	r := NewRouter(DefaultRouterConfig(), nil)
+	body, status, err := r.proxyRegistryGET(context.Background(), upstream.URL)
+	if err == nil {
+		t.Fatal("proxyRegistryGET error = nil, want unauthorized error")
+	}
+	if status != http.StatusUnauthorized {
+		t.Fatalf("proxyRegistryGET status = %d, want %d", status, http.StatusUnauthorized)
+	}
+	if body != nil {
+		t.Fatalf("proxyRegistryGET body = %q, want nil when upstream is unauthorized", string(body))
+	}
+}
+
+func TestFetchRouterStatusUsesBearerToken(t *testing.T) {
+	t.Parallel()
+
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/api/status" {
+			http.NotFound(w, req)
+			return
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer peer-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(StatusData{Version: map[string]string{"version": "dev"}})
+	}))
+	defer peer.Close()
+
+	status, err := fetchRouterStatus(&http.Client{Timeout: 2 * time.Second}, peer.URL, "peer-token")
+	if err != nil {
+		t.Fatalf("fetchRouterStatus returned error: %v", err)
+	}
+	if status == nil || status.Version["version"] != "dev" {
+		t.Fatalf("unexpected status payload: %#v", status)
+	}
+}
+
+func TestFetchRouterRepositoriesUsesBearerToken(t *testing.T) {
+	t.Parallel()
+
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/api/repositories" {
+			http.NotFound(w, req)
+			return
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer peer-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(RepositoriesData{CurrentTopologyVersion: 7})
+	}))
+	defer peer.Close()
+
+	repos, err := fetchRouterRepositories(&http.Client{Timeout: 2 * time.Second}, peer.URL, "peer-token")
+	if err != nil {
+		t.Fatalf("fetchRouterRepositories returned error: %v", err)
+	}
+	if repos == nil || repos.CurrentTopologyVersion != 7 {
+		t.Fatalf("unexpected repositories payload: %#v", repos)
+	}
+}

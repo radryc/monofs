@@ -1,0 +1,31 @@
+name: build-test
+on:
+  push:
+    branches: [main, "feature/*"]
+  pull_request:
+    branches: [main]
+jobs:
+  build:
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - run: make build
+
+  test-unit:
+    needs: [build]
+    runs-on: builder
+    timeout-minutes: 5
+    steps:
+      - run: make test-unit
+
+  vet:
+    needs: [build]
+    runs-on: builder
+    steps:
+      - run: make vet
+
+  fmt-check:
+    needs: [build]
+    runs-on: builder
+    steps:
+      - run: make fmt-check

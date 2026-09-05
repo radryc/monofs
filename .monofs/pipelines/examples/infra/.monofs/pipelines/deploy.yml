@@ -1,0 +1,17 @@
+name: infra-deploy
+source_dir: infra
+on:
+  push:
+    branches: [main]
+    paths: [infra/**, "*.tf", "*.hcl"]
+jobs:
+  plan:
+    runs-on: builder
+    steps:
+      - run: terraform plan
+
+  apply:
+    needs: [plan]
+    runs-on: deployer
+    steps:
+      - run: terraform apply -auto-approve
