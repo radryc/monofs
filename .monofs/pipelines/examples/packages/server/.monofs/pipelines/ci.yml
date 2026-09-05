@@ -1,0 +1,20 @@
+name: server-ci
+source_dir: packages/server
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  build:
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - run: make build-server
+
+  test:
+    needs: [build]
+    runs-on: builder
+    timeout-minutes: 5
+    steps:
+      - run: make test-unit

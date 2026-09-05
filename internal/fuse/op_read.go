@@ -1,0 +1,235 @@
+package fuse
+
+import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
+)
+
+// Read reads file content.
+func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	defer n.recoverPanic("Read")
+	n.logger.Debug("read", "path", n.path, "offset", off, "len", len(dest))
+
+	// Delegate to file handle if available (overlay files opened via Open/Create)
+	if mfh, ok := f.(*monofsFileHandle); ok {
+		return mfh.Read(ctx, dest, off)
+	}
+	if content, errno, ok := n.loadSyntheticWorkspaceFileContent(ctx, n.path); ok {
+		if errno != 0 {
+			return nil, errno
+		}
+		n.mu.Lock()
+		n.content = content
+		n.size = uint64(len(content))
+		n.mu.Unlock()
+		end := int(off) + len(dest)
+		if end > len(content) {
+			end = len(content)
+		}
+		if int(off) >= len(content) {
+			n.client.RecordOperation()
+			return fuse.ReadResultData(nil), 0
+		}
+		n.client.RecordOperation()
+		n.client.RecordBytesRead(int64(end - int(off)))
+		return fuse.ReadResultData(content[off:end]), 0
+	}
+
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
+		parts := splitPath(n.path)
+		if len(parts) == 5 && parts[0] == "doctor" && parts[1] == "v1" && parts[2] == "query" && parts[4] == "results.json" {
+			sessionID := parts[3]
+			statementPath, err := n.sessionMgr.GetLocalPath("doctor/v1/query/" + sessionID + "/statement")
+			if err == nil {
+				resultsPath, err := n.sessionMgr.GetLocalPath(n.path)
+				if err == nil {
+					ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+					defer cancel()
+					if err := n.ensureDoctorQueryResults(ctx, statementPath, resultsPath); err == nil {
+						return n.readLocalFileRange(resultsPath, dest, off)
+					}
+					n.logger.Warn("read: QueryLogs RPC failed", "error", err)
+				}
+			}
+		}
+	}
+	if mfh, ok := f.(*monofsFileHandle); ok {
+		return mfh.Read(ctx, dest, off)
+	}
+
+	// If the file is tracked in overlay, read from disk directly.
+	// This handles the case where go-fuse dispatches to the node's Read
+	// instead of the file handle's Read (e.g. after a re-open).
+	if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() && n.sessionMgr.HasLocalOverride(n.path) {
+		localPath, err := n.sessionMgr.GetLocalPath(n.path)
+		if err == nil {
+			n.logger.Debug("read: serving from overlay", "path", n.path, "local", localPath)
+			data, err := os.ReadFile(localPath)
+			if err == nil {
+				end := int(off) + len(dest)
+				if end > len(data) {
+					end = len(data)
+				}
+				if int(off) >= len(data) {
+					n.client.RecordOperation()
+					return fuse.ReadResultData(nil), 0
+				}
+				n.client.RecordOperation()
+				n.client.RecordBytesRead(int64(end - int(off)))
+				return fuse.ReadResultData(data[off:end]), 0
+			}
+			n.logger.Warn("read: overlay file read failed", "path", n.path, "error", err)
+		}
+	}
+
+	n.mu.RLock()
+	content := n.content
+	n.mu.RUnlock()
+
+	// If content is nil, try to reload it (handles race conditions and cleanup)
+	if content == nil {
+		n.logger.Debug("read: content nil, attempting reload", "path", n.path)
+
+		// For paths under user root directories (e.g. .deps/), the backend
+		// doesn't know about these files. Don't waste time routing reads
+		// across the cluster — they will always fail with NotFound.
+		if n.sessionMgr != nil && !n.isWorkspaceSystemViewPath() {
+			parts := splitPath(n.path)
+			if len(parts) > 1 && n.sessionMgr.IsUserRootDir(parts[0]) {
+				n.logger.Debug("read: content nil for user root dir path, returning EIO", "path", n.path)
+				return nil, syscall.EIO
+			}
+		}
+
+		// Try to reload content with retry
+		const maxRetries = 3
+		var err error
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			content, err = n.client.Read(ctx, n.backendPath(), 0, 0)
+			if err == nil {
+				// Normalise nil → empty slice so we never store nil in
+				// n.content again. The backend returns nil for zero-byte
+				// files (empty stream, no error). nil in n.content means
+				// "not loaded" and would re-trigger this reload loop.
+				if content == nil {
+					content = []byte{}
+				}
+				// Cache the content for future reads
+				n.mu.Lock()
+				n.content = content
+				n.mu.Unlock()
+				n.logger.Debug("read: content reloaded successfully", "path", n.path, "size", len(content))
+				break
+			}
+
+			n.logger.Debug("read: reload retry", "path", n.path, "attempt", attempt+1, "error", err)
+
+			if attempt < maxRetries-1 {
+				select {
+				case <-ctx.Done():
+					return nil, syscall.EINTR
+				case <-time.After(retryDelay(attempt)):
+				}
+			}
+		}
+
+		if err != nil {
+			n.logger.Debug("read: reload failed after retries", "path", n.path, "error", err)
+			n.updateBackendError(err)
+			// Only count real errors, not context cancellations
+			if err != context.Canceled && err != context.DeadlineExceeded {
+				if n.client != nil {
+					n.client.RecordError()
+				}
+			}
+			return nil, syscall.EIO
+		}
+
+		// Clear backend error on success
+		n.updateBackendError(nil)
+	}
+
+	end := int(off) + len(dest)
+	if end > len(content) {
+		end = len(content)
+	}
+	if int(off) >= len(content) {
+		n.client.RecordOperation()
+		return fuse.ReadResultData(nil), 0
+	}
+
+	bytesRead := int64(end - int(off))
+	n.client.RecordOperation()
+	n.client.RecordBytesRead(bytesRead)
+	return fuse.ReadResultData(content[off:end]), 0
+}
+
+func (n *MonoNode) ensureDoctorQueryResults(ctx context.Context, statementPath, resultsPath string) error {
+	statementInfo, err := os.Stat(statementPath)
+	if err != nil {
+		return err
+	}
+	if resultsInfo, err := os.Stat(resultsPath); err == nil && !resultsInfo.ModTime().Before(statementInfo.ModTime()) {
+		return nil
+	}
+
+	queryBytes, err := os.ReadFile(statementPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(resultsPath), 0755); err != nil {
+		return err
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(resultsPath), "results-*.json")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	if err := n.client.WriteQueryLogs(ctx, string(queryBytes), tmpFile); err != nil {
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, resultsPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (n *MonoNode) readLocalFileRange(path string, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	file, err := os.Open(path)
+	if err != nil {
+		n.logger.Warn("read: open local query results failed", "path", path, "error", err)
+		return nil, syscall.EIO
+	}
+	defer file.Close()
+
+	nread, err := file.ReadAt(dest, off)
+	if err != nil && err != io.EOF {
+		n.logger.Warn("read: local query results read failed", "path", path, "error", err)
+		return nil, syscall.EIO
+	}
+	if nread <= 0 {
+		n.client.RecordOperation()
+		return fuse.ReadResultData(nil), 0
+	}
+
+	n.client.RecordOperation()
+	n.client.RecordBytesRead(int64(nread))
+	return fuse.ReadResultData(dest[:nread]), 0
+}

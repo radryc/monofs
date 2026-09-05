@@ -1,0 +1,60 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+      - 'docker/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'haproxy.cfg'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+      - 'docker/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'haproxy.cfg'
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - target: monofs
+            dockerfile: Dockerfile
+          - target: monofs-search
+            dockerfile: Dockerfile.search
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: monofs/${{ matrix.target.target }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=
+
+      - name: build ${{ matrix.target.target }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.target.dockerfile }}
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

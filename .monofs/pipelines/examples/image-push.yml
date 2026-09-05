@@ -1,0 +1,27 @@
+name: image-push
+on:
+  push:
+    branches: [main]
+jobs:
+  containerize:
+    runs-on: docker
+    strategy:
+      matrix:
+        service: [server, router, fetcher, search, registry, client, session]
+      max-parallel: 3
+    timeout-minutes: 20
+    steps:
+      - name: Build image
+        run: |
+          VERSION_TAG=$(git rev-parse --short HEAD)
+          make docker-build-${{ matrix.service }} VERSION=$VERSION_TAG
+
+      - name: Push to registry
+        run: |
+          VERSION_TAG=$(git rev-parse --short HEAD)
+          docker tag monofs-${{ matrix.service }}:$VERSION_TAG \
+            registry.strata.local:5000/monofs-${{ matrix.service }}:$VERSION_TAG
+          docker tag monofs-${{ matrix.service }}:$VERSION_TAG \
+            registry.strata.local:5000/monofs-${{ matrix.service }}:latest
+          docker push registry.strata.local:5000/monofs-${{ matrix.service }}:$VERSION_TAG
+          docker push registry.strata.local:5000/monofs-${{ matrix.service }}:latest

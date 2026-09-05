@@ -1,0 +1,16 @@
+.git/
+bin/
+*.log
+tmp/
+node_modules/
+internal/router/ui/node_modules/
+internal/router/ui/dist/
+vscode-monofs/
+monofs-client
+monofs-router
+monofs-server
+monofs-fetcher
+monofs-search
+monofs-admin
+monofs-session
+monofs-loadtest

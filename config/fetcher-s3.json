@@ -1,0 +1,25 @@
+{
+  "port": 9200,
+  "cache_dir": "/data/cache",
+  "max_cache_gb": 50,
+  "cache_age_hours": 2,
+  "prefetch_workers": 4,
+  "enable_git": false,
+  "log_level": "info",
+  "storage": {
+    "type": "s3",
+    "local_path": "/data/cache/archives",
+
+    "s3_region": "us-east-1",
+    "s3_bucket": "monofs",
+    "s3_prefix": "archives/",
+    "s3_endpoint": "http://localhost:19000",
+    "s3_access_key_id": "minioadmin",
+    "s3_secret_access_key": "minioadmin",
+    "s3_use_path_style": true,
+
+    "gcs_bucket": "",
+    "gcs_prefix": "",
+    "gcs_credentials_file": ""
+  }
+}

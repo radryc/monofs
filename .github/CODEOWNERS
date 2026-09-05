@@ -1,0 +1,50 @@
+# MonoFS CODEOWNERS
+#
+# Last matching rule takes precedence. Owners are requested for review
+# when changes touch matching paths.
+
+# CI and repository governance
+/.github/  @platform-eng
+
+# Documentation and readiness program
+/docs/     @platform-eng
+
+# Router — cluster topology, workspace sync, policy, Guardian
+/internal/router/   @platform-eng
+/cmd/monofs-router/ @platform-eng
+
+# Fetcher — sync worker, blob backend, source push, git operations
+/internal/fetcher/   @platform-eng
+/cmd/monofs-fetcher/ @platform-eng
+
+# FUSE — client session, overlay, VCS
+/internal/fuse/     @platform-eng
+/cmd/monofs-session/  @platform-eng
+
+# Server — KVS backend, directories, replication
+/internal/server/   @platform-eng
+/cmd/monofs-server/ @platform-eng
+
+# Client — HRW sharding, failover
+/internal/client/   @platform-eng
+/cmd/monofs-client/ @platform-eng
+
+# Search
+/internal/search/   @platform-eng
+/cmd/monofs-search/ @platform-eng
+
+# Storage — blob, git, log engine, audit
+/internal/storage/  @platform-eng
+
+# Protobuf API surface
+/api/proto/         @platform-eng
+
+# Deployment, Docker, K8s
+/docker/            @platform-eng
+/Dockerfile*        @platform-eng
+/docker-compose*.yml @platform-eng
+/Makefile           @platform-eng
+/scripts/           @platform-eng
+
+# Kernel module
+/monofs-kmod/       @platform-eng
