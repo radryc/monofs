@@ -92,6 +92,30 @@ func TestDetectAffectedPackages(t *testing.T) {
 	}
 }
 
+func TestDetectAffectedPackagesTransitiveClosure(t *testing.T) {
+	meta := &PackageMeta{
+		Packages: map[string]PackageInfo{
+			"lib":  {Path: "packages/lib"},
+			"app":  {Path: "packages/app", Deps: []string{"packages/lib"}},
+			"tool": {Path: "packages/tool", Deps: []string{"packages/app"}},
+		},
+	}
+
+	// A change inside packages/lib directly affects lib and
+	// transitively affects app (depends on lib) and tool (depends on
+	// app).
+	affected := DetectAffectedPackages(meta, []string{"packages/lib/util.go"})
+	if !stringSliceEqual(affected, []string{"app", "lib", "tool"}) {
+		t.Errorf("affected = %v, want [app lib tool]", affected)
+	}
+
+	// A change inside packages/app affects app and tool, not lib.
+	affected = DetectAffectedPackages(meta, []string{"packages/app/main.go"})
+	if !stringSliceEqual(affected, []string{"app", "tool"}) {
+		t.Errorf("affected = %v, want [app tool]", affected)
+	}
+}
+
 func TestIsPathAffected(t *testing.T) {
 	tests := []struct {
 		file   string

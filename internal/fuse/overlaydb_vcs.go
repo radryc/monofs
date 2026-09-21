@@ -316,3 +316,66 @@ func (odb *OverlayDB) BranchMappingCount() int {
 	})
 	return count
 }
+
+// PutSessionConflict records an unresolved merge conflict for a path.
+func (odb *OverlayDB) PutSessionConflict(conflict SessionConflict) error {
+	conflict.Path = strings.TrimSpace(conflict.Path)
+	if conflict.Path == "" {
+		return fmt.Errorf("session conflict path is required")
+	}
+	if conflict.CreatedAt.IsZero() {
+		conflict.CreatedAt = time.Now().UTC()
+	}
+	return odb.putJSONValue(bucketOverlayConflict, conflict.Path, conflict)
+}
+
+// GetSessionConflict returns the recorded conflict for a path.
+func (odb *OverlayDB) GetSessionConflict(path string) (SessionConflict, bool, error) {
+	var conflict SessionConflict
+	found, err := odb.getJSONValue(bucketOverlayConflict, path, &conflict)
+	return conflict, found, err
+}
+
+// DeleteSessionConflict clears the conflict state for a path.
+func (odb *OverlayDB) DeleteSessionConflict(path string) error {
+	return odb.deleteBucketKey(bucketOverlayConflict, path)
+}
+
+// ListSessionConflicts returns all unresolved merge conflicts.
+func (odb *OverlayDB) ListSessionConflicts() ([]SessionConflict, error) {
+	conflicts := make([]SessionConflict, 0)
+
+	err := odb.db.View(func(tx *nutsdb.Tx) error {
+		keys, values, err := tx.GetAll(bucketOverlayConflict)
+		if err != nil {
+			if isNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		for idx, key := range keys {
+			var conflict SessionConflict
+			if err := json.Unmarshal(values[idx], &conflict); err != nil {
+				return fmt.Errorf("unmarshal session conflict: %w", err)
+			}
+			if conflict.Path == "" {
+				conflict.Path = string(key)
+			}
+			conflicts = append(conflicts, conflict)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(conflicts, func(left, right int) bool {
+		return conflicts[left].Path < conflicts[right].Path
+	})
+	return conflicts, nil
+}
+
+// SessionConflictCount returns the number of unresolved conflicts.
+func (odb *OverlayDB) SessionConflictCount() int {
+	return odb.countBucket(bucketOverlayConflict)
+}

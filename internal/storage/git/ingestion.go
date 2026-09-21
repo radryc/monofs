@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 	gitpkg "github.com/radryc/monofs/internal/git"
 	"github.com/radryc/monofs/internal/storage"
 )
@@ -18,6 +17,7 @@ type GitIngestionBackend struct {
 	branch    string
 	repoID    string
 	sourceURL string
+	fetchTags bool // true when ref is a tag or commit SHA (requires tag/SHA fetch)
 }
 
 // NewGitIngestionBackend creates a new Git ingestion backend
@@ -36,6 +36,12 @@ func (g *GitIngestionBackend) Initialize(ctx context.Context, sourceURL string, 
 		g.branch = "main"
 	}
 
+	// A tag or commit SHA ref requires tags/SHA objects to be fetched.
+	switch gitpkg.ClassifyRef(g.branch) {
+	case gitpkg.RefTag, gitpkg.RefSHA:
+		g.fetchTags = true
+	}
+
 	// Generate repo ID from URL
 	g.repoID = config["display_path"]
 	if g.repoID == "" {
@@ -50,18 +56,16 @@ func (g *GitIngestionBackend) Initialize(ctx context.Context, sourceURL string, 
 	}
 	g.repoMgr = repoMgr
 
-	// Clone or open repository
-	repo, err := g.repoMgr.CloneOrOpen(ctx, sourceURL, g.repoID, g.branch)
+	// Clone or open repository (branch, tag, or commit SHA)
+	repo, err := g.repoMgr.CloneOrOpenRef(ctx, sourceURL, g.repoID, g.branch, g.fetchTags)
 	if err != nil {
 		return fmt.Errorf("failed to clone/open repository: %w", err)
 	}
 	g.repo = repo
 
-	// Extract commit information from the current branch
-	ref, err := repo.Reference(plumbing.NewBranchReferenceName(g.branch), true)
-	if err == nil {
-		commit, err := repo.CommitObject(ref.Hash())
-		if err == nil {
+	// Extract commit information from the resolved ref (branch/tag/SHA)
+	if hash, err := g.repoMgr.ResolveCommit(repo, g.branch); err == nil {
+		if commit, err := repo.CommitObject(hash); err == nil {
 			config["commit_hash"] = commit.Hash.String()
 			config["commit_time"] = fmt.Sprintf("%d", commit.Committer.When.Unix())
 			config["commit_message"] = commit.Message
@@ -99,10 +103,8 @@ func (g *GitIngestionBackend) WalkFiles(ctx context.Context, fn func(storage.Fil
 	// Get commit information
 	var commitHash, commitMessage string
 	var commitTime int64
-	ref, err := g.repo.Reference(plumbing.NewBranchReferenceName(g.branch), true)
-	if err == nil {
-		commit, err := g.repo.CommitObject(ref.Hash())
-		if err == nil {
+	if hash, err := g.repoMgr.ResolveCommit(g.repo, g.branch); err == nil {
+		if commit, err := g.repo.CommitObject(hash); err == nil {
 			commitHash = commit.Hash.String()
 			commitTime = commit.Committer.When.Unix()
 			commitMessage = commit.Message

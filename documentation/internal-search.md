@@ -549,9 +549,23 @@ type Indexer struct {
     logger          *slog.Logger
     pathToStorageID map[string]string
     monofsClient    client.MonoFSClient
+    ctagsPath       string
+    symbolsEnabled  bool
 }
 ```
-Manages Zoekt index creation and search. `searcher` is an in-process Zoekt searcher backed by on-disk shards in `indexDir`. `pathToStorageID` maps `DisplayPath` → `StorageID` for enriching search results. `monofsClient` is an optional client for fetching files from MonoFS storage nodes.
+Manages Zoekt index creation and search. `searcher` is an in-process Zoekt searcher backed by on-disk shards in `indexDir`. `pathToStorageID` maps `DisplayPath` → `StorageID` for enriching search results. `monofsClient` is an optional client for fetching files from MonoFS storage nodes. `ctagsPath` holds the universal-ctags binary used for symbol extraction, and `symbolsEnabled` reports whether `sym:` queries are supported.
+
+### Index Options and Symbol Extraction
+
+Every indexing path (`indexFromMonoFS`, `indexFromExternal`, `IndexLocalDir`)
+sets `opts.CTagsPath` from the detected universal-ctags binary before calling
+`opts.SetDefaults()`. Zoekt then performs symbol extraction internally during
+`builder.Finish()`, populating each document's `Symbols`/`SymbolsMetaData` and
+setting the shard's `HasSymbols` flag. This is what makes `sym:` queries work.
+
+When no universal-ctags binary is available (checked once in `NewIndexer` via
+`detectSymbolSupport`), symbol extraction is disabled and `sym:` queries return
+nothing — full-text search still works. See `symbols.go`.
 
 #### `IndexRequest`
 ```go
@@ -964,3 +978,40 @@ func isBinaryContent(content []byte) bool
 - `bool`: True if null bytes detected in the first 8192 bytes.
 
 **Implementation details:** Scans at most `min(len(content), 8192)` bytes.
+
+---
+
+## File: `symbols.go`
+
+Universal-ctags detection and symbol-support reporting.
+
+### Functions
+
+#### `ctagsCommand()`
+```go
+func ctagsCommand() string
+```
+Locates a ctags binary, preferring universal-ctags. Resolution order: the
+`CTAGS_COMMAND` environment variable, then `universal-ctags`, then `ctags` on
+`$PATH`. Returns `""` when none is found.
+
+#### `isUniversalCTags(bin string)`
+```go
+func isUniversalCTags(bin string) bool
+```
+Reports whether `bin` is a universal-ctags build with the `+interactive` feature
+Zoekt requires, by inspecting its `--help` output.
+
+#### `detectSymbolSupport()`
+```go
+func detectSymbolSupport() symbolSupport
+```
+Combines the two functions above into a `symbolSupport` value
+(`Binary`, `EnableUniversalCtags`) consumed by `NewIndexer` to decide whether to
+enable `sym:` indexing and to log the result.
+
+### Notes
+
+Symbol extraction is best-effort. Without universal-ctags, documents are still
+indexed and full-text search works; only `sym:` queries are affected. The CLI
+`monofs-session search --symbol <name>` maps to the Zoekt `sym:<name>` query.

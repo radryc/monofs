@@ -4,25 +4,23 @@ import (
 	"testing"
 )
 
-// TestMessagePoolsReuse verifies that pooled messages are properly reused.
+// TestMessagePoolsReuse verifies that pooled messages come back reset
+// (zero-valued), whether the pooled object is reused or a fresh one is
+// allocated. sync.Pool does not guarantee object identity across a GC cycle,
+// so the identity is not asserted.
 func TestMessagePoolsReuse(t *testing.T) {
 	pools := NewMessagePools()
 
 	// Get a ReadRequest
 	req1 := pools.GetReadRequest()
 	req1.Path = "/test/path"
-	req1ID := req1
 
 	// Put it back
 	pools.PutReadRequest(req1)
 
-	// Get another ReadRequest - should be the same object
+	// Get another ReadRequest - must be reset to the zero value (either the
+	// reused pooled object or a freshly allocated one).
 	req2 := pools.GetReadRequest()
-	if req2 != req1ID {
-		t.Error("pool reuse failed: expected same object, got different one")
-	}
-
-	// Verify it was reset to zero value
 	if req2.Path != "" {
 		t.Errorf("pool reset failed: expected empty path, got %q", req2.Path)
 	}
@@ -44,6 +42,7 @@ func TestMessagePoolsNilSafety(t *testing.T) {
 	pools.PutDirEntry(nil)
 	pools.PutDataChunk(nil)
 }
+
 // TestAllMessageTypes verifies all message pool types work correctly.
 func TestAllMessageTypes(t *testing.T) {
 	pools := NewMessagePools()

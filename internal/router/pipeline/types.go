@@ -1,7 +1,11 @@
 package pipeline
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -84,8 +88,42 @@ type JobConfig struct {
 }
 
 type StrategyConfig struct {
-	Matrix      map[string][]string `yaml:"matrix,omitempty" json:"matrix,omitempty"`
-	MaxParallel int                 `yaml:"max-parallel,omitempty" json:"max_parallel,omitempty"`
+	Matrix      MatrixConfig `yaml:"matrix,omitempty" json:"matrix,omitempty"`
+	MaxParallel int          `yaml:"max-parallel,omitempty" json:"max_parallel,omitempty"`
+}
+
+// MatrixConfig maps matrix variable names to either a static value list or
+// an expression (e.g. ${{ needs.detect.outputs.packages }}) resolved from
+// upstream job outputs at enqueue time.
+type MatrixConfig map[string]MatrixVar
+
+// MatrixVar is a matrix value that is either a static list or a dynamic
+// expression producing a comma-separated list.
+type MatrixVar struct {
+	Static []string
+	Expr   string
+}
+
+// UnmarshalYAML accepts either a YAML sequence of values or a scalar
+// expression string.
+func (m *MatrixVar) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		m.Expr = value.Value
+		return nil
+	case yaml.SequenceNode:
+		return value.Decode(&m.Static)
+	default:
+		return fmt.Errorf("matrix value must be a list or an expression string")
+	}
+}
+
+// MarshalJSON encodes a matrix var as either its static list or expression.
+func (m MatrixVar) MarshalJSON() ([]byte, error) {
+	if m.Expr != "" {
+		return json.Marshal(m.Expr)
+	}
+	return json.Marshal(m.Static)
 }
 
 type StepConfig struct {
@@ -106,6 +144,9 @@ type PipelineRun struct {
 	Branch       string                `json:"branch"`
 	Tag          string                `json:"tag,omitempty"`
 	PRNumber     int                   `json:"pr_number,omitempty"`
+	RepoFullName string                `json:"repo_full_name,omitempty"`
+	RepoURL      string                `json:"repo_url,omitempty"`
+	ChangedFiles []string              `json:"changed_files,omitempty"`
 	CreatedAt    time.Time             `json:"created_at"`
 	StartedAt    *time.Time            `json:"started_at,omitempty"`
 	FinishedAt   *time.Time            `json:"finished_at,omitempty"`
@@ -114,41 +155,45 @@ type PipelineRun struct {
 }
 
 type JobStatus struct {
-	JobName    string     `json:"job_name"`
-	State      JobState   `json:"state"`
-	Needs      []string   `json:"needs,omitempty"`
-	WorkerID   string     `json:"worker_id,omitempty"`
-	ClaimedAt  *time.Time `json:"claimed_at,omitempty"`
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	Retries    int        `json:"retries"`
-	MaxRetries int        `json:"max_retries"`
-	Error      string     `json:"error,omitempty"`
-	ExitCode   int        `json:"exit_code,omitempty"`
+	JobName    string            `json:"job_name"`
+	State      JobState          `json:"state"`
+	Needs      []string          `json:"needs,omitempty"`
+	WorkerID   string            `json:"worker_id,omitempty"`
+	ClaimedAt  *time.Time        `json:"claimed_at,omitempty"`
+	StartedAt  *time.Time        `json:"started_at,omitempty"`
+	FinishedAt *time.Time        `json:"finished_at,omitempty"`
+	Retries    int               `json:"retries"`
+	MaxRetries int               `json:"max_retries"`
+	Error      string            `json:"error,omitempty"`
+	ExitCode   int               `json:"exit_code,omitempty"`
+	Outputs    map[string]string `json:"outputs,omitempty"`
 }
 
 type Task struct {
-	TaskID     string            `json:"task_id"`
-	RunID      string            `json:"run_id"`
-	JobName    string            `json:"job_name"`
-	RunnerType RunnerType        `json:"runner_type"`
-	Steps      []StepConfig      `json:"steps"`
-	Env        map[string]string `json:"env,omitempty"`
-	TimeoutSec int               `json:"timeout_sec"`
-	MaxRetries int               `json:"max_retries"`
-	CreatedAt  time.Time         `json:"created_at"`
+	TaskID       string            `json:"task_id"`
+	RunID        string            `json:"run_id"`
+	JobName      string            `json:"job_name"`
+	RunnerType   RunnerType        `json:"runner_type"`
+	Steps        []StepConfig      `json:"steps"`
+	Env          map[string]string `json:"env,omitempty"`
+	TimeoutSec   int               `json:"timeout_sec"`
+	MaxRetries   int               `json:"max_retries"`
+	CreatedAt    time.Time         `json:"created_at"`
+	Affected     []string          `json:"affected,omitempty"`
+	ChangedFiles []string          `json:"changed_files,omitempty"`
 }
 
 type TaskResult struct {
-	TaskID    string    `json:"task_id"`
-	RunID     string    `json:"run_id"`
-	JobName   string    `json:"job_name"`
-	State     JobState  `json:"state"`
-	ExitCode  int       `json:"exit_code"`
-	Error     string    `json:"error,omitempty"`
-	StartedAt time.Time `json:"started_at"`
-	EndedAt   time.Time `json:"ended_at"`
-	WorkerID  string    `json:"worker_id"`
+	TaskID    string            `json:"task_id"`
+	RunID     string            `json:"run_id"`
+	JobName   string            `json:"job_name"`
+	State     JobState          `json:"state"`
+	ExitCode  int               `json:"exit_code"`
+	Error     string            `json:"error,omitempty"`
+	StartedAt time.Time         `json:"started_at"`
+	EndedAt   time.Time         `json:"ended_at"`
+	WorkerID  string            `json:"worker_id"`
+	Outputs   map[string]string `json:"outputs,omitempty"`
 }
 
 type TaskClaim struct {

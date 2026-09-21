@@ -90,6 +90,11 @@ service MonoFSRouter {
     rpc ListWorkspaceSyncJobs(ListWorkspaceSyncJobsRequest) returns (ListWorkspaceSyncJobsResponse);
     rpc CancelWorkspaceSyncJob(CancelWorkspaceSyncJobRequest) returns (CancelWorkspaceSyncJobResponse);
     rpc QueryLedger(QueryLedgerRequest) returns (QueryLedgerResponse);
+
+    // Upstream read operations (forwarded to the fetcher cluster).
+    rpc GetUpstreamLog(UpstreamLogRequest) returns (UpstreamLogResponse);
+    rpc GetUpstreamTags(UpstreamTagsRequest) returns (UpstreamTagsResponse);
+    rpc GetUpstreamBlame(UpstreamBlameRequest) returns (UpstreamBlameResponse);
 }
 
 // MonoFS is the backend node service for filesystem operations
@@ -636,6 +641,7 @@ enum WorkspaceSyncRepositoryStatus {
     WORKSPACE_SYNC_REPOSITORY_STATUS_FAILED = 5;
     WORKSPACE_SYNC_REPOSITORY_STATUS_CANCELLED = 6;
     WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED = 7;
+    WORKSPACE_SYNC_REPOSITORY_STATUS_ROLLED_BACK = 8;
 }
 
 message WorkspaceRepositoryRef {
@@ -707,6 +713,8 @@ message WorkspaceSyncRepositoryResult {
     string pushed_commit = 11;
     string local_commit_id = 12;
     int32 local_commit_index = 13;
+    string pull_request_url = 14;
+    bool pull_request_created = 15;
 }
 
 message WorkspaceSyncJob {
@@ -1394,4 +1402,56 @@ message RefreshEvent {
     string new_upstream_hash = 5;
     int32 incoming_commits = 6;
     int64 timestamp_unix = 7;
+}
+
+// UpstreamLogRequest asks the fetcher to return recent commits on an upstream
+// branch.
+message UpstreamLogRequest {
+    string repo_url = 1;
+    string branch = 2;
+    int32 limit = 3;
+}
+
+message UpstreamLogEntry {
+    string hash = 1;
+    string author_name = 2;
+    string author_email = 3;
+    int64 authored_at_unix = 4;
+    string message = 5;
+}
+
+message UpstreamLogResponse {
+    repeated UpstreamLogEntry entries = 1;
+}
+
+message UpstreamTagsRequest {
+    string repo_url = 1;
+}
+
+message UpstreamTag {
+    string name = 1;
+    string commit_hash = 2;
+    int64 tagged_at_unix = 3;
+}
+
+message UpstreamTagsResponse {
+    repeated UpstreamTag tags = 1;
+}
+
+message UpstreamBlameRequest {
+    string repo_url = 1;
+    string branch = 2;
+    string path = 3;
+}
+
+message UpstreamBlameLine {
+    int32 line_no = 1;
+    string hash = 2;
+    string author_name = 3;
+    int64 authored_at_unix = 4;
+    string content = 5;
+}
+
+message UpstreamBlameResponse {
+    repeated UpstreamBlameLine lines = 1;
 }

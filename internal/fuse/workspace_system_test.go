@@ -227,3 +227,77 @@ func newWorkspaceViewMockClient() *workspaceViewMockClient {
 		},
 	}
 }
+
+func TestSparseWorkspaceFilter(t *testing.T) {
+	client := newWorkspaceViewMockClient()
+	root := NewRoot(client, nil, testLogger())
+	if err := root.EnableVirtualMonorepo(); err != nil {
+		t.Fatalf("EnableVirtualMonorepo: %v", err)
+	}
+
+	// Include only the acme/monofs repo subtree; everything else is filtered.
+	filter, err := NewRepoFilter([]string{"github.com/acme/monofs"}, nil)
+	if err != nil {
+		t.Fatalf("NewRepoFilter: %v", err)
+	}
+	root.SetRepoFilter(filter)
+
+	manifest := root.WorkspaceManifest()
+	ctx := context.Background()
+	entries, err := manifest.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	included := map[string]bool{}
+	for _, e := range entries {
+		included[e.Repository.DisplayPath] = e.Included
+	}
+	if !included["github.com/acme/monofs"] {
+		t.Fatal("acme/monofs should be included when it matches the filter")
+	}
+	for _, other := range []string{"github.com/acme/guardian", "github.com/acme/doctor"} {
+		if included[other] {
+			t.Fatalf("%s should be excluded by the filter", other)
+		}
+	}
+
+	// ResolvePath into a filtered repo must report not-included.
+	res, err := manifest.ResolvePath(ctx, "github.com/acme/guardian")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if res.Included {
+		t.Fatal("filtered repo path should resolve as not included")
+	}
+
+	// workspace.json must expose the filter and the subset.
+	content, err := manifest.JSONContent(ctx)
+	if err != nil {
+		t.Fatalf("JSONContent: %v", err)
+	}
+	var doc struct {
+		RepoFilter struct {
+			Include []string `json:"include"`
+		} `json:"repo_filter"`
+		Repositories []struct {
+			DisplayPath string `json:"display_path"`
+			Included    bool   `json:"included"`
+		} `json:"repositories"`
+	}
+	if err := json.Unmarshal(content, &doc); err != nil {
+		t.Fatalf("unmarshal workspace.json: %v", err)
+	}
+	if len(doc.RepoFilter.Include) != 1 || doc.RepoFilter.Include[0] != "github.com/acme/monofs" {
+		t.Fatalf("workspace.json repo_filter = %+v", doc.RepoFilter)
+	}
+	var manifestIncluded []string
+	for _, r := range doc.Repositories {
+		if r.Included {
+			manifestIncluded = append(manifestIncluded, r.DisplayPath)
+		}
+	}
+	if len(manifestIncluded) != 1 || manifestIncluded[0] != "github.com/acme/monofs" {
+		t.Fatalf("workspace.json included repos = %v, want only acme/monofs", manifestIncluded)
+	}
+}

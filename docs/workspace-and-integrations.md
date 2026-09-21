@@ -87,6 +87,43 @@ What this enables:
 
 Guardian paths are managed namespaces, so they are treated differently from normal ingested repositories.
 
+## Review Workflow
+
+MonoFS can enforce a subtree-ownership review gate on source pushes so that
+non-maintainers cannot silently publish changes into a subtree they do not own.
+The gate is opt-in and disabled by default.
+
+Ownership is declared in `.guardian/OWNERS` files (YAML) and, as a fallback
+for paths no OWNERS file governs, in GitHub-style `CODEOWNERS` files
+(`docs/CODEOWNERS`, `.github/CODEOWNERS`, or `CODEOWNERS` at the repo root).
+A directory owner is listed under the `maintainers` role.
+
+The review flow works like this:
+
+1. OWNERS file declares the maintainers of a partition subtree
+   (e.g. `guardian/doctor/.guardian/OWNERS`).
+2. A source push that touches a subtree the caller does not maintain is
+   rejected for **direct** pushes with a "review required" reason.
+3. The caller retries using a logical branch (a non-direct strategy); MonoFS
+   then pushes to a review branch and automatically opens a pull/merge request
+   on the forge.
+4. When the change lands on a review branch, the maintainers of the touched
+   subtrees are requested as reviewers on the pull request.
+
+Enable the gate with `--ownership-gate` on the router. An optional
+`--ownership-team-mapping` YAML file maps OWNERS `@team` handles to IdP group
+names.
+
+For guardian-managed partitions that are not backed by an external git
+provider, MonoFS exposes native merge-request endpoints that route proposal
+creation, review, approval, and rejection through the same ownership model:
+
+- `POST /api/merge-requests` — open a proposal (`{partition, paths, title}`)
+- `GET  /api/merge-requests` — list proposals (`?status=open|approved|...`)
+- `POST /api/merge-requests/{id}/approve` — approve (maintainer only)
+- `POST /api/merge-requests/{id}/merge` — merge (maintainer only)
+- `POST /api/merge-requests/{id}/reject` — reject (maintainer only)
+
 ## Doctor in the Workspace
 
 Doctor content appears under `doctor/v1/...`.

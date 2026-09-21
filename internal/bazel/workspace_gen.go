@@ -170,11 +170,15 @@ func (g *Generator) generateBazelrc(repos []ManifestRepository) string {
 
 	// Remote execution
 	if g.ExecutorEnabled && g.ExecutorAddr != "" {
-		b.WriteString("# Remote execution (monofs-executor).\n")
-		b.WriteString(fmt.Sprintf("build:remote-exec --remote_executor=grpc://%s\n", g.ExecutorAddr))
-		b.WriteString("build:remote-exec --remote_default_platform_properties=properties:{\n")
-		b.WriteString("  name:\"OSFamily\" value:\"linux\"\n")
-		b.WriteString("}\n")
+		// The monofs executor speaks a custom HTTP protocol (POST
+		// /execute), not the gRPC Remote Execution API, so Bazel must
+		// not point --remote_executor at it. Remote execution is
+		// dispatched by pipeline workers (runs-on: bazel); the executor
+		// address is exposed to build actions through action_env.
+		b.WriteString("# Remote execution is dispatched by monofs pipeline workers\n")
+		b.WriteString("# (runs-on: bazel). The monofs executor uses a custom HTTP\n")
+		b.WriteString("# protocol, not REAPI, so Bazel consumes it via action_env only.\n")
+		b.WriteString(fmt.Sprintf("build:remote-exec --action_env=MONOFS_EXECUTOR_ADDR=http://%s\n", g.ExecutorAddr))
 		b.WriteString("\n")
 	}
 

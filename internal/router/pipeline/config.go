@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -124,12 +125,18 @@ func (c *PipelineConfig) MatchEvent(event WebhookEvent) bool {
 		if !c.On.Push.matchesBranch(event.Branch) {
 			return false
 		}
+		if !c.On.Push.matchesPaths(event.ChangedFiles) {
+			return false
+		}
 		eventMatched = true
 	case TriggerPullRequest:
 		if c.On.PullRequest == nil {
 			return false
 		}
 		if !c.On.PullRequest.matchesBranch(event.Branch) {
+			return false
+		}
+		if !c.On.PullRequest.matchesPaths(event.ChangedFiles) {
 			return false
 		}
 		eventMatched = true
@@ -178,6 +185,79 @@ func (f *BranchFilter) matchesBranch(branch string) bool {
 		}
 	}
 	return false
+}
+
+// matchesPaths enforces the optional paths / paths-ignore trigger
+// filters against the changed files of an event. When no changed-file
+// information is available the filters are treated as matching, matching
+// the permissive source_dir behavior.
+func (f *BranchFilter) matchesPaths(changedFiles []string) bool {
+	if len(f.Paths) == 0 && len(f.PathsIgnore) == 0 {
+		return true
+	}
+	if len(changedFiles) == 0 {
+		return true
+	}
+
+	matched := false
+	for _, file := range changedFiles {
+		if pathMatchesAny(file, f.PathsIgnore) {
+			continue
+		}
+		if len(f.Paths) == 0 || pathMatchesAny(file, f.Paths) {
+			matched = true
+			break
+		}
+	}
+	return matched
+}
+
+// pathMatchesAny reports whether the file path matches any of the glob
+// patterns. Glob semantics: "**" spans path separators, "*" and "?"
+// match within a single path segment.
+func pathMatchesAny(file string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if pathGlobMatch(pattern, file) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathGlobMatch(pattern, file string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return false
+	}
+	if pattern == "**" {
+		return true
+	}
+
+	var sb strings.Builder
+	sb.WriteString("^")
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		switch c {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				sb.WriteString(".*")
+				i++
+			} else {
+				sb.WriteString("[^/]*")
+			}
+		case '?':
+			sb.WriteString("[^/]")
+		case '.', '(', ')', '[', ']', '{', '}', '\\', '^', '$', '+', '|':
+			sb.WriteByte('\\')
+			sb.WriteByte(c)
+		default:
+			sb.WriteByte(c)
+		}
+	}
+	sb.WriteString("$")
+
+	matched, err := regexp.MatchString(sb.String(), file)
+	return err == nil && matched
 }
 
 func matchGlob(pattern, value string) bool {
@@ -249,6 +329,11 @@ func LoadPackageMeta(ctx context.Context, path string) (*PackageMeta, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read package meta %s: %w", path, err)
 	}
+	return ParsePackageMeta(data)
+}
+
+// ParsePackageMeta decodes package metadata from raw YAML content.
+func ParsePackageMeta(data []byte) (*PackageMeta, error) {
 	var meta PackageMeta
 	if err := yaml.Unmarshal(data, &meta); err != nil {
 		return nil, fmt.Errorf("parse package meta: %w", err)

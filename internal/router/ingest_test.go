@@ -213,3 +213,40 @@ func TestReservedManagedDisplayPathConflict(t *testing.T) {
 		})
 	}
 }
+
+func TestGoModuleVersion(t *testing.T) {
+	cases := []struct {
+		in      string
+		module  string
+		version string
+		ok      bool
+	}{
+		{"github.com/google/uuid@v1.3.0", "github.com/google/uuid", "v1.3.0", true},
+		{"github.com/owner/repo.git@v2.0.0", "github.com/owner/repo", "v2.0.0", true},
+		{"https://github.com/owner/repo", "", "", false},
+		{"git@github.com:owner/repo.git", "", "", false},
+		{"github.com/owner/repo", "", "", false},
+	}
+	for _, c := range cases {
+		module, version, ok := goModuleVersion(c.in)
+		if module != c.module || version != c.version || ok != c.ok {
+			t.Errorf("goModuleVersion(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				c.in, module, version, ok, c.module, c.version, c.ok)
+		}
+	}
+}
+
+func TestValidateGitRef(t *testing.T) {
+	valid := []string{"main", "feature/x-y.z", "v1.0.0", "0123456789012345678901234567890123456789", "refs/heads/main", "refs/tags/v1.0.0"}
+	for _, r := range valid {
+		if err := validateGitRef(r); err != nil {
+			t.Errorf("validateGitRef(%q) = %v, want nil", r, err)
+		}
+	}
+	invalid := []string{"", "  ", "foo bar", "a../b", "/leading", "trailing/", "a..b", "foo~1", "foo^1", "foo:bar"}
+	for _, r := range invalid {
+		if err := validateGitRef(r); err == nil {
+			t.Errorf("validateGitRef(%q) = nil, want error", r)
+		}
+	}
+}

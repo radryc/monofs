@@ -247,7 +247,7 @@ func TestPushSourceSendsPushRequest(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("pushSource() stderr = %q, want empty", stderr)
 	}
-	if !strings.Contains(stdout, "Warning: pending local commits are currently squashed into one upstream Git commit per affected repository.") || !strings.Contains(stdout, "Local commits pushed") || !strings.Contains(stdout, "logical branch feature/demo") {
+	if !strings.Contains(stdout, "Pushing local commits...") || !strings.Contains(stdout, "Local commits pushed") || !strings.Contains(stdout, "logical branch feature/demo") {
 		t.Fatalf("pushSource() stdout = %q, want push summary", stdout)
 	}
 

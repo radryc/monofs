@@ -195,6 +195,13 @@ func (r *Router) runWorkspacePublishJob(ctx context.Context, entry *workspaceSyn
 		if err := r.updateWorkspaceSyncRepository(entry, repoResult); err != nil {
 			return err
 		}
+
+		// Re-index search for successfully published repositories so the
+		// index tracks the published overlay state.
+		if repoResult.GetStatus() == pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED {
+			r.triggerSearchReindex(repoResult.GetStorageId(), repoResult.GetDisplayPath(), repoResult.GetRepoUrl(), repoResult.GetBranch(), "publish")
+		}
+
 		if err := send(&pb.WorkspaceSyncEvent{
 			EventType:  workspaceEventTypeForRepository(repoResult),
 			Job:        entry.snapshot(),

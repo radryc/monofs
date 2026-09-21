@@ -12,19 +12,19 @@ import (
 )
 
 const (
-	defaultAutoPushInterval   = 60 * time.Second
-	defaultConcurrencyCap    = 20
-	minAutoPushInterval      = 30 * time.Second
-	maxBackoffInterval       = 30 * time.Minute
-	deadLetterAfterFailures  = 10
+	defaultAutoPushInterval = 60 * time.Second
+	defaultConcurrencyCap   = 20
+	minAutoPushInterval     = 30 * time.Second
+	maxBackoffInterval      = 30 * time.Minute
+	deadLetterAfterFailures = 10
 )
 
 type autoPushWorker struct {
-	router       *Router
-	logger       *slog.Logger
-	interval     time.Duration
-	concurrency  int
-	stop         chan struct{}
+	router      *Router
+	logger      *slog.Logger
+	interval    time.Duration
+	concurrency int
+	stop        chan struct{}
 
 	mu           sync.Mutex
 	active       map[string]bool
@@ -178,12 +178,12 @@ func (w *autoPushWorker) tryPush(workspaceID string) {
 
 	pushMode := w.router.config.SourcePushMode
 	policyResult, err := w.router.evalPolicy(&workspacepolicy.EvaluationRequest{
-		PrincipalID:    "autopush",
-		WorkspaceID:    workspaceID,
-		LogicalBranch:  logicalBranch,
-		RepositoryIDs:  storageIDsFromSourceBundle(bundleEntry.commitBundle),
-		Action:         workspacepolicy.ActionSourcePush,
-		PushMode:       pushMode,
+		PrincipalID:   "autopush",
+		WorkspaceID:   workspaceID,
+		LogicalBranch: logicalBranch,
+		RepositoryIDs: storageIDsFromSourceBundle(bundleEntry.commitBundle),
+		Action:        workspacepolicy.ActionSourcePush,
+		PushMode:      pushMode,
 	})
 	if err != nil {
 		w.recordFailure(workspaceID)

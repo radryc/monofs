@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,6 +92,8 @@ func TestMatchesGuardianPrefixesIncludesAncestorDeletes(t *testing.T) {
 type mockChangeStream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	mu     sync.Mutex
 	events []*pb.ChangeEvent
 }
 
@@ -115,13 +118,17 @@ func (m *mockChangeStream) SendMsg(any) error { return nil }
 func (m *mockChangeStream) RecvMsg(any) error { return nil }
 
 func (m *mockChangeStream) Send(event *pb.ChangeEvent) error {
+	m.mu.Lock()
 	m.events = append(m.events, cloneGuardianChangeEvent(event))
+	m.mu.Unlock()
 	return nil
 }
 
 func (m *mockChangeStream) Events() []*pb.ChangeEvent {
+	m.mu.Lock()
 	result := make([]*pb.ChangeEvent, len(m.events))
 	copy(result, m.events)
+	m.mu.Unlock()
 	return result
 }
 

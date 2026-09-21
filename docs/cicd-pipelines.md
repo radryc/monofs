@@ -433,6 +433,17 @@ POST /api/webhooks/gitlab            # GitLab webhook receiver
 3. Events: Push, Merge request, Tag push
 4. Secret: optional — set `MONOFS_GITLAB_WEBHOOK_SECRET` on router
 
+## Webhook-Triggered Re-Ingestion
+
+Webhook pushes also signal upstream repository changes to the router's
+auto-refresh path. Any ingested repository whose source URL matches the pushed
+repository is probed and re-ingested when its upstream has advanced, so sessions
+see fresh content without a manual `pull`.
+
+Enable the poller with `--auto-refresh` (optionally `--auto-refresh-interval`
+and `--auto-refresh-concurrency`). Webhook-triggered re-ingestion is deduplicated
+within a 60-second window per repository.
+
 ## Worker Deployment
 
 Workers are defined as a Guardian partition:

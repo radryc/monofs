@@ -20,6 +20,14 @@ type WebhookHandler struct {
 	configs      map[string]*PipelineConfig
 	webhookCfg   WebhookConfig
 	metaPath     string
+	// metaLoader, when set, resolves package metadata content from a
+	// source other than the local filesystem (e.g. a KVS read). It is
+	// preferred over metaPath.
+	metaLoader func() ([]byte, error)
+	// repoChangedHandler, when set, is invoked for every incoming push
+	// event with the repository URL and branch, so the router can re-ingest
+	// affected repositories.
+	repoChangedHandler func(repoURL, branch, sha string)
 }
 
 func NewWebhookHandler(orchestrator *Orchestrator, cfg WebhookConfig, metaPath string) *WebhookHandler {
@@ -29,6 +37,28 @@ func NewWebhookHandler(orchestrator *Orchestrator, cfg WebhookConfig, metaPath s
 		webhookCfg:   cfg,
 		metaPath:     metaPath,
 	}
+}
+
+// SetRepoChangedHandler installs a callback invoked when a push event signals
+// that an upstream repository changed.
+func (h *WebhookHandler) SetRepoChangedHandler(fn func(repoURL, branch, sha string)) {
+	h.repoChangedHandler = fn
+}
+
+// SetMetaLoader installs an alternate package-metadata content loader.
+func (h *WebhookHandler) SetMetaLoader(loader func() ([]byte, error)) {
+	h.metaLoader = loader
+}
+
+// loadPackageMeta resolves package metadata, preferring the configured
+// meta loader over the local filesystem path.
+func (h *WebhookHandler) loadPackageMeta() (*PackageMeta, error) {
+	if h.metaLoader != nil {
+		if content, err := h.metaLoader(); err == nil && len(content) > 0 {
+			return ParsePackageMeta(content)
+		}
+	}
+	return LoadPackageMeta(nil, h.metaPath)
 }
 
 func (h *WebhookHandler) RegisterPipeline(cfg *PipelineConfig) {
@@ -146,7 +176,13 @@ func (h *WebhookHandler) handleGitLab(w http.ResponseWriter, r *http.Request, ev
 }
 
 func (h *WebhookHandler) processEvent(event WebhookEvent) {
-	meta, err := LoadPackageMeta(nil, h.metaPath)
+	// Notify the router that an upstream repository changed (auto-refresh
+	// re-ingest hook), regardless of whether any pipeline matches.
+	if h.repoChangedHandler != nil && event.RepoURL != "" {
+		h.repoChangedHandler(event.RepoURL, event.Branch, event.CommitSHA)
+	}
+
+	meta, err := h.loadPackageMeta()
 	if err != nil {
 		return
 	}

@@ -155,7 +155,7 @@ func (m *mockClient) PublishWorkspaceBundle(ctx context.Context, bundle *workspa
 	return nil, fmt.Errorf("workspace publish not configured")
 }
 
-func (m *mockClient) PushWorkspaceCommitBundle(ctx context.Context, bundle *workspacebundle.SourceCommitBundle) (*monoclient.WorkspaceSourcePushResult, error) {
+func (m *mockClient) PushWorkspaceCommitBundle(ctx context.Context, bundle *workspacebundle.SourceCommitBundle, pushMode pb.SourcePushMode) (*monoclient.WorkspaceSourcePushResult, error) {
 	return nil, fmt.Errorf("workspace source push not configured")
 }
 

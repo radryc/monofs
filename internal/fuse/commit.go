@@ -58,7 +58,7 @@ type workspaceBundlePublisher interface {
 }
 
 type workspaceCommitBundlePusher interface {
-	PushWorkspaceCommitBundle(ctx context.Context, bundle *workspacebundle.SourceCommitBundle) (*client.WorkspaceSourcePushResult, error)
+	PushWorkspaceCommitBundle(ctx context.Context, bundle *workspacebundle.SourceCommitBundle, pushMode pb.SourcePushMode) (*client.WorkspaceSourcePushResult, error)
 }
 
 type commitClient interface {
@@ -170,7 +170,10 @@ func (cm *CommitManager) CommitChanges(ctx context.Context, opts CommitOptions) 
 	return result, nil
 }
 
-func (cm *CommitManager) PushPendingLocalCommits(ctx context.Context) (*PushResult, error) {
+// PushPendingLocalCommits pushes pending local virtual commits on the
+// current logical branch upstream. A non-zero pushMode overrides the
+// router's configured default.
+func (cm *CommitManager) PushPendingLocalCommits(ctx context.Context, pushMode pb.SourcePushMode) (*PushResult, error) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -200,7 +203,7 @@ func (cm *CommitManager) PushPendingLocalCommits(ctx context.Context) (*PushResu
 		return nil, err
 	}
 
-	pushResult, err := cm.client.PushWorkspaceCommitBundle(ctx, bundle)
+	pushResult, err := cm.client.PushWorkspaceCommitBundle(ctx, bundle, pushMode)
 	if err != nil {
 		return nil, err
 	}

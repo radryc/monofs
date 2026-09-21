@@ -22,6 +22,8 @@ import (
 	monoclient "github.com/radryc/monofs/internal/client"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	pb "github.com/radryc/monofs/api/proto"
 )
 
 // SessionSocketHandler handles session management requests via Unix socket
@@ -33,6 +35,7 @@ type SessionSocketHandler struct {
 	ingester    BlobIngester // optional, nil if not configured
 	deleter     BlobDeleter  // optional, nil if not configured
 	refresher   WorkspaceRefresher
+	upstream    UpstreamReader  // optional, nil if not configured
 	diffReader  DiffReader      // optional, for reading original file content
 	verifier    BackendVerifier // optional, for verifying backend has files before cleanup
 	attrCache   *cache.Cache    // optional, for invalidation after push
@@ -42,6 +45,12 @@ type SessionSocketHandler struct {
 	wg          sync.WaitGroup
 	ctx         context.Context
 	cancel      context.CancelFunc
+
+	// pushModeMu guards preferredPushMode, the push mode preference set
+	// via "commit --push-mode" and consumed by a later "push" that does
+	// not carry an explicit --push-mode flag.
+	pushModeMu        sync.Mutex
+	preferredPushMode pb.SourcePushMode
 }
 
 // BlobIngester ingests dependency files into the cluster backend so they
@@ -73,6 +82,14 @@ type BlobDeleteResult struct {
 
 type WorkspaceRefresher interface {
 	RefreshWorkspaceRepositories(ctx context.Context, repos []monoclient.WorkspaceRepository) (*monoclient.WorkspaceRefreshResult, error)
+}
+
+// UpstreamReader fetches upstream Git metadata (log, tags, blame) through the
+// router's fetcher pass-through.
+type UpstreamReader interface {
+	UpstreamLog(ctx context.Context, repoURL, branch string, limit int) ([]monoclient.UpstreamLogEntry, error)
+	UpstreamTags(ctx context.Context, repoURL string) ([]monoclient.UpstreamTag, error)
+	UpstreamBlame(ctx context.Context, repoURL, branch, path string) ([]monoclient.UpstreamBlameLine, error)
 }
 
 type WorkspaceRefresherFunc func(ctx context.Context, repos []monoclient.WorkspaceRepository) (*monoclient.WorkspaceRefreshResult, error)
@@ -162,15 +179,19 @@ type BlobFileInfo struct {
 // SessionRequest is received from CLI
 type SessionRequest struct {
 	Action                  string   `json:"action"`         // start, add, rm, status, branch, log, commit, pull, discard, push, push-blobs, blobs-info, diff
-	Path                    string   `json:"path,omitempty"` // optional file path filter (for diff)
+	Path                    string   `json:"path,omitempty"` // optional file path filter (for diff / blame)
 	Paths                   []string `json:"paths,omitempty"`
 	BranchOp                string   `json:"branch_op,omitempty"`
 	BranchName              string   `json:"branch_name,omitempty"`
 	ShowBlobs               bool     `json:"show_blobs,omitempty"`
+	Upstream                bool     `json:"upstream,omitempty"`    // log: query upstream history instead of local commits
+	RepoFilter              string   `json:"repo_filter,omitempty"` // display path of the repository to query (log/tags/blame)
+	Limit                   int      `json:"limit,omitempty"`       // log entry limit
 	LogicalCommitMessage    string   `json:"logical_commit_message,omitempty"`
 	AuthorName              string   `json:"author_name,omitempty"`
 	AuthorEmail             string   `json:"author_email,omitempty"`
 	RequestedBranchStrategy string   `json:"requested_branch_strategy,omitempty"`
+	SourcePushMode          string   `json:"source_push_mode,omitempty"` // squash or preserve (empty = router default)
 }
 
 // SessionResponse is sent to CLI
@@ -184,6 +205,8 @@ type SessionResponse struct {
 	PendingCommits    int                 `json:"pending_commits,omitempty"`
 	BlobChanges       int                 `json:"blob_changes,omitempty"`
 	ExcludedChanges   int                 `json:"excluded_changes,omitempty"`
+	Conflicts         int                 `json:"conflicts,omitempty"`
+	ConflictList      []ConflictInfo      `json:"conflict_list,omitempty"`
 	Message           string              `json:"message,omitempty"`
 	Error             string              `json:"error,omitempty"`
 	ChangeList        []ChangeInfo        `json:"change_list,omitempty"`
@@ -198,6 +221,41 @@ type SessionResponse struct {
 	DepsInfo          *BlobsInfoData      `json:"blobs_info,omitempty"`
 	DiffData          []FileDiff          `json:"diff_data,omitempty"`
 	BlobDiffData      []FileDiff          `json:"blob_diff_data,omitempty"`
+	UpstreamLogList   []UpstreamLogInfo   `json:"upstream_log_list,omitempty"`
+	TagList           []UpstreamTagInfo   `json:"tag_list,omitempty"`
+	BlameLines        []UpstreamBlameInfo `json:"blame_lines,omitempty"`
+}
+
+// UpstreamLogInfo is one commit in an upstream branch's history.
+type UpstreamLogInfo struct {
+	Hash        string `json:"hash"`
+	AuthorName  string `json:"author_name,omitempty"`
+	AuthorEmail string `json:"author_email,omitempty"`
+	AuthoredAt  string `json:"authored_at,omitempty"`
+	Message     string `json:"message,omitempty"`
+}
+
+// UpstreamTagInfo is one upstream tag.
+type UpstreamTagInfo struct {
+	Name       string `json:"name"`
+	CommitHash string `json:"commit_hash"`
+	TaggedAt   string `json:"tagged_at,omitempty"`
+}
+
+// UpstreamBlameInfo is one blamed line of a file.
+type UpstreamBlameInfo struct {
+	LineNo     int    `json:"line_no"`
+	Hash       string `json:"hash"`
+	Author     string `json:"author,omitempty"`
+	AuthoredAt string `json:"authored_at,omitempty"`
+	Content    string `json:"content"`
+}
+
+// ConflictInfo summarizes one unresolved merge conflict.
+type ConflictInfo struct {
+	Path      string `json:"path"`
+	Reason    string `json:"reason,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // FileDiff contains the unified diff for a single file.
@@ -309,6 +367,11 @@ func (h *SessionSocketHandler) SetDeleter(d BlobDeleter) {
 // the visible source repositories through the router.
 func (h *SessionSocketHandler) SetWorkspaceRefresher(r WorkspaceRefresher) {
 	h.refresher = r
+}
+
+// SetUpstreamReader attaches the upstream Git metadata reader (log/tags/blame).
+func (h *SessionSocketHandler) SetUpstreamReader(u UpstreamReader) {
+	h.upstream = u
 }
 
 // SetDiffReader attaches a reader for fetching original file content
@@ -438,7 +501,11 @@ func (h *SessionSocketHandler) handleConnection(conn net.Conn) {
 	case "refs":
 		resp = h.handleRefs()
 	case "log":
-		resp = h.handleLog()
+		resp = h.handleLog(req)
+	case "tags":
+		resp = h.handleUpstreamTags(req)
+	case "blame":
+		resp = h.handleUpstreamBlame(req)
 	case "commit":
 		resp = h.handleCommit(req)
 	case "pull", "refresh":
@@ -446,7 +513,9 @@ func (h *SessionSocketHandler) handleConnection(conn net.Conn) {
 	case "discard":
 		resp = h.handleDiscard()
 	case "push":
-		resp = h.handlePushSource()
+		resp = h.handlePushSource(req)
+	case "conflicts":
+		resp = h.handleConflicts()
 	case "push-blobs":
 		resp = h.handleUploadDeps()
 	case "blobs-info":
@@ -498,8 +567,22 @@ func (h *SessionSocketHandler) handleAdd(paths []string) SessionResponse {
 		if err != nil {
 			return SessionResponse{Success: false, Error: err.Error()}
 		}
+		if hasConflictMarkers(entry.Content) {
+			return SessionResponse{
+				Success: false,
+				Error: fmt.Sprintf("%s still contains merge conflict markers; resolve them, then stage again",
+					change.Path),
+			}
+		}
 		if err := h.sessionMgr.PutStagedEntry(entry); err != nil {
 			return SessionResponse{Success: false, Error: err.Error()}
+		}
+		// Staging a previously conflicted path with clean content marks
+		// the conflict resolved.
+		if _, conflicted, _ := h.sessionMgr.GetSessionConflict(change.Path); conflicted {
+			if err := h.sessionMgr.ClearSessionConflict(change.Path); err != nil {
+				h.logger.Warn("clear conflict state failed", "path", change.Path, "error", err)
+			}
 		}
 		stagedInfos = append(stagedInfos, changeInfoFromStagedEntry(entry))
 	}
@@ -753,9 +836,29 @@ func (h *SessionSocketHandler) handleBranch(req SessionRequest) SessionResponse 
 		return h.handleBranchCreate(req.BranchName)
 	case "switch":
 		return h.handleBranchSwitch(req.BranchName)
+	case "delete":
+		return h.handleBranchDelete(req.BranchName)
 	default:
 		return SessionResponse{Success: false, Error: fmt.Sprintf("unknown branch operation: %s", branchOp)}
 	}
+}
+
+func (h *SessionSocketHandler) handleBranchDelete(rawBranchName string) SessionResponse {
+	branchName, err := normalizeLogicalBranchName(rawBranchName)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+
+	deletedCommits, deletedMappings, err := h.sessionMgr.DeleteLogicalBranch(branchName)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+
+	message := fmt.Sprintf("deleted logical branch %s (%d unpushed commit(s), %d mapping(s))", branchName, deletedCommits, deletedMappings)
+	if deletedCommits == 0 && deletedMappings == 0 {
+		message = fmt.Sprintf("logical branch %q had no unpushed commits or mappings", branchName)
+	}
+	return SessionResponse{Success: true, Message: message}
 }
 
 func (h *SessionSocketHandler) handleBranchShow() SessionResponse {
@@ -875,6 +978,20 @@ func (h *SessionSocketHandler) handleCommit(req SessionRequest) SessionResponse 
 			Error:   "commit manager not available",
 		}
 	}
+	if h.sessionMgr.HasSessionConflicts() {
+		return SessionResponse{
+			Success: false,
+			Error:   "unresolved merge conflicts; run 'monofs-session conflicts' and resolve them before committing",
+		}
+	}
+
+	if req.SourcePushMode != "" {
+		mode, err := parseSourcePushMode(req.SourcePushMode)
+		if err != nil {
+			return SessionResponse{Success: false, Error: err.Error()}
+		}
+		h.setPreferredPushMode(mode)
+	}
 
 	result, err := h.commitMgr.CommitChanges(h.ctx, CommitOptions{
 		LogicalCommitMessage:    req.LogicalCommitMessage,
@@ -904,12 +1021,20 @@ func (h *SessionSocketHandler) handleCommit(req SessionRequest) SessionResponse 
 	}
 }
 
-func (h *SessionSocketHandler) handlePushSource() SessionResponse {
+func (h *SessionSocketHandler) handlePushSource(req SessionRequest) SessionResponse {
 	if h.commitMgr == nil {
 		return SessionResponse{Success: false, Error: "commit manager not available"}
 	}
 
-	result, err := h.commitMgr.PushPendingLocalCommits(h.ctx)
+	pushMode, err := parseSourcePushMode(req.SourcePushMode)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	if pushMode == pb.SourcePushMode_SOURCE_PUSH_MODE_UNSPECIFIED {
+		pushMode = h.preferredPushModeLocked()
+	}
+
+	result, err := h.commitMgr.PushPendingLocalCommits(h.ctx, pushMode)
 	if err != nil {
 		return SessionResponse{Success: false, Error: err.Error()}
 	}
@@ -922,13 +1047,45 @@ func (h *SessionSocketHandler) handlePushSource() SessionResponse {
 	}
 }
 
-func (h *SessionSocketHandler) handleLog() SessionResponse {
+func (h *SessionSocketHandler) setPreferredPushMode(mode pb.SourcePushMode) {
+	h.pushModeMu.Lock()
+	h.preferredPushMode = mode
+	h.pushModeMu.Unlock()
+}
+
+func (h *SessionSocketHandler) preferredPushModeLocked() pb.SourcePushMode {
+	h.pushModeMu.Lock()
+	defer h.pushModeMu.Unlock()
+	return h.preferredPushMode
+}
+
+// parseSourcePushMode maps a CLI-supplied push mode string onto the
+// request enum. An empty string means "use the router default".
+func parseSourcePushMode(mode string) (pb.SourcePushMode, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "":
+		return pb.SourcePushMode_SOURCE_PUSH_MODE_UNSPECIFIED, nil
+	case "squash":
+		return pb.SourcePushMode_SOURCE_PUSH_MODE_SQUASH, nil
+	case "preserve":
+		return pb.SourcePushMode_SOURCE_PUSH_MODE_PRESERVE, nil
+	default:
+		return pb.SourcePushMode_SOURCE_PUSH_MODE_UNSPECIFIED,
+			fmt.Errorf("invalid push mode %q (expected squash or preserve)", mode)
+	}
+}
+
+func (h *SessionSocketHandler) handleLog(req SessionRequest) SessionResponse {
 	id, createdAt, _, ok := h.sessionMgr.GetSessionInfo()
 	if !ok {
 		return SessionResponse{
 			Success: false,
 			Error:   "no active session",
 		}
+	}
+
+	if req.Upstream {
+		return h.handleUpstreamLog(req, id, createdAt.Format("2006-01-02 15:04:05"))
 	}
 
 	localCommits, err := h.sessionMgr.ListLocalVirtualCommits()
@@ -950,6 +1107,128 @@ func (h *SessionSocketHandler) handleLog() SessionResponse {
 	}
 }
 
+// resolveUpstreamRepo resolves a display path (or a workspace file path) to the
+// repository's source URL, branch, and repo-relative path.
+func (h *SessionSocketHandler) resolveUpstreamRepo(displayPath string) (repoURL, branch, relPath string, err error) {
+	if h.rootNode == nil || h.rootNode.WorkspaceManifest() == nil {
+		return "", "", "", fmt.Errorf("upstream reads require virtual monorepo mode")
+	}
+	trimmed := strings.Trim(displayPath, "/")
+	res, err := h.rootNode.WorkspaceManifest().ResolvePath(h.ctx, trimmed)
+	if err != nil {
+		return "", "", "", err
+	}
+	if res.Repository == nil || res.Repository.Source == "" {
+		return "", "", "", fmt.Errorf("path %q does not map to a repository", displayPath)
+	}
+	repoURL = res.Repository.Source
+	branch = res.Repository.Ref
+	if branch == "" {
+		branch = "main"
+	}
+	repoRoot := strings.Trim(res.Repository.DisplayPath, "/")
+	if trimmed != repoRoot && strings.HasPrefix(trimmed, repoRoot+"/") {
+		relPath = strings.TrimPrefix(trimmed, repoRoot+"/")
+	}
+	return repoURL, branch, relPath, nil
+}
+
+func (h *SessionSocketHandler) handleUpstreamLog(req SessionRequest, id, createdAt string) SessionResponse {
+	if h.upstream == nil {
+		return SessionResponse{Success: false, Error: "upstream log is not available"}
+	}
+	repoURL, branch, _, err := h.resolveUpstreamRepo(req.RepoFilter)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	entries, err := h.upstream.UpstreamLog(h.ctx, repoURL, branch, limit)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+
+	list := make([]UpstreamLogInfo, 0, len(entries))
+	for _, e := range entries {
+		list = append(list, UpstreamLogInfo{
+			Hash:        e.Hash,
+			AuthorName:  e.AuthorName,
+			AuthorEmail: e.AuthorEmail,
+			AuthoredAt:  formatUnixTime(e.AuthoredAt),
+			Message:     e.Message,
+		})
+	}
+	return SessionResponse{
+		Success:         true,
+		SessionID:       id,
+		CreatedAt:       createdAt,
+		UpstreamLogList: list,
+	}
+}
+
+func (h *SessionSocketHandler) handleUpstreamTags(req SessionRequest) SessionResponse {
+	if h.upstream == nil {
+		return SessionResponse{Success: false, Error: "upstream tags are not available"}
+	}
+	repoURL, _, _, err := h.resolveUpstreamRepo(req.RepoFilter)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	tags, err := h.upstream.UpstreamTags(h.ctx, repoURL)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	list := make([]UpstreamTagInfo, 0, len(tags))
+	for _, t := range tags {
+		list = append(list, UpstreamTagInfo{
+			Name:       t.Name,
+			CommitHash: t.CommitHash,
+			TaggedAt:   formatUnixTime(t.TaggedAt),
+		})
+	}
+	return SessionResponse{Success: true, TagList: list}
+}
+
+func (h *SessionSocketHandler) handleUpstreamBlame(req SessionRequest) SessionResponse {
+	if h.upstream == nil {
+		return SessionResponse{Success: false, Error: "upstream blame is not available"}
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		return SessionResponse{Success: false, Error: "blame requires a file path"}
+	}
+	repoURL, branch, relPath, err := h.resolveUpstreamRepo(req.Path)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	if relPath == "" {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("%q is a repository root, not a file", req.Path)}
+	}
+	lines, err := h.upstream.UpstreamBlame(h.ctx, repoURL, branch, relPath)
+	if err != nil {
+		return SessionResponse{Success: false, Error: err.Error()}
+	}
+	list := make([]UpstreamBlameInfo, 0, len(lines))
+	for _, l := range lines {
+		list = append(list, UpstreamBlameInfo{
+			LineNo:     l.LineNo,
+			Hash:       l.Hash,
+			Author:     l.Author,
+			AuthoredAt: formatUnixTime(l.AuthoredAt),
+			Content:    l.Content,
+		})
+	}
+	return SessionResponse{Success: true, BlameLines: list}
+}
+
+func formatUnixTime(unix int64) string {
+	if unix <= 0 {
+		return ""
+	}
+	return time.Unix(unix, 0).UTC().Format("2006-01-02 15:04:05")
+}
+
 func (h *SessionSocketHandler) handlePull() SessionResponse {
 	if h.refresher == nil {
 		return SessionResponse{
@@ -963,12 +1242,9 @@ func (h *SessionSocketHandler) handlePull() SessionResponse {
 			Error:   "workspace refresh requires virtual monorepo mode",
 		}
 	}
-	if len(h.sessionMgr.GetChanges()) > 0 {
-		return SessionResponse{
-			Success: false,
-			Error:   "local changes pending; commit, discard, or push dependency changes before pull",
-		}
-	}
+
+	// Unpushed local commits carry stale base commits and must be pushed
+	// (or discarded) before refreshing.
 	localCommits, err := h.sessionMgr.ListLocalVirtualCommits()
 	if err != nil {
 		return SessionResponse{Success: false, Error: fmt.Sprintf("list local commits: %v", err)}
@@ -979,6 +1255,43 @@ func (h *SessionSocketHandler) handlePull() SessionResponse {
 				Success: false,
 				Error:   "local commits pending; push source commits before pull",
 			}
+		}
+	}
+
+	// Split pending changes: workspace changes are 3-way merged onto the
+	// refreshed upstream; blob (dependency) changes cannot be merged and
+	// still block the pull.
+	changes := h.sessionMgr.GetChanges()
+	var workspaceChanges []Change
+	blobChanges := 0
+	for _, change := range changes {
+		if isDependencyPath(change.Path) {
+			blobChanges++
+			continue
+		}
+		if change.Type == ChangeUserRootDir || change.Type == ChangeRemoveUserRootDir {
+			continue
+		}
+		workspaceChanges = append(workspaceChanges, change)
+	}
+	if blobChanges > 0 {
+		return SessionResponse{
+			Success: false,
+			Error:   "dependency changes pending; push or discard dependency changes before pull",
+		}
+	}
+	if len(workspaceChanges) > 0 && h.diffReader == nil {
+		return SessionResponse{
+			Success: false,
+			Error:   "local changes pending and merge support unavailable; commit, discard, or push before pull",
+		}
+	}
+
+	var captures map[string]pullCapture
+	if len(workspaceChanges) > 0 {
+		captures, err = h.capturePullMergeState(h.ctx, workspaceChanges)
+		if err != nil {
+			return SessionResponse{Success: false, Error: err.Error()}
 		}
 	}
 
@@ -1007,10 +1320,49 @@ func (h *SessionSocketHandler) handlePull() SessionResponse {
 		}
 	}
 
+	message := formatWorkspacePullMessage(result)
+	if len(captures) > 0 {
+		summary := h.applyPullMerge(h.ctx, captures)
+		if mergeMsg := summary.message(); mergeMsg != "" {
+			message = message + "; " + mergeMsg
+		}
+	}
+
 	return SessionResponse{
 		Success: true,
 		Changes: result.Refreshed,
-		Message: h.appendWorkspaceGitSyncWarning(formatWorkspacePullMessage(result), result != nil && result.Refreshed > 0),
+		Message: h.appendWorkspaceGitSyncWarning(message, result != nil && result.Refreshed > 0),
+	}
+}
+
+// handleConflicts lists unresolved merge conflicts from the last pull.
+func (h *SessionSocketHandler) handleConflicts() SessionResponse {
+	conflicts, err := h.sessionMgr.ListSessionConflicts()
+	if err != nil {
+		return SessionResponse{Success: false, Error: fmt.Sprintf("list conflicts: %v", err)}
+	}
+
+	conflictInfos := make([]ConflictInfo, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		conflictInfos = append(conflictInfos, ConflictInfo{
+			Path:      conflict.Path,
+			Reason:    conflict.Reason,
+			CreatedAt: conflict.CreatedAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+
+	sessionID := ""
+	if session := h.sessionMgr.GetCurrentSession(); session != nil {
+		sessionID = session.ID
+	}
+
+	return SessionResponse{
+		Success:      true,
+		SessionID:    sessionID,
+		Conflicts:    len(conflictInfos),
+		ConflictList: conflictInfos,
+		Message: fmt.Sprintf("%d unresolved conflict(s); edit the file then 'monofs-session add <path>' to mark resolved",
+			len(conflictInfos)),
 	}
 }
 

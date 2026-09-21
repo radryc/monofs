@@ -14,17 +14,20 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"sync/atomic"
 )
 
 // mockBlobFetcherServer implements a minimal fetcher server for testing
 type mockBlobFetcherServer struct {
 	pb.UnimplementedBlobFetcherServer
-	fetchCalls     int
-	prefetchCalls  int
-	cacheCalls     int
-	storeCalls     int
-	forceStreamErr bool
-	cache          map[string]bool
+	fetchCalls     atomic.Int64
+	prefetchCalls  atomic.Int64
+	cacheCalls     atomic.Int64
+	storeCalls     atomic.Int64
+	forceStreamErr atomic.Bool
+
+	mu    sync.Mutex
+	cache map[string]bool
 }
 
 type mockRepoSyncWorkerServer struct {
@@ -43,7 +46,7 @@ func (m *mockRepoSyncWorkerServer) DiscardWorkspaceBundle(ctx context.Context, r
 }
 
 func (m *mockBlobFetcherServer) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_FetchBlobServer) error {
-	m.fetchCalls++
+	m.fetchCalls.Add(1)
 
 	// Send mock data
 	data := []byte("mock blob content for " + req.ContentId)
@@ -55,7 +58,7 @@ func (m *mockBlobFetcherServer) FetchBlob(req *pb.FetchBlobRequest, stream pb.Bl
 }
 
 func (m *mockBlobFetcherServer) PrefetchBlobs(ctx context.Context, req *pb.PrefetchRequest) (*pb.PrefetchResponse, error) {
-	m.prefetchCalls++
+	m.prefetchCalls.Add(1)
 	return &pb.PrefetchResponse{
 		Accepted:      int32(len(req.Blobs)),
 		AlreadyCached: 0,
@@ -64,8 +67,9 @@ func (m *mockBlobFetcherServer) PrefetchBlobs(ctx context.Context, req *pb.Prefe
 }
 
 func (m *mockBlobFetcherServer) CheckCache(ctx context.Context, req *pb.CheckCacheRequest) (*pb.CheckCacheResponse, error) {
-	m.cacheCalls++
+	m.cacheCalls.Add(1)
 
+	m.mu.Lock()
 	result := make(map[string]bool)
 	sizes := make(map[string]int64)
 	for _, id := range req.ContentIds {
@@ -76,6 +80,7 @@ func (m *mockBlobFetcherServer) CheckCache(ctx context.Context, req *pb.CheckCac
 			result[id] = false
 		}
 	}
+	m.mu.Unlock()
 
 	return &pb.CheckCacheResponse{
 		Cached: result,
@@ -84,24 +89,27 @@ func (m *mockBlobFetcherServer) CheckCache(ctx context.Context, req *pb.CheckCac
 }
 
 func (m *mockBlobFetcherServer) GetStats(ctx context.Context, req *pb.FetcherStatsRequest) (*pb.FetcherStatsResponse, error) {
+	fetchCalls := m.fetchCalls.Load()
 	return &pb.FetcherStatsResponse{
-		TotalRequests: int64(m.fetchCalls),
+		TotalRequests: fetchCalls,
 		CacheHits:     0,
-		CacheMisses:   int64(m.fetchCalls),
+		CacheMisses:   fetchCalls,
 	}, nil
 }
 
 func (m *mockBlobFetcherServer) StoreBlob(ctx context.Context, req *pb.StoreBlobRequest) (*pb.StoreBlobResponse, error) {
-	m.storeCalls++
+	m.storeCalls.Add(1)
+	m.mu.Lock()
 	if m.cache == nil {
 		m.cache = make(map[string]bool)
 	}
 	m.cache[req.BlobHash] = true
+	m.mu.Unlock()
 	return &pb.StoreBlobResponse{Success: true}, nil
 }
 
 func (m *mockBlobFetcherServer) StoreBlobBatchStream(stream pb.BlobFetcher_StoreBlobBatchStreamServer) error {
-	if m.forceStreamErr {
+	if m.forceStreamErr.Load() {
 		return context.DeadlineExceeded
 	}
 	stored := int32(0)
@@ -229,8 +237,8 @@ func TestClient_FetchBlob(t *testing.T) {
 		t.Error("expected non-empty data")
 	}
 
-	if server.fetchCalls != 1 {
-		t.Errorf("expected 1 fetch call, got %d", server.fetchCalls)
+	if server.fetchCalls.Load() != 1 {
+		t.Errorf("expected 1 fetch call, got %d", server.fetchCalls.Load())
 	}
 }
 
@@ -265,8 +273,8 @@ func TestClient_FetchBlobSimple(t *testing.T) {
 		t.Error("expected non-empty data")
 	}
 
-	if server.fetchCalls != 1 {
-		t.Errorf("expected 1 fetch call, got %d", server.fetchCalls)
+	if server.fetchCalls.Load() != 1 {
+		t.Errorf("expected 1 fetch call, got %d", server.fetchCalls.Load())
 	}
 }
 
@@ -296,7 +304,12 @@ func TestClient_CheckCacheSimple(t *testing.T) {
 	}
 
 	// Add to mock cache and check again
+	server.mu.Lock()
+	if server.cache == nil {
+		server.cache = make(map[string]bool)
+	}
 	server.cache["cached-blob"] = true
+	server.mu.Unlock()
 
 	cached, err = client.CheckCacheSimple(context.Background(), "https://github.com/test/repo", "cached-blob")
 	if err != nil {
@@ -354,8 +367,8 @@ func TestClient_PrefetchSimple(t *testing.T) {
 	// Wait for async prefetch to complete
 	time.Sleep(100 * time.Millisecond)
 
-	if server.prefetchCalls < 1 {
-		t.Errorf("expected at least 1 prefetch call, got %d", server.prefetchCalls)
+	if server.prefetchCalls.Load() < 1 {
+		t.Errorf("expected at least 1 prefetch call, got %d", server.prefetchCalls.Load())
 	}
 }
 
@@ -471,7 +484,7 @@ func TestClient_AffinityRouting(t *testing.T) {
 
 	// With consistent hashing, all requests should go to the same server
 	// (or mostly the same, depending on affinity updates)
-	total := server1.fetchCalls + server2.fetchCalls
+	total := server1.fetchCalls.Load() + server2.fetchCalls.Load()
 	if total != 5 {
 		t.Errorf("expected 5 total fetches, got %d", total)
 	}
@@ -573,7 +586,7 @@ func TestClient_NoHealthyFetchers(t *testing.T) {
 func TestClient_StoreBlobBatch_StreamFails_FallbackSucceeds(t *testing.T) {
 	addr, server, cleanup := startMockServer(t)
 	defer cleanup()
-	server.forceStreamErr = true
+	server.forceStreamErr.Store(true)
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
@@ -598,8 +611,8 @@ func TestClient_StoreBlobBatch_StreamFails_FallbackSucceeds(t *testing.T) {
 	if stored != 2 || failed != 0 {
 		t.Fatalf("unexpected StoreBlobBatch result: stored=%d failed=%d", stored, failed)
 	}
-	if server.storeCalls != 2 {
-		t.Fatalf("expected fallback StoreBlob to be called twice, got %d", server.storeCalls)
+	if server.storeCalls.Load() != 2 {
+		t.Fatalf("expected fallback StoreBlob to be called twice, got %d", server.storeCalls.Load())
 	}
 }
 

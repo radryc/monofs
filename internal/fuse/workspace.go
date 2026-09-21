@@ -35,6 +35,7 @@ const (
 	WorkspaceExcludedNone            WorkspaceExclusionReason = ""
 	WorkspaceExcludedSystemNamespace WorkspaceExclusionReason = "system-namespace"
 	WorkspaceExcludedNestedGit       WorkspaceExclusionReason = "nested-git"
+	WorkspaceExcludedFilter          WorkspaceExclusionReason = "repo-filter"
 )
 
 var hiddenWorkspaceRoots = map[string]WorkspaceExclusionReason{
@@ -78,6 +79,11 @@ type WorkspaceManifest struct {
 	provider client.WorkspaceMetadataProvider
 	ttl      time.Duration
 
+	// filter, when set, restricts which repositories appear in the sparse
+	// view (client --include/--exclude globs). It is applied at read time so
+	// it persists across manifest refreshes.
+	filter *RepoFilter
+
 	mu        sync.RWMutex
 	entries   []WorkspaceManifestEntry
 	fetchedAt time.Time
@@ -88,6 +94,19 @@ func NewWorkspaceManifest(provider client.WorkspaceMetadataProvider) *WorkspaceM
 		provider: provider,
 		ttl:      workspaceManifestTTL,
 	}
+}
+
+// SetRepoFilter installs the sparse-mount repository filter.
+func (m *WorkspaceManifest) SetRepoFilter(filter *RepoFilter) {
+	m.filter = filter
+}
+
+// RepoFilter returns the active sparse-mount filter, or nil.
+func (m *WorkspaceManifest) RepoFilter() *RepoFilter {
+	if m == nil {
+		return nil
+	}
+	return m.filter
 }
 
 // List returns the latest discovered repositories along with their inclusion
@@ -113,6 +132,13 @@ func (m *WorkspaceManifest) List(ctx context.Context) ([]WorkspaceManifestEntry,
 	entries := make([]WorkspaceManifestEntry, 0, len(repos))
 	for _, repo := range repos {
 		reason, hidden := workspaceExcludedPath(repo.DisplayPath)
+		// Apply the sparse-mount repo filter (include/exclude globs).
+		if m.filter != nil && !m.filter.Allows(repo.DisplayPath) {
+			if !hidden {
+				hidden = true
+				reason = WorkspaceExcludedFilter
+			}
+		}
 		entries = append(entries, WorkspaceManifestEntry{
 			Repository:      repo,
 			Included:        !hidden,
@@ -188,7 +214,10 @@ func (m *WorkspaceManifest) ShouldHidePath(path string) bool {
 		return false
 	}
 	_, hidden := workspaceHiddenPath(path)
-	return hidden
+	if hidden {
+		return true
+	}
+	return m.pathUnderFilteredRepo(path)
 }
 
 func (m *WorkspaceManifest) ShouldReserveRoot(name string) bool {
@@ -209,8 +238,38 @@ func (m *WorkspaceManifest) ShouldHideChild(parentPath, name string) bool {
 	if parentPath == "" && name == syntheticGitignoreName {
 		return false
 	}
-	_, hidden := workspaceHiddenPath(joinWorkspacePath(parentPath, name))
-	return hidden
+	child := joinWorkspacePath(parentPath, name)
+	if _, hidden := workspaceHiddenPath(child); hidden {
+		return true
+	}
+	return m.pathUnderFilteredRepo(child)
+}
+
+// pathUnderFilteredRepo reports whether path equals or nest under a repository
+// that the active repo filter excludes. It consults the cached entry list, so
+// it is populated only after the manifest has been listed at least once.
+func (m *WorkspaceManifest) pathUnderFilteredRepo(path string) bool {
+	if m == nil || m.filter == nil || m.filter.IsEmpty() {
+		return false
+	}
+	m.mu.RLock()
+	entries := m.entries
+	m.mu.RUnlock()
+
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return false
+	}
+	for _, entry := range entries {
+		dp := strings.Trim(entry.Repository.DisplayPath, "/")
+		if dp == "" || entry.Included {
+			continue
+		}
+		if trimmed == dp || strings.HasPrefix(trimmed, dp+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *WorkspaceManifest) FilterDirEntries(path string, entries []fuse.DirEntry) []fuse.DirEntry {
@@ -296,9 +355,17 @@ func (m *WorkspaceManifest) JSONContent(ctx context.Context) ([]byte, error) {
 
 	doc := struct {
 		GeneratedAt  string               `json:"generated_at"`
+		RepoFilter   map[string][]string  `json:"repo_filter,omitempty"`
 		Repositories []manifestRepository `json:"repositories"`
 	}{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if m.filter != nil && !m.filter.IsEmpty() {
+		doc.RepoFilter = map[string][]string{
+			"include": m.filter.IncludePatterns(),
+			"exclude": m.filter.ExcludePatterns(),
+		}
 	}
 
 	for _, entry := range entries {

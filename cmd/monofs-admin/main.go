@@ -43,7 +43,7 @@ func main() {
 	// Ingest flags
 	routerAddr := ingestCmd.String("router", "localhost:9090", "MonoFS router address")
 	source := ingestCmd.String("source", "", "Source: Git URL, S3 bucket (required)")
-	ref := ingestCmd.String("ref", "", "Ref: branch for Git, prefix for S3 (optional)")
+	ref := ingestCmd.String("ref", "", "Ref: branch name, tag name, or commit SHA for Git; prefix for S3 (optional)")
 	sourceID := ingestCmd.String("source-id", "", "Custom source ID (optional, auto-generated if empty)")
 	ingestionType := ingestCmd.String("ingestion-type", "git", "Ingestion backend type (git, s3, file)")
 	fetchType := ingestCmd.String("fetch-type", "blob", "Fetch backend type (blob, git, s3, local)")

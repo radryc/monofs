@@ -36,15 +36,15 @@ func NewBazelHandler(mountPath, cacheAddr, executorAddr string, logger *slog.Log
 
 // Execute implements Handler. It runs each step's Run command through
 // a shell and parses BEP output if bazel was invoked.
-func (h *BazelHandler) Execute(ctx context.Context, task *TaskData, logWriter io.Writer) (int, error) {
+func (h *BazelHandler) Execute(ctx context.Context, task *TaskData, logWriter io.Writer) (int, map[string]string, error) {
 	for i, step := range task.Steps {
 		code, err := h.executeStep(ctx, step, logWriter)
 		if err != nil {
 			fmt.Fprintf(logWriter, "step %d failed: %v\n", i, err)
-			return code, err
+			return code, nil, err
 		}
 	}
-	return 0, nil
+	return 0, nil, nil
 }
 
 func (h *BazelHandler) executeStep(ctx context.Context, step StepData, logWriter io.Writer) (int, error) {

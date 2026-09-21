@@ -72,6 +72,67 @@ type SessionBranchMapping struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
+// SessionConflict records an unresolved 3-way merge conflict produced by
+// pulling upstream changes into a session with local modifications.
+type SessionConflict struct {
+	Path       string    `json:"path"`
+	Reason     string    `json:"reason,omitempty"`
+	BaseCommit string    `json:"base_commit,omitempty"`
+	TheirsRef  string    `json:"theirs_ref,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// PutSessionConflict records an unresolved merge conflict.
+func (sm *SessionManager) PutSessionConflict(conflict SessionConflict) error {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if sm.current == nil || sm.db == nil {
+		return fmt.Errorf("no active session")
+	}
+	return sm.db.PutSessionConflict(conflict)
+}
+
+// GetSessionConflict returns the recorded conflict for a path.
+func (sm *SessionManager) GetSessionConflict(path string) (SessionConflict, bool, error) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if sm.current == nil || sm.db == nil {
+		return SessionConflict{}, false, nil
+	}
+	return sm.db.GetSessionConflict(path)
+}
+
+// ListSessionConflicts returns all unresolved merge conflicts.
+func (sm *SessionManager) ListSessionConflicts() ([]SessionConflict, error) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if sm.current == nil || sm.db == nil {
+		return nil, nil
+	}
+	return sm.db.ListSessionConflicts()
+}
+
+// ClearSessionConflict marks a conflicted path as resolved.
+func (sm *SessionManager) ClearSessionConflict(path string) error {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if sm.current == nil || sm.db == nil {
+		return fmt.Errorf("no active session")
+	}
+	return sm.db.DeleteSessionConflict(path)
+}
+
+// HasSessionConflicts reports whether any unresolved merge conflicts
+// remain.
+func (sm *SessionManager) HasSessionConflicts() bool {
+	conflicts, err := sm.ListSessionConflicts()
+	return err == nil && len(conflicts) > 0
+}
+
 func (sm *SessionManager) PutStagedEntry(entry StagedIndexEntry) error {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -234,6 +295,57 @@ func (sm *SessionManager) DeleteBranchMapping(principalID, logicalBranch, storag
 		return fmt.Errorf("no active session")
 	}
 	return sm.db.DeleteBranchMapping(principalID, logicalBranch, storageID)
+}
+
+// DeleteLogicalBranch removes a logical branch: its unpushed local virtual
+// commits and its branch mappings. Pushed commits are intentionally retained
+// (they reflect work already published upstream). If the deleted branch was the
+// current branch, the current branch is cleared.
+func (sm *SessionManager) DeleteLogicalBranch(branch string) (deletedCommits, deletedMappings int, err error) {
+	if branch == "" {
+		return 0, 0, fmt.Errorf("logical branch name is required")
+	}
+	sm.mu.RLock()
+	if sm.current == nil || sm.db == nil {
+		sm.mu.RUnlock()
+		return 0, 0, fmt.Errorf("no active session")
+	}
+	db := sm.db
+	sm.mu.RUnlock()
+
+	commits, err := db.ListLocalVirtualCommits()
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, c := range commits {
+		if c.LogicalBranch != branch || c.Pushed {
+			continue
+		}
+		if err := db.DeleteLocalVirtualCommit(c.ID); err != nil {
+			return deletedCommits, deletedMappings, err
+		}
+		deletedCommits++
+	}
+
+	mappings, err := db.ListBranchMappings()
+	if err != nil {
+		return deletedCommits, deletedMappings, err
+	}
+	for _, m := range mappings {
+		if m.LogicalBranch != branch {
+			continue
+		}
+		if err := db.DeleteBranchMapping(m.PrincipalID, m.LogicalBranch, m.StorageID); err != nil {
+			return deletedCommits, deletedMappings, err
+		}
+		deletedMappings++
+	}
+
+	if current, found, err := db.GetCurrentLogicalBranch(); err == nil && found && current == branch {
+		_ = db.SetCurrentLogicalBranch("")
+	}
+
+	return deletedCommits, deletedMappings, nil
 }
 
 func sortLocalVirtualCommits(commits []LocalVirtualCommit) {

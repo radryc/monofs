@@ -33,6 +33,8 @@ type Indexer struct {
 	logger          *slog.Logger
 	pathToStorageID map[string]string   // DisplayPath -> StorageID mapping
 	monofsClient    client.MonoFSClient // Optional client for fetching from storage nodes
+	ctagsPath       string              // universal-ctags binary for symbol extraction ("" = disabled)
+	symbolsEnabled  bool                // whether sym: queries are supported
 }
 
 // IndexRequest contains repository indexing parameters
@@ -138,6 +140,21 @@ func NewIndexer(indexDir, cacheDir string, monofsClient client.MonoFSClient, log
 		return nil, fmt.Errorf("failed to create searcher: %w", err)
 	}
 
+	// Detect universal-ctags for symbol extraction (sym: queries). Best-effort:
+	// without it documents are still indexed and full-text search works.
+	support := detectSymbolSupport()
+	if support.EnableUniversalCtags {
+		logger.Info("symbol indexing enabled", "ctags", support.Binary)
+	} else if support.Binary != "" {
+		logger.Warn("symbol indexing disabled: ctags binary is not universal-ctags (+interactive required)", "ctags", support.Binary)
+	} else {
+		logger.Info("symbol indexing disabled: no universal-ctags binary found")
+	}
+	ctagsPath := ""
+	if support.EnableUniversalCtags {
+		ctagsPath = support.Binary
+	}
+
 	return &Indexer{
 		indexDir:        indexDir,
 		cacheDir:        cacheDir,
@@ -145,7 +162,17 @@ func NewIndexer(indexDir, cacheDir string, monofsClient client.MonoFSClient, log
 		logger:          logger,
 		pathToStorageID: make(map[string]string),
 		monofsClient:    monofsClient,
+		ctagsPath:       ctagsPath,
+		symbolsEnabled:  support.EnableUniversalCtags,
 	}, nil
+}
+
+// SymbolsEnabled reports whether sym: queries are supported (universal-ctags
+// is available for symbol extraction).
+func (i *Indexer) SymbolsEnabled() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.symbolsEnabled
 }
 
 // RegisterStorageMapping registers a DisplayPath to StorageID mapping.
@@ -211,6 +238,7 @@ func (i *Indexer) indexFromMonoFS(ctx context.Context, req IndexRequest, start t
 			},
 		},
 	}
+	opts.CTagsPath = i.ctagsPath
 	opts.SetDefaults()
 
 	builder, err := index.NewBuilder(opts)
@@ -394,6 +422,7 @@ func (i *Indexer) indexFromExternal(ctx context.Context, req IndexRequest, start
 			},
 		},
 	}
+	opts.CTagsPath = i.ctagsPath
 	opts.SetDefaults()
 
 	builder, err := index.NewBuilder(opts)
@@ -748,6 +777,7 @@ func (i *Indexer) IndexLocalDir(ctx context.Context, req IndexLocalRequest) (*In
 			},
 		},
 	}
+	opts.CTagsPath = i.ctagsPath
 	opts.SetDefaults()
 
 	builder, err := index.NewBuilder(opts)

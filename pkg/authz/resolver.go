@@ -58,9 +58,28 @@ func ownerRefMatchesIdentity(ref OwnerRef, id Identity, mapping TeamMapping) boo
 // OwnershipResolver decides subtree ownership using nested OWNERS files. An
 // identity owns a path if it is listed as a maintainer in the nearest governing
 // OWNERS file or in any ancestor OWNERS file (parent owners retain authority).
+// When no OWNERS file governs a path and a CODEOWNERS provider is configured,
+// CODEOWNERS rules are consulted as a fallback (OWNERS wins over CODEOWNERS).
 type OwnershipResolver struct {
 	source  OwnersSource
 	mapping TeamMapping
+	// codeowners, when set, supplies a repository-level CODEOWNERS
+	// document used as an ownership fallback.
+	codeowners CodeownersProvider
+}
+
+// CodeownersProvider loads the repository-level CODEOWNERS document. A
+// repository without CODEOWNERS returns (nil, nil).
+type CodeownersProvider interface {
+	LoadCodeowners(ctx context.Context) (*CodeownersFile, error)
+}
+
+// CodeownersProviderFunc adapts a function into a CodeownersProvider.
+type CodeownersProviderFunc func(ctx context.Context) (*CodeownersFile, error)
+
+// LoadCodeowners implements CodeownersProvider.
+func (f CodeownersProviderFunc) LoadCodeowners(ctx context.Context) (*CodeownersFile, error) {
+	return f(ctx)
 }
 
 // NewOwnershipResolver builds a resolver over the given OWNERS source and team
@@ -69,9 +88,18 @@ func NewOwnershipResolver(source OwnersSource, mapping TeamMapping) *OwnershipRe
 	return &OwnershipResolver{source: source, mapping: mapping}
 }
 
+// SetCodeownersProvider installs a CODEOWNERS fallback provider.
+func (r *OwnershipResolver) SetCodeownersProvider(provider CodeownersProvider) {
+	r.codeowners = provider
+}
+
 // IsOwner reports whether id may modify path directly. When owned, ownerDir is
 // the deepest OWNERS directory that granted ownership.
 func (r *OwnershipResolver) IsOwner(ctx context.Context, path string, id Identity) (owned bool, ownerDir string, err error) {
+	// governed records whether any OWNERS file exists on the ancestor
+	// chain; CODEOWNERS is only consulted when no OWNERS file governs
+	// the path (OWNERS wins).
+	governed := false
 	for _, dir := range ancestorDirs(path) {
 		owners, err := r.source.LoadOwners(ctx, dir)
 		if err != nil {
@@ -80,13 +108,57 @@ func (r *OwnershipResolver) IsOwner(ctx context.Context, path string, id Identit
 		if owners == nil {
 			continue
 		}
+		governed = true
 		for _, ref := range owners.Maintainers {
 			if ownerRefMatchesIdentity(ref, id, r.mapping) {
 				return true, dir, nil
 			}
 		}
 	}
+	if governed {
+		return false, "", nil
+	}
+	// CODEOWNERS fallback.
+	if r.codeowners != nil {
+		codeowners, err := r.codeowners.LoadCodeowners(ctx)
+		if err != nil {
+			return false, "", err
+		}
+		if codeowners != nil {
+			for _, ref := range codeowners.OwnersFor(path) {
+				if ownerRefMatchesIdentity(ref, id, r.mapping) {
+					return true, "CODEOWNERS", nil
+				}
+			}
+		}
+	}
 	return false, "", nil
+}
+
+// Governed reports whether any OWNERS or CODEOWNERS rule governs path,
+// regardless of who owns it. Ungoverned paths are open by default (no owners
+// means no review requirement); callers use this to distinguish "governed but
+// foreign" (review required) from "ungoverned" (open).
+func (r *OwnershipResolver) Governed(ctx context.Context, path string) (bool, error) {
+	for _, dir := range ancestorDirs(path) {
+		owners, err := r.source.LoadOwners(ctx, dir)
+		if err != nil {
+			return false, err
+		}
+		if owners != nil {
+			return true, nil
+		}
+	}
+	if r.codeowners != nil {
+		codeowners, err := r.codeowners.LoadCodeowners(ctx)
+		if err != nil {
+			return false, err
+		}
+		if codeowners != nil && len(codeowners.OwnersFor(path)) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // OwnsAll reports whether id owns every path (may modify all directly). It also
@@ -108,11 +180,32 @@ func (r *OwnershipResolver) OwnsAll(ctx context.Context, paths []string, id Iden
 // OwnersOf returns the distinct maintainer references that govern any of the
 // given paths (from the nearest and ancestor OWNERS files). Callers use this to
 // assign reviewers to a merge request. Order is deterministic (path order, then
-// deepest-to-root, first occurrence wins).
+// deepest-to-root, first occurrence wins). CODEOWNERS owners are included for
+// paths that no OWNERS file governs.
 func (r *OwnershipResolver) OwnersOf(ctx context.Context, paths []string) ([]OwnerRef, error) {
 	seen := make(map[string]bool)
 	var refs []OwnerRef
+	addRefs := func(candidates []OwnerRef) {
+		for _, ref := range candidates {
+			key := ref.String()
+			if !seen[key] {
+				seen[key] = true
+				refs = append(refs, ref)
+			}
+		}
+	}
+
+	var codeowners *CodeownersFile
+	if r.codeowners != nil {
+		var err error
+		codeowners, err = r.codeowners.LoadCodeowners(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	for _, p := range paths {
+		governed := false
 		for _, dir := range ancestorDirs(p) {
 			owners, err := r.source.LoadOwners(ctx, dir)
 			if err != nil {
@@ -121,13 +214,11 @@ func (r *OwnershipResolver) OwnersOf(ctx context.Context, paths []string) ([]Own
 			if owners == nil {
 				continue
 			}
-			for _, ref := range owners.Maintainers {
-				key := ref.String()
-				if !seen[key] {
-					seen[key] = true
-					refs = append(refs, ref)
-				}
-			}
+			governed = true
+			addRefs(owners.Maintainers)
+		}
+		if !governed && codeowners != nil {
+			addRefs(codeowners.OwnersFor(p))
 		}
 	}
 	return refs, nil

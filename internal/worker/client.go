@@ -83,13 +83,15 @@ func (c *Client) WorkerID() string {
 }
 
 type TaskData struct {
-	TaskID     string     `json:"task_id"`
-	RunID      string     `json:"run_id"`
-	JobName    string     `json:"job_name"`
-	RunnerType string     `json:"runner_type"`
-	Steps      []StepData `json:"steps"`
-	TimeoutSec int        `json:"timeout_sec"`
-	MaxRetries int        `json:"max_retries"`
+	TaskID       string     `json:"task_id"`
+	RunID        string     `json:"run_id"`
+	JobName      string     `json:"job_name"`
+	RunnerType   string     `json:"runner_type"`
+	Steps        []StepData `json:"steps"`
+	TimeoutSec   int        `json:"timeout_sec"`
+	MaxRetries   int        `json:"max_retries"`
+	Affected     []string   `json:"affected,omitempty"`
+	ChangedFiles []string   `json:"changed_files,omitempty"`
 }
 
 type StepData struct {
@@ -101,15 +103,16 @@ type StepData struct {
 }
 
 type ResultData struct {
-	TaskID    string `json:"task_id"`
-	RunID     string `json:"run_id"`
-	JobName   string `json:"job_name"`
-	State     string `json:"state"`
-	ExitCode  int    `json:"exit_code"`
-	Error     string `json:"error,omitempty"`
-	StartedAt string `json:"started_at"`
-	EndedAt   string `json:"ended_at"`
-	WorkerID  string `json:"worker_id"`
+	TaskID    string            `json:"task_id"`
+	RunID     string            `json:"run_id"`
+	JobName   string            `json:"job_name"`
+	State     string            `json:"state"`
+	ExitCode  int               `json:"exit_code"`
+	Error     string            `json:"error,omitempty"`
+	StartedAt string            `json:"started_at"`
+	EndedAt   string            `json:"ended_at"`
+	WorkerID  string            `json:"worker_id"`
+	Outputs   map[string]string `json:"outputs,omitempty"`
 }
 
 type ClaimData struct {
@@ -145,7 +148,7 @@ func isContextError(err error) bool {
 }
 
 type Handler interface {
-	Execute(ctx context.Context, task *TaskData, logWriter io.Writer) (int, error)
+	Execute(ctx context.Context, task *TaskData, logWriter io.Writer) (int, map[string]string, error)
 }
 
 type Worker struct {
@@ -292,7 +295,7 @@ func (w *Worker) executeTask(ctx context.Context, runID, taskID string, task *Ta
 	w.logger.Info("executing task", "task_id", taskID, "job", task.JobName, "steps", len(task.Steps))
 
 	startedAt := time.Now().UTC()
-	exitCode, execErr := w.handler.Execute(taskCtx, task, discardWriter{})
+	exitCode, outputs, execErr := w.handler.Execute(taskCtx, task, discardWriter{})
 	endedAt := time.Now().UTC()
 
 	state := "succeeded"
@@ -300,6 +303,7 @@ func (w *Worker) executeTask(ctx context.Context, runID, taskID string, task *Ta
 	if execErr != nil {
 		state = "failed"
 		errMsg = execErr.Error()
+		outputs = nil
 	}
 
 	w.writeResult(ctx, rPath, ResultData{
@@ -312,6 +316,7 @@ func (w *Worker) executeTask(ctx context.Context, runID, taskID string, task *Ta
 		StartedAt: startedAt.Format(time.RFC3339),
 		EndedAt:   endedAt.Format(time.RFC3339),
 		WorkerID:  w.client.WorkerID(),
+		Outputs:   outputs,
 	})
 
 	w.logger.Info("task completed", "task_id", taskID, "state", state,

@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -151,13 +153,40 @@ func (s *Service) StartWorkspaceCommitPush(req *pb.StartWorkspaceCommitPushReque
 		}
 	} else {
 		plans := sourcePushRepositoryPlans(bundleEntry.commitBundle)
+		published := make([]sourcePushRollback, 0, len(plans))
+		hardFailed := false
 		for _, plan := range plans {
 			select {
 			case <-ctx.Done():
 				resultLabel = "failed"
 				jobFailed = true
-				break
+				hardFailed = true
 			default:
+			}
+
+			if hardFailed {
+				// Once one repository failed hard, do not publish the
+				// remaining repositories; report them as skipped so the
+				// job is an all-or-nothing unit.
+				progress := &pb.RepoSyncProgress{
+					JobId: req.GetJobId(),
+					Repository: &pb.WorkspaceRepositoryRef{
+						StorageId:   plan.repo.StorageID,
+						DisplayPath: plan.repo.DisplayPath,
+						RepoUrl:     plan.repo.RepoURL,
+						Branch:      plan.repo.Branch,
+						BaseCommit:  plan.repo.BaseCommit,
+					},
+					Status:  pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED,
+					Message: "skipped: earlier repository in this push failed",
+				}
+				if err := stream.Send(progress); err != nil {
+					resultLabel = "failed"
+					s.syncFailedJobs.Add(1)
+					fetcherGitSyncJobsTotal.WithLabelValues("source_push", "failed").Inc()
+					return err
+				}
+				continue
 			}
 
 			progress := s.pushSourceCommitRepository(ctx, req, plan)
@@ -169,9 +198,18 @@ func (s *Service) StartWorkspaceCommitPush(req *pb.StartWorkspaceCommitPushReque
 				progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_MISSING_BRANCH {
 				jobFailed = true
 				resultLabel = "failed"
+				hardFailed = true
 			}
 			if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED {
 				s.syncPublishedRepos.Add(1)
+				published = append(published, sourcePushRollback{
+					storageID:    plan.repo.StorageID,
+					displayPath:  plan.repo.DisplayPath,
+					repoURL:      plan.repo.RepoURL,
+					branch:       plan.repo.Branch,
+					baseCommit:   plan.repo.BaseCommit,
+					targetBranch: progress.GetTargetBranch(),
+				})
 			}
 			if progress.GetConflictReason() != "" {
 				fetcherGitSyncConflictsTotal.WithLabelValues("source_push", progress.GetConflictReason()).Inc()
@@ -181,6 +219,22 @@ func (s *Service) StartWorkspaceCommitPush(req *pb.StartWorkspaceCommitPushReque
 				s.syncFailedJobs.Add(1)
 				fetcherGitSyncJobsTotal.WithLabelValues("source_push", "failed").Inc()
 				return err
+			}
+		}
+
+		// Best-effort rollback: a multi-repo push that failed part-way
+		// reverts every repository already published back to its base
+		// commit so the logical changeset does not linger half-applied.
+		if hardFailed && len(published) > 0 {
+			for _, record := range published {
+				rollbackProgress := s.rollbackSourcePushRepository(ctx, req, record, nil, nil)
+				if rollbackProgress.GetConflictReason() != "" {
+					fetcherGitSyncConflictsTotal.WithLabelValues("source_push_rollback", rollbackProgress.GetConflictReason()).Inc()
+				}
+				if err := stream.Send(rollbackProgress); err != nil {
+					resultLabel = "failed"
+					return err
+				}
 			}
 		}
 	}
@@ -397,6 +451,206 @@ func sourcePushCommitMessage(plan sourcePushRepositoryPlan) string {
 
 const sourcePushModePreserve = "preserve"
 
+// sourcePushRollback records everything needed to revert one published
+// repository back to its base commit after a partial multi-repo push
+// failure.
+type sourcePushRollback struct {
+	storageID    string
+	displayPath  string
+	repoURL      string
+	branch       string
+	baseCommit   string
+	targetBranch string
+}
+
+// rollbackSourcePushRepository reverts a published repository to its
+// base commit by creating and pushing a revert commit on the target
+// branch. When handle/wt are nil a fresh clone is made. It never
+// force-pushes.
+func (s *Service) rollbackSourcePushRepository(ctx context.Context, req *pb.StartWorkspaceCommitPushRequest, record sourcePushRollback, handle *gogit.Repository, wt *gogit.Worktree) *pb.RepoSyncProgress {
+	progress := &pb.RepoSyncProgress{
+		JobId: req.GetJobId(),
+		Repository: &pb.WorkspaceRepositoryRef{
+			StorageId:   record.storageID,
+			DisplayPath: record.displayPath,
+			RepoUrl:     record.repoURL,
+			Branch:      record.branch,
+			BaseCommit:  record.baseCommit,
+		},
+		TargetBranch: record.targetBranch,
+	}
+
+	if handle == nil || wt == nil {
+		worktreeRoot, err := cloneBranchWorktree(ctx, record.repoURL, record.targetBranch)
+		if err != nil {
+			progress.Status, progress.ConflictReason = mapPublishError(err)
+			progress.Message = fmt.Sprintf("rollback clone failed: %v", err)
+			return progress
+		}
+		defer os.RemoveAll(worktreeRoot)
+		handle, err = gogit.PlainOpen(worktreeRoot)
+		if err != nil {
+			progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+			progress.Message = fmt.Sprintf("rollback open failed: %v", err)
+			return progress
+		}
+		wt, err = handle.Worktree()
+		if err != nil {
+			progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+			progress.Message = fmt.Sprintf("rollback worktree failed: %v", err)
+			return progress
+		}
+	}
+
+	baseHash := plumbing.NewHash(record.baseCommit)
+	if record.baseCommit == "" {
+		if head, err := handle.Head(); err == nil {
+			// No base recorded: roll back to the pushed commit's parent.
+			parentIter, err := handle.Log(&gogit.LogOptions{From: head.Hash()})
+			if err == nil {
+				count := 0
+				_ = parentIter.ForEach(func(c *object.Commit) error {
+					if count == 1 {
+						baseHash = c.Hash
+					}
+					count++
+					return nil
+				})
+			}
+		}
+	}
+	if baseHash.IsZero() {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = "rollback aborted: base commit unavailable"
+		return progress
+	}
+	baseCommit, err := handle.CommitObject(baseHash)
+	if err != nil {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = fmt.Sprintf("rollback aborted: base commit %s not found: %v", record.baseCommit, err)
+		return progress
+	}
+
+	// Restore the base tree content in the worktree while leaving HEAD
+	// at the pushed commit, so the revert is a normal fast-forward push
+	// (never a force push).
+	if err := restoreBaseTree(wt.Filesystem.Root(), baseCommit); err != nil {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = fmt.Sprintf("rollback restore failed: %v", err)
+		return progress
+	}
+
+	hasChanges, err := stageWorktreeChanges(wt)
+	if err != nil {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = fmt.Sprintf("rollback stage failed: %v", err)
+		return progress
+	}
+	if !hasChanges {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = "rollback aborted: repository already matches base"
+		return progress
+	}
+
+	rollbackCommit, err := wt.Commit(fmt.Sprintf(
+		"MonoFS rollback: revert source push of %s after partial failure\n\nMonoFS-Job: %s",
+		record.displayPath, req.GetJobId()), &gogit.CommitOptions{
+		Author: &object.Signature{Name: "MonoFS", Email: "monofs@local", When: time.Now()},
+	})
+	if err != nil {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
+		progress.Message = fmt.Sprintf("rollback commit failed: %v", err)
+		return progress
+	}
+
+	pushRef := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", record.targetBranch, record.targetBranch))
+	if err := handle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}}); err != nil {
+		progress.Status, progress.ConflictReason = mapPublishError(err)
+		progress.Message = fmt.Sprintf("rollback push failed: %v", err)
+		return progress
+	}
+
+	progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_ROLLED_BACK
+	progress.PushedCommit = rollbackCommit.String()
+	progress.Message = fmt.Sprintf("rolled back to base commit %s after partial push failure", record.baseCommit)
+	return progress
+}
+
+// cloneBranchWorktree clones a repository at an explicit branch for
+// rollback operations.
+func cloneBranchWorktree(ctx context.Context, repoURL, branch string) (string, error) {
+	worktreeRoot, err := os.MkdirTemp("", "source-push-rollback-*")
+	if err != nil {
+		return "", fmt.Errorf("create rollback worktree: %w", err)
+	}
+	_, err = gogit.PlainCloneContext(ctx, worktreeRoot, &gogit.CloneOptions{
+		URL:           repoURL,
+		ReferenceName: plumbing.NewBranchReferenceName(branch),
+		SingleBranch:  true,
+	})
+	if err != nil {
+		_ = os.RemoveAll(worktreeRoot)
+		return "", fmt.Errorf("clone repository for rollback: %w", err)
+	}
+	return worktreeRoot, nil
+}
+
+// restoreBaseTree writes the content of a base commit's tree into the
+// worktree without moving HEAD: files present in the base are restored,
+// files absent from the base are removed (except .git).
+func restoreBaseTree(worktreeRoot string, baseCommit *object.Commit) error {
+	if worktreeRoot == "" {
+		return fmt.Errorf("worktree root is required")
+	}
+	baseFiles := make(map[string]bool)
+
+	files, err := baseCommit.Files()
+	if err != nil {
+		return fmt.Errorf("read base tree: %w", err)
+	}
+	if err := files.ForEach(func(f *object.File) error {
+		baseFiles[f.Name] = true
+		target := filepath.Join(worktreeRoot, filepath.Clean(f.Name))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		content, err := f.Contents()
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, []byte(content), fs.FileMode(fileModeOf(f)))
+	}); err != nil {
+		return fmt.Errorf("restore base files: %w", err)
+	}
+
+	return filepath.WalkDir(worktreeRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(worktreeRoot, path)
+		if relErr != nil {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git/") {
+			return nil
+		}
+		if !baseFiles[filepath.ToSlash(rel)] {
+			return os.Remove(path)
+		}
+		return nil
+	})
+}
+
+func fileModeOf(f *object.File) os.FileMode {
+	if osMode, err := f.Mode.ToOSFileMode(); err == nil {
+		return osMode
+	}
+	return 0o644
+}
+
 func (s *Service) pushSourceCommitsPreserve(ctx context.Context, req *pb.StartWorkspaceCommitPushRequest, bundleEntry *syncWorkerBundle, stream pb.RepoSyncWorker_StartWorkspaceCommitPushServer) error {
 	bundle := bundleEntry.commitBundle
 	sort.Slice(bundle.Commits, func(i, j int) bool {
@@ -415,10 +669,32 @@ func (s *Service) pushSourceCommitsPreserve(ctx context.Context, req *pb.StartWo
 		}
 	}()
 
+	// published tracks repositories that received at least one pushed
+	// commit so they can be rolled back on a later failure.
+	published := make(map[string]sourcePushRollback)
+	rollbackAndReport := func() error {
+		for _, record := range published {
+			rw := repoWorktrees[record.storageID]
+			var handle *gogit.Repository
+			var wt *gogit.Worktree
+			if rw != nil {
+				handle, wt = rw.repoHandle, rw.wt
+			}
+			progress := s.rollbackSourcePushRepository(ctx, req, record, handle, wt)
+			if progress.GetConflictReason() != "" {
+				fetcherGitSyncConflictsTotal.WithLabelValues("source_push_rollback", progress.GetConflictReason()).Inc()
+			}
+			if err := stream.Send(progress); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	for commitIdx, commit := range bundle.Commits {
 		select {
 		case <-ctx.Done():
-			return nil
+			return rollbackAndReport()
 		default:
 		}
 
@@ -441,7 +717,7 @@ func (s *Service) pushSourceCommitsPreserve(ctx context.Context, req *pb.StartWo
 					if err := stream.Send(progress); err != nil {
 						return err
 					}
-					return nil
+					return rollbackAndReport()
 				}
 				repoWorktrees[repo.StorageID] = rw
 			}
@@ -449,6 +725,16 @@ func (s *Service) pushSourceCommitsPreserve(ctx context.Context, req *pb.StartWo
 			progress := s.pushSinglePreserveCommit(ctx, req, rw, commitIdx, commit, repo, bundleEntry.workspaceID, len(bundle.Commits))
 			if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED {
 				s.syncPublishedRepos.Add(1)
+				if _, exists := published[repo.StorageID]; !exists {
+					published[repo.StorageID] = sourcePushRollback{
+						storageID:    repo.StorageID,
+						displayPath:  repo.DisplayPath,
+						repoURL:      repo.RepoURL,
+						branch:       repo.Branch,
+						baseCommit:   repo.BaseCommit,
+						targetBranch: progress.GetTargetBranch(),
+					}
+				}
 			}
 			if progress.GetConflictReason() != "" {
 				fetcherGitSyncConflictsTotal.WithLabelValues("source_push", progress.GetConflictReason()).Inc()
@@ -458,10 +744,10 @@ func (s *Service) pushSourceCommitsPreserve(ctx context.Context, req *pb.StartWo
 			}
 			if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_CONFLICT ||
 				progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_DIVERGED {
-				return nil
+				return rollbackAndReport()
 			}
 			if progress.GetStatus() == pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED {
-				return nil
+				return rollbackAndReport()
 			}
 		}
 	}

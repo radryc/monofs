@@ -31,10 +31,14 @@ type SessionRequest struct {
 	BranchOp                string   `json:"branch_op,omitempty"`
 	BranchName              string   `json:"branch_name,omitempty"`
 	ShowBlobs               bool     `json:"show_blobs,omitempty"`
+	Upstream                bool     `json:"upstream,omitempty"`
+	RepoFilter              string   `json:"repo_filter,omitempty"`
+	Limit                   int      `json:"limit,omitempty"`
 	LogicalCommitMessage    string   `json:"logical_commit_message,omitempty"`
 	AuthorName              string   `json:"author_name,omitempty"`
 	AuthorEmail             string   `json:"author_email,omitempty"`
 	RequestedBranchStrategy string   `json:"requested_branch_strategy,omitempty"`
+	SourcePushMode          string   `json:"source_push_mode,omitempty"` // squash or preserve (empty = router default)
 }
 
 // FileDiff holds the unified diff output for a single changed file.
@@ -57,6 +61,8 @@ type SessionResponse struct {
 	PendingCommits    int                 `json:"pending_commits,omitempty"`
 	BlobChanges       int                 `json:"blob_changes,omitempty"`
 	ExcludedChanges   int                 `json:"excluded_changes,omitempty"`
+	Conflicts         int                 `json:"conflicts,omitempty"`
+	ConflictList      []ConflictInfo      `json:"conflict_list,omitempty"`
 	Message           string              `json:"message,omitempty"`
 	Error             string              `json:"error,omitempty"`
 	ChangeList        []ChangeInfo        `json:"change_list,omitempty"`
@@ -68,9 +74,44 @@ type SessionResponse struct {
 	BranchMappings    []BranchMappingInfo `json:"branch_mappings,omitempty"`
 	BlobChangeList    []ChangeInfo        `json:"blob_change_list,omitempty"`
 	WorkspaceRefs     []WorkspaceRef      `json:"workspace_refs,omitempty"`
-	DepsInfo          *BlobsInfoData      `json:"deps_info,omitempty"`
+	DepsInfo          *BlobsInfoData      `json:"blobs_info,omitempty"`
 	DiffData          []FileDiff          `json:"diff_data,omitempty"`
 	BlobDiffData      []FileDiff          `json:"blob_diff_data,omitempty"`
+	UpstreamLogList   []UpstreamLogInfo   `json:"upstream_log_list,omitempty"`
+	TagList           []UpstreamTagInfo   `json:"tag_list,omitempty"`
+	BlameLines        []UpstreamBlameInfo `json:"blame_lines,omitempty"`
+}
+
+// UpstreamLogInfo is one commit in an upstream branch's history.
+type UpstreamLogInfo struct {
+	Hash        string `json:"hash"`
+	AuthorName  string `json:"author_name,omitempty"`
+	AuthorEmail string `json:"author_email,omitempty"`
+	AuthoredAt  string `json:"authored_at,omitempty"`
+	Message     string `json:"message,omitempty"`
+}
+
+// UpstreamTagInfo is one upstream tag.
+type UpstreamTagInfo struct {
+	Name       string `json:"name"`
+	CommitHash string `json:"commit_hash"`
+	TaggedAt   string `json:"tagged_at,omitempty"`
+}
+
+// UpstreamBlameInfo is one blamed line of a file.
+type UpstreamBlameInfo struct {
+	LineNo     int    `json:"line_no"`
+	Hash       string `json:"hash"`
+	Author     string `json:"author,omitempty"`
+	AuthoredAt string `json:"authored_at,omitempty"`
+	Content    string `json:"content"`
+}
+
+// ConflictInfo represents one unresolved merge conflict for display.
+type ConflictInfo struct {
+	Path      string `json:"path"`
+	Reason    string `json:"reason,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // WorkspaceRef describes the authoritative tracked ref for one mounted repository.
@@ -223,10 +264,16 @@ func (sc *SessionCommand) Execute(args []string) error {
 		return sc.showRefs(args[1:])
 	case "log":
 		return sc.showLog(args[1:])
+	case "tags":
+		return sc.showTags(args[1:])
+	case "blame":
+		return sc.showBlame(args[1:])
 	case "commit":
 		return sc.commitSession(args[1:])
 	case "pull":
 		return sc.pullWorkspace()
+	case "conflicts":
+		return sc.showConflicts()
 	case "discard":
 		return sc.discardSession()
 	case "search":
@@ -265,12 +312,17 @@ Commands:
 		diff [file]  Show unified diff between original and changed files
 		commit       Create a local virtual commit from staged source changes
 		pull         Re-ingest included workspace repositories from their upstream sources
-		push         Send pending local virtual commits upstream on the current logical branch
+		push         Send pending local virtual commits upstream (--push-mode squash|preserve)
+		conflicts    List unresolved merge conflicts from a pull
 
 	Workspace state:
-		branch       Show, create, or switch logical branches
+		branch       Show, create, switch, or delete logical branches (branch delete <name>)
 		refs         Show tracked workspace refs for the mounted repositories
-		log          Show local virtual commit history
+		log          Show local virtual commit history (--upstream for the remote)
+
+	Upstream reads:
+		tags         List tags on a repository (--repo <display-path>)
+		blame <path> Show line-level authorship for a file
 
 	Blobs and search:
 		blobs-info   Show blob files in the current session
@@ -331,6 +383,9 @@ Examples:
 
   # Search with filters
   monofs-session search --query "TODO" --regex --case-sensitive
+
+  # Search for a symbol (function/type/class name; requires universal-ctags)
+  monofs-session search --symbol "someFunction"
 
   # Use explicit socket path (useful in Docker)
   monofs-session --socket /path/to/session.sock status
@@ -470,6 +525,21 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// validatePushMode rejects push-mode values other than "", squash, preserve.
+func validatePushMode(mode string) error {
+	switch normalizePushMode(mode) {
+	case "", "squash", "preserve":
+		return nil
+	default:
+		return fmt.Errorf("invalid --push-mode %q (expected squash or preserve)", mode)
+	}
+}
+
+// normalizePushMode canonicalizes a push-mode flag value.
+func normalizePushMode(mode string) string {
+	return strings.ToLower(strings.TrimSpace(mode))
 }
 
 func (sc *SessionCommand) showDiff(args []string) error {
@@ -730,8 +800,19 @@ func (sc *SessionCommand) showStatus(args []string) error {
 
 func (sc *SessionCommand) showLog(args []string) error {
 	logCmd := flag.NewFlagSet("log", flag.ExitOnError)
+	upstream := logCmd.Bool("upstream", false, "Show upstream commit history instead of local commits")
+	repoFilter := logCmd.String("repo", "", "Repository display path to query (upstream only)")
+	limit := logCmd.Int("limit", 50, "Maximum number of commits (upstream only)")
 	if err := logCmd.Parse(args); err != nil {
 		return err
+	}
+
+	if *upstream {
+		resp, err := sc.sendRequest(SessionRequest{Action: "log", Upstream: true, RepoFilter: *repoFilter, Limit: *limit})
+		if err != nil {
+			return err
+		}
+		return displayUpstreamLog(resp)
 	}
 
 	resp, err := sc.sendCommand("log")
@@ -782,6 +863,85 @@ func (sc *SessionCommand) showLog(args []string) error {
 		fmt.Printf("\n    %s\n", commit.Message)
 	}
 
+	return nil
+}
+
+func displayUpstreamLog(resp *SessionResponse) error {
+	if !resp.Success {
+		return fmt.Errorf("failed to read upstream log: %s", resp.Error)
+	}
+	fmt.Printf("Upstream Commit Log\n")
+	fmt.Printf("===================\n")
+	if len(resp.UpstreamLogList) == 0 {
+		fmt.Println("\nNo upstream commits.")
+		return nil
+	}
+	for _, e := range resp.UpstreamLogList {
+		fmt.Println()
+		fmt.Printf("commit %s\n", e.Hash)
+		if e.AuthoredAt != "" {
+			fmt.Printf("Date:    %s\n", e.AuthoredAt)
+		}
+		if e.AuthorName != "" {
+			fmt.Printf("Author:  %s <%s>\n", e.AuthorName, e.AuthorEmail)
+		}
+		if e.Message != "" {
+			fmt.Printf("\n    %s\n", e.Message)
+		}
+	}
+	return nil
+}
+
+func (sc *SessionCommand) showTags(args []string) error {
+	tagsCmd := flag.NewFlagSet("tags", flag.ExitOnError)
+	repoFilter := tagsCmd.String("repo", "", "Repository display path")
+	if err := tagsCmd.Parse(args); err != nil {
+		return err
+	}
+
+	resp, err := sc.sendRequest(SessionRequest{Action: "tags", RepoFilter: *repoFilter})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("failed to list upstream tags: %s", resp.Error)
+	}
+
+	fmt.Printf("Upstream Tags\n")
+	fmt.Printf("=============\n")
+	if len(resp.TagList) == 0 {
+		fmt.Println("\nNo tags.")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "TAG\tCOMMIT\tTAGGED")
+	for _, t := range resp.TagList {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", t.Name, shortCommitHash(t.CommitHash), t.TaggedAt)
+	}
+	return w.Flush()
+}
+
+func (sc *SessionCommand) showBlame(args []string) error {
+	blameCmd := flag.NewFlagSet("blame", flag.ExitOnError)
+	if err := blameCmd.Parse(args); err != nil {
+		return err
+	}
+	path := strings.TrimSpace(blameCmd.Arg(0))
+	if path == "" {
+		return fmt.Errorf("blame requires a file path")
+	}
+
+	resp, err := sc.sendRequest(SessionRequest{Action: "blame", Path: path})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("failed to blame %s: %s", path, resp.Error)
+	}
+
+	for _, l := range resp.BlameLines {
+		fmt.Printf("%s %4d  %-20s %s\n", shortCommitHash(l.Hash), l.LineNo, l.Author, l.Content)
+	}
 	return nil
 }
 
@@ -887,7 +1047,7 @@ func (sc *SessionCommand) manageBranches(args []string) error {
 			return fmt.Errorf("branch show does not take a branch name")
 		}
 		return sc.showLogicalBranches()
-	case "create", "switch":
+	case "create", "switch", "delete":
 		if branchName == "" {
 			return fmt.Errorf("branch %s requires a logical branch name", op)
 		}
@@ -980,12 +1140,16 @@ func (sc *SessionCommand) commitSession(args []string) error {
 	authorName := commitCmd.String("author-name", firstNonEmpty(os.Getenv("MONOFS_AUTHOR_NAME"), os.Getenv("GIT_AUTHOR_NAME"), os.Getenv("GIT_COMMITTER_NAME")), "Author name recorded on the local virtual commit")
 	authorEmail := commitCmd.String("author-email", firstNonEmpty(os.Getenv("MONOFS_AUTHOR_EMAIL"), os.Getenv("GIT_AUTHOR_EMAIL"), os.Getenv("GIT_COMMITTER_EMAIL")), "Author email recorded on the local virtual commit")
 	branchStrategy := commitCmd.String("branch-strategy", "direct", "Reserved for later push routing; ignored when creating local commits")
+	pushMode := commitCmd.String("push-mode", "", "push mode used by a later push: squash or preserve (default: router configuration)")
 
 	if err := commitCmd.Parse(args); err != nil {
 		return err
 	}
 	if *branchStrategy != "direct" && *branchStrategy != "workspace_branch" && *branchStrategy != "per_repo_branch" {
 		return fmt.Errorf("unsupported branch strategy %q", *branchStrategy)
+	}
+	if err := validatePushMode(*pushMode); err != nil {
+		return err
 	}
 
 	finalMessage := firstNonEmpty(*messageLong, *message)
@@ -998,6 +1162,7 @@ func (sc *SessionCommand) commitSession(args []string) error {
 		AuthorName:              *authorName,
 		AuthorEmail:             *authorEmail,
 		RequestedBranchStrategy: *branchStrategy,
+		SourcePushMode:          normalizePushMode(*pushMode),
 	})
 	if err != nil {
 		return err
@@ -1015,16 +1180,23 @@ func (sc *SessionCommand) commitSession(args []string) error {
 
 func (sc *SessionCommand) pushSource(args []string) error {
 	pushCmd := flag.NewFlagSet("push", flag.ExitOnError)
+	mode := pushCmd.String("push-mode", "", "push mode: squash or preserve (default: mode set at commit time, else router configuration)")
 	if err := pushCmd.Parse(args); err != nil {
 		return err
 	}
 	if pushCmd.NArg() > 0 {
 		return fmt.Errorf("push does not accept positional arguments")
 	}
+	if err := validatePushMode(*mode); err != nil {
+		return err
+	}
 
 	fmt.Println("Pushing local commits...")
 
-	resp, err := sc.sendCommand("push")
+	resp, err := sc.sendRequest(SessionRequest{
+		Action:         "push",
+		SourcePushMode: normalizePushMode(*mode),
+	})
 	if err != nil {
 		return err
 	}
@@ -1055,6 +1227,33 @@ func (sc *SessionCommand) pullWorkspace() error {
 	if resp.Message != "" {
 		fmt.Printf("  %s\n", resp.Message)
 	}
+
+	return nil
+}
+
+func (sc *SessionCommand) showConflicts() error {
+	resp, err := sc.sendCommand("conflicts")
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("conflicts failed: %s", resp.Error)
+	}
+
+	if len(resp.ConflictList) == 0 {
+		fmt.Println("No unresolved conflicts")
+		return nil
+	}
+
+	fmt.Printf("Unresolved conflicts (%d):\n", len(resp.ConflictList))
+	for _, conflict := range resp.ConflictList {
+		fmt.Printf("  %-60s %s\n", conflict.Path, conflict.Reason)
+		if conflict.CreatedAt != "" {
+			fmt.Printf("    conflicted at %s\n", conflict.CreatedAt)
+		}
+	}
+	fmt.Println("\nResolve by editing each file (remove <<<<<<< ... >>>>>>> markers),")
+	fmt.Println("then: monofs-session add <path>")
 
 	return nil
 }
@@ -1344,14 +1543,20 @@ func (sc *SessionCommand) searchCode(args []string) error {
 	caseSensitive := searchCmd.Bool("case-sensitive", false, "Case-sensitive search")
 	regex := searchCmd.Bool("regex", false, "Treat query as regular expression")
 	filePattern := searchCmd.String("file-pattern", "", "File glob pattern (e.g., *.go)")
+	symbol := searchCmd.String("symbol", "", "Search for a symbol (maps to Zoekt sym: query, e.g. a function/type name)")
 
 	if err := searchCmd.Parse(args); err != nil {
 		return err
 	}
 
-	if *query == "" {
+	if *query == "" && *symbol == "" {
 		searchCmd.Usage()
-		return fmt.Errorf("--query is required")
+		return fmt.Errorf("--query or --symbol is required")
+	}
+
+	effectiveQuery := *query
+	if *symbol != "" {
+		effectiveQuery = "sym:" + *symbol
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1371,7 +1576,7 @@ func (sc *SessionCommand) searchCode(args []string) error {
 
 	// Build search request
 	req := &pb.SearchRequest{
-		Query:         *query,
+		Query:         effectiveQuery,
 		MaxResults:    int32(*maxResults),
 		CaseSensitive: *caseSensitive,
 		Regex:         *regex,
@@ -1392,7 +1597,7 @@ func (sc *SessionCommand) searchCode(args []string) error {
 	}
 
 	// Display results
-	return displaySearchResults(resp, *query)
+	return displaySearchResults(resp, effectiveQuery)
 }
 
 // displaySearchResults formats and displays search results

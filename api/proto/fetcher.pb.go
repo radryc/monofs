@@ -34,21 +34,23 @@ const (
 	RepoSyncStatus_REPO_SYNC_STATUS_FAILED          RepoSyncStatus = 7
 	RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED       RepoSyncStatus = 8
 	RepoSyncStatus_REPO_SYNC_STATUS_CONFLICT        RepoSyncStatus = 9
+	RepoSyncStatus_REPO_SYNC_STATUS_ROLLED_BACK     RepoSyncStatus = 10
 )
 
 // Enum value maps for RepoSyncStatus.
 var (
 	RepoSyncStatus_name = map[int32]string{
-		0: "REPO_SYNC_STATUS_UNSPECIFIED",
-		1: "REPO_SYNC_STATUS_UNCHANGED",
-		2: "REPO_SYNC_STATUS_ADVANCED",
-		3: "REPO_SYNC_STATUS_DIVERGED",
-		4: "REPO_SYNC_STATUS_MISSING_BRANCH",
-		5: "REPO_SYNC_STATUS_AUTH_FAILED",
-		6: "REPO_SYNC_STATUS_TRANSIENT_ERROR",
-		7: "REPO_SYNC_STATUS_FAILED",
-		8: "REPO_SYNC_STATUS_PUBLISHED",
-		9: "REPO_SYNC_STATUS_CONFLICT",
+		0:  "REPO_SYNC_STATUS_UNSPECIFIED",
+		1:  "REPO_SYNC_STATUS_UNCHANGED",
+		2:  "REPO_SYNC_STATUS_ADVANCED",
+		3:  "REPO_SYNC_STATUS_DIVERGED",
+		4:  "REPO_SYNC_STATUS_MISSING_BRANCH",
+		5:  "REPO_SYNC_STATUS_AUTH_FAILED",
+		6:  "REPO_SYNC_STATUS_TRANSIENT_ERROR",
+		7:  "REPO_SYNC_STATUS_FAILED",
+		8:  "REPO_SYNC_STATUS_PUBLISHED",
+		9:  "REPO_SYNC_STATUS_CONFLICT",
+		10: "REPO_SYNC_STATUS_ROLLED_BACK",
 	}
 	RepoSyncStatus_value = map[string]int32{
 		"REPO_SYNC_STATUS_UNSPECIFIED":     0,
@@ -61,6 +63,7 @@ var (
 		"REPO_SYNC_STATUS_FAILED":          7,
 		"REPO_SYNC_STATUS_PUBLISHED":       8,
 		"REPO_SYNC_STATUS_CONFLICT":        9,
+		"REPO_SYNC_STATUS_ROLLED_BACK":     10,
 	}
 )
 
@@ -2951,7 +2954,7 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x18\n" +
 	"\adeleted\x18\x03 \x01(\x05R\adeleted\x12\x1b\n" +
 	"\tnot_found\x18\x04 \x01(\x05R\bnotFound\x12)\n" +
-	"\x10archives_removed\x18\x05 \x01(\x05R\x0farchivesRemoved*\xd9\x02\n" +
+	"\x10archives_removed\x18\x05 \x01(\x05R\x0farchivesRemoved*\xfb\x02\n" +
 	"\x0eRepoSyncStatus\x12 \n" +
 	"\x1cREPO_SYNC_STATUS_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aREPO_SYNC_STATUS_UNCHANGED\x10\x01\x12\x1d\n" +
@@ -2962,7 +2965,9 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	" REPO_SYNC_STATUS_TRANSIENT_ERROR\x10\x06\x12\x1b\n" +
 	"\x17REPO_SYNC_STATUS_FAILED\x10\a\x12\x1e\n" +
 	"\x1aREPO_SYNC_STATUS_PUBLISHED\x10\b\x12\x1d\n" +
-	"\x19REPO_SYNC_STATUS_CONFLICT\x10\t*\x85\x01\n" +
+	"\x19REPO_SYNC_STATUS_CONFLICT\x10\t\x12 \n" +
+	"\x1cREPO_SYNC_STATUS_ROLLED_BACK\x10\n" +
+	"*\x85\x01\n" +
 	"\n" +
 	"AccessType\x12\x17\n" +
 	"\x13ACCESS_TYPE_UNKNOWN\x10\x00\x12\x14\n" +
@@ -2980,7 +2985,7 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\tStoreBlob\x12\x18.monofs.StoreBlobRequest\x1a\x19.monofs.StoreBlobResponse\x12P\n" +
 	"\x14StoreBlobBatchStream\x12\x16.monofs.StoreBlobEntry\x1a\x1e.monofs.StoreBlobBatchResponse(\x01\x12F\n" +
 	"\vDeleteBlobs\x12\x1a.monofs.DeleteBlobsRequest\x1a\x1b.monofs.DeleteBlobsResponse\x12I\n" +
-	"\fStoreArchive\x12\x19.monofs.StoreArchiveChunk\x1a\x1c.monofs.StoreArchiveResponse(\x012\xa9\x05\n" +
+	"\fStoreArchive\x12\x19.monofs.StoreArchiveChunk\x1a\x1c.monofs.StoreArchiveResponse(\x012\x93\a\n" +
 	"\x0eRepoSyncWorker\x12\\\n" +
 	"\x14StageWorkspaceBundle\x12\x1c.monofs.WorkspaceBundleChunk\x1a$.monofs.StageWorkspaceBundleResponse(\x01\x12b\n" +
 	"\x1aStageWorkspaceCommitBundle\x12\x1c.monofs.WorkspaceBundleChunk\x1a$.monofs.StageWorkspaceBundleResponse(\x01\x12Y\n" +
@@ -2988,7 +2993,10 @@ const file_api_proto_fetcher_proto_rawDesc = "" +
 	"\x18StartWorkspaceCommitPush\x12'.monofs.StartWorkspaceCommitPushRequest\x1a\x18.monofs.RepoSyncProgress0\x01\x12Y\n" +
 	"\x15ProbeWorkspaceRefresh\x12$.monofs.ProbeWorkspaceRefreshRequest\x1a\x18.monofs.RepoSyncProgress0\x01\x12g\n" +
 	"\x16DiscardWorkspaceBundle\x12%.monofs.DiscardWorkspaceBundleRequest\x1a&.monofs.DiscardWorkspaceBundleResponse\x12U\n" +
-	"\x12GetSyncWorkerStats\x12\x1e.monofs.SyncWorkerStatsRequest\x1a\x1f.monofs.SyncWorkerStatsResponseB$Z\"github.com/radryc/monofs/api/protob\x06proto3"
+	"\x12GetSyncWorkerStats\x12\x1e.monofs.SyncWorkerStatsRequest\x1a\x1f.monofs.SyncWorkerStatsResponse\x12I\n" +
+	"\x0eGetUpstreamLog\x12\x1a.monofs.UpstreamLogRequest\x1a\x1b.monofs.UpstreamLogResponse\x12L\n" +
+	"\x0fGetUpstreamTags\x12\x1b.monofs.UpstreamTagsRequest\x1a\x1c.monofs.UpstreamTagsResponse\x12O\n" +
+	"\x10GetUpstreamBlame\x12\x1c.monofs.UpstreamBlameRequest\x1a\x1d.monofs.UpstreamBlameResponseB$Z\"github.com/radryc/monofs/api/protob\x06proto3"
 
 var (
 	file_api_proto_fetcher_proto_rawDescOnce sync.Once
@@ -3049,7 +3057,13 @@ var file_api_proto_fetcher_proto_goTypes = []any{
 	(SourceType)(0),                         // 41: monofs.SourceType
 	(*WorkspaceRepositoryRef)(nil),          // 42: monofs.WorkspaceRepositoryRef
 	(*WorkspaceBundleChunk)(nil),            // 43: monofs.WorkspaceBundleChunk
-	(*DataChunk)(nil),                       // 44: monofs.DataChunk
+	(*UpstreamLogRequest)(nil),              // 44: monofs.UpstreamLogRequest
+	(*UpstreamTagsRequest)(nil),             // 45: monofs.UpstreamTagsRequest
+	(*UpstreamBlameRequest)(nil),            // 46: monofs.UpstreamBlameRequest
+	(*DataChunk)(nil),                       // 47: monofs.DataChunk
+	(*UpstreamLogResponse)(nil),             // 48: monofs.UpstreamLogResponse
+	(*UpstreamTagsResponse)(nil),            // 49: monofs.UpstreamTagsResponse
+	(*UpstreamBlameResponse)(nil),           // 50: monofs.UpstreamBlameResponse
 }
 var file_api_proto_fetcher_proto_depIdxs = []int32{
 	41, // 0: monofs.FetchBlobRequest.source_type:type_name -> monofs.SourceType
@@ -3087,24 +3101,30 @@ var file_api_proto_fetcher_proto_depIdxs = []int32{
 	15, // 32: monofs.RepoSyncWorker.ProbeWorkspaceRefresh:input_type -> monofs.ProbeWorkspaceRefreshRequest
 	16, // 33: monofs.RepoSyncWorker.DiscardWorkspaceBundle:input_type -> monofs.DiscardWorkspaceBundleRequest
 	19, // 34: monofs.RepoSyncWorker.GetSyncWorkerStats:input_type -> monofs.SyncWorkerStatsRequest
-	44, // 35: monofs.BlobFetcher.FetchBlob:output_type -> monofs.DataChunk
-	4,  // 36: monofs.BlobFetcher.FetchBlobBatch:output_type -> monofs.FetchBlobBatchResponse
-	6,  // 37: monofs.BlobFetcher.PrefetchBlobs:output_type -> monofs.PrefetchResponse
-	8,  // 38: monofs.BlobFetcher.CheckCache:output_type -> monofs.CheckCacheResponse
-	10, // 39: monofs.BlobFetcher.GetStats:output_type -> monofs.FetcherStatsResponse
-	29, // 40: monofs.BlobFetcher.StoreBlob:output_type -> monofs.StoreBlobResponse
-	33, // 41: monofs.BlobFetcher.StoreBlobBatchStream:output_type -> monofs.StoreBlobBatchResponse
-	35, // 42: monofs.BlobFetcher.DeleteBlobs:output_type -> monofs.DeleteBlobsResponse
-	31, // 43: monofs.BlobFetcher.StoreArchive:output_type -> monofs.StoreArchiveResponse
-	12, // 44: monofs.RepoSyncWorker.StageWorkspaceBundle:output_type -> monofs.StageWorkspaceBundleResponse
-	12, // 45: monofs.RepoSyncWorker.StageWorkspaceCommitBundle:output_type -> monofs.StageWorkspaceBundleResponse
-	18, // 46: monofs.RepoSyncWorker.StartWorkspacePublish:output_type -> monofs.RepoSyncProgress
-	18, // 47: monofs.RepoSyncWorker.StartWorkspaceCommitPush:output_type -> monofs.RepoSyncProgress
-	18, // 48: monofs.RepoSyncWorker.ProbeWorkspaceRefresh:output_type -> monofs.RepoSyncProgress
-	17, // 49: monofs.RepoSyncWorker.DiscardWorkspaceBundle:output_type -> monofs.DiscardWorkspaceBundleResponse
-	21, // 50: monofs.RepoSyncWorker.GetSyncWorkerStats:output_type -> monofs.SyncWorkerStatsResponse
-	35, // [35:51] is the sub-list for method output_type
-	19, // [19:35] is the sub-list for method input_type
+	44, // 35: monofs.RepoSyncWorker.GetUpstreamLog:input_type -> monofs.UpstreamLogRequest
+	45, // 36: monofs.RepoSyncWorker.GetUpstreamTags:input_type -> monofs.UpstreamTagsRequest
+	46, // 37: monofs.RepoSyncWorker.GetUpstreamBlame:input_type -> monofs.UpstreamBlameRequest
+	47, // 38: monofs.BlobFetcher.FetchBlob:output_type -> monofs.DataChunk
+	4,  // 39: monofs.BlobFetcher.FetchBlobBatch:output_type -> monofs.FetchBlobBatchResponse
+	6,  // 40: monofs.BlobFetcher.PrefetchBlobs:output_type -> monofs.PrefetchResponse
+	8,  // 41: monofs.BlobFetcher.CheckCache:output_type -> monofs.CheckCacheResponse
+	10, // 42: monofs.BlobFetcher.GetStats:output_type -> monofs.FetcherStatsResponse
+	29, // 43: monofs.BlobFetcher.StoreBlob:output_type -> monofs.StoreBlobResponse
+	33, // 44: monofs.BlobFetcher.StoreBlobBatchStream:output_type -> monofs.StoreBlobBatchResponse
+	35, // 45: monofs.BlobFetcher.DeleteBlobs:output_type -> monofs.DeleteBlobsResponse
+	31, // 46: monofs.BlobFetcher.StoreArchive:output_type -> monofs.StoreArchiveResponse
+	12, // 47: monofs.RepoSyncWorker.StageWorkspaceBundle:output_type -> monofs.StageWorkspaceBundleResponse
+	12, // 48: monofs.RepoSyncWorker.StageWorkspaceCommitBundle:output_type -> monofs.StageWorkspaceBundleResponse
+	18, // 49: monofs.RepoSyncWorker.StartWorkspacePublish:output_type -> monofs.RepoSyncProgress
+	18, // 50: monofs.RepoSyncWorker.StartWorkspaceCommitPush:output_type -> monofs.RepoSyncProgress
+	18, // 51: monofs.RepoSyncWorker.ProbeWorkspaceRefresh:output_type -> monofs.RepoSyncProgress
+	17, // 52: monofs.RepoSyncWorker.DiscardWorkspaceBundle:output_type -> monofs.DiscardWorkspaceBundleResponse
+	21, // 53: monofs.RepoSyncWorker.GetSyncWorkerStats:output_type -> monofs.SyncWorkerStatsResponse
+	48, // 54: monofs.RepoSyncWorker.GetUpstreamLog:output_type -> monofs.UpstreamLogResponse
+	49, // 55: monofs.RepoSyncWorker.GetUpstreamTags:output_type -> monofs.UpstreamTagsResponse
+	50, // 56: monofs.RepoSyncWorker.GetUpstreamBlame:output_type -> monofs.UpstreamBlameResponse
+	38, // [38:57] is the sub-list for method output_type
+	19, // [19:38] is the sub-list for method input_type
 	19, // [19:19] is the sub-list for extension type_name
 	19, // [19:19] is the sub-list for extension extendee
 	0,  // [0:19] is the sub-list for field type_name
