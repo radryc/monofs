@@ -270,9 +270,6 @@ func (s *Server) handleDeleteManifest(w http.ResponseWriter, r *http.Request, re
 func (s *Server) handleGetBlob(w http.ResponseWriter, r *http.Request, repo, digestStr string) {
 	ctx := r.Context()
 	dgst := digestStr
-	if !strings.HasPrefix(dgst, "sha256:") && strings.Contains(dgst, ":") {
-		dgst = dgst
-	}
 
 	reader, err := s.blobs.GetReader(ctx, dgst)
 	if err == nil {

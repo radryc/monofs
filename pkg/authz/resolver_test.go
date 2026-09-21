@@ -95,3 +95,21 @@ func TestOwnersPath(t *testing.T) {
 		t.Fatalf("subtree OwnersPath = %q", got)
 	}
 }
+
+func TestGoverned(t *testing.T) {
+	src := mapOwnersSource{
+		"a/b": &OwnersFile{Version: 1, Maintainers: []OwnerRef{{Subject: "alice"}}},
+	}
+	r := NewOwnershipResolver(src, nil)
+	ctx := context.Background()
+
+	if governed, err := r.Governed(ctx, "a/b/c.txt"); err != nil || !governed {
+		t.Fatalf("a/b/c.txt should be governed, got %v err=%v", governed, err)
+	}
+	if governed, _ := r.Governed(ctx, "a/c.txt"); governed {
+		t.Fatal("a/c.txt should not be governed (only a/b has OWNERS)")
+	}
+	if governed, _ := r.Governed(ctx, "x/y.txt"); governed {
+		t.Fatal("x/y.txt should not be governed")
+	}
+}

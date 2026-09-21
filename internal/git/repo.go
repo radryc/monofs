@@ -47,26 +47,60 @@ func (rm *RepoManager) OpenOnly(repoID string) (*git.Repository, error) {
 
 // CloneOrOpen clones a repository or opens existing one.
 func (rm *RepoManager) CloneOrOpen(ctx context.Context, repoURL, repoID, branch string) (*git.Repository, error) {
+	return rm.CloneOrOpenRef(ctx, repoURL, repoID, branch, false)
+}
+
+// CloneOrOpenRef clones a repository at a branch, tag, or commit SHA. When
+// fetchTags is true (tag/SHA refs), tags are fetched rather than skipped so the
+// target object is available for tree walking.
+//
+// Resolution for a bare name ref: the branch is tried first (the common case,
+// including the default branch), and when that fails the name is tried as a
+// tag. A name that matches both a branch and a tag resolves as the branch.
+func (rm *RepoManager) CloneOrOpenRef(ctx context.Context, repoURL, repoID, ref string, fetchTags bool) (*git.Repository, error) {
 	repoPath := filepath.Join(rm.cacheDir, repoID)
 
 	// Try to open existing repo
 	repo, err := git.PlainOpen(repoPath)
 	if err == nil {
-		// Fetch latest changes (shallow fetch to match clone depth)
-		if err := repo.FetchContext(ctx, &git.FetchOptions{
-			Depth: 1,
-		}); err != nil && err != git.NoErrAlreadyUpToDate {
+		// Refresh objects; when a tag/SHA was requested, fetch tags so the
+		// ref can be resolved if it wasn't present before.
+		fetchOpts := &git.FetchOptions{Depth: 1}
+		if fetchTags {
+			fetchOpts.Tags = git.AllTags
+		}
+		if err := repo.FetchContext(ctx, fetchOpts); err != nil && err != git.NoErrAlreadyUpToDate {
 			// Non-fatal error, continue with existing data
 		}
 		return repo, nil
 	}
 
-	// Clone new repo
-	if branch == "" {
+	if ref == "" {
 		return nil, fmt.Errorf("branch must be specified")
 	}
 
-	repo, err = git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
+	switch kind := ClassifyRef(ref); kind {
+	case RefTag:
+		return rm.cloneTagRef(ctx, repoPath, repoURL, TrimRefPrefix(ref))
+	case RefSHA:
+		return rm.cloneSHARef(ctx, repoPath, repoURL, TrimRefPrefix(ref))
+	default:
+		repo, err := rm.cloneBranchRef(ctx, repoPath, repoURL, ref)
+		if err == nil {
+			return repo, nil
+		}
+		// A bare name might be a tag; try that before giving up.
+		_ = os.RemoveAll(repoPath)
+		if tagRepo, tagErr := rm.cloneTagRef(ctx, repoPath, repoURL, ref); tagErr == nil {
+			return tagRepo, nil
+		}
+		return nil, err
+	}
+}
+
+// cloneBranchRef shallow-clones a single branch (the default ingest path).
+func (rm *RepoManager) cloneBranchRef(ctx context.Context, repoPath, repoURL, branch string) (*git.Repository, error) {
+	repo, err := git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
 		URL:               repoURL,
 		ReferenceName:     plumbing.NewBranchReferenceName(branch),
 		SingleBranch:      true,
@@ -78,7 +112,85 @@ func (rm *RepoManager) CloneOrOpen(ctx context.Context, repoURL, repoID, branch 
 	if err != nil {
 		return nil, fmt.Errorf("failed to clone repo: %w", err)
 	}
+	return repo, nil
+}
 
+// cloneTagRef shallow-clones a specific tag.
+func (rm *RepoManager) cloneTagRef(ctx context.Context, repoPath, repoURL, tag string) (*git.Repository, error) {
+	repo, err := git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
+		URL:               repoURL,
+		ReferenceName:     plumbing.NewTagReferenceName(tag),
+		SingleBranch:      true,
+		Depth:             1,
+		Tags:              git.TagFollowing,
+		NoCheckout:        true,
+		ShallowSubmodules: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to clone repo tag %q: %w", tag, err)
+	}
+	return repo, nil
+}
+
+// CloneOrOpenHistory clones (with full history and all tags) or opens an
+// existing repo and refreshes it with full history, for read-side operations
+// like upstream log, tag listing, and blame that need the complete commit graph.
+func (rm *RepoManager) CloneOrOpenHistory(ctx context.Context, repoURL, repoID, ref string) (*git.Repository, error) {
+	repoPath := filepath.Join(rm.cacheDir, repoID)
+
+	if repo, err := git.PlainOpen(repoPath); err == nil {
+		_ = repo.FetchContext(ctx, &git.FetchOptions{
+			Depth: 0,
+			Tags:  git.AllTags,
+		})
+		return repo, nil
+	}
+
+	if ref == "" {
+		ref = "main"
+	}
+	referenceName := plumbing.ReferenceName(plumbing.HEAD)
+	switch ClassifyRef(ref) {
+	case RefTag:
+		referenceName = plumbing.NewTagReferenceName(TrimRefPrefix(ref))
+	case RefSHA:
+		referenceName = plumbing.HEAD
+	default:
+		referenceName = plumbing.NewBranchReferenceName(ref)
+	}
+
+	repo, err := git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
+		URL:               repoURL,
+		ReferenceName:     referenceName,
+		SingleBranch:      referenceName != plumbing.HEAD && ClassifyRef(ref) != RefSHA,
+		Depth:             0, // full history
+		Tags:              git.AllTags,
+		NoCheckout:        true,
+		ShallowSubmodules: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to clone repo history: %w", err)
+	}
+	return repo, nil
+}
+
+// cloneSHARef clones the full repository (all branches + tags) so an arbitrary
+// commit SHA is reachable, then verifies the requested commit exists.
+func (rm *RepoManager) cloneSHARef(ctx context.Context, repoPath, repoURL, sha string) (*git.Repository, error) {
+	repo, err := git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
+		URL:               repoURL,
+		SingleBranch:      false,
+		Depth:             0, // full history so arbitrary SHAs are reachable
+		Tags:              git.AllTags,
+		NoCheckout:        true,
+		ShallowSubmodules: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to clone repo for SHA: %w", err)
+	}
+	if _, err := repo.CommitObject(plumbing.NewHash(sha)); err != nil {
+		return nil, fmt.Errorf("commit SHA %q not found in repository: %w", sha, err)
+	}
 	return repo, nil
 }
 
@@ -131,11 +243,22 @@ type FileMetadata struct {
 }
 
 // resolveReference attempts to resolve a git reference using multiple strategies.
-// Tries: branch name, origin/branch name, HEAD
+// Tries: branch name, origin/branch name, tag name, HEAD, and finally a raw
+// commit SHA (for tag/SHA-pinned ingests).
 func resolveReference(repo *git.Repository, branch string) (*plumbing.Reference, error) {
+	// A raw commit SHA resolves directly to itself when the object is present.
+	if IsHexSHA(branch) {
+		hash := plumbing.NewHash(branch)
+		if _, err := repo.CommitObject(hash); err != nil {
+			return nil, fmt.Errorf("failed to resolve commit SHA %q: %w", branch, err)
+		}
+		return plumbing.NewHashReference(plumbing.ReferenceName("refs/monofs/sha"), hash), nil
+	}
+
 	refNames := []plumbing.ReferenceName{
 		plumbing.NewBranchReferenceName(branch),
 		plumbing.NewRemoteReferenceName("origin", branch),
+		plumbing.NewTagReferenceName(branch),
 		plumbing.HEAD,
 	}
 
@@ -147,7 +270,7 @@ func resolveReference(repo *git.Repository, branch string) (*plumbing.Reference,
 			return ref, nil
 		}
 	}
-	return nil, fmt.Errorf("failed to get branch ref (tried local, remote, HEAD): %w", err)
+	return nil, fmt.Errorf("failed to get branch ref (tried local, remote, tag, HEAD): %w", err)
 }
 
 // resolveReferenceWithFallback tries the specified branch, then falls back to main/master
@@ -171,6 +294,34 @@ func resolveReferenceWithFallback(repo *git.Repository, branch string) (*plumbin
 	return nil, fmt.Errorf("failed to resolve reference (tried %q, main, master)", branch)
 }
 
+// ResolveCommit resolves a branch, tag, or commit SHA ref to its commit hash,
+// peeling annotated tags down to their target commit.
+func (rm *RepoManager) ResolveCommit(repo *git.Repository, ref string) (plumbing.Hash, error) {
+	r, err := resolveReference(repo, ref)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	return peelToCommit(repo, r.Hash())
+}
+
+// peelToCommit dereferences annotated tags to their target commit. Non-tag
+// objects are returned unchanged.
+func peelToCommit(repo *git.Repository, hash plumbing.Hash) (plumbing.Hash, error) {
+	for i := 0; i < 10; i++ { // bounded to avoid pathological tag chains
+		tag, err := repo.TagObject(hash)
+		if err != nil {
+			// No tag object at this hash (or hash is a commit) - done.
+			return hash, nil
+		}
+		if tag.TargetType == plumbing.CommitObject || tag.TargetType == plumbing.TagObject {
+			hash = tag.Target
+			continue
+		}
+		return hash, nil
+	}
+	return hash, fmt.Errorf("tag chain too deep while resolving %s", hash)
+}
+
 // WalkTree walks the Git tree and yields file metadata.
 // Walks git tree objects directly without requiring a working directory.
 func (rm *RepoManager) WalkTree(repo *git.Repository, branch string, fn func(FileMetadata) error) error {
@@ -178,12 +329,12 @@ func (rm *RepoManager) WalkTree(repo *git.Repository, branch string, fn func(Fil
 		branch = "main"
 	}
 
-	ref, err := resolveReference(repo, branch)
+	commitHash, err := rm.ResolveCommit(repo, branch)
 	if err != nil {
 		return err
 	}
 
-	commit, err := repo.CommitObject(ref.Hash())
+	commit, err := repo.CommitObject(commitHash)
 	if err != nil {
 		return fmt.Errorf("failed to get commit: %w", err)
 	}
@@ -277,12 +428,12 @@ func (rm *RepoManager) GetFileMetadata(repo *git.Repository, branch, filePath st
 		branch = "main"
 	}
 
-	ref, err := resolveReference(repo, branch)
+	commitHash, err := rm.ResolveCommit(repo, branch)
 	if err != nil {
 		return FileMetadata{}, err
 	}
 
-	commit, err := repo.CommitObject(ref.Hash())
+	commit, err := repo.CommitObject(commitHash)
 	if err != nil {
 		return FileMetadata{}, fmt.Errorf("failed to get commit: %w", err)
 	}

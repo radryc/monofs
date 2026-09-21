@@ -219,4 +219,25 @@ var (
 		Name:      "auth_outcomes_total",
 		Help:      "authentication outcomes by result and protocol.",
 	}, []string{"outcome", "protocol"})
+
+	routerAutoRefreshProbesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "auto_refresh_probes_total",
+		Help:      "auto-refresh probe outcomes by result (unchanged/advanced/diverged/error).",
+	}, []string{"result"})
+
+	routerAutoRefreshReingestsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "auto_refresh_reingests_total",
+		Help:      "repositories re-ingested by the auto-refresh worker.",
+	})
+
+	routerAutoRefreshBackoffTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "auto_refresh_backoff_total",
+		Help:      "auto-refresh failures that triggered backoff.",
+	})
 )

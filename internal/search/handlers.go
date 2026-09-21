@@ -142,13 +142,14 @@ func (s *Service) GetIndexStatus(ctx context.Context, req *pb.IndexStatusRequest
 	})
 
 	if activeJob != nil {
+		job := s.snapshotJob(activeJob)
 		return &pb.IndexStatusResponse{
-			StorageId:   activeJob.StorageID,
-			DisplayPath: activeJob.DisplayPath,
-			Status:      activeJob.Status,
-			Progress:    activeJob.Progress,
-			QueuedAt:    activeJob.QueuedAt.Format(time.RFC3339),
-			StartedAt:   activeJob.StartedAt.Format(time.RFC3339),
+			StorageId:   job.StorageID,
+			DisplayPath: job.DisplayPath,
+			Status:      job.Status,
+			Progress:    job.Progress,
+			QueuedAt:    job.QueuedAt.Format(time.RFC3339),
+			StartedAt:   job.StartedAt.Format(time.RFC3339),
 		}, nil
 	}
 
@@ -214,7 +215,7 @@ func (s *Service) ListIndexes(ctx context.Context, req *pb.ListIndexesRequest) (
 			var errMsg string
 
 			s.activeJobs.Range(func(key, value interface{}) bool {
-				j := value.(*Job)
+				j := s.snapshotJob(value.(*Job))
 				if j.StorageID == meta.StorageID {
 					status = j.Status
 					progress = j.Progress

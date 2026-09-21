@@ -258,7 +258,7 @@ func TestSessionSocketLogListsLocalCommitsWithMetadata(t *testing.T) {
 		t.Fatalf("PutLocalVirtualCommit(local-2) error = %v", err)
 	}
 
-	resp := handler.handleLog()
+	resp := handler.handleLog(SessionRequest{})
 	if !resp.Success {
 		t.Fatalf("handleLog() error = %s", resp.Error)
 	}
@@ -334,7 +334,7 @@ func TestSessionSocketPushUsesCurrentLogicalBranchCommits(t *testing.T) {
 		}
 	}
 
-	resp := handler.handlePushSource()
+	resp := handler.handlePushSource(SessionRequest{Action: "push"})
 	if !resp.Success {
 		t.Fatalf("handlePushSource() error = %s", resp.Error)
 	}
@@ -354,6 +354,111 @@ func TestSessionSocketPushUsesCurrentLogicalBranchCommits(t *testing.T) {
 	}
 	if byID["local-2"].Pushed {
 		t.Fatalf("local-2 after push = %+v, want other branch pending", byID["local-2"])
+	}
+}
+
+func TestParseSourcePushMode(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    pb.SourcePushMode
+		wantErr bool
+	}{
+		{"", pb.SourcePushMode_SOURCE_PUSH_MODE_UNSPECIFIED, false},
+		{"squash", pb.SourcePushMode_SOURCE_PUSH_MODE_SQUASH, false},
+		{"preserve", pb.SourcePushMode_SOURCE_PUSH_MODE_PRESERVE, false},
+		{"PRESERVE", pb.SourcePushMode_SOURCE_PUSH_MODE_PRESERVE, false},
+		{"  squash  ", pb.SourcePushMode_SOURCE_PUSH_MODE_SQUASH, false},
+		{"bogus", pb.SourcePushMode_SOURCE_PUSH_MODE_UNSPECIFIED, true},
+	}
+
+	for _, tt := range tests {
+		got, err := parseSourcePushMode(tt.input)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("parseSourcePushMode(%q) expected error", tt.input)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseSourcePushMode(%q) error = %v", tt.input, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("parseSourcePushMode(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestSessionSocketPushModePreferenceFlow(t *testing.T) {
+	handler, sessionMgr := newVirtualMonorepoSessionHandler(t)
+	pushClient := &commitPublisherMockClient{
+		mockClient: &mockClient{workspaceRepos: testWorkspaceRepositories()},
+		sourcePushResult: &monoclient.WorkspaceSourcePushResult{
+			Job: &pb.WorkspaceSyncJob{
+				JobId: "job-mode-1",
+				State: pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_SUCCEEDED,
+				Repositories: []*pb.WorkspaceSyncRepositoryResult{{
+					StorageId:   "repo-monofs",
+					DisplayPath: "github.com/acme/monofs",
+					Branch:      "main",
+					Status:      pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED,
+				}},
+			},
+		},
+	}
+	handler.commitMgr = NewCommitManager(sessionMgr, pushClient, testLogger())
+	handler.commitMgr.SetWorkspaceManifest(handler.rootNode.WorkspaceManifest())
+	handler.commitMgr.SetPrincipalID("principal-mode")
+	const path = "github.com/acme/monofs/main.go"
+
+	writeTrackedSessionFile(t, sessionMgr, path, "package main\n", ChangeModify)
+	if resp := handler.handleAdd([]string{path}); !resp.Success {
+		t.Fatalf("handleAdd() error = %s", resp.Error)
+	}
+
+	// Commit with an explicit push-mode preference.
+	commitResp := handler.handleCommit(SessionRequest{
+		Action:               "commit",
+		LogicalCommitMessage: "checkpoint",
+		AuthorName:           "Test User",
+		AuthorEmail:          "test@example.com",
+		SourcePushMode:       "preserve",
+	})
+	if !commitResp.Success {
+		t.Fatalf("handleCommit() error = %s", commitResp.Error)
+	}
+	if got := handler.preferredPushModeLocked(); got != pb.SourcePushMode_SOURCE_PUSH_MODE_PRESERVE {
+		t.Fatalf("preferred push mode = %v, want preserve", got)
+	}
+
+	// Push without an explicit flag consumes the commit-time preference.
+	pushResp := handler.handlePushSource(SessionRequest{Action: "push"})
+	if !pushResp.Success {
+		t.Fatalf("handlePushSource() error = %s", pushResp.Error)
+	}
+	if len(pushClient.sourcePushBundles) != 1 {
+		t.Fatalf("source push bundles = %d, want 1", len(pushClient.sourcePushBundles))
+	}
+	if got := pushClient.sourcePushBundles[0].pushMode; got != pb.SourcePushMode_SOURCE_PUSH_MODE_PRESERVE {
+		t.Fatalf("push mode used = %v, want preserve", got)
+	}
+}
+
+func TestSessionSocketPushRejectsInvalidPushMode(t *testing.T) {
+	handler, _ := newVirtualMonorepoSessionHandler(t)
+	handler.commitMgr = NewCommitManager(nil, nil, testLogger())
+
+	resp := handler.handlePushSource(SessionRequest{Action: "push", SourcePushMode: "bogus"})
+	if resp.Success {
+		t.Fatal("handlePushSource() should reject an invalid push mode")
+	}
+	if !strings.Contains(resp.Error, "invalid push mode") {
+		t.Fatalf("handlePushSource() error = %q, want invalid push mode", resp.Error)
+	}
+
+	commitResp := handler.handleCommit(SessionRequest{Action: "commit", SourcePushMode: "bogus"})
+	if commitResp.Success {
+		t.Fatal("handleCommit() should reject an invalid push mode")
 	}
 }
 
@@ -730,8 +835,9 @@ func TestSessionSocketBranchSwitchRejectsUnknownBranch(t *testing.T) {
 	}
 }
 
-func TestSessionSocketPullRejectsDirtyWorkspace(t *testing.T) {
+func TestSessionSocketPullRejectsDirtyWorkspaceWithoutMergeSupport(t *testing.T) {
 	handler, sessionMgr := newVirtualMonorepoSessionHandler(t)
+	handler.diffReader = nil
 	refresher := &workspaceRefreshMock{
 		result: &monoclient.WorkspaceRefreshResult{Requested: 3, Refreshed: 3},
 	}
@@ -740,13 +846,239 @@ func TestSessionSocketPullRejectsDirtyWorkspace(t *testing.T) {
 
 	resp := handler.handlePull()
 	if resp.Success {
-		t.Fatal("handlePull() success = true, want rejection for dirty workspace")
+		t.Fatal("handlePull() success = true, want rejection without merge support")
 	}
-	if !strings.Contains(resp.Error, "local changes pending") {
-		t.Fatalf("handlePull() error = %q, want pending-changes guidance", resp.Error)
+	if !strings.Contains(resp.Error, "merge support unavailable") {
+		t.Fatalf("handlePull() error = %q, want merge-support guidance", resp.Error)
 	}
 	if len(refresher.calls) != 0 {
 		t.Fatalf("refresh calls = %d, want 0", len(refresher.calls))
+	}
+}
+
+// switchableDiffReader serves different content before and after a
+// refresh, simulating an upstream advance.
+type switchableDiffReader struct {
+	beforeContent map[string]string
+	afterContent  map[string]string
+	after         bool
+}
+
+func (r *switchableDiffReader) ReadOriginal(ctx context.Context, path string) ([]byte, error) {
+	content := r.beforeContent
+	if r.after {
+		content = r.afterContent
+	}
+	data, ok := content[path]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "not found: "+path)
+	}
+	return []byte(data), nil
+}
+
+func (r *switchableDiffReader) flip() { r.after = true }
+
+// refreshFlipMock wraps workspaceRefreshMock and flips the diff reader
+// to post-refresh content when the refresh runs.
+type refreshFlipMock struct {
+	workspaceRefreshMock
+	reader *switchableDiffReader
+}
+
+func (m *refreshFlipMock) RefreshWorkspaceRepositories(ctx context.Context, repos []monoclient.WorkspaceRepository) (*monoclient.WorkspaceRefreshResult, error) {
+	result, err := m.workspaceRefreshMock.RefreshWorkspaceRepositories(ctx, repos)
+	m.reader.flip()
+	return result, err
+}
+
+func TestSessionSocketPullMergesLocalChangesCleanly(t *testing.T) {
+	handler, sessionMgr := newVirtualMonorepoSessionHandler(t)
+
+	reader := &switchableDiffReader{
+		beforeContent: map[string]string{
+			"github.com/acme/monofs/main.go": "package main\n\nfunc main() {\n}\n",
+		},
+		afterContent: map[string]string{
+			"github.com/acme/monofs/main.go": "package main\n\nfunc main() {\n\tprintln(\"upstream\")\n}\n",
+		},
+	}
+	handler.SetDiffReader(reader)
+	refresher := &refreshFlipMock{
+		workspaceRefreshMock: workspaceRefreshMock{
+			result: &monoclient.WorkspaceRefreshResult{Requested: 1, Refreshed: 1},
+		},
+		reader: reader,
+	}
+	handler.SetWorkspaceRefresher(refresher)
+
+	// Local modification in a different region of the same file.
+	writeTrackedSessionFile(t, sessionMgr, "github.com/acme/monofs/main.go",
+		"package main\n\nfunc main() {\n}\n\nfunc helper() {\n}\n", ChangeModify)
+
+	resp := handler.handlePull()
+	if !resp.Success {
+		t.Fatalf("handlePull() error = %s", resp.Error)
+	}
+	if !strings.Contains(resp.Message, "1 merged") {
+		t.Fatalf("handlePull() message = %q, want merge summary", resp.Message)
+	}
+
+	// The overlay file should now contain both changes.
+	localPath, err := sessionMgr.GetLocalPath("github.com/acme/monofs/main.go")
+	if err != nil {
+		t.Fatalf("GetLocalPath() error = %v", err)
+	}
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	merged := string(content)
+	if !strings.Contains(merged, `println("upstream")`) {
+		t.Errorf("merged content missing upstream change:\n%s", merged)
+	}
+	if !strings.Contains(merged, "func helper()") {
+		t.Errorf("merged content missing local change:\n%s", merged)
+	}
+	if hasConflictMarkers(content) {
+		t.Errorf("merged content has conflict markers:\n%s", merged)
+	}
+
+	// No conflicts recorded.
+	conflicts, err := sessionMgr.ListSessionConflicts()
+	if err != nil {
+		t.Fatalf("ListSessionConflicts() error = %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("conflicts = %v, want none", conflicts)
+	}
+}
+
+func TestSessionSocketPullRecordsConflicts(t *testing.T) {
+	handler, sessionMgr := newVirtualMonorepoSessionHandler(t)
+
+	reader := &switchableDiffReader{
+		beforeContent: map[string]string{
+			"github.com/acme/monofs/config.go": "value = \"base\"\n",
+		},
+		afterContent: map[string]string{
+			"github.com/acme/monofs/config.go": "value = \"upstream\"\n",
+		},
+	}
+	handler.SetDiffReader(reader)
+	refresher := &refreshFlipMock{
+		workspaceRefreshMock: workspaceRefreshMock{
+			result: &monoclient.WorkspaceRefreshResult{Requested: 1, Refreshed: 1},
+		},
+		reader: reader,
+	}
+	handler.SetWorkspaceRefresher(refresher)
+
+	// Local modification of the SAME line that upstream changed.
+	writeTrackedSessionFile(t, sessionMgr, "github.com/acme/monofs/config.go",
+		"value = \"local\"\n", ChangeModify)
+
+	resp := handler.handlePull()
+	if !resp.Success {
+		t.Fatalf("handlePull() error = %s", resp.Error)
+	}
+	if !strings.Contains(resp.Message, "CONFLICTED") {
+		t.Fatalf("handlePull() message = %q, want conflict summary", resp.Message)
+	}
+
+	conflicts, err := sessionMgr.ListSessionConflicts()
+	if err != nil {
+		t.Fatalf("ListSessionConflicts() error = %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Path != "github.com/acme/monofs/config.go" {
+		t.Fatalf("conflicts = %+v, want one for config.go", conflicts)
+	}
+
+	// The conflicts command lists them.
+	conflictResp := handler.handleConflicts()
+	if !conflictResp.Success || conflictResp.Conflicts != 1 {
+		t.Fatalf("handleConflicts() = %+v, want one conflict", conflictResp)
+	}
+	if len(conflictResp.ConflictList) != 1 || conflictResp.ConflictList[0].Path != "github.com/acme/monofs/config.go" {
+		t.Fatalf("handleConflicts() list = %+v", conflictResp.ConflictList)
+	}
+
+	// The overlay content carries conflict markers.
+	localPath, _ := sessionMgr.GetLocalPath("github.com/acme/monofs/config.go")
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !hasConflictMarkers(content) {
+		t.Errorf("conflicted file missing markers:\n%s", string(content))
+	}
+
+	// Staging a file with markers is rejected.
+	stageResp := handler.handleAdd([]string{"github.com/acme/monofs/config.go"})
+	if stageResp.Success {
+		t.Fatal("handleAdd() should reject unresolved conflict markers")
+	}
+
+	// Commit is blocked while conflicts remain.
+	commitResp := handler.handleCommit(SessionRequest{Action: "commit", LogicalCommitMessage: "nope"})
+	if commitResp.Success {
+		t.Fatal("handleCommit() should be blocked by unresolved conflicts")
+	}
+
+	// Resolve: rewrite clean content, stage, and verify the conflict
+	// state clears.
+	resolved := []byte("value = \"resolved\"\n")
+	if err := os.WriteFile(localPath, resolved, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := sessionMgr.TrackChange(ChangeModify, "github.com/acme/monofs/config.go", ""); err != nil {
+		t.Fatalf("TrackChange() error = %v", err)
+	}
+	stageResp = handler.handleAdd([]string{"github.com/acme/monofs/config.go"})
+	if !stageResp.Success {
+		t.Fatalf("handleAdd() after resolution error = %s", stageResp.Error)
+	}
+	conflicts, _ = sessionMgr.ListSessionConflicts()
+	if len(conflicts) != 0 {
+		t.Fatalf("conflicts after resolution = %v, want none", conflicts)
+	}
+}
+
+func TestSessionSocketPullDropsVacuousLocalChanges(t *testing.T) {
+	handler, sessionMgr := newVirtualMonorepoSessionHandler(t)
+
+	reader := &switchableDiffReader{
+		beforeContent: map[string]string{
+			"github.com/acme/monofs/readme.md": "hello\n",
+		},
+		afterContent: map[string]string{
+			"github.com/acme/monofs/readme.md": "hello upstream\n",
+		},
+	}
+	handler.SetDiffReader(reader)
+	refresher := &refreshFlipMock{
+		workspaceRefreshMock: workspaceRefreshMock{
+			result: &monoclient.WorkspaceRefreshResult{Requested: 1, Refreshed: 1},
+		},
+		reader: reader,
+	}
+	handler.SetWorkspaceRefresher(refresher)
+
+	// Local content identical to the pre-refresh base: the local change
+	// is vacuous and the upstream version should win.
+	writeTrackedSessionFile(t, sessionMgr, "github.com/acme/monofs/readme.md", "hello\n", ChangeModify)
+
+	resp := handler.handlePull()
+	if !resp.Success {
+		t.Fatalf("handlePull() error = %s", resp.Error)
+	}
+	if !strings.Contains(resp.Message, "1 dropped") {
+		t.Fatalf("handlePull() message = %q, want drop summary", resp.Message)
+	}
+
+	// The overlay entry is gone: the change no longer counts.
+	changes := sessionMgr.GetChanges()
+	if len(changes) != 0 {
+		t.Fatalf("changes after vacuous drop = %d, want 0", len(changes))
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/router/mergerequest"
 	"github.com/radryc/monofs/internal/router/pipeline"
 	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"github.com/radryc/monofs/internal/sharding"
@@ -51,6 +52,11 @@ type RouterConfig struct {
 	AutoPushEnabled  bool
 	AutoPushInterval time.Duration
 
+	// Auto-refresh (Phase 5): polling re-ingestion of advanced upstreams.
+	AutoRefreshEnabled     bool
+	AutoRefreshInterval    time.Duration
+	AutoRefreshConcurrency int
+
 	// Replication and failover configuration
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
 	RebalanceDelay        time.Duration // Wait before triggering permanent rebalance after failure, default: 10m
@@ -61,6 +67,12 @@ type RouterConfig struct {
 	AuthzEnforceIngest bool
 	AuthzGrantsPath    string
 	AuthzGrantsJSON    string
+
+	// Ownership gate (Phase 3 VCS governance): subtree-ownership review
+	// gate. When enabled, direct pushes into subtrees the principal does
+	// not own are rejected, requiring a non-direct (PR) strategy. Defaults
+	// off so existing deployments are unchanged.
+	OwnershipGateEnabled bool
 }
 
 // RouterPeer identifies another router instance to aggregate UI data from.
@@ -133,6 +145,10 @@ type Router struct {
 	searchConn   *grpc.ClientConn
 	searchAddr   string
 
+	// Search re-index debounce (guardian partitions)
+	searchReindexDebounceMu sync.Mutex
+	searchReindexDebounce   map[string]*time.Timer
+
 	// Ingestion whitelist
 	whitelist *whitelistStore
 
@@ -157,6 +173,13 @@ type Router struct {
 
 	// Phase 3: Auto-push worker (nil when disabled)
 	autoPushWorker *autoPushWorker
+
+	// Phase 5: Auto-refresh worker (nil when disabled)
+	autoRefreshWorker *autoRefreshWorker
+
+	// Auto-refresh re-ingest dedup (shared by poll + webhook paths)
+	reingestDedupMu sync.Mutex
+	reingestSeen    map[string]time.Time
 
 	// Connected FUSE clients
 	clients     map[string]*clientState // clientID -> state
@@ -206,9 +229,15 @@ type Router struct {
 	authzEnforceIngest bool
 	breakGlassAdmins   map[string]bool
 
+	// Ownership gate (Phase 3 VCS governance)
+	ownershipResolverFull *authz.OwnershipResolver // concrete resolver (OwnersOf, Governed)
+	mergeRequests         *mergerequest.Store      // native merge-request proposals
+
 	// Pipeline orchestration
 	pipelineOrchestrator   *pipeline.Orchestrator
 	pipelineWebhookHandler *pipeline.WebhookHandler
+	pipelineTaskQueue      *pipeline.TaskQueue
+	pipelineStatusReporter *pipeline.StatusReporter
 }
 
 var fetcherReconnectInterval = 5 * time.Second
@@ -309,6 +338,7 @@ type ingestedRepo struct {
 	repoURL     string
 	guardianURL string
 	branch      string
+	commitHash  string // resolved commit at ingest time (base for refresh probes)
 	filesCount  int64
 	ingestedAt  time.Time
 
@@ -400,6 +430,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		workspaceBundles:          make(map[string]*stagedWorkspaceBundle),
 		workspaceJobStore:         wjs,
 		policyCfg:                 policyCfg,
+		reingestSeen:              make(map[string]time.Time),
 		failoverTimers:            make(map[string]*time.Timer),
 		failoverStartTimes:        make(map[string]time.Time),
 		breakGlassAdmins:          make(map[string]bool),
@@ -422,6 +453,19 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		r.autoPushWorker = newAutoPushWorker(r, interval, defaultConcurrencyCap, logger)
 		r.autoPushWorker.Start()
 	}
+
+	if cfg.AutoRefreshEnabled {
+		interval := cfg.AutoRefreshInterval
+		if interval <= 0 {
+			interval = defaultAutoRefreshInterval
+		}
+		r.autoRefreshWorker = newAutoRefreshWorker(r, interval, cfg.AutoRefreshConcurrency, logger)
+		r.autoRefreshWorker.Start()
+	}
+
+	// Boot the pipeline orchestrator: registers the internal principal,
+	// loads pipeline configs from /.pipelines/, and starts config watching.
+	r.initPipeline(logger)
 
 	// Start UI request handler goroutine
 	go r.handleUIRequests()
@@ -1790,6 +1834,10 @@ func (r *Router) Close() error {
 
 	if r.autoPushWorker != nil {
 		r.autoPushWorker.Stop()
+	}
+
+	if r.autoRefreshWorker != nil {
+		r.autoRefreshWorker.Stop()
 	}
 
 	if r.workspaceJobStore != nil {

@@ -119,6 +119,25 @@ func (r *Router) PushWorkspaceCommits(req *pb.PushWorkspaceCommitsRequest, strea
 		})
 	}
 
+	// Subtree-ownership review gate (Phase 3 VCS governance). Only enforced
+	// when configured; denies direct pushes into subtrees the principal does
+	// not maintain.
+	if err := r.enforceOwnershipGate(stream.Context(), logicalBranch, bundleEntry.commitBundle); err != nil {
+		job.State = pb.WorkspaceSyncState_WORKSPACE_SYNC_STATE_FAILED
+		job.FinishedAtUnix = time.Now().Unix()
+		job.ErrorMessage = err.Error()
+		entry := &workspaceSyncJobEntry{job: job}
+		if err := r.storeWorkspaceSyncJob(entry); err != nil {
+			return err
+		}
+		routerWorkspaceSyncJobsTotal.WithLabelValues(actionLabel, "denied").Inc()
+		return stream.Send(&pb.WorkspaceSyncEvent{
+			EventType: pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_JOB_COMPLETED,
+			Job:       job,
+			Message:   fmt.Sprintf("push denied by ownership gate: %s", err.Error()),
+		})
+	}
+
 	entry := &workspaceSyncJobEntry{job: job}
 	if err := r.storeWorkspaceSyncJob(entry); err != nil {
 		return err
@@ -213,6 +232,17 @@ func (r *Router) runWorkspaceCommitPushJob(ctx context.Context, entry *workspace
 		}
 
 		repoResult := workspaceRepositoryResultFromPublish(progress, actionLabel)
+
+		// Non-direct branch strategies push to review branches; open a
+		// pull request for each such repository automatically.
+		r.attachPullRequest(ctx, repoResult, bundleEntry.commitBundle, entry.snapshot().GetJobId())
+
+		// The cluster content for a PUBLISHED repository reflects the pushed
+		// overlay state; re-index search so it tracks the push.
+		if repoResult.GetStatus() == pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED {
+			r.triggerSearchReindex(repoResult.GetStorageId(), repoResult.GetDisplayPath(), repoResult.GetRepoUrl(), repoResult.GetBranch(), "source_push")
+		}
+
 		if err := r.updateWorkspaceSyncRepository(entry, repoResult); err != nil {
 			return err
 		}

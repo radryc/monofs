@@ -68,6 +68,46 @@ func normalizeRepoID(repoURL string) string {
 	return strings.TrimSuffix(repoURL, ".git")
 }
 
+// goModuleVersion splits "module@version" into its module path and version
+// suffix. It returns ok=false when source is not a go-module-style reference
+// (e.g. an https:// URL or an SSH remote like git@host:owner/repo).
+func goModuleVersion(source string) (module, version string, ok bool) {
+	if strings.Contains(source, "://") || strings.HasPrefix(source, "git@") {
+		return "", "", false
+	}
+	idx := strings.LastIndex(source, "@")
+	if idx <= 0 || idx == len(source)-1 {
+		return "", "", false
+	}
+	module = strings.TrimSuffix(source[:idx], ".git")
+	version = source[idx+1:]
+	if module == "" || version == "" {
+		return "", "", false
+	}
+	return module, version, true
+}
+
+// validateGitRef accepts a branch name, a tag name, or a full commit SHA, and
+// rejects clearly-invalid refs (empty, whitespace, path traversal, or git
+// revision-operator characters). It is deliberately permissive about valid
+// ref characters (/, -, _, .) since branches commonly contain them.
+func validateGitRef(ref string) error {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return fmt.Errorf("git ref must be a branch, tag, or commit SHA")
+	}
+	if strings.ContainsAny(ref, " \t\r\n~^:?*[\\") {
+		return fmt.Errorf("invalid git ref %q: contains disallowed characters", ref)
+	}
+	if strings.Contains(ref, "..") || strings.HasPrefix(ref, "/") || strings.HasSuffix(ref, "/") {
+		return fmt.Errorf("invalid git ref %q", ref)
+	}
+	if strings.HasSuffix(ref, ".lock") || strings.HasSuffix(ref, ".") {
+		return fmt.Errorf("invalid git ref %q", ref)
+	}
+	return nil
+}
+
 func reservedManagedDisplayPathConflict(displayPath string, ingestionType pb.IngestionType) error {
 	displayPath = strings.Trim(strings.TrimSpace(displayPath), "/")
 	if displayPath == "" || ingestionType == pb.IngestionType_INGESTION_GUARDIAN {
@@ -173,9 +213,20 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 
 	switch req.IngestionType {
 	case pb.IngestionType_INGESTION_GIT:
-		// Git: ref is optional, defaults to "main"
+		// Go-module @version convenience: "<module>@<version>" with no
+		// explicit ref uses the version suffix as the ref (tag) and clones
+		// the bare module path. Display-path normalization still preserves
+		// the @version suffix.
 		if ref == "" {
-			ref = "main"
+			if module, version, ok := goModuleVersion(sourceURL); ok {
+				sourceURL = module
+				ref = version
+			} else {
+				ref = "main"
+			}
+		}
+		if err := validateGitRef(ref); err != nil {
+			return err
 		}
 	case pb.IngestionType_INGESTION_S3:
 		// S3: ref is optional and used as prefix
@@ -1031,6 +1082,7 @@ initComplete:
 		repoURL:           sourceURL,
 		guardianURL:       guardianURL,
 		branch:            ref,
+		commitHash:        commitHash,
 		filesCount:        filesIngested,
 		ingestedAt:        time.Now(),
 		topologyVersion:   r.version.Load(), // Current topology version
@@ -1056,32 +1108,7 @@ initComplete:
 	}
 
 	// Trigger search indexing asynchronously (if search service configured)
-	if r.searchClient != nil {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-			defer cancel()
-
-			resp, err := r.searchClient.IndexRepository(ctx, &pb.IndexRequest{
-				StorageId:   storageID,
-				DisplayPath: displayPath,
-				Source:      sourceURL,
-				Ref:         ref,
-			})
-			if err != nil {
-				r.logger.Warn("failed to trigger search indexing",
-					"storage_id", storageID,
-					"error", err)
-			} else if resp.Queued {
-				r.logger.Info("search indexing queued",
-					"storage_id", storageID,
-					"job_id", resp.JobId)
-			} else {
-				r.logger.Warn("search indexing not queued",
-					"storage_id", storageID,
-					"message", resp.Message)
-			}
-		}()
-	}
+	r.triggerSearchReindex(storageID, displayPath, sourceURL, ref, "ingest")
 
 	sendProgress(pb.IngestProgress_COMPLETED, fmt.Sprintf("Repository ingested successfully: %d files", filesIngested), filesIngested, filesIngested, "")
 	routerIngestFilesTotal.Add(float64(filesIngested))

@@ -78,6 +78,7 @@ type Service struct {
 	jobQueue   chan *Job
 	activeJobs sync.Map // jobID -> *Job
 	jobsWg     sync.WaitGroup
+	workerWg   sync.WaitGroup
 
 	// Stats
 	stats       ServiceStats
@@ -220,6 +221,7 @@ func NewService(cfg Config) (*Service, error) {
 
 	// Start workers
 	for i := 0; i < cfg.Workers; i++ {
+		s.workerWg.Add(1)
 		go s.worker(i)
 	}
 
@@ -237,6 +239,7 @@ func NewService(cfg Config) (*Service, error) {
 // Close shuts down the service
 func (s *Service) Close() error {
 	close(s.stopChan)
+	s.workerWg.Wait()
 	s.jobsWg.Wait()
 	s.saveStats()
 	if err := s.indexer.Close(); err != nil {
@@ -247,6 +250,7 @@ func (s *Service) Close() error {
 
 // worker processes indexing jobs
 func (s *Service) worker(id int) {
+	defer s.workerWg.Done()
 	s.logger.Info("indexing worker started", "worker_id", id)
 
 	for {
@@ -271,8 +275,10 @@ func (s *Service) processJob(job *Job) {
 		"display_path", job.DisplayPath)
 
 	// Update status to indexing
+	s.mu.Lock()
 	job.Status = pb.IndexStatus_INDEX_STATUS_INDEXING
 	job.StartedAt = time.Now()
+	s.mu.Unlock()
 	s.activeJobs.Store(job.ID, job)
 	s.saveJob(job)
 
@@ -290,32 +296,30 @@ func (s *Service) processJob(job *Job) {
 
 	// Update job status based on result
 	if err != nil {
+		s.mu.Lock()
 		job.Status = pb.IndexStatus_INDEX_STATUS_ERROR
 		job.ErrorMessage = err.Error()
+		s.stats.JobsFailed++
+		s.mu.Unlock()
+
 		s.logger.Error("indexing failed",
 			"job_id", job.ID,
 			"storage_id", job.StorageID,
 			"error", err)
-
-		// Track failure
-		s.mu.Lock()
-		s.stats.JobsFailed++
-		s.mu.Unlock()
 	} else {
+		s.mu.Lock()
 		job.Status = pb.IndexStatus_INDEX_STATUS_READY
 		job.FilesCount = result.FilesIndexed
 		job.IndexSize = result.IndexSizeBytes
 		job.Progress = 1.0
+		s.stats.JobsCompleted++
+		s.mu.Unlock()
+
 		s.logger.Info("indexing completed",
 			"job_id", job.ID,
 			"storage_id", job.StorageID,
 			"files", result.FilesIndexed,
 			"size", result.IndexSizeBytes)
-
-		// Track completion
-		s.mu.Lock()
-		s.stats.JobsCompleted++
-		s.mu.Unlock()
 
 		// Save repo metadata
 		s.saveRepoMeta(&RepoMeta{
@@ -329,14 +333,18 @@ func (s *Service) processJob(job *Job) {
 		})
 	}
 
+	s.mu.Lock()
 	job.CompletedAt = time.Now()
+	s.mu.Unlock()
 	s.activeJobs.Delete(job.ID)
 	s.saveJob(job)
 }
 
 // saveJob persists job state to DB
 func (s *Service) saveJob(job *Job) {
+	s.mu.RLock()
 	data, err := json.Marshal(job)
+	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Error("failed to marshal job", "error", err)
 		return
@@ -347,6 +355,15 @@ func (s *Service) saveJob(job *Job) {
 	}); err != nil {
 		s.logger.Error("failed to save job", "error", err)
 	}
+}
+
+// snapshotJob returns a copy of a job's fields under the read lock, so callers
+// can read a mutable job without racing the indexing worker.
+func (s *Service) snapshotJob(job *Job) *Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cloned := *job
+	return &cloned
 }
 
 // loadJob loads job state from DB
@@ -438,7 +455,9 @@ func (s *Service) loadRepoMappings() {
 
 // saveStats persists service statistics
 func (s *Service) saveStats() {
+	s.mu.RLock()
 	data, err := json.Marshal(s.stats)
+	s.mu.RUnlock()
 	if err != nil {
 		return
 	}

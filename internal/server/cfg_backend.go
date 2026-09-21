@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/cfg"
 	"github.com/radryc/kvs/pkg/kvsapi"
+	pb "github.com/radryc/monofs/api/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

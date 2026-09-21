@@ -18,7 +18,10 @@ type WorkspaceSourcePushResult struct {
 	Events   []*pb.WorkspaceSyncEvent
 }
 
-func (sc *ShardedClient) PushWorkspaceCommitBundle(ctx context.Context, bundle *workspacebundle.SourceCommitBundle) (*WorkspaceSourcePushResult, error) {
+// PushWorkspaceCommitBundle uploads a source commit bundle and starts a
+// workspace source push. A non-zero pushMode overrides the router's
+// configured default push mode.
+func (sc *ShardedClient) PushWorkspaceCommitBundle(ctx context.Context, bundle *workspacebundle.SourceCommitBundle, pushMode pb.SourcePushMode) (*WorkspaceSourcePushResult, error) {
 	normalizedBundle, err := normalizeSourceCommitBundleForPush(bundle, sc.clientID)
 	if err != nil {
 		return nil, err
@@ -73,9 +76,10 @@ func (sc *ShardedClient) PushWorkspaceCommitBundle(ctx context.Context, bundle *
 	defer cancelPush()
 
 	pushStream, err := routerClient.PushWorkspaceCommits(pushCtx, &pb.PushWorkspaceCommitsRequest{
-		WorkspaceId:   normalizedBundle.WorkspaceID,
-		BundleId:      uploadResp.GetBundleId(),
-		LogicalBranch: normalizedBundle.LogicalBranch,
+		WorkspaceId:    normalizedBundle.WorkspaceID,
+		BundleId:       uploadResp.GetBundleId(),
+		LogicalBranch:  normalizedBundle.LogicalBranch,
+		SourcePushMode: pushMode,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start workspace source push: %w", err)

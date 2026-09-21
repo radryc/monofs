@@ -16,12 +16,13 @@ import (
 
 // Bucket names for overlay database
 const (
-	bucketOverlayFiles   = "files"    // monofs path -> FileEntry JSON
-	bucketOverlayDeleted = "deleted"  // monofs path -> deletion timestamp
-	bucketOverlayDirs    = "userdirs" // root dir name -> creation timestamp
-	bucketOverlayStaged  = "staged"   // monofs path -> StagedIndexEntry JSON
-	bucketOverlayCommits = "commits"  // local commit id -> LocalVirtualCommit JSON
-	bucketOverlayBranch  = "branch"   // branch metadata and mappings
+	bucketOverlayFiles    = "files"     // monofs path -> FileEntry JSON
+	bucketOverlayDeleted  = "deleted"   // monofs path -> deletion timestamp
+	bucketOverlayDirs     = "userdirs"  // root dir name -> creation timestamp
+	bucketOverlayStaged   = "staged"    // monofs path -> StagedIndexEntry JSON
+	bucketOverlayCommits  = "commits"   // local commit id -> LocalVirtualCommit JSON
+	bucketOverlayBranch   = "branch"    // branch metadata and mappings
+	bucketOverlayConflict = "conflicts" // monofs path -> SessionConflict JSON
 )
 
 // FileEntryType represents the type of an overlay file entry
@@ -110,6 +111,7 @@ func (odb *OverlayDB) initBuckets() error {
 		bucketOverlayStaged,
 		bucketOverlayCommits,
 		bucketOverlayBranch,
+		bucketOverlayConflict,
 	}
 	for _, bucket := range buckets {
 		if err := odb.db.Update(func(tx *nutsdb.Tx) error {

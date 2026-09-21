@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/radryc/monofs/internal/workspacebundle"
@@ -64,6 +65,78 @@ func (r *Router) evaluateSubtreeOwnership(ctx context.Context, paths []string) (
 		return MergeDecisionDirect, nil, nil
 	}
 	return MergeDecisionMergeRequest, unowned, nil
+}
+
+// enforceOwnershipGate applies the subtree-ownership review gate to a source
+// push. It only denies when the push is a direct push (empty logical branch:
+// the target branch equals the repository's default branch, so no pull request
+// is opened) AND the principal does not own one or more governed subtrees.
+// Non-direct pushes are allowed because review happens at the forge via the
+// pull request that Phase 2 opens automatically.
+//
+// Ungoverned paths (no OWNERS/CODEOWNERS rule anywhere) are open by default.
+func (r *Router) enforceOwnershipGate(ctx context.Context, logicalBranch string, bundle *workspacebundle.SourceCommitBundle) error {
+	if !r.config.OwnershipGateEnabled {
+		return nil
+	}
+	if bundle == nil {
+		return nil
+	}
+	if strings.TrimSpace(logicalBranch) != "" {
+		// Non-direct strategy: PR review happens at the forge.
+		return nil
+	}
+
+	paths := changedPathsFromSourceBundle(bundle)
+	if len(paths) == 0 {
+		return nil
+	}
+
+	decision, unowned, err := r.evaluateSubtreeOwnership(ctx, paths)
+	if err != nil {
+		// Default-open on resolution failure (mirrors the disabled gate).
+		r.logger.Warn("ownership gate resolution failed, allowing push", "error", err)
+		return nil
+	}
+	if decision == MergeDecisionDirect {
+		return nil
+	}
+
+	// Filter to only the *governed* unowned paths; ungoverned paths are open.
+	governed := unowned[:0]
+	for _, p := range unowned {
+		g, err := r.ownershipResolverFull.Governed(ctx, p)
+		if err != nil {
+			r.logger.Warn("ownership gate governance check failed", "path", p, "error", err)
+			governed = append(governed, p)
+			continue
+		}
+		if g {
+			governed = append(governed, p)
+		}
+	}
+	if len(governed) == 0 {
+		return nil
+	}
+
+	owners := r.ownersForUnowned(ctx, governed)
+	return fmt.Errorf("review required: %s owned by %s; use a logical branch so a pull request is opened",
+		strings.Join(governed, ", "), strings.Join(owners, ", "))
+}
+
+// ownersForUnowned returns the maintainer references that govern the given
+// paths, for use in deny reasons and reviewer assignment.
+func (r *Router) ownersForUnowned(ctx context.Context, paths []string) []string {
+	resolver := r.ownershipResolverRef()
+	if resolver == nil {
+		return nil
+	}
+	refs, err := resolver.OwnersOf(ctx, paths)
+	if err != nil {
+		r.logger.Warn("ownership gate could not resolve owners", "error", err)
+		return nil
+	}
+	return reviewersFromOwnerRefs(refs)
 }
 
 // changedPathsFromSourceBundle collects the distinct absolute display paths

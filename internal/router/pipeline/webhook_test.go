@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -302,4 +303,83 @@ func TestWebhookServeHTTPGet(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405 for GET, got %d", w.Code)
 	}
+}
+
+func TestLoadPackageMetaPrefersLoader(t *testing.T) {
+	handler := NewWebhookHandler(nil, WebhookConfig{}, "does-not-exist.yaml")
+	handler.SetMetaLoader(func() ([]byte, error) {
+		return []byte(`
+packages:
+  server:
+    path: cmd/server
+    deps: [internal/storage]
+    build: make build-server
+    test: make test
+`), nil
+	})
+
+	meta, err := handler.loadPackageMeta()
+	if err != nil {
+		t.Fatalf("loadPackageMeta: %v", err)
+	}
+	pkg, ok := meta.Packages["server"]
+	if !ok {
+		t.Fatal("expected server package from loader")
+	}
+	if pkg.Path != "cmd/server" {
+		t.Errorf("server path = %q, want cmd/server", pkg.Path)
+	}
+
+	affected := DetectAffectedPackages(meta, []string{"internal/storage/foo.go"})
+	if len(affected) != 1 || affected[0] != "server" {
+		t.Errorf("affected = %v, want [server]", affected)
+	}
+}
+
+func TestLoadPackageMetaFallsBackToDisk(t *testing.T) {
+	handler := NewWebhookHandler(nil, WebhookConfig{}, "testdata/packages.yaml")
+	handler.SetMetaLoader(func() ([]byte, error) {
+		return nil, fmt.Errorf("kvs unavailable")
+	})
+
+	// Both loader and disk path are missing; loadPackageMeta must fail
+	// gracefully rather than panic.
+	if _, err := handler.loadPackageMeta(); err == nil {
+		t.Fatal("expected error when neither loader nor disk file is available")
+	}
+}
+
+func TestRepoChangedHandlerInvokedOnEvent(t *testing.T) {
+	handler := NewWebhookHandler(nil, WebhookConfig{}, "testdata/packages.yaml")
+	var got repoChangedPayload
+	handler.SetRepoChangedHandler(func(repoURL, branch, sha string) {
+		got = repoChangedPayload{repoURL, branch, sha}
+	})
+
+	handler.processEvent(WebhookEvent{
+		RepoURL:   "https://github.com/org/repo",
+		Branch:    "main",
+		CommitSHA: "abc123",
+	})
+
+	if got.repoURL != "https://github.com/org/repo" || got.branch != "main" || got.sha != "abc123" {
+		t.Fatalf("repoChangedHandler got %+v", got)
+	}
+}
+
+func TestRepoChangedHandlerNotCalledWithoutRepoURL(t *testing.T) {
+	handler := NewWebhookHandler(nil, WebhookConfig{}, "testdata/packages.yaml")
+	called := false
+	handler.SetRepoChangedHandler(func(repoURL, branch, sha string) { called = true })
+
+	handler.processEvent(WebhookEvent{RepoURL: "", Branch: "main", CommitSHA: "abc"})
+	if called {
+		t.Fatal("repoChangedHandler should not be invoked when RepoURL is empty")
+	}
+}
+
+type repoChangedPayload struct {
+	repoURL string
+	branch  string
+	sha     string
 }

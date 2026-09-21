@@ -212,6 +212,12 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 		return nil, status.Errorf(codes.Internal, "upsert guardian paths: %v", err)
 	}
 
+	// Re-index search for affected guardian partitions, debounced per
+	// storageID so bursts of writes coalesce into a single re-index.
+	for _, group := range groups {
+		r.requestSearchReindexDebounced(group.storageID, group.displayPath, "guardian://"+group.displayPath, "main", "guardian_upsert")
+	}
+
 	versions := make([]*pb.GuardianFileVersion, 0, len(plans))
 	for _, plan := range plans {
 		version, err := r.guardianVersions.commit(guardianVersionCommit{

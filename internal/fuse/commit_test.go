@@ -364,7 +364,7 @@ func TestCommitManagerPushPendingLocalCommitsBuildsSourceBundleAndMarksBranchCom
 		}
 	}
 
-	result, err := commitMgr.PushPendingLocalCommits(context.Background())
+	result, err := commitMgr.PushPendingLocalCommits(context.Background(), pb.SourcePushMode_SOURCE_PUSH_MODE_UNSPECIFIED)
 	if err != nil {
 		t.Fatalf("PushPendingLocalCommits() error = %v", err)
 	}
@@ -428,7 +428,8 @@ type publishedWorkspaceBundle struct {
 }
 
 type pushedSourceCommitBundle struct {
-	bundle *workspacebundle.SourceCommitBundle
+	bundle   *workspacebundle.SourceCommitBundle
+	pushMode pb.SourcePushMode
 }
 
 func (m *mockClient) ApplyRepositoryChanges(ctx context.Context, repo monoclient.WorkspaceRepository, changes []monoclient.RepositoryChange) (*monoclient.ApplyRepositoryChangesResult, error) {
@@ -446,8 +447,8 @@ func (m *commitPublisherMockClient) PublishWorkspaceBundle(ctx context.Context, 
 	return &monoclient.WorkspacePublishResult{}, nil
 }
 
-func (m *commitPublisherMockClient) PushWorkspaceCommitBundle(ctx context.Context, bundle *workspacebundle.SourceCommitBundle) (*monoclient.WorkspaceSourcePushResult, error) {
-	m.sourcePushBundles = append(m.sourcePushBundles, pushedSourceCommitBundle{bundle: bundle})
+func (m *commitPublisherMockClient) PushWorkspaceCommitBundle(ctx context.Context, bundle *workspacebundle.SourceCommitBundle, pushMode pb.SourcePushMode) (*monoclient.WorkspaceSourcePushResult, error) {
+	m.sourcePushBundles = append(m.sourcePushBundles, pushedSourceCommitBundle{bundle: bundle, pushMode: pushMode})
 	if m.sourcePushErr != nil {
 		return nil, m.sourcePushErr
 	}

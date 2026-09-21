@@ -71,6 +71,30 @@ Each entry documents: function signature, purpose, callers/call-sites, parameter
 
 ---
 
+## Files Added In Later Phases
+
+These source files were added after the initial documentation generation and are
+documented inline (doc comments) but not yet folded into the per-file guides:
+
+| File | Purpose |
+|------|---------|
+| `internal/router/mergerequest/store.go` | Native merge-request (proposal) store |
+| `internal/router/ownership.go` | Ownership gate wiring + OWNERS source |
+| `internal/router/mergerequest_api.go` | Native merge-request REST endpoints |
+| `internal/router/search_reindex.go` | Search re-index trigger + debounce |
+| `internal/router/autorefresh.go` | Auto-refresh poll + webhook re-ingest |
+| `internal/router/upstream_read.go` | Upstream log/tags/blame pass-through |
+| `internal/fuse/merge3.go` | 3-way merge + conflict markers |
+| `internal/fuse/pull_merge.go` | Pull-driven merge state capture/apply |
+| `internal/fuse/repo_filter.go` | Sparse-mount --include/--exclude globs |
+| `internal/search/symbols.go` | universal-ctags detection (sym: search) |
+| `internal/fetcher/upstream_read.go` | Fetcher upstream log/tags/blame |
+| `internal/client/upstream_read.go` | Client upstream log/tags/blame wrappers |
+| `internal/git/ref.go` | Ref classification (branch/tag/SHA) |
+| `pkg/authz/codeowners.go` | CODEOWNERS parsing |
+
+---
+
 ## Stats
 - **Total Go source files documented**: ~179 (excluding `_test.go` and `.pb.go` files)
 - **Total documentation lines**: 30,300

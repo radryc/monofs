@@ -252,3 +252,57 @@ func TestSessionManager_RecoverSessionRestoresVCSState(t *testing.T) {
 		t.Fatalf("recovered branch mapping = %+v, found=%v, want %+v", gotMapping, found, mapping)
 	}
 }
+
+func TestSessionManager_DeleteLogicalBranch(t *testing.T) {
+	sm, err := NewSessionManager(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionManager failed: %v", err)
+	}
+	defer func() {
+		if sm.db != nil {
+			_ = sm.db.Close()
+		}
+	}()
+
+	now := time.Now()
+	unpushed := LocalVirtualCommit{ID: "c-pending", LogicalBranch: "feature/x", Message: "pending", Pushed: false, CreatedAt: now}
+	pushed := LocalVirtualCommit{ID: "c-pushed", LogicalBranch: "feature/x", Message: "pushed", Pushed: true, CreatedAt: now}
+	if err := sm.PutLocalVirtualCommit(unpushed); err != nil {
+		t.Fatalf("put unpushed: %v", err)
+	}
+	if err := sm.PutLocalVirtualCommit(pushed); err != nil {
+		t.Fatalf("put pushed: %v", err)
+	}
+
+	mapping := SessionBranchMapping{PrincipalID: "p", LogicalBranch: "feature/x", StorageID: "repo-1", DisplayPath: "github.com/a/b", OriginalBranch: "main", ActualBranch: "feature/x-1", CreatedAt: now}
+	if err := sm.PutBranchMapping(mapping); err != nil {
+		t.Fatalf("put mapping: %v", err)
+	}
+	if err := sm.SetCurrentLogicalBranch("feature/x"); err != nil {
+		t.Fatalf("set current: %v", err)
+	}
+
+	deletedCommits, deletedMappings, err := sm.DeleteLogicalBranch("feature/x")
+	if err != nil {
+		t.Fatalf("DeleteLogicalBranch: %v", err)
+	}
+	if deletedCommits != 1 || deletedMappings != 1 {
+		t.Fatalf("deleted commits=%d mappings=%d, want 1/1", deletedCommits, deletedMappings)
+	}
+
+	// Unpushed commit is gone, pushed commit is retained.
+	commits, _ := sm.ListLocalVirtualCommits()
+	if len(commits) != 1 || commits[0].ID != "c-pushed" {
+		t.Fatalf("remaining commits = %+v, want only pushed commit", commits)
+	}
+
+	mappings, _ := sm.ListBranchMappings()
+	if len(mappings) != 0 {
+		t.Fatalf("remaining mappings = %+v, want none", mappings)
+	}
+
+	current, found, _ := sm.GetCurrentLogicalBranch()
+	if found && current != "" {
+		t.Fatalf("current branch = %q, want cleared", current)
+	}
+}

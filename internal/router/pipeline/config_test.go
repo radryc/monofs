@@ -363,11 +363,14 @@ func TestGlobMatching(t *testing.T) {
 }
 
 func TestExpandMatrix(t *testing.T) {
-	matrix := map[string][]string{
-		"os":   {"linux", "darwin"},
-		"arch": {"amd64", "arm64"},
+	matrix := MatrixConfig{
+		"os":   {Static: []string{"linux", "darwin"}},
+		"arch": {Static: []string{"amd64", "arm64"}},
 	}
-	result := expandMatrix(matrix)
+	result, err := expandMatrix(matrix, func(string) ([]string, bool) { return nil, false })
+	if err != nil {
+		t.Fatalf("expandMatrix: %v", err)
+	}
 	if len(result) != 4 {
 		t.Fatalf("expected 4 combinations, got %d", len(result))
 	}
@@ -386,6 +389,153 @@ func TestExpandMatrix(t *testing.T) {
 		if !v {
 			t.Errorf("missing combination: %s", k)
 		}
+	}
+}
+
+func TestExpandMatrixFromExpression(t *testing.T) {
+	matrix := MatrixConfig{
+		"package": {Expr: "${{ needs.detect.outputs.packages }}"},
+	}
+	resolver := func(expr string) ([]string, bool) {
+		if expr == "${{ needs.detect.outputs.packages }}" {
+			return []string{"server", "router"}, true
+		}
+		return nil, false
+	}
+	result, err := expandMatrix(matrix, resolver)
+	if err != nil {
+		t.Fatalf("expandMatrix: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 combinations, got %d", len(result))
+	}
+	got := []string{result[0]["package"], result[1]["package"]}
+	if got[0] != "server" || got[1] != "router" {
+		t.Errorf("packages = %v, want [server router]", got)
+	}
+}
+
+func TestExpandMatrixEmptyResolvedExpression(t *testing.T) {
+	matrix := MatrixConfig{
+		"package": {Expr: "${{ needs.detect.outputs.packages }}"},
+	}
+	result, err := expandMatrix(matrix, func(string) ([]string, bool) { return nil, true })
+	if err != nil {
+		t.Fatalf("expandMatrix: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected 0 combinations for empty output, got %d", len(result))
+	}
+}
+
+func TestParseMatrixConfigStaticAndExpression(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`
+name: matrix-pipeline
+on:
+  push:
+    branches: [main]
+jobs:
+  detect:
+    runs-on: builder
+    steps:
+      - uses: monofs/affected@v1
+        id: affected
+  build:
+    needs: [detect]
+    strategy:
+      matrix:
+        package: ${{ needs.detect.outputs.packages }}
+        os: [linux, darwin]
+    runs-on: builder
+    steps:
+      - run: make build-${{ matrix.package }} GOOS=${{ matrix.os }}
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	build := cfg.Jobs["build"]
+	if build.Strategy == nil {
+		t.Fatal("expected strategy on build job")
+	}
+	pkgVar := build.Strategy.Matrix["package"]
+	if pkgVar.Expr != "${{ needs.detect.outputs.packages }}" {
+		t.Errorf("package expr = %q", pkgVar.Expr)
+	}
+	osVar := build.Strategy.Matrix["os"]
+	if len(osVar.Static) != 2 || osVar.Static[0] != "linux" {
+		t.Errorf("os static = %v", osVar.Static)
+	}
+}
+
+func TestMatchEventPathsFilters(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`
+name: paths-pipeline
+on:
+  push:
+    branches: [main]
+    paths: [cmd/**, internal/**]
+    paths-ignore: ["*.md", docs/**]
+jobs:
+  build:
+    runs-on: builder
+    steps:
+      - run: make build
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		files []string
+		want  bool
+	}{
+		{"code change matches", []string{"cmd/server/main.go"}, true},
+		{"internal change matches", []string{"internal/server/x.go"}, true},
+		{"docs ignored", []string{"docs/guide.md"}, false},
+		{"root markdown ignored", []string{"README.md"}, false},
+		{"unrelated path", []string{"config/settings.json"}, false},
+		{"mixed code and docs matches", []string{"docs/a.md", "cmd/x.go"}, true},
+		{"no file info matches", nil, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cfg.MatchEvent(WebhookEvent{
+				EventType:    TriggerPush,
+				Branch:       "main",
+				ChangedFiles: tt.files,
+			})
+			if got != tt.want {
+				t.Errorf("MatchEvent(files=%v) = %v, want %v", tt.files, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPathGlobMatch(t *testing.T) {
+	tests := []struct {
+		pattern string
+		file    string
+		want    bool
+	}{
+		{"cmd/**", "cmd/server/main.go", true},
+		{"cmd/**", "cmd/main.go", true},
+		{"cmd/**", "internal/x.go", false},
+		{"*.md", "README.md", true},
+		{"*.md", "docs/README.md", false},
+		{"docs/**", "docs/a/b/c.md", true},
+		{"**", "anything/at/all.txt", true},
+		{"cmd/*", "cmd/server/main.go", false},
+		{"cmd/*", "cmd/main.go", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern+"_"+tt.file, func(t *testing.T) {
+			if got := pathGlobMatch(tt.pattern, tt.file); got != tt.want {
+				t.Errorf("pathGlobMatch(%q, %q) = %v, want %v", tt.pattern, tt.file, got, tt.want)
+			}
+		})
 	}
 }
 

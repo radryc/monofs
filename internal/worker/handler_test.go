@@ -26,7 +26,7 @@ func TestBuilderHandlerShellStep(t *testing.T) {
 		TimeoutSec: 5,
 	}
 
-	code, err := handler.Execute(context.Background(), task, &buf)
+	code, _, err := handler.Execute(context.Background(), task, &buf)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestBuilderHandlerFailingStep(t *testing.T) {
 		TimeoutSec: 5,
 	}
 
-	code, err := handler.Execute(context.Background(), task, &buf)
+	code, _, err := handler.Execute(context.Background(), task, &buf)
 	if err == nil {
 		t.Fatal("expected error for failing step")
 	}
@@ -80,7 +80,7 @@ func TestBuilderHandlerMultipleSteps(t *testing.T) {
 		TimeoutSec: 5,
 	}
 
-	code, err := handler.Execute(context.Background(), task, &buf)
+	code, _, err := handler.Execute(context.Background(), task, &buf)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestBuilderHandlerTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err := handler.Execute(ctx, task, &buf)
+	_, _, err := handler.Execute(ctx, task, &buf)
 	if err == nil {
 		t.Fatal("expected error for timeout")
 	}
@@ -132,7 +132,7 @@ func TestBuilderHandlerBuiltinCheckout(t *testing.T) {
 		TimeoutSec: 5,
 	}
 
-	code, err := handler.Execute(context.Background(), task, &buf)
+	code, _, err := handler.Execute(context.Background(), task, &buf)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestDockerHandler(t *testing.T) {
 		TimeoutSec: 5,
 	}
 
-	code, err := handler.Execute(context.Background(), task, &buf)
+	code, _, err := handler.Execute(context.Background(), task, &buf)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestDeployerHandler(t *testing.T) {
 		TimeoutSec: 5,
 	}
 
-	code, err := handler.Execute(context.Background(), task, &buf)
+	code, _, err := handler.Execute(context.Background(), task, &buf)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -204,6 +204,11 @@ func TestBuilderHandlerBuiltinAffected(t *testing.T) {
     deps: [internal/server]
     build: make build-server
     test: make test-unit
+  router:
+    path: cmd/monofs-router
+    deps: [internal/router]
+    build: make build-router
+    test: make test-unit
 `), 0644)
 
 	handler := NewBuilderHandler(dir, logger)
@@ -216,18 +221,62 @@ func TestBuilderHandlerBuiltinAffected(t *testing.T) {
 		Steps: []StepData{
 			{Uses: "monofs/affected@v1", With: map[string]string{"packages": packagesPath}},
 		},
-		TimeoutSec: 5,
+		TimeoutSec:   5,
+		ChangedFiles: []string{"internal/server/node.go"},
 	}
 
-	code, err := handler.Execute(context.Background(), task, &buf)
+	code, outputs, err := handler.Execute(context.Background(), task, &buf)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
 	}
-	if !bytes.Contains(buf.Bytes(), []byte("cmd/monofs-server")) {
-		t.Error("output should contain package path from the packages file")
+	if outputs == nil {
+		t.Fatal("expected outputs from affected builtin")
+	}
+	// internal/server is a dep of the server package, so a change there
+	// affects server.
+	if outputs["packages"] != "server" {
+		t.Errorf("outputs[packages] = %q, want server", outputs["packages"])
+	}
+	if outputs["count"] != "1" {
+		t.Errorf("outputs[count] = %q, want 1", outputs["count"])
+	}
+	if outputs["any"] != "true" {
+		t.Errorf("outputs[any] = %q, want true", outputs["any"])
+	}
+}
+
+func TestBuilderHandlerBuiltinAffectedNoChanges(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+
+	dir := t.TempDir()
+	packagesPath := filepath.Join(dir, "monofs-packages.yaml")
+	os.WriteFile(packagesPath, []byte("packages: {}\n"), 0644)
+
+	handler := NewBuilderHandler(dir, logger)
+
+	var buf bytes.Buffer
+	task := &TaskData{
+		TaskID:     "test-affected-empty",
+		JobName:    "detect",
+		RunnerType: "builder",
+		Steps: []StepData{
+			{Uses: "monofs/affected@v1", With: map[string]string{"packages": packagesPath}},
+		},
+		TimeoutSec: 5,
+	}
+
+	code, outputs, err := handler.Execute(context.Background(), task, &buf)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	if outputs["any"] != "false" || outputs["packages"] != "" {
+		t.Errorf("outputs = %v, want empty affected set", outputs)
 	}
 }
 

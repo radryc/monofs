@@ -221,7 +221,17 @@ func TestSubscribeGuardianChangesReceivesLogicalEvents(t *testing.T) {
 	waitForCondition(t, func() bool {
 		router.guardianLogicalChangeSubsMu.RLock()
 		defer router.guardianLogicalChangeSubsMu.RUnlock()
-		return len(router.guardianLogicalChangeSubs) == 1
+		// The router's own pipeline watchers (/.pipelines, /.queues/pipeline)
+		// also hold subscriptions, so match on the test's prefix instead of
+		// counting.
+		for _, sub := range router.guardianLogicalChangeSubs {
+			for _, prefix := range sub.logicalPrefixes {
+				if prefix == "/partitions/genomics/intents" {
+					return true
+				}
+			}
+		}
+		return false
 	})
 
 	_, err := router.UpsertGuardianPaths(context.Background(), &pb.UpsertGuardianPathsRequest{

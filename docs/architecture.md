@@ -181,11 +181,34 @@ MonoFS supports:
 
 The publish path requires known workspace repositories with source, branch, and base commit metadata. That is why MonoFS supports publishing changes to existing repositories but does not provision entirely new upstream repositories from scratch.
 
+### Conflict and Rollback Semantics
+
+Publishing into upstream repositories can conflict with concurrent upstream
+changes. MonoFS resolves these explicitly:
+
+- **Pull conflicts** use a 3-way merge and produce git-style conflict markers
+  in the workspace, surfaced via `monofs-session conflicts`.
+- **Cross-repo atomicity** is best-effort: when a multi-repository push fails
+  partway, already-published repositories are rolled back with *revert commits*
+  (never force-pushed), recorded with a `ROLLED_BACK` status.
+
+### Auto-Refresh
+
+The router can poll ingested repositories and re-ingest those whose upstream
+has advanced (`--auto-refresh`), so mounted sessions pick up upstream changes
+without a manual pull. Webhook pushes additionally trigger immediate
+re-ingestion of matching repositories. Re-ingestion reuses the normal ingest
+path, so session namespace generations and search indexes stay in sync.
+
 ## Search and Discovery
 
 Search services index ingested content so the mounted workspace remains usable at scale.
 
 This matters because the value of a virtual monorepo is not only path unification. It is also the ability to discover code and operational content across repository boundaries.
+
+Search supports both full-text and symbol queries (`sym:`) — the latter requires
+a universal-ctags binary on the search service. Indexes refresh on ingestion,
+publish, source push, and guardian partition upserts (debounced).
 
 ## Operational Characteristics
 

@@ -56,6 +56,11 @@ service RepoSyncWorker {
     rpc ProbeWorkspaceRefresh(ProbeWorkspaceRefreshRequest) returns (stream RepoSyncProgress);
     rpc DiscardWorkspaceBundle(DiscardWorkspaceBundleRequest) returns (DiscardWorkspaceBundleResponse);
     rpc GetSyncWorkerStats(SyncWorkerStatsRequest) returns (SyncWorkerStatsResponse);
+
+    // Upstream read operations (log/tags/blame).
+    rpc GetUpstreamLog(UpstreamLogRequest) returns (UpstreamLogResponse);
+    rpc GetUpstreamTags(UpstreamTagsRequest) returns (UpstreamTagsResponse);
+    rpc GetUpstreamBlame(UpstreamBlameRequest) returns (UpstreamBlameResponse);
 }
 
 // SourceType is defined in monofs.proto (imported above)
@@ -234,6 +239,7 @@ enum RepoSyncStatus {
     REPO_SYNC_STATUS_FAILED = 7;
     REPO_SYNC_STATUS_PUBLISHED = 8;
     REPO_SYNC_STATUS_CONFLICT = 9;
+    REPO_SYNC_STATUS_ROLLED_BACK = 10;
 }
 
 message StageWorkspaceBundleResponse {

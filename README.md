@@ -34,6 +34,19 @@ MonoFS also integrates with:
 
 That means the workspace includes more than code. It includes desired state and operational reality.
 
+## Feature Highlights
+
+- **Virtual monorepo** over independent Git repos, with upstream publish/pull.
+- **Sparse workspaces** via `--include`/`--exclude` display-path globs.
+- **Ref pinning** at ingest: branch, tag, or commit SHA (and `module@version`).
+- **Review workflow**: OWNERS/CODEOWNERS subtree-ownership gate, automatic pull
+  requests for non-direct pushes, and native merge-request endpoints.
+- **Code intelligence**: full-text and `sym:` symbol search (universal-ctags).
+- **Auto-refresh**: poll- and webhook-driven re-ingestion of advanced upstreams.
+- **Session VCS**: local virtual commits, logical branches, conflicts, push
+  modes, plus upstream `log`/`tags`/`blame`.
+- **CI/CD pipelines** with monorepo-aware affected-builds and executor wire-up.
+
 ## Quick Example
 
 Ingest a repository:

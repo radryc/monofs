@@ -31,6 +31,20 @@ var (
 	BuildTime = "unknown"
 )
 
+// csvFlag collects comma-separated (and repeatable) string values.
+type csvFlag []string
+
+func (f *csvFlag) String() string { return strings.Join(*f, ",") }
+
+func (f *csvFlag) Set(value string) error {
+	for _, part := range strings.Split(value, ",") {
+		if s := strings.TrimSpace(part); s != "" {
+			*f = append(*f, s)
+		}
+	}
+	return nil
+}
+
 func main() {
 	routerAddr := flag.String("router", "localhost:9090", "MonoFS router address")
 	mountpoint := flag.String("mount", "", "Mount point (required)")
@@ -46,6 +60,12 @@ func main() {
 	rpcTimeout := flag.Duration("rpc-timeout", 10*time.Second, "Timeout for RPC calls to nodes")
 	clientID := flag.String("client-id", "", "Persistent client identifier (default: auto-generated and stored in ~/.monofs/client-id)")
 	showVersion := flag.Bool("version", false, "Print version information and exit")
+
+	var includeGlobs csvFlag
+	var excludeGlobs csvFlag
+	flag.Var(&includeGlobs, "include", "Comma-separated display-path globs to mount; repeatable (only matching repos mount)")
+	flag.Var(&excludeGlobs, "exclude", "Comma-separated display-path globs to hide; repeatable (applied after --include)")
+
 	flag.Parse()
 
 	if *showVersion {
@@ -261,6 +281,10 @@ func main() {
 			},
 		))
 
+		// Wire upstream reader so `monofs-session log --upstream`, `tags`,
+		// and `blame` work through the router's fetcher pass-through.
+		socketHandler.SetUpstreamReader(c)
+
 		// Wire attr cache so push can invalidate stale dependency entries.
 		if cacheLayer != nil {
 			socketHandler.SetAttrCache(cacheLayer)
@@ -286,6 +310,18 @@ func main() {
 			logger.Error("failed to enable virtual monorepo mode", "error", err)
 			os.Exit(1)
 		}
+
+		if len(includeGlobs) > 0 || len(excludeGlobs) > 0 {
+			filter, err := monofuse.NewRepoFilter(includeGlobs, excludeGlobs)
+			if err != nil {
+				logger.Error("invalid repo filter", "error", err)
+				os.Exit(1)
+			}
+			root.SetRepoFilter(filter)
+			logger.Info("sparse workspace filter enabled",
+				"include", includeGlobs, "exclude", excludeGlobs)
+		}
+
 		if err := root.EnableWorkspaceGitProjection(*mountpoint, workspaceGitStateDir); err != nil {
 			logger.Error("failed to enable workspace git projection", "error", err)
 			os.Exit(1)

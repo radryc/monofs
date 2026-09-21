@@ -13,19 +13,19 @@ type WALWriter interface {
 }
 
 type Ledger struct {
-	mu sync.RWMutex
+	mu  sync.RWMutex
 	wal WALWriter
 
-	commits  []*pb.LocalCommit
-	outcomes []*pb.PushOutcome
+	commits   []*pb.LocalCommit
+	outcomes  []*pb.PushOutcome
 	refreshes []*pb.RefreshEvent
 
-	byCommitID map[string]*pb.LocalCommit
-	byJobID   map[string]*pb.PushOutcome
+	byCommitID  map[string]*pb.LocalCommit
+	byJobID     map[string]*pb.PushOutcome
 	byWorkspace map[string][]int
 	byPrincipal map[string][]int
 	byRepo      map[string][]int
-	byStatus   map[string][]int
+	byStatus    map[string][]int
 }
 
 func New() *Ledger {
@@ -186,31 +186,65 @@ func (l *Ledger) Query(req *pb.QueryLedgerRequest) *pb.QueryLedgerResponse {
 }
 
 func matchesCommitFilters(req *pb.QueryLedgerRequest, c *pb.LocalCommit) bool {
-	if w := req.GetWorkspaceId(); w != "" && c.GetWorkspaceId() != w { return false }
-	if p := req.GetPrincipalId(); p != "" && c.GetPrincipalId() != p { return false }
-	if r := req.GetRepoStorageId(); r != "" && c.GetRepoStorageId() != r { return false }
-	if l := req.GetLocalCommitId(); l != "" && c.GetLocalCommitId() != l { return false }
-	if a := req.GetCreatedAfter(); a > 0 && c.GetTimestampUnix() < a { return false }
-	if b := req.GetCreatedBefore(); b > 0 && c.GetTimestampUnix() > b { return false }
+	if w := req.GetWorkspaceId(); w != "" && c.GetWorkspaceId() != w {
+		return false
+	}
+	if p := req.GetPrincipalId(); p != "" && c.GetPrincipalId() != p {
+		return false
+	}
+	if r := req.GetRepoStorageId(); r != "" && c.GetRepoStorageId() != r {
+		return false
+	}
+	if l := req.GetLocalCommitId(); l != "" && c.GetLocalCommitId() != l {
+		return false
+	}
+	if a := req.GetCreatedAfter(); a > 0 && c.GetTimestampUnix() < a {
+		return false
+	}
+	if b := req.GetCreatedBefore(); b > 0 && c.GetTimestampUnix() > b {
+		return false
+	}
 	return true
 }
 
 func matchesOutcomeFilters(req *pb.QueryLedgerRequest, o *pb.PushOutcome) bool {
-	if w := req.GetWorkspaceId(); w != "" && o.GetWorkspaceId() != w { return false }
-	if j := req.GetJobId(); j != "" && o.GetJobId() != j { return false }
-	if r := req.GetRepoStorageId(); r != "" && o.GetRepoStorageId() != r { return false }
-	if s := req.GetPushStatus(); s != "" && o.GetStatus() != s { return false }
-	if b := req.GetBranch(); b != "" && o.GetBranch() != b { return false }
-	if a := req.GetCreatedAfter(); a > 0 && o.GetTimestampUnix() < a { return false }
-	if b := req.GetCreatedBefore(); b > 0 && o.GetTimestampUnix() > b { return false }
+	if w := req.GetWorkspaceId(); w != "" && o.GetWorkspaceId() != w {
+		return false
+	}
+	if j := req.GetJobId(); j != "" && o.GetJobId() != j {
+		return false
+	}
+	if r := req.GetRepoStorageId(); r != "" && o.GetRepoStorageId() != r {
+		return false
+	}
+	if s := req.GetPushStatus(); s != "" && o.GetStatus() != s {
+		return false
+	}
+	if b := req.GetBranch(); b != "" && o.GetBranch() != b {
+		return false
+	}
+	if a := req.GetCreatedAfter(); a > 0 && o.GetTimestampUnix() < a {
+		return false
+	}
+	if b := req.GetCreatedBefore(); b > 0 && o.GetTimestampUnix() > b {
+		return false
+	}
 	return true
 }
 
 func matchesRefreshFilters(req *pb.QueryLedgerRequest, r *pb.RefreshEvent) bool {
-	if w := req.GetWorkspaceId(); w != "" && r.GetWorkspaceId() != w { return false }
-	if s := req.GetRepoStorageId(); s != "" && r.GetRepoStorageId() != s { return false }
-	if a := req.GetCreatedAfter(); a > 0 && r.GetTimestampUnix() < a { return false }
-	if b := req.GetCreatedBefore(); b > 0 && r.GetTimestampUnix() > b { return false }
+	if w := req.GetWorkspaceId(); w != "" && r.GetWorkspaceId() != w {
+		return false
+	}
+	if s := req.GetRepoStorageId(); s != "" && r.GetRepoStorageId() != s {
+		return false
+	}
+	if a := req.GetCreatedAfter(); a > 0 && r.GetTimestampUnix() < a {
+		return false
+	}
+	if b := req.GetCreatedBefore(); b > 0 && r.GetTimestampUnix() > b {
+		return false
+	}
 	return true
 }
 

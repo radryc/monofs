@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +21,10 @@ type Orchestrator struct {
 
 	runHistory []*PipelineRun
 	maxHistory int
+
+	// onRunFinished, when set, is invoked (in its own goroutine) when a
+	// run transitions into a terminal state.
+	onRunFinished func(run *PipelineRun)
 }
 
 func NewOrchestrator(queue *TaskQueue, logger *slog.Logger) *Orchestrator {
@@ -29,6 +35,13 @@ func NewOrchestrator(queue *TaskQueue, logger *slog.Logger) *Orchestrator {
 		logger:     logger,
 		maxHistory: 100,
 	}
+}
+
+// SetOnRunFinished installs a callback invoked when a run finishes.
+func (o *Orchestrator) SetOnRunFinished(fn func(run *PipelineRun)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.onRunFinished = fn
 }
 
 func (o *Orchestrator) RegisterPipeline(cfg *PipelineConfig) {
@@ -70,6 +83,9 @@ func (o *Orchestrator) StartRun(cfg *PipelineConfig, event WebhookEvent, affecte
 		Branch:       event.Branch,
 		Tag:          event.Tag,
 		PRNumber:     event.PRNumber,
+		RepoFullName: repoFullNameFromURL(event.RepoURL),
+		RepoURL:      event.RepoURL,
+		ChangedFiles: event.ChangedFiles,
 		CreatedAt:    time.Now(),
 		Jobs:         make(map[string]*JobStatus),
 		Affected:     affected,
@@ -111,8 +127,19 @@ func (o *Orchestrator) cancelExistingRuns(pipelineName, group string) {
 }
 
 func (o *Orchestrator) executeRun(run *PipelineRun, cfg *PipelineConfig, event WebhookEvent, affected []string) {
-	o.setRunState(run, RunRunning)
+	var notify bool
 
+	o.mu.Lock()
+
+	// Guard: only initialize a freshly-pending run. A run that has already
+	// been driven to a terminal state (e.g. by a cancel or a direct task
+	// result) must not be reset.
+	if run.State != RunPending {
+		o.mu.Unlock()
+		return
+	}
+
+	o.setRunStateLocked(run, RunRunning)
 	now := time.Now()
 	run.StartedAt = &now
 
@@ -120,18 +147,29 @@ func (o *Orchestrator) executeRun(run *PipelineRun, cfg *PipelineConfig, event W
 	jobsStarted := 0
 	for _, jobName := range entrypoints {
 		if o.canRunJob(cfg, run, jobName, event, affected) {
-			o.enqueueJobTasks(run, cfg, jobName, affected)
-			o.setJobState(run, jobName, JobRunning)
-			jobsStarted++
+			enqueued := o.enqueueJobTasks(run, cfg, jobName, affected)
+			if enqueued > 0 {
+				o.setJobStateLocked(run, jobName, JobRunning)
+				jobsStarted++
+			} else {
+				o.setJobStateLocked(run, jobName, JobSkipped)
+			}
 		} else {
-			o.setJobState(run, jobName, JobSkipped)
+			o.setJobStateLocked(run, jobName, JobSkipped)
 		}
 	}
 
 	if jobsStarted == 0 {
-		o.setRunState(run, RunSucceeded)
+		o.setRunStateLocked(run, RunSucceeded)
 		now := time.Now()
 		run.FinishedAt = &now
+		notify = true
+	}
+
+	o.mu.Unlock()
+
+	if notify {
+		o.notifyRunFinished(run)
 	}
 }
 
@@ -167,36 +205,88 @@ func (o *Orchestrator) evaluateCondition(condition string, run *PipelineRun, aff
 	return true
 }
 
-func (o *Orchestrator) enqueueJobTasks(run *PipelineRun, cfg *PipelineConfig, jobName string, affected []string) {
+// enqueueJobTasks enqueues the tasks for one job of a run, expanding any
+// matrix strategy. It returns the number of tasks enqueued; zero means
+// the job resolved to an empty matrix and should be skipped.
+func (o *Orchestrator) enqueueJobTasks(run *PipelineRun, cfg *PipelineConfig, jobName string, affected []string) int {
 	job, ok := cfg.Jobs[jobName]
 	if !ok {
-		return
+		return 0
 	}
 
 	if job.Strategy != nil && len(job.Strategy.Matrix) > 0 {
-		matrixCombos := expandMatrix(job.Strategy.Matrix)
+		matrixCombos, err := expandMatrix(job.Strategy.Matrix, func(expr string) ([]string, bool) {
+			return resolveNeedsOutputExpr(expr, run)
+		})
+		if err != nil {
+			o.logger.Error("matrix expansion failed", "job", jobName, "error", err)
+			return 0
+		}
 		for _, combo := range matrixCombos {
-			task := o.buildTask(run.RunID, jobName, job, combo)
+			task := o.buildTask(run, jobName, job, combo)
 			if err := o.queue.EnqueueTask(run.RunID, task); err != nil {
 				o.logger.Error("enqueue task failed", "job", jobName, "error", err)
 			}
 		}
-	} else {
-		task := o.buildTask(run.RunID, jobName, job, nil)
-		if err := o.queue.EnqueueTask(run.RunID, task); err != nil {
-			o.logger.Error("enqueue task failed", "job", jobName, "error", err)
-		}
+		return len(matrixCombos)
 	}
+
+	task := o.buildTask(run, jobName, job, nil)
+	if err := o.queue.EnqueueTask(run.RunID, task); err != nil {
+		o.logger.Error("enqueue task failed", "job", jobName, "error", err)
+	}
+	return 1
 }
 
-func (o *Orchestrator) buildTask(runID, jobName string, job JobConfig, matrixVars map[string]string) *Task {
+// resolveNeedsOutputExpr resolves a ${{ needs.<job>.outputs.<key> }}
+// expression against the completed jobs of the run. It returns the
+// comma-separated output split into values; false when the expression
+// does not match the needs-outputs pattern.
+func resolveNeedsOutputExpr(expr string, run *PipelineRun) ([]string, bool) {
+	expr = strings.TrimSpace(expr)
+	if !strings.HasPrefix(expr, "${{ needs.") || !strings.HasSuffix(expr, " }}") {
+		return nil, false
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(expr, "${{ needs."), " }}")
+	parts := strings.Split(inner, ".outputs.")
+	if len(parts) != 2 {
+		return nil, false
+	}
+	neededJob, key := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	if neededJob == "" || key == "" {
+		return nil, false
+	}
+	if job, ok := run.Jobs[neededJob]; ok && job.Outputs != nil {
+		if value, ok := job.Outputs[key]; ok {
+			return splitOutputList(value), true
+		}
+	}
+	return nil, true
+}
+
+// splitOutputList splits a comma-separated output value into trimmed,
+// non-empty entries.
+func splitOutputList(value string) []string {
+	var result []string
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry != "" {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
+func (o *Orchestrator) buildTask(run *PipelineRun, jobName string, job JobConfig, matrixVars map[string]string) *Task {
 	steps := make([]StepConfig, len(job.Steps))
 	copy(steps, job.Steps)
 
+	needsOutputs := needsOutputResolver(run)
 	for i := range steps {
 		for k, v := range matrixVars {
 			steps[i].Run = replaceVar(steps[i].Run, "matrix."+k, v)
 		}
+		steps[i].Run = substituteNeedsOutputs(steps[i].Run, needsOutputs)
 	}
 
 	timeout := job.TimeoutMinutes * 60
@@ -205,32 +295,63 @@ func (o *Orchestrator) buildTask(runID, jobName string, job JobConfig, matrixVar
 	}
 
 	return &Task{
-		RunID:      runID,
-		JobName:    jobName,
-		RunnerType: job.RunsOn,
-		Steps:      steps,
-		TimeoutSec: timeout,
-		MaxRetries: 2,
+		RunID:        run.RunID,
+		JobName:      jobName,
+		RunnerType:   job.RunsOn,
+		Steps:        steps,
+		TimeoutSec:   timeout,
+		MaxRetries:   2,
+		Affected:     run.Affected,
+		ChangedFiles: run.ChangedFiles,
 	}
+}
+
+// needsOutputResolver builds a "<job>.outputs.<key>" → output lookup.
+func needsOutputResolver(run *PipelineRun) map[string]string {
+	resolver := make(map[string]string)
+	for jobName, job := range run.Jobs {
+		for key, value := range job.Outputs {
+			resolver[jobName+".outputs."+key] = value
+		}
+	}
+	return resolver
+}
+
+// substituteNeedsOutputs replaces all ${{ needs.<job>.outputs.<key> }}
+// occurrences in a step command with the corresponding upstream output.
+func substituteNeedsOutputs(s string, resolver map[string]string) string {
+	if !strings.Contains(s, "${{ needs.") {
+		return s
+	}
+	for key, value := range resolver {
+		s = replaceVar(s, "needs."+key, value)
+	}
+	return s
 }
 
 func (o *Orchestrator) OnTaskResult(ctx context.Context, result *TaskResult) {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 
 	run, ok := o.runs[result.RunID]
 	if !ok {
+		o.mu.Unlock()
 		return
 	}
 
+	prevState := run.State
+
 	job, ok := run.Jobs[result.JobName]
 	if !ok {
+		o.mu.Unlock()
 		return
 	}
 
 	switch result.State {
 	case JobSucceeded:
 		job.State = JobSucceeded
+		job.WorkerID = result.WorkerID
+		job.ExitCode = result.ExitCode
+		job.Outputs = result.Outputs
 		job.FinishedAt = &result.EndedAt
 		o.advancePipeline(ctx, run)
 
@@ -252,11 +373,58 @@ func (o *Orchestrator) OnTaskResult(ctx context.Context, result *TaskResult) {
 		} else {
 			job.State = JobFailed
 			job.Error = result.Error
+			job.WorkerID = result.WorkerID
+			job.ExitCode = result.ExitCode
 			o.setRunStateLocked(run, RunFailed)
 			now := time.Now()
 			run.FinishedAt = &now
 		}
 	}
+
+	o.mu.Unlock()
+
+	if !isTerminalRunState(prevState) && isTerminalRunState(run.State) {
+		o.notifyRunFinished(run)
+	}
+}
+
+// notifyRunFinished invokes the run-finished callback with a snapshot of
+// the run. The snapshot is taken under the lock so it never races with the
+// run's state transitions.
+func (o *Orchestrator) notifyRunFinished(run *PipelineRun) {
+	o.mu.RLock()
+	fn := o.onRunFinished
+	if fn == nil {
+		o.mu.RUnlock()
+		return
+	}
+	cloned := cloneRun(run)
+	o.mu.RUnlock()
+
+	go fn(&cloned)
+}
+
+func isTerminalRunState(state RunState) bool {
+	return state == RunSucceeded || state == RunFailed || state == RunCancelled
+}
+
+// repoFullNameFromURL extracts the "owner/repo" identity from a repository
+// URL such as https://github.com/org/repo or https://gitlab.com/group/repo.git.
+func repoFullNameFromURL(repoURL string) string {
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL == "" {
+		return ""
+	}
+	if u, err := url.Parse(repoURL); err == nil && u.Path != "" {
+		repoURL = u.Path
+	}
+	repoURL = strings.TrimPrefix(repoURL, "/")
+	repoURL = strings.TrimSuffix(repoURL, ".git")
+	parts := strings.Split(repoURL, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.Join(parts[len(parts)-2:], "/")
 }
 
 func (o *Orchestrator) advancePipeline(ctx context.Context, run *PipelineRun) {
@@ -266,25 +434,45 @@ func (o *Orchestrator) advancePipeline(ctx context.Context, run *PipelineRun) {
 	}
 
 	completed := make(map[string]bool)
-	allDone := true
 	for name, job := range run.Jobs {
-		if job.State == JobSucceeded || job.State == JobSkipped {
-			completed[name] = true
-		} else if job.State != JobFailed {
-			allDone = false
-		} else {
+		if job.State == JobSucceeded || job.State == JobSkipped || job.State == JobFailed || job.State == JobCancelled {
 			completed[name] = true
 		}
 	}
 
-	for jobName, job := range run.Jobs {
-		if job.State != JobPending {
-			continue
+	// Advance to a fixpoint: a job that resolves to an empty matrix is
+	// skipped immediately and may unblock its own downstream jobs in the
+	// same pass.
+	maxPasses := len(run.Jobs) + 1
+	for pass := 0; pass < maxPasses; pass++ {
+		progressed := false
+		for jobName, job := range run.Jobs {
+			if job.State != JobPending {
+				continue
+			}
+			if !cfg.AllNeedsSatisfied(jobName, completed) {
+				continue
+			}
+			enqueued := o.enqueueJobTasks(run, cfg, jobName, run.Affected)
+			if enqueued > 0 {
+				o.setJobStateLocked(run, jobName, JobRunning)
+			} else {
+				o.setJobStateLocked(run, jobName, JobSkipped)
+				completed[jobName] = true
+			}
+			progressed = true
 		}
-		if cfg.AllNeedsSatisfied(jobName, completed) {
-			o.enqueueJobTasks(run, cfg, jobName, run.Affected)
-			o.setJobStateLocked(run, jobName, JobRunning)
+		if !progressed {
+			break
+		}
+	}
+
+	// The run is finished once every job reached a terminal state.
+	allDone := true
+	for _, job := range run.Jobs {
+		if !completed[job.JobName] && job.State != JobSucceeded && job.State != JobSkipped && job.State != JobFailed && job.State != JobCancelled {
 			allDone = false
+			break
 		}
 	}
 
@@ -301,19 +489,34 @@ func (o *Orchestrator) advancePipeline(ctx context.Context, run *PipelineRun) {
 
 func (o *Orchestrator) CancelRun(runID string) error {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 
 	run, ok := o.runs[runID]
 	if !ok {
+		o.mu.Unlock()
 		return fmt.Errorf("run not found: %s", runID)
 	}
 
-	if run.State == RunSucceeded || run.State == RunFailed || run.State == RunCancelled {
+	if isTerminalRunState(run.State) {
+		o.mu.Unlock()
 		return fmt.Errorf("run already finished: %s", run.State)
 	}
 
 	o.cancelRunLocked(run)
+	o.mu.Unlock()
+
+	o.notifyRunFinished(run)
 	return nil
+}
+
+// cloneRun returns a shallow copy of run with a copied Jobs map.
+func cloneRun(run *PipelineRun) PipelineRun {
+	cloned := *run
+	cloned.Jobs = make(map[string]*JobStatus, len(run.Jobs))
+	for k, v := range run.Jobs {
+		vc := *v
+		cloned.Jobs[k] = &vc
+	}
+	return cloned
 }
 
 func (o *Orchestrator) cancelRunLocked(run *PipelineRun) {
@@ -416,20 +619,8 @@ func (o *Orchestrator) PipelineConfigs() map[string]*PipelineConfig {
 	return result
 }
 
-func (o *Orchestrator) setRunState(run *PipelineRun, state RunState) {
-	o.mu.Lock()
-	o.setRunStateLocked(run, state)
-	o.mu.Unlock()
-}
-
 func (o *Orchestrator) setRunStateLocked(run *PipelineRun, state RunState) {
 	run.State = state
-}
-
-func (o *Orchestrator) setJobState(run *PipelineRun, jobName string, state JobState) {
-	o.mu.Lock()
-	o.setJobStateLocked(run, jobName, state)
-	o.mu.Unlock()
 }
 
 func (o *Orchestrator) setJobStateLocked(run *PipelineRun, jobName string, state JobState) {
@@ -454,21 +645,36 @@ func (o *Orchestrator) addToHistory(run *PipelineRun) {
 	}
 }
 
-func expandMatrix(m map[string][]string) []map[string]string {
+// expandMatrix computes the matrix combinations. Static values are used
+// as-is; expression values are resolved through the supplied resolver
+// (typically needs-outputs) and split on commas. An error is returned
+// when an expression cannot be resolved against any known output.
+func expandMatrix(m MatrixConfig, resolve func(expr string) ([]string, bool)) ([]map[string]string, error) {
 	if len(m) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var keys []string
 	var values [][]string
 	for k, v := range m {
 		keys = append(keys, k)
-		values = append(values, v)
+		if v.Expr != "" {
+			resolved, ok := resolve(v.Expr)
+			if !ok {
+				return nil, fmt.Errorf("unresolved matrix expression %q", v.Expr)
+			}
+			values = append(values, resolved)
+			continue
+		}
+		if len(v.Static) == 0 {
+			return nil, nil
+		}
+		values = append(values, v.Static)
 	}
 
 	var result []map[string]string
 	expandMatrixRecursive(&result, keys, values, make(map[string]string), 0)
-	return result
+	return result, nil
 }
 
 func expandMatrixRecursive(result *[]map[string]string, keys []string, values [][]string, current map[string]string, depth int) {

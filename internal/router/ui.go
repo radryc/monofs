@@ -152,10 +152,15 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/whitelist/toggle", r.handleWhitelistToggleAPI)
 	mux.HandleFunc("/api/authz/ingest", r.handleAuthzIngestStatusAPI)
 	mux.HandleFunc("/api/authz/ingest/toggle", r.handleAuthzIngestToggleAPI)
+	mux.HandleFunc("/api/merge-requests", r.handleMergeRequestsAPI)
+	mux.HandleFunc("/api/merge-requests/", r.handleMergeRequestsAPI)
 
 	// Predictor API route
 	mux.HandleFunc("/api/predictor", r.handlePredictorAPI)
 	mux.HandleFunc("/api/pprof/collect", r.handlePprofCollectAPI)
+
+	// Bazel adoption status API route
+	mux.HandleFunc("/api/bazel/status", r.handleBazelStatusAPI)
 
 	// Search API routes
 	mux.HandleFunc("/api/search", r.handleSearchAPI)

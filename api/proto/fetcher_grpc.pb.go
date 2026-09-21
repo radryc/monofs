@@ -471,6 +471,9 @@ const (
 	RepoSyncWorker_ProbeWorkspaceRefresh_FullMethodName      = "/monofs.RepoSyncWorker/ProbeWorkspaceRefresh"
 	RepoSyncWorker_DiscardWorkspaceBundle_FullMethodName     = "/monofs.RepoSyncWorker/DiscardWorkspaceBundle"
 	RepoSyncWorker_GetSyncWorkerStats_FullMethodName         = "/monofs.RepoSyncWorker/GetSyncWorkerStats"
+	RepoSyncWorker_GetUpstreamLog_FullMethodName             = "/monofs.RepoSyncWorker/GetUpstreamLog"
+	RepoSyncWorker_GetUpstreamTags_FullMethodName            = "/monofs.RepoSyncWorker/GetUpstreamTags"
+	RepoSyncWorker_GetUpstreamBlame_FullMethodName           = "/monofs.RepoSyncWorker/GetUpstreamBlame"
 )
 
 // RepoSyncWorkerClient is the client API for RepoSyncWorker service.
@@ -487,6 +490,10 @@ type RepoSyncWorkerClient interface {
 	ProbeWorkspaceRefresh(ctx context.Context, in *ProbeWorkspaceRefreshRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RepoSyncProgress], error)
 	DiscardWorkspaceBundle(ctx context.Context, in *DiscardWorkspaceBundleRequest, opts ...grpc.CallOption) (*DiscardWorkspaceBundleResponse, error)
 	GetSyncWorkerStats(ctx context.Context, in *SyncWorkerStatsRequest, opts ...grpc.CallOption) (*SyncWorkerStatsResponse, error)
+	// Upstream read operations (log/tags/blame).
+	GetUpstreamLog(ctx context.Context, in *UpstreamLogRequest, opts ...grpc.CallOption) (*UpstreamLogResponse, error)
+	GetUpstreamTags(ctx context.Context, in *UpstreamTagsRequest, opts ...grpc.CallOption) (*UpstreamTagsResponse, error)
+	GetUpstreamBlame(ctx context.Context, in *UpstreamBlameRequest, opts ...grpc.CallOption) (*UpstreamBlameResponse, error)
 }
 
 type repoSyncWorkerClient struct {
@@ -600,6 +607,36 @@ func (c *repoSyncWorkerClient) GetSyncWorkerStats(ctx context.Context, in *SyncW
 	return out, nil
 }
 
+func (c *repoSyncWorkerClient) GetUpstreamLog(ctx context.Context, in *UpstreamLogRequest, opts ...grpc.CallOption) (*UpstreamLogResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpstreamLogResponse)
+	err := c.cc.Invoke(ctx, RepoSyncWorker_GetUpstreamLog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *repoSyncWorkerClient) GetUpstreamTags(ctx context.Context, in *UpstreamTagsRequest, opts ...grpc.CallOption) (*UpstreamTagsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpstreamTagsResponse)
+	err := c.cc.Invoke(ctx, RepoSyncWorker_GetUpstreamTags_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *repoSyncWorkerClient) GetUpstreamBlame(ctx context.Context, in *UpstreamBlameRequest, opts ...grpc.CallOption) (*UpstreamBlameResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpstreamBlameResponse)
+	err := c.cc.Invoke(ctx, RepoSyncWorker_GetUpstreamBlame_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RepoSyncWorkerServer is the server API for RepoSyncWorker service.
 // All implementations must embed UnimplementedRepoSyncWorkerServer
 // for forward compatibility.
@@ -614,6 +651,10 @@ type RepoSyncWorkerServer interface {
 	ProbeWorkspaceRefresh(*ProbeWorkspaceRefreshRequest, grpc.ServerStreamingServer[RepoSyncProgress]) error
 	DiscardWorkspaceBundle(context.Context, *DiscardWorkspaceBundleRequest) (*DiscardWorkspaceBundleResponse, error)
 	GetSyncWorkerStats(context.Context, *SyncWorkerStatsRequest) (*SyncWorkerStatsResponse, error)
+	// Upstream read operations (log/tags/blame).
+	GetUpstreamLog(context.Context, *UpstreamLogRequest) (*UpstreamLogResponse, error)
+	GetUpstreamTags(context.Context, *UpstreamTagsRequest) (*UpstreamTagsResponse, error)
+	GetUpstreamBlame(context.Context, *UpstreamBlameRequest) (*UpstreamBlameResponse, error)
 	mustEmbedUnimplementedRepoSyncWorkerServer()
 }
 
@@ -644,6 +685,15 @@ func (UnimplementedRepoSyncWorkerServer) DiscardWorkspaceBundle(context.Context,
 }
 func (UnimplementedRepoSyncWorkerServer) GetSyncWorkerStats(context.Context, *SyncWorkerStatsRequest) (*SyncWorkerStatsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSyncWorkerStats not implemented")
+}
+func (UnimplementedRepoSyncWorkerServer) GetUpstreamLog(context.Context, *UpstreamLogRequest) (*UpstreamLogResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUpstreamLog not implemented")
+}
+func (UnimplementedRepoSyncWorkerServer) GetUpstreamTags(context.Context, *UpstreamTagsRequest) (*UpstreamTagsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUpstreamTags not implemented")
+}
+func (UnimplementedRepoSyncWorkerServer) GetUpstreamBlame(context.Context, *UpstreamBlameRequest) (*UpstreamBlameResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUpstreamBlame not implemented")
 }
 func (UnimplementedRepoSyncWorkerServer) mustEmbedUnimplementedRepoSyncWorkerServer() {}
 func (UnimplementedRepoSyncWorkerServer) testEmbeddedByValue()                        {}
@@ -749,6 +799,60 @@ func _RepoSyncWorker_GetSyncWorkerStats_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RepoSyncWorker_GetUpstreamLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpstreamLogRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepoSyncWorkerServer).GetUpstreamLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepoSyncWorker_GetUpstreamLog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepoSyncWorkerServer).GetUpstreamLog(ctx, req.(*UpstreamLogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RepoSyncWorker_GetUpstreamTags_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpstreamTagsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepoSyncWorkerServer).GetUpstreamTags(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepoSyncWorker_GetUpstreamTags_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepoSyncWorkerServer).GetUpstreamTags(ctx, req.(*UpstreamTagsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RepoSyncWorker_GetUpstreamBlame_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpstreamBlameRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepoSyncWorkerServer).GetUpstreamBlame(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepoSyncWorker_GetUpstreamBlame_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepoSyncWorkerServer).GetUpstreamBlame(ctx, req.(*UpstreamBlameRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RepoSyncWorker_ServiceDesc is the grpc.ServiceDesc for RepoSyncWorker service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -763,6 +867,18 @@ var RepoSyncWorker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSyncWorkerStats",
 			Handler:    _RepoSyncWorker_GetSyncWorkerStats_Handler,
+		},
+		{
+			MethodName: "GetUpstreamLog",
+			Handler:    _RepoSyncWorker_GetUpstreamLog_Handler,
+		},
+		{
+			MethodName: "GetUpstreamTags",
+			Handler:    _RepoSyncWorker_GetUpstreamTags_Handler,
+		},
+		{
+			MethodName: "GetUpstreamBlame",
+			Handler:    _RepoSyncWorker_GetUpstreamBlame_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

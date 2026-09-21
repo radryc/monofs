@@ -20,6 +20,10 @@ func (f *fakePRProvider) Create(_ context.Context, req workspacepr.CreatePRReque
 
 func (f *fakePRProvider) ProviderName() string { return "fake" }
 
+func (f *fakePRProvider) RequestReviewers(_ context.Context, _ workspacepr.ReviewersRequest) error {
+	return nil
+}
+
 func TestBuildPRRequestBodyAndReviewers(t *testing.T) {
 	mr := externalMergeRequest{
 		RepoCloneURL: "https://github.com/org/repo",

@@ -1,0 +1,863 @@
+# MonoFS: Full Monorepo Feature Completion — Remaining Work Plan
+#
+# Generated: 2026-09-05. This file tracks the remaining items after the
+# first two implementation phases. Append "DONE" markers to items as
+# they are completed.
+#
+# ─── CONTEXT ───────────────────────────────────────────────────────────
+# Goal: close every gap identified in the monorepo feature audit so
+# MonoFS behaves like a true monorepo (Google Piper / Meta style) while
+# remaining a virtual filesystem over independent Git repos.
+#
+# Design decisions already confirmed by the user:
+#   - Pull/refresh conflicts: 3-way merge with git-style conflict markers
+#     (DONE — internal/fuse/merge3.go + pull_merge.go)
+#   - Cross-repo atomicity: best-effort rollback of already-pushed repos
+#     via revert commits, never force-push (DONE — fetcher
+#     rollbackSourcePushRepository + REPO_SYNC_STATUS_ROLLED_BACK)
+#   - PR creation: automatic on non-direct branch strategies
+#     (DONE — workspacepr providers now call GitHub/GitLab APIs,
+#     router attaches PRs in runWorkspaceCommitPushJob)
+#   - Remote execution: honest HTTP protocol, no REAPI pretense
+#     (DONE — .bazelrc now uses action_env=MONOFS_EXECUTOR_ADDR)
+#   - Code intelligence: symbol indexing via ctags + re-index wiring
+#     (no LSP proxy in this phase)
+#   - Auto-refresh: poll interval AND webhook-triggered re-ingest
+#   - Sparse workspace: client-side --include/--exclude globs
+#
+# ─── PHASE STATUS SUMMARY ──────────────────────────────────────────────
+# [x] Phase 0: Data race fix (subscribe_test mock mutex)
+# [x] Phase 1 CI: transitive affected closure, real monofs/affected@v1
+#     builtin with outputs, ${{ needs.X.outputs.Y }} substitution,
+#     matrix-from-expression expansion, paths/paths-ignore enforcement,
+#     .bazelrc protocol fix
+# [x] Phase 2 VCS: 3-way merge + conflicts command + conflict-marker
+#     guards on add/commit, best-effort rollback (squash + preserve
+#     paths), ROLLED_BACK status end-to-end (proto → router → summary),
+#     real GitHub/GitLab PR creation with token support + fallback URLs,
+#     pull_request_url/pull_request_created fields on repo results
+# [x] Plan item 3 (CODEOWNERS): DONE — pkg/authz/codeowners.go parser
+#     (GitHub semantics: last-match-wins, "*" catch-all, anchored and
+#     unanchored globs, trailing-slash dirs, wildcard-free dir prefix),
+#     OwnershipResolver CODEOWNERS fallback (OWNERS wins whenever an
+#     OWNERS file exists anywhere on the ancestor chain; CODEOWNERS used
+#     only when none governs), OwnersOf includes CODEOWNERS owners for
+#     ungoverned paths. Fully tested (pkg/authz green).
+# [x] Phase 3 VCS governance   → items 1–3 below (ALL DONE — item 1
+#     completed: ownership gate + merge-request store + reviewer
+#     auto-assignment, item 3 CODEOWNERS)
+# [x] Item 2 (MEDIUM)          → DONE — upstream log/tags/blame + branch
+#     delete session commands (proto + fetcher + router + client + FUSE + CLI)
+# [x] Phase 4 Search/code intel → items 4–5 below (item 4 DONE — symbol
+#     indexing; item 5 DONE — re-index triggers on publish/source-push/
+#     guardian upsert, refresh covered via ingest; doctor ticker deferred)
+# [x] Phase 5 Ingest/sync      → items 6–7 below (item 6 DONE — tag/SHA
+#     ref pinning; item 7 DONE — auto-refresh poll + webhook re-ingest)
+# [x] Phase 6 Workspace       → item 8 below (DONE — sparse mount
+#     --include/--exclude globs)
+# [x] Phase 7 Final verification → item 9 below (DONE — build/vet/test/
+#     race/fmt clean, CLI smoke, docs pass, all items marked)
+#
+# ─── HANDOFF NOTES (read this first) ───────────────────────────────────
+# Repo state at handoff: BUILD GREEN, ALL TESTS GREEN, gofmt clean on
+# all touched packages. Verified: go build ./... ; go test ./pkg/authz
+# ./internal/fuse ./internal/router ./internal/router/pipeline
+# ./internal/fetcher ./internal/worker — all ok. Full ./internal/... and
+# pkg/... suites were green at the last full run before handoff.
+# Nothing is half-edited. The NEXT task is plan item 1 (review gate),
+# which can now consume both OWNERS and CODEOWNERS via
+# pkg/authz.OwnershipResolver (SetCodeownersProvider + IsOwner/OwnsAll/
+# OwnersOf).
+#
+# Key new APIs the next agent should know about:
+#   - authz.ParseCodeowners / CodeownersFile.OwnersFor / resolver
+#     fallback via SetCodeownersProvider (pkg/authz/codeowners.go)
+#   - fuse.Merge3 / hasConflictMarkers / SessionManager conflict APIs
+#     (PutSessionConflict/ListSessionConflicts/ClearSessionConflict)
+#   - fetcher rollback: sourcePushRollback record +
+#     rollbackSourcePushRepository + restoreBaseTree (never force-push)
+#   - workspacepr.DetectProvider(url, gitlabBase, ghToken, glToken) —
+#     real API PRs; router attachPullRequest() in workspace_pr.go
+#   - pipeline.MatrixConfig/MatrixVar (expression matrices),
+#     TaskResult.Outputs, JobStatus.Outputs, resolveNeedsOutputExpr
+#   - worker Handler.Execute now returns (int, map[string]string, error)
+#     — outputs from monofs/affected@v1 flow to needs.*.outputs.*
+#   - CLI: monofs-session {conflicts, push --push-mode, commit
+#     --push-mode} (TODO per plan item 2: log --upstream, tags, blame,
+#     branch --delete)
+# Env vars introduced: MONOFS_GITHUB_WEBHOOK_SECRET,
+#   MONOFS_GITLAB_WEBHOOK_SECRET, MONOFS_GITHUB_TOKEN,
+#   MONOFS_GITLAB_TOKEN (planned: MONOFS_GITLAB_BASE_URL — item 1).
+# Pre-existing issues now FIXED (final cleanup pass):
+#   - go vet self-assignment internal/registry/server.go (removed dead no-op).
+#   - go test -race data races: pipeline orchestrator (run-state/cloneRun +
+#     executeRun unsynchronized StartedAt/FinishedAt; guarded under o.mu and
+#     made defensive against non-Pending runs), fetcher client_test mock
+#     (atomic counters + cache mutex), search service Job sharing (s.mu + a
+#     snapshotJob helper + worker WaitGroup on Close); TestGetStats and
+#     TestCancelRunNotifies now deterministic.
+#   - monofs-session TestPushSourceSendsPushRequest (stale push-summary
+#     assertion updated to the current "✓ Local commits pushed" output).
+#   - protos TestMessagePoolsReuse (no longer asserts sync.Pool object
+#     identity, which GC does not guarantee).
+#   - gofmt-dirty files (cmd/monofs-fetcher, fetcher/workspace_source_push*,
+#     protos/pools_test, router/autopush, workspaceledger/ledger, server/*,
+#     telemetry, worker/*, test/embedded_kvs_integration_test) — all formatted.
+#
+# Verification commands (run after every item):
+#   go build ./...
+#   go vet ./internal/... ./cmd/...
+#   go test -count=1 ./internal/... ./pkg/...
+#   go test -race -count=1 ./internal/router/... ./internal/fuse/...
+#   gofmt -l <changed packages>   (must be empty)
+
+═══════════════════════════════════════════════════════════════════════
+ ITEM 1 — Wire merge-request store + subtree ownership review gate
+ Priority: HIGH
+═══════════════════════════════════════════════════════════════════════
+
+STATUS: DONE
+
+What landed:
+  - RouterConfig.OwnershipGateEnabled + --ownership-gate /
+    --ownership-team-mapping flags (cmd/monofs-router/main.go); defaults OFF.
+  - Router.EnableOwnershipGate + ConfigureOwnership + mergeRequests store
+    wiring (internal/router/ownership.go); routerOwnersSource reads
+    .guardian/OWNERS via readPipelinePath.
+  - authz.OwnershipResolver.Governed (pkg/authz/resolver.go) to distinguish
+    "governed but foreign" from "ungoverned" (open by default).
+  - Ownership gate wired after workspacepolicy eval in
+    PushWorkspaceCommits (internal/router/workspace_source_push.go),
+    enforced by enforceOwnershipGate (internal/router/authz_merge_gate.go):
+    direct push into foreign governed subtree -> DENY "review required";
+    owned/ungoverned/non-direct -> allow.
+  - Native merge-request REST endpoints (internal/router/mergerequest_api.go,
+    registered in ui.go): POST/GET /api/merge-requests + approve/merge/reject.
+  - Reviewer auto-assignment: workspacepr.PullRequestProvider.RequestReviewers
+    (GitHub requested_reviewers, GitLab reviewer_ids) + requestPullReviewers
+    in attachPullRequest (workspace_pr.go).
+  - Tests: internal/router/ownership_gate_test.go (gate decisions +
+    splitManagedDisplayPath), mergerequest_api_test.go (HTTP lifecycle),
+    pkg/authz resolver_test.go TestGoverned.
+  - Docs: docs/workspace-and-integrations.md "Review workflow" section.
+
+Current state:
+  - internal/router/mergerequest/store.go — in-memory proposal store
+    (open → approved → merged/rejected) with subtree-ownership gating.
+    Fully coded, referenced only by its own test.
+  - internal/router/authz_merge_gate.go — evaluateSubtreeOwnership()
+    decides direct-push vs merge-request based on OWNERS subtree
+    ownership. Only called from tests.
+  - internal/router/authz_merge_external.go — openExternalMergeRequest()
+    pulls reviewers from OWNERS. Test-only.
+  - pkg/authz/owners.go — .guardian/OWNERS YAML (viewers/ingesters/
+    maintainainers) + OwnershipResolver.OwnsAll/OwnersOf. Unwired.
+  - Effective publish flow: workspacepolicy YAML gate only.
+
+Plan:
+  1. Router construction (internal/router/router.go NewRouter):
+     - Add fields: ownershipResolver *authz.OwnershipResolver,
+       mergeRequests *mergerequest.Store.
+     - Initialize both in NewRouter; register the store on the Router
+       struct so RPC/HTTP handlers can reach it.
+  2. Wire the ownership gate into the push path
+     (internal/router/workspace_source_push.go PushWorkspaceCommits,
+      after the workspacepolicy evaluation):
+     - Evaluate evaluateSubtreeOwnership(principal, bundle paths).
+     - Semantics (per confirmed design):
+       a) Principal owns every touched subtree → allow direct push
+          (current behavior).
+       b) Principal does NOT own some touched subtree AND the resolved
+          branch strategy is "direct" → DENY with reason
+          "review required: <paths> owned by <owners>; use a logical
+          branch so a pull request is opened" (the auto-PR flow from
+          Phase 2 then handles review).
+       c) Non-direct strategy → allow (PR review happens at the forge).
+     - Ownership data source: OWNERS resolution currently expects files
+       on disk. Adapt: resolve OWNERS content through the router's
+       guardian/file read path (r.readPipelinePath-style) or fall back
+       to no-ownership (allow) when no OWNERS exist anywhere — same
+       default-open behavior as the existing authz flags.
+     - Gate must be opt-in via router flag --ownership-gate (mirror
+       --policy-gate) so default deployments are unchanged; env/flag
+       plumbed in cmd/monofs-router/main.go + RouterConfig.
+  3. Native merge-request RPCs for guardian-managed partitions
+     (mergerequest.Store surface):
+     - Add REST endpoints in internal/router (register in ui.go mux):
+         POST /api/merge-requests            {workspace, paths, title}
+         GET  /api/merge-requests            list (status filter)
+         POST /api/merge-requests/{id}/approve
+         POST /api/merge-requests/{id}/merge
+         POST /api/merge-requests/{id}/reject
+     - Approve: enforce OWNERS maintainer role of the approver on the
+       proposal's subtree set (evaluateSubtreeOwnership).
+     - Merge: for guardian-managed partitions, apply the proposal via
+       the existing guardian upsert path (processGuardianUpsert).
+     - Auth: same principal identity extraction as other router HTTP
+       APIs (gRPC identity interceptor equivalent for HTTP — reuse
+       authz_ui.go patterns).
+  4. Reviewer auto-assignment:
+     - In workspace_pr.go attachPullRequest, when OWNERS data is
+       available, request reviewers: GitHub API
+       POST /repos/{o}/{r}/pulls/{n}/requested_reviewers with logins
+       from OwnersOf(); GitLab: merge request update with
+       reviewer_ids. Gate on tokens being present; failures logged.
+  5. Tests:
+     - Router-level: ownership gate denies direct push on foreign
+       subtree, allows owned subtree, allows non-direct strategy.
+     - mergerequest store lifecycle via new HTTP handlers.
+  6. Docs: docs/workspace-and-integrations.md — new "Review workflow"
+     section (OWNERS → gate → auto-PR → reviewers).
+
+Files touched:
+  internal/router/router.go, workspace_source_push.go, ui.go (new file
+  mergerequest_api.go), workspace_pr.go, authz_merge_gate.go,
+  authz_merge_external.go, mergerequest/store.go,
+  cmd/monofs-router/main.go, docs/workspace-and-integrations.md
+
+Estimated size: M (mostly wiring existing code; HTTP handlers + tests)
+
+═══════════════════════════════════════════════════════════════════════
+ ITEM 2 — Blame, upstream log, tags, branch delete session commands
+ Priority: MEDIUM
+═══════════════════════════════════════════════════════════════════════
+
+STATUS: DONE
+
+What landed:
+  - Proto: UpstreamLog/Tags/Blame messages in monofs.proto + RPCs on
+    MonoFSRouter (monofs.proto) and RepoSyncWorker (fetcher.proto); `make proto`.
+  - internal/git: CloneOrOpenHistory (full-history + all-tags clone) +
+    ResolveCommit/peelToCommit already present; blame/log/tags use it.
+  - internal/fetcher/upstream_read.go: GetUpstreamLog/Tags/Blame
+    (go-git Log/Tags/Blame, log limit cap 200, blame 1MiB cap).
+  - internal/fetcher/upstream_read_client.go: fetcher.Client wrappers.
+  - internal/router/upstream_read.go: router pass-through to fetcher.
+  - internal/client/upstream_read.go: ShardedClient.UpstreamLog/Tags/Blame
+    (typed wrappers via routerClient).
+  - internal/fuse: UpstreamReader interface + SetUpstreamReader; SessionRequest
+    (Upstream/RepoFilter/Limit) + SessionResponse (UpstreamLogList/TagList/
+    BlameLines); handlers handleUpstreamLog/Tags/Blame + handleBranchDelete +
+    SessionManager.DeleteLogicalBranch (unpushed commits + mappings, clears
+    current branch).
+  - CLI: monofs-session log --upstream [--repo --limit], tags [--repo],
+    blame <path>, branch delete <name> (cmd/monofs-session/main.go).
+  - Tests: internal/fetcher/upstream_read_test.go (log/tags/blame fixture),
+    internal/fuse/session_vcs_test.go TestSessionManager_DeleteLogicalBranch.
+  - Native: wired c.SetUpstreamReader(c) in cmd/monofs-client/main.go.
+
+Current state:
+  - monofs-session log shows local virtual commits only; no upstream
+    history view.
+  - No blame, no tag listing, no logical branch delete.
+  - internal/git/repo.go: read-only shallow go-git clone helper
+    (Depth:1, NoCheckout, NoTags) + blob cache; used for ingestion.
+  - Fetcher (DMZ) is the only component with upstream network access.
+  - go-git v6 supports object.Blame and commit log walking.
+
+Plan:
+  1. New fetcher RPCs (api/proto/fetcher.proto + make proto):
+     message UpstreamLogRequest  { string repo_url; string branch;
+                                    int32 limit; }
+     message UpstreamLogEntry    { string hash; string author_name;
+                                    string author_email; int64 authored_at_unix;
+                                    string message; }
+     message UpstreamTagsRequest { string repo_url; }
+     message UpstreamTag         { string name; string commit_hash;
+                                    int64 tagged_at_unix; }
+     message UpstreamBlameRequest{ string repo_url; string branch;
+                                    string path; }
+     message UpstreamBlameLine   { int32 line_no; string hash;
+                                    string author_name; int64 authored_at_unix;
+                                    string content; }
+     service additions:
+       rpc GetUpstreamLog(...)   returns (stream UpstreamLogEntry) — or
+         plain repeated field, limit-capped (≤ 200).
+       rpc GetUpstreamTags(...)  returns (UpstreamTagsResponse)
+       rpc GetUpstreamBlame(...) returns (UpstreamBlameResponse)
+  2. Fetcher implementation (new file internal/fetcher/upstream_read.go):
+     - Reuse the internal/git read-side helper; needs a NON-shallow,
+       tags-enabled variant: add OpenUpstreamRepo(ctx, url, branch) that
+       clones with depth 0? Full clones are heavy; use fetch of specific
+       refs with tag following (git.FetchOptions{TagMode: AllTags}) on
+       the existing blob-cache clone. Cap log at limit (default 50).
+     - Blame: gogit object.Blame(worktreeFile/commitFile...); go-git v6
+       API: object.Blame is computed via commit history walk
+       (repo per-file blame is expensive; cap file size ≤ 1 MiB and
+       history depth ≤ 500 commits; return best-effort).
+     - Cache upstream handles (LRU by repo_url, TTL ~10 min) to avoid
+       re-cloning per command.
+  3. Router pass-through (internal/router): thin RPCs forwarding to the
+     fetcher cluster via the existing fetcher client plumbing, so the
+     FUSE client never talks to fetchers directly (preserve DMZ shape):
+     add to monofs.proto service MonoFSRouter:
+       rpc GetUpstreamLog / GetUpstreamTags / GetUpstreamBlame.
+  4. Client plumbing (internal/client): typed wrappers
+     UpstreamLog(repoURL, branch, limit), UpstreamTags(repoURL),
+     UpstreamBlame(repoURL, branch, path).
+  5. Session socket + CLI (internal/fuse/session_socket.go,
+     cmd/monofs-session/main.go):
+     - "log --upstream [--repo <display-path>] [--limit N]": resolve
+       repo → router GetUpstreamLog → print hash/author/date/message.
+     - "tags [--repo <display-path>]": list tags with commit hashes.
+     - "blame <path>": resolve repo + repo-relative path → blame lines
+       output `hash author date lineno content`.
+     - "branch --delete <name>": SessionManager.DeleteLogicalBranch —
+       delete branch's unpushed local virtual commits (refuse when
+       pushed commits exist? keep them; only delete unpushed pending
+       commits and branch mappings), clear current-branch if it was
+       active, delete SessionBranchMappings for that logical branch.
+     - SessionRequest fields: RepoFilter, Path, Limit, BranchOp=delete.
+     - SessionResponse: UpstreamLogList, TagList, BlameLines.
+  6. Tests:
+     - Fetcher: upstream log/tags/blame against go-git fixture repos
+       (reuse createPublishRemoteRepo-style helpers with extra commits
+       + tags).
+     - Session: branch delete lifecycle (create → commit → delete
+       removes pending commits + mappings).
+     - CLI: table-driven flag parsing tests where practical.
+
+Files touched:
+  api/proto/fetcher.proto, api/proto/monofs.proto (regen),
+  internal/fetcher/upstream_read.go (+test), internal/git/repo.go,
+  internal/router/upstream_read.go, internal/client/upstream_read.go,
+  internal/fuse/session_socket.go, session_vcs.go, cmd/monofs-session/main.go
+
+Estimated size: M-L (proto + 3 layers of plumbing; core logic small)
+
+═══════════════════════════════════════════════════════════════════════
+ ITEM 3 — CODEOWNERS format parsing alongside OWNERS
+ Priority: MEDIUM
+═══════════════════════════════════════════════════════════════════════
+
+STATUS: DONE — see phase summary + handoff notes at top of file
+
+Current state: only .guardian/OWNERS YAML v1 is understood; GitHub
+CODEOWNERS files (docs/README/CODEOWNERS, .github/CODEOWNERS,
+CODEOWNERS) are not parsed anywhere.
+
+Plan:
+  1. New parser pkg/authz/codeowners.go:
+     - ParseCodeowners(data []byte) ([]CodeownersRule, error):
+       rules `<path-glob> @user1 @user2 team/name`, comment lines (#),
+       later-rules-take-precedence semantics (GitHub behavior).
+     - Map to the existing OWNERS model: convert rules into an
+       OwnershipSet with maintainainers = owners of the LAST matching
+       rule for a path (evaluate per-path, like resolver does).
+     - Path semantics: leading "/" = repo-root anchored; "*" within a
+       segment; "**" across segments — reuse pathGlobMatch-style logic
+       (a copy lives in pipeline/config.go; move a shared helper to
+       pkg/authz or internal/monopath to avoid duplication).
+  2. Integration in pkg/authz/resolver.go:
+     - OwnershipResolver gains a fallback: when no `.guardian/OWNERS`
+       exists for a directory tree, look for CODEOWNERS at repo root
+       (docs/, .github/, or root) and use its rules for ownership
+       queries. Priority: OWNERS YAML wins over CODEOWNERS.
+     - Loader API: resolver loads file contents via injected reader
+       (func(path) ([]byte, error)) so both router (guardian read) and
+       fetcher (git tree read) can supply content.
+  3. Reviewer assignment + ownership gate (Item 1) automatically
+     benefit: owners for reviewer requests come from either format.
+  4. Tests: parser table tests (glob variants, precedence, comments);
+     resolver tests mixing OWNERS + CODEOWNERS precedence.
+
+Files touched: pkg/authz/codeowners.go (+test), resolver.go (+test),
+docs/workspace-and-integrations.md (document both formats)
+
+Estimated size: S-M
+
+═══════════════════════════════════════════════════════════════════════
+ ITEM 4 — Symbol indexing via universal-ctags + working sym: queries
+ Priority: HIGH
+═══════════════════════════════════════════════════════════════════════
+
+STATUS: DONE
+
+What landed:
+  - internal/search/symbols.go: ctagsCommand()/isUniversalCTags()/
+    detectSymbolSupport() (universal-ctags detection via CTAGS_COMMAND env
+    -> universal-ctags -> ctags, +interactive check), logging in NewIndexer.
+  - Indexer gains ctagsPath/symbolsEnabled fields + SymbolsEnabled(); all
+    three index paths set opts.CTagsPath before SetDefaults() so Zoekt
+    performs native symbol extraction (populates doc.Symbols +
+    HasSymbols) — sym: queries now work when universal-ctags is present.
+  - CLI: monofs-session search --symbol <name> maps to sym:<name> (and
+    --query/--symbol at least one required).
+  - Tests: internal/search/symbols_test.go (detection + SymbolsEnabled +
+    sym: end-to-end, t.Skip when no universal-ctags).
+  - Docs: documentation/internal-search.md symbols.go section + indexer
+    symbol-extraction note.
+
+Current state:
+  - internal/search/indexer.go builds zoekt Documents with only
+    Name/Content/Branches — no Symbols, so `sym:` queries silently
+    return nothing.
+  - Zoekt's index.Document has a Symbols field
+    ([]index.Symbol{Sym, Kind, Parent}) and zoekt's ctags indexer
+    exists (sourcegraph/zoekt/ctag builder) — check vendored API
+    (go.sum has zoekt v0.0.0-20260114...; use whatever symbols API it
+    exposes: index.Document.Symbols + query.Symbol regression).
+
+Plan:
+  1. internal/search/symbols.go — ctags integration:
+     - Detect universal-ctags binary (exec.LookPath("ctags")).
+     - runCtags(tempDir or files) with flags:
+         ctags --output-format=json --fields=+n --kinds-all=... \
+              --files=<list> (or -L -) — emit JSON lines per symbol:
+         {name, path, line, kind, scope, ...}
+     - Fallback chain: universal-ctags JSON → plain ctags tab format
+       (--format=1 parse name/kind/file/line) → none (no symbols,
+       log once).
+     - Per-file map: path → []Symbol{Sym, Kind, Parent(scope)}.
+  2. Indexer changes (internal/search/indexer.go):
+     - In indexFromMonoFS/indexFromExternal, after collecting files,
+       write them to a temp dir (they already stream content for
+       indexing; reuse), run ctags once per repo batch, attach
+       Symbols to each zoekt Document.
+     - Respect a max symbol count per file (e.g. 50k) and skip binary
+       files (already detected).
+  3. Query path:
+     - Zoekt query.Parse already handles `sym:foo` when symbols exist;
+       verify the passthrough heuristic in Indexer.Search (indexer.go
+       ~513) routes sym: queries — if the heuristic only detects
+       prefixes, ensure "sym:" is included (it is listed).
+     - Extend the CLI (monofs-session search --symbol foo) mapping to
+       `sym:foo` query syntax; add --symbol flag to
+       cmd/monofs-session/main.go searchCode.
+  4. gRPC surface: no proto change needed (query string carries sym:).
+     Optionally add a Symbol bool to SearchRequest for clarity — skip
+     if query-string passthrough suffices.
+  5. Tests:
+     - symbols_test.go: fixture dir with .go/.py files, ctags binary
+       present in CI? — SKIP ctags-dependent assertions when
+       exec.LookPath("ctags") == nil (t.Skip) so CI stays green;
+       assert symbol extraction when available.
+     - End-to-end: index fixture → Search("sym:main") finds main().
+  6. Docs: documentation/internal-search.md — symbols section.
+
+Files touched: internal/search/symbols.go (+test), indexer.go (+test),
+cmd/monofs-session/main.go, documentation/internal-search.md
+
+Estimated size: M
+
+═══════════════════════════════════════════════════════════════════════
+ ITEM 5 — Re-index on publish/refresh + doctor/guardian-system indexing
+ Priority: HIGH
+═══════════════════════════════════════════════════════════════════════
+
+STATUS: DONE (doctor namespace ticker deferred — see note)
+
+What landed:
+  - Extract r.triggerSearchReindex(storageID, displayPath, source, ref,
+    reason) async helper (internal/router/search_reindex.go); ingest.go
+    refactored to use it.
+  - Wire re-index after source-push (workspace_source_push.go) and
+    workspace publish (workspace_publish.go) for PUBLISHED repos.
+    Refresh already re-indexes via the re-ingest ingest trigger.
+  - Guardian upsert re-index: processGuardianUpsert debounces per
+    storageID (5s) via r.requestSearchReindexDebounced
+    (search_reindex.go + guardian_paths.go); debounce map on Router.
+  - Tests: internal/router/search_reindex_test.go (trigger + no-client
+    no-op + debounce coalescing with a fake bufconn search server).
+  - Docs: docs/production-operations.md "Search Index Freshness" table.
+  Deferred: doctor/ namespace indexing (telemetry files land on nodes via
+    the server log engine, not through the router; the plan's fallback was
+    a router ticker keyed on a doctor directory fingerprint, which adds
+    config surface for limited value — left out of this pass).
+
+Current state:
+  - Only full (re-)ingest triggers IndexRepository; publish/push and
+    refresh do NOT refresh search indexes → indexes go stale until the
+    next re-ingest.
+  - doctor/ and guardian-system/ managed namespaces are never indexed
+    (ingest.go forbids ingesting them as normal repos; doctor backend
+    and guardian upserts have no search hooks).
+
+Plan:
+  1. Router→search re-index trigger plumbing
+     (internal/router/search hooks):
+     - Extract the existing trigger logic from ingest.go (lines
+       ~1058-1084) into a helper: r.triggerSearchReindex(ctx,
+       storageID, reason) — async, 30-min timeout, failure logged.
+     - Call it:
+       a) After a successful source-push job terminal event per
+          PUBLISHED repo (workspace_source_push.go, in the progress
+          loop after attachPullRequest).
+       b) After a successful refresh re-ingestion of a repository
+          (workspace_sync.go where ADVANCED → re-ingest path completes
+          — i.e., after the re-ingest branch finishes for that repo).
+       c) After a successful PublishWorkspace per PUBLISHED repo
+          (workspace_publish.go).
+     - Note: the search service indexes from the CLUSTER state
+       (indexFromMonoFS walks via ShardedClient), so re-indexing after
+       the router has re-ingested/published gives fresh content. For
+       source pushes the upstream moved but cluster content is the
+       published overlay state — still fresher than nothing; ALSO hook
+       refresh (which re-ingests from upstream) so the index tracks
+       upstream truth.
+  2. doctor/ namespace indexing:
+     - Doctor files flow through internal/server/doctor_backend.go and
+       land as normal files in the cluster (storageID derived from
+       doctor namespace?). Add a periodic (or event-driven) indexing
+       trigger for the doctor namespace storageID: simplest robust
+       approach — a router ticker (every 10 min, configurable
+       --doctor-reindex-interval) that calls IndexRepository for the
+       doctor namespace if it exists and content generation changed
+       (compare a cheap directory fingerprint from ListDirectory).
+     - Alternatively index doctor files at ingest time wherever
+       doctor_backend persists files — locate the exact call site
+       (internal/server/doctor_backend.go persist path) and trigger
+       reindex per batch (preferred if a single call site exists;
+       server→router notification via existing search client).
+     - Choose the call-site trigger if clean; ticker as fallback.
+  3. guardian-system/ namespace indexing:
+     - Hook guardian_paths.go processGuardianUpsert: after a successful
+       batch upsert, trigger reindex for affected guardian partitions
+       (batch by storageID, debounced 5 s per partition to avoid
+       index storms).
+     - Debounce map on Router (partition → *time.Timer), mutex-guarded.
+  4. DeleteIndex is already wired on repo delete (delete.go).
+  5. Tests:
+     - Router test with a mock search client (check how ingest tests
+       fake the search connection — internal/router has searchConn
+       plumbing) asserting reindex triggered after publish/refresh
+       completion and guardian upsert (advance fake timer for
+       debounce).
+  6. Ops doc note: docs/production-operations.md — search freshness
+     expectations table (ingest / publish / refresh / guardian / doctor).
+
+Files touched: internal/router/ingest.go (extract helper),
+workspace_source_push.go, workspace_sync.go, workspace_publish.go,
+guardian_paths.go, doctor hook site (internal/server/doctor_backend.go
+or router ticker), + router test file.
+
+Estimated size: M
+
+═══════════════════════════════════════════════════════════════════════
+  ITEM 6 — Tag / SHA ref pinning at ingest
+ Priority: MEDIUM
+═══════════════════════════════════════════════════════════════════════
+
+STATUS: DONE
+
+What landed:
+  - internal/git/ref.go: RefKind + ClassifyRef + IsHexSHA + TrimRefPrefix.
+  - internal/git/repo.go: CloneOrOpenRef(branch/tag/SHA) with cloneBranchRef/
+    cloneTagRef/cloneSHARef; resolveReference now resolves SHA + tags;
+    ResolveCommit peels annotated tags; WalkTree/GetFileMetadata use
+    ResolveCommit.
+  - internal/storage/git/ingestion.go: Initialize classifies the ref,
+    clones via CloneOrOpenRef (fetchTags for tag/SHA), and extracts the
+    resolved commit metadata via ResolveCommit.
+  - Router (internal/router/ingest.go): validateGitRef (branch/tag/SHA,
+    rejects garbage) + goModuleVersion "module@version" -> tag ref
+    convenience (source stripped, version becomes ref, display path keeps
+    @version).
+  - monofs-admin --ref help text updated (branch/tag/SHA).
+  - Tests: internal/storage/git/ingestion_test.go (branch/tag/SHA fixture
+    asserts resolved commit), internal/git/ref_test.go (classify/sha),
+    internal/router/ingest_test.go (goModuleVersion + validateGitRef).
+  - Docs: docs/getting-started.md "Pinning a ref" section.
+
+Current state:
+ --ref accepts a branch name only (default "main"); tags
+and commit SHAs are not supported. Go-module-style IDs
+(github.com/owner/repo@v1.3.0) are preserved as display paths but the
+@version is not used as the ref.
+
+Plan:
+  1. internal/storage/git/ingestion.go:
+     - ResolveRef(source, ref) → accept:
+         a) 40/64-hex commit SHA → clone with that commit checked out
+            (go-git: clone default branch then checkout hash; or fetch
+            + checkout).
+         b) tag name (refs/tags/<name>) → plumbing.NewTagReferenceName.
+         c) branch (current behavior).
+     - go-git CloneOptions.ReferenceName accepts tag refs directly;
+       SHA needs post-clone `wt.Checkout(&CheckoutOptions{Hash: ...})`
+       or repo.SetReference + checkout. Implement a helper
+       openAtRef(ctx, url, ref) (*gogit.Repository, resolvedHash, kind).
+     - Extract commit metadata (hash/time/message) of the RESOLVED
+       commit (already done for branch heads — generalize).
+  2. Router ingest path (internal/router/ingest.go):
+     - Ref validation: accept branch, tag, or hex SHA (regex
+       ^[0-9a-f]{40}(|[0-9a-f]{24})$); reject ambiguous refs that match
+       both a branch and a tag with a clear error (prefer tag with a
+       warning, mirroring git's semantics of tags winning for
+       checkout? — actually git ref resolution order: refs/tags then
+       refs/heads; document the choice).
+     - monofs-admin ingest CLI: --ref help text updated (branch, tag,
+       or commit SHA).
+  3. Go-module @version convenience: when source parses as
+     `module@version` and no --ref given, use the version suffix as the
+     ref (vX.Y.Z tags). Keep display path normalization unchanged.
+  4. Tests:
+     - internal/storage/git: fixture repo with a tag + known SHA;
+       ingest at tag, at SHA, at branch; assert commit metadata equals
+       the pinned object.
+     - Router: ingest request with 40-hex ref accepted; garbage ref
+       rejected with clear error.
+
+Files touched: internal/storage/git/ingestion.go (+test),
+internal/router/ingest.go (+test), cmd/monofs-admin/main.go (help),
+docs/getting-started.md (ref pinning section)
+
+Estimated size: S-M
+
+═══════════════════════════════════════════════════════════════════════
+ ITEM 7 — Auto-refresh: poll interval + webhook-triggered re-ingest
+ Priority: HIGH
+═══════════════════════════════════════════════════════════════════════
+
+STATUS: DONE
+
+What landed:
+  - internal/router/autorefresh.go: autoRefreshWorker (poll loop, probe via
+    fetcher ProbeWorkspaceRefresh, ADVANCED -> re-ingest, UNCHANGED no-op,
+    DIVERGED conflict skip, exponential backoff to 30m, concurrency semaphore);
+    Router.ingestedRepoSnapshot/reingestRepoAsync/enqueueUpstreamRefresh +
+    sameRepoURL. Re-ingest reuses IngestRepository (bumps namespace gen +
+    search reindex) with a shared 60s dedup + in-flight guard.
+  - ingestedRepo.commitHash added + populated; probe supplies base_commit.
+  - RouterConfig AutoRefreshEnabled/Interval/Concurrency + Router field +
+    NewRouter wiring + Close stop; --auto-refresh/--auto-refresh-interval/
+    --auto-refresh-concurrency flags (cmd/monofs-router/main.go).
+  - Webhook: pipeline.WebhookHandler.SetRepoChangedHandler called in
+    processEvent; router wires it to enqueueUpstreamRefresh.
+  - Metrics: router_auto_refresh_probes_total{result},
+    router_auto_refresh_reingests_total, router_auto_refresh_backoff_total.
+  - Tests: internal/router/autorefresh_test.go (ADVANCED schedules re-ingest,
+    UNCHANGED no-op, DIVERGED backoff, webhook dedup, sameRepoURL),
+    pipeline/webhook_test.go TestRepoChangedHandler*.
+  - Docs: docs/cicd-pipelines.md + docs/production-operations.md.
+
+Current state:
+  - Nothing polls upstreams. Refresh is user/job-initiated only.
+  - Webhooks exist but only trigger CI pipelines, never re-ingestion.
+  - probeWorkspaceRepository (fetcher) can compare remote head vs
+    BaseCommit → UNCHANGED/ADVANCED/DIVERGED.
+
+Plan:
+  1. Router auto-refresh worker (new file internal/router/autorefresh.go,
+     modeled on autopush.go):
+     - RouterConfig additions: AutoRefreshEnabled bool,
+       AutoRefreshInterval time.Duration (default 5m, min 30s),
+       AutoRefreshConcurrency int (default 4).
+     - Flags in cmd/monofs-router/main.go: --auto-refresh,
+       --auto-refresh-interval, --auto-refresh-concurrency.
+     - Loop (ticker): enumerate all ingested repos (r.ingestedRepos
+       map) → for each, call fetcher ProbeWorkspaceRefresh (single-repo
+       probe; reuse the existing probe RPC — check
+       internal/fetcher/service.go ProbeWorkspaceRefresh shape for a
+       one-repo variant; add ProbeRepository RPC if the current one is
+       workspace-scoped).
+     - ADVANCED → enqueue re-ingestion through the EXISTING refresh
+       machinery (RefreshWorkspace job path, workspace_sync.go) so
+       sessions/clients get events; do NOT bypass job tracking.
+     - DIVERGED → record conflict metric + ledger event only.
+     - Concurrency semaphore + per-repo skip if an ingest/refresh for
+       that storageID is already in flight (check inProgressIngestions /
+       workspaceSyncJobs).
+     - Failure backoff per repo (map storageID→nextEligibleTime,
+       exponential to 30m cap) so dead remotes don't get hammered.
+     - Stop on r.stopUI / Close (same lifecycle as autopush worker).
+  2. Webhook-triggered re-ingest (internal/router/pipeline/webhook.go
+     processEvent + router wiring):
+     - After pipeline triggering, publish a lightweight internal event:
+       the router's webhook handler currently lives in the pipeline
+       package; add an optional callback OnRepoChanged(repoURL, branch,
+       sha) set from initPipeline:
+         wh.SetRepoChangedHandler(func(repoURL, branch, sha) {
+             r.enqueueUpstreamRefresh(repoURL, branch)
+         })
+     - enqueueUpstreamRefresh: map repoURL → ingested repo(s) (match on
+       repo source URL; may be several display paths) → enqueue
+       RefreshWorkspace job for matched repos (dedupe: skip if a
+       refresh job for the same repo is queued/running within the last
+       60 s — small timestamp cache).
+     - Rate-limit: max N (default 10) webhook refreshes per minute per
+       repo; exceeding → log + drop (upstream will be caught by the
+       poller anyway).
+  3. Client cache invalidation on auto-refresh:
+     - Sessions with active mounts learn about upstream changes via the
+       native namespace generation bump (re-ingest already bumps it) —
+       verify FUSE attr cache TTL picks it up (existing mechanism after
+       manual pull; auto-refresh uses the same path, so no client
+       change needed — confirm in code review).
+     - Sessions with LOCAL CHANGES are NOT auto-merged: auto-refresh
+       only re-ingests the cluster copy; the client's pull (with the
+       Phase-2 3-way merge) reconciles local overlays on demand. Add a
+       ledger event "auto_refresh" so users can see upstream moved.
+  4. Metrics: routerAutoRefreshProbesTotal{result},
+     routerAutoRefreshReingestsTotal, routerAutoRefreshBackoffTotal.
+  5. Tests:
+     - autorefresh_test.go with a fake fetcher probe client:
+       ADVANCED triggers refresh job; UNCHANGED does not; DIVERGED
+       records conflict; backoff map extends on repeated failure.
+     - Webhook handler test: repo-changed callback fires with parsed
+       URL/branch; dedupe suppresses duplicate within window.
+  6. Docs: docs/cicd-pipelines.md + production-operations.md —
+     auto-refresh configuration and webhook re-ingest flow.
+
+Files touched: internal/router/autorefresh.go (+test), router.go
+(config fields + worker start/stop), cmd/monofs-router/main.go,
+internal/router/pipeline/webhook.go (callback),
+pipeline_router.go (handler wiring), internal/fetcher/service.go
+(single-repo probe if needed), api/proto (only if new probe RPC),
+docs/*.md
+
+Estimated size: M-L
+
+═══════════════════════════════════════════════════════════════════════
+ ITEM 8 — Sparse mount: --include/--exclude globs on monofs-client
+ Priority: HIGH
+═══════════════════════════════════════════════════════════════════════
+
+STATUS: DONE
+
+What landed:
+  - internal/fuse/repo_filter.go: RepoFilter (include/exclude globs,
+    Allows/IsEmpty, "*" within-segment, trailing "/*" and "**" subtree, "?")
+    + NewRepoFilter validation + repoGlobMatch.
+  - WorkspaceManifest (workspace.go): filter field + SetRepoFilter/RepoFilter;
+    List marks filtered repos Included=false (WorkspaceExcludedFilter);
+    ShouldHidePath/ShouldHideChild hide filtered-repo subtrees;
+    JSONContent emits "repo_filter" field + filtered subset.
+  - MonoNode.SetRepoFilter (node.go).
+  - CLI (cmd/monofs-client/main.go): repeatable/comma-separated --include and
+    --exclude (csvFlag), wired after EnableVirtualMonorepo to SetRepoFilter.
+  - Tests: internal/fuse/repo_filter_test.go (Allows/IsEmpty/glob + error),
+    workspace_system_test.go TestSparseWorkspaceFilter (list subset, resolve
+    excluded, workspace.json repo_filter).
+  - Docs: docs/getting-started.md "Sparse workspace" section.
+
+Current state: monofs-client mounts ALL registered repos; no subset
+selection. Workspace manifest lists everything from the nodes.
+
+Plan:
+  1. CLI flags (cmd/monofs-client/main.go):
+     --include <glob>[,<glob>...]  e.g. 'sre/*,github.com/acme/api'
+     --exclude <glob>[,<glob>...]  e.g. 'guardian/*,docs/**'
+     - Repeatable flags (flag.StringSlice-style via custom
+       csv-aware Value or repeated --include).
+     - Validation: error when both include and exclude are empty AND
+       virtual-monorepo mode... actually both empty = mount everything
+       (today's behavior). If --include given, only matching repos
+       mount; --exclude subtracts (applies after include).
+  2. Filter type (new file internal/fuse/repo_filter.go):
+     type RepoFilter struct { include, exclude []string }
+     func NewRepoFilter(include, exclude []string) (*RepoFilter, error)
+       — compile globs once (reuse pathGlobMatch-style matcher; keep a
+       copy local to fuse pkg or share via internal/monopath — avoid
+       importing router/pipeline from fuse).
+     func (f *RepoFilter) Allows(displayPath string) bool
+       — include empty → allow by default; then exclude subtracts.
+     func (f *RepoFilter) IsEmpty() bool
+  3. FUSE integration (internal/fuse/workspace.go + node.go):
+     - Root/workspace manifest enumeration: filter
+       WorkspaceManifest repo list at the enumeration boundary —
+       where virtual-monorepo root readdir/workspace JSON are built
+       (workspace.go); apply to:
+         a) root readdir entry synthesis
+         b) longest-prefix path resolution (unmatched repos resolve as
+            not-found, so the kernel can't reach them)
+         c) .monofs/workspace.json contents (filtered list — the Bazel
+            workspace generation then naturally respects the sparse
+            view)
+         d) collectPullRepositories (pull refreshes only mounted repos)
+     - Set on the root node: NewRootWithSession variant or setter
+       root.SetRepoFilter(filter). Store on WorkspaceManifest or root.
+     - Cache invalidation: namespace gen changes repopulate the
+       manifest — ensure the filter persists across manifest refreshes
+       (filter lives on the root, applied at read time, not baked into
+       the manifest).
+  4. Dependency/managed namespaces: doctor/, guardian/ visibility
+     unaffected by repo filters (they are not "repos"); document that
+     exclude 'guardian/*' also works because guardian partitions appear
+     as display paths — decide: treat filters as pure display-path
+     globs so users CAN hide guardian/doctor via --exclude. Keep it
+     simple: filters apply to all root-level entries by display path.
+  5. CLI UX:
+     - Print summary at mount: "mounted 12/57 repositories (45 excluded
+       by filter)".
+     - monofs-session status shows the active filter? (nice-to-have;
+       expose via .monofs/workspace.json "repo_filter" field).
+  6. Tests:
+     - RepoFilter unit table tests (include/exclude precedence, **,
+       multi-pattern, empty).
+     - Fuse workspace test: with filter, root readdir only lists
+       allowed repos; path resolution into excluded repo fails;
+       workspace.json reflects the subset (extend
+       workspace_system_test.go patterns).
+  7. Docs: docs/getting-started.md — "Sparse workspace" section.
+
+Files touched: cmd/monofs-client/main.go, internal/fuse/repo_filter.go
+(+test), workspace.go, node.go, session_socket.go
+(collectPullRepositories), docs/getting-started.md
+
+Estimated size: M
+
+═══════════════════════════════════════════════════════════════════════
+ ITEM 9 — Final verification + documentation pass
+ Priority: HIGH (gate)
+═══════════════════════════════════════════════════════════════════════
+
+STATUS: DONE
+
+  1. Full local pipeline:
+       `make proto` + `go build ./...` + `go vet ./...` — CLEAN except the
+       pre-existing `internal/registry/server.go:274` self-assignment.
+       `go test -count=1 ./internal/... ./pkg/...` — ALL GREEN.
+       `go test -race -count=1 ./internal/router ./internal/fuse` — GREEN;
+       pre-existing data race only in internal/router/pipeline
+       (orchestrator setRunStateLocked vs cloneRun, untouched by this work).
+  2. gofmt -l — empty for every file touched by this effort. Remaining
+     dirty files are pre-existing (autopush.go, workspaceledger/ledger.go,
+     fetcher/workspace_source_push*, server/telemetry/worker/tests, etc.).
+  3. CLI smoke:
+       monofs-session --help lists conflicts, push --push-mode, log --upstream,
+       tags, blame, branch delete. monofs-client --help lists --include/--exclude.
+  4. Docs: README.md (feature highlights), docs/architecture.md (conflict/
+     rollback + auto-refresh), docs/workspace-and-integrations.md (review
+     workflow), docs/cicd-pipelines.md (webhook re-ingest), docs/
+     bazel-integration.md (executor action_env semantics), docs/
+     getting-started.md (ref pinning + sparse mount), documentation/INDEX.md
+     ("Files Added In Later Phases").
+   5. This file: all items 1–9 now marked DONE with landing summaries.
+
+  6. Pre-existing issues — ALL FIXED (final cleanup pass):
+        - go vet self-assignment internal/registry/server.go (dead no-op removed).
+        - -race pipeline orchestrator run-state/cloneRun + executeRun race.
+        - -race fetcher client_test mock counters/cache.
+        - -race search service Job sharing + Close/worker teardown.
+        - monofs-session push-summary test assertion (updated to current output).
+        - protos TestMessagePoolsReuse (no longer asserts pool object identity).
+        - gofmt formatted all previously-dirty files.
+     Final state: go build ./... clean, go vet ./... clean, gofmt -l . empty,
+     go test -race ./internal/... ./pkg/... ./cmd/... ALL GREEN.
+
+═══════════════════════════════════════════════════════════════════════
+ EXECUTION ORDER (dependencies):
+   Item 3 (CODEOWNERS) BEFORE Item 1 (review gate uses both formats).
+   Item 4 and Item 5 are independent — can proceed in either order.
+   Item 6 is independent (ingest layer only).
+   Item 7 depends on nothing new (probes exist); do after Item 5 so
+     refresh-triggered re-indexing lands first.
+   Item 8 is independent.
+   Item 9 last.
+
+   Suggested sequence: 3 → 1 → 4 → 5 → 6 → 7 → 8 → 9
+   (S/M items first to de-risk, L items with the harness warm.)
+
+═══════════════════════════════════════════════════════════════════════
+ KEY INVARIANTS (hold these in every item):
+   - No force-push anywhere (rollback uses revert commits).
+   - Router never gains FUSE/network-to-upstream access; upstream git
+     operations stay in the fetcher (DMZ shape).
+   - All new gates (ownership, auto-refresh) default OFF or
+     non-breaking; existing deployments must behave identically.
+   - Proto changes require `make proto` + full rebuild.
+   - Worker/router event paths stay non-blocking (drop-on-slow
+     semantics for guardian change subscriptions).
+   - Every feature lands with unit tests; CI scripts (vet/fmt/test)
+     must stay green.

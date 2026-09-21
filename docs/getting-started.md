@@ -79,6 +79,32 @@ Ingest the repos you want in the workspace.
 
 Repeat for related services, libraries, or operational repos that you want in the same workspace.
 
+### Pinning a ref (branch, tag, or commit SHA)
+
+By default ingestion uses the `main` branch. You can pin a specific revision with
+`--ref`:
+
+```bash
+# Pin to a tag
+./bin/monofs-admin ingest --router localhost:9090 \
+  --source https://github.com/your-org/foo.git \
+  --source-id sre/foo --ref v1.3.0
+
+# Pin to a specific commit SHA
+./bin/monofs-admin ingest --router localhost:9090 \
+  --source https://github.com/your-org/foo.git \
+  --source-id sre/foo --ref 6d97bcb8f9a2bcd84ec9b2b8a0b8bb9f80e5b2a2
+```
+
+`--ref` accepts a branch name, a tag name, or a full 40/64-hex commit SHA. For
+tag/SHA refs the resolved commit (not just the branch tip) is recorded as the
+ingested commit. When a bare ref name matches both a branch and a tag, the
+branch wins (branch-first resolution).
+
+Go-module-style sources also work: `github.com/owner/repo@v1.3.0` is cloned at
+tag `v1.3.0` even without `--ref`, while the `@version` suffix is preserved in
+the display path.
+
 ### 5. Mount the virtual monorepo
 
 Mount a writable workspace with the overlay outside the mountpoint.
@@ -92,6 +118,32 @@ Mount a writable workspace with the overlay outside the mountpoint.
   --writable \
   --overlay /tmp/monofs-overlay
 ```
+
+### Sparse workspace
+
+By default a virtual-monorepo mount exposes every registered repository. Use
+`--include`/`--exclude` display-path globs to mount a subset (a sparse
+workspace):
+
+```bash
+./bin/monofs-client \
+  --mount /tmp/monofs \
+  --router localhost:9090 \
+  --virtual-monorepo \
+  --include 'sre/*,github.com/acme/api' \
+  --exclude 'guardian/*,docs/**'
+```
+
+- `--include` — only repositories matching at least one glob mount (empty =
+  everything).
+- `--exclude` — subtracts (applied after `--include`).
+- Both flags are repeatable and accept comma-separated lists.
+- `*` matches within a path segment; a trailing `/*` and `**` match the whole
+  subtree; `?` matches a single character.
+
+The active filter is reflected in `.monofs/workspace.json` (`repo_filter`
+field), and pulled/committed repositories are limited to the mounted subset.
+With no `--include`/`--exclude`, behavior is unchanged (mount everything).
 
 ### 6. Work through the session flow
 

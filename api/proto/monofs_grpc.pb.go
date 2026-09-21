@@ -68,6 +68,9 @@ const (
 	MonoFSRouter_ListWorkspaceSyncJobs_FullMethodName       = "/monofs.MonoFSRouter/ListWorkspaceSyncJobs"
 	MonoFSRouter_CancelWorkspaceSyncJob_FullMethodName      = "/monofs.MonoFSRouter/CancelWorkspaceSyncJob"
 	MonoFSRouter_QueryLedger_FullMethodName                 = "/monofs.MonoFSRouter/QueryLedger"
+	MonoFSRouter_GetUpstreamLog_FullMethodName              = "/monofs.MonoFSRouter/GetUpstreamLog"
+	MonoFSRouter_GetUpstreamTags_FullMethodName             = "/monofs.MonoFSRouter/GetUpstreamTags"
+	MonoFSRouter_GetUpstreamBlame_FullMethodName            = "/monofs.MonoFSRouter/GetUpstreamBlame"
 )
 
 // MonoFSRouterClient is the client API for MonoFSRouter service.
@@ -145,6 +148,10 @@ type MonoFSRouterClient interface {
 	ListWorkspaceSyncJobs(ctx context.Context, in *ListWorkspaceSyncJobsRequest, opts ...grpc.CallOption) (*ListWorkspaceSyncJobsResponse, error)
 	CancelWorkspaceSyncJob(ctx context.Context, in *CancelWorkspaceSyncJobRequest, opts ...grpc.CallOption) (*CancelWorkspaceSyncJobResponse, error)
 	QueryLedger(ctx context.Context, in *QueryLedgerRequest, opts ...grpc.CallOption) (*QueryLedgerResponse, error)
+	// Upstream read operations (forwarded to the fetcher cluster).
+	GetUpstreamLog(ctx context.Context, in *UpstreamLogRequest, opts ...grpc.CallOption) (*UpstreamLogResponse, error)
+	GetUpstreamTags(ctx context.Context, in *UpstreamTagsRequest, opts ...grpc.CallOption) (*UpstreamTagsResponse, error)
+	GetUpstreamBlame(ctx context.Context, in *UpstreamBlameRequest, opts ...grpc.CallOption) (*UpstreamBlameResponse, error)
 }
 
 type monoFSRouterClient struct {
@@ -735,6 +742,36 @@ func (c *monoFSRouterClient) QueryLedger(ctx context.Context, in *QueryLedgerReq
 	return out, nil
 }
 
+func (c *monoFSRouterClient) GetUpstreamLog(ctx context.Context, in *UpstreamLogRequest, opts ...grpc.CallOption) (*UpstreamLogResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpstreamLogResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_GetUpstreamLog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) GetUpstreamTags(ctx context.Context, in *UpstreamTagsRequest, opts ...grpc.CallOption) (*UpstreamTagsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpstreamTagsResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_GetUpstreamTags_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *monoFSRouterClient) GetUpstreamBlame(ctx context.Context, in *UpstreamBlameRequest, opts ...grpc.CallOption) (*UpstreamBlameResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpstreamBlameResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_GetUpstreamBlame_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MonoFSRouterServer is the server API for MonoFSRouter service.
 // All implementations must embed UnimplementedMonoFSRouterServer
 // for forward compatibility.
@@ -810,6 +847,10 @@ type MonoFSRouterServer interface {
 	ListWorkspaceSyncJobs(context.Context, *ListWorkspaceSyncJobsRequest) (*ListWorkspaceSyncJobsResponse, error)
 	CancelWorkspaceSyncJob(context.Context, *CancelWorkspaceSyncJobRequest) (*CancelWorkspaceSyncJobResponse, error)
 	QueryLedger(context.Context, *QueryLedgerRequest) (*QueryLedgerResponse, error)
+	// Upstream read operations (forwarded to the fetcher cluster).
+	GetUpstreamLog(context.Context, *UpstreamLogRequest) (*UpstreamLogResponse, error)
+	GetUpstreamTags(context.Context, *UpstreamTagsRequest) (*UpstreamTagsResponse, error)
+	GetUpstreamBlame(context.Context, *UpstreamBlameRequest) (*UpstreamBlameResponse, error)
 	mustEmbedUnimplementedMonoFSRouterServer()
 }
 
@@ -966,6 +1007,15 @@ func (UnimplementedMonoFSRouterServer) CancelWorkspaceSyncJob(context.Context, *
 }
 func (UnimplementedMonoFSRouterServer) QueryLedger(context.Context, *QueryLedgerRequest) (*QueryLedgerResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method QueryLedger not implemented")
+}
+func (UnimplementedMonoFSRouterServer) GetUpstreamLog(context.Context, *UpstreamLogRequest) (*UpstreamLogResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUpstreamLog not implemented")
+}
+func (UnimplementedMonoFSRouterServer) GetUpstreamTags(context.Context, *UpstreamTagsRequest) (*UpstreamTagsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUpstreamTags not implemented")
+}
+func (UnimplementedMonoFSRouterServer) GetUpstreamBlame(context.Context, *UpstreamBlameRequest) (*UpstreamBlameResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUpstreamBlame not implemented")
 }
 func (UnimplementedMonoFSRouterServer) mustEmbedUnimplementedMonoFSRouterServer() {}
 func (UnimplementedMonoFSRouterServer) testEmbeddedByValue()                      {}
@@ -1774,6 +1824,60 @@ func _MonoFSRouter_QueryLedger_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFSRouter_GetUpstreamLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpstreamLogRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).GetUpstreamLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_GetUpstreamLog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).GetUpstreamLog(ctx, req.(*UpstreamLogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_GetUpstreamTags_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpstreamTagsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).GetUpstreamTags(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_GetUpstreamTags_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).GetUpstreamTags(ctx, req.(*UpstreamTagsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MonoFSRouter_GetUpstreamBlame_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpstreamBlameRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).GetUpstreamBlame(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_GetUpstreamBlame_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).GetUpstreamBlame(ctx, req.(*UpstreamBlameRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MonoFSRouter_ServiceDesc is the grpc.ServiceDesc for MonoFSRouter service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1928,6 +2032,18 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "QueryLedger",
 			Handler:    _MonoFSRouter_QueryLedger_Handler,
+		},
+		{
+			MethodName: "GetUpstreamLog",
+			Handler:    _MonoFSRouter_GetUpstreamLog_Handler,
+		},
+		{
+			MethodName: "GetUpstreamTags",
+			Handler:    _MonoFSRouter_GetUpstreamTags_Handler,
+		},
+		{
+			MethodName: "GetUpstreamBlame",
+			Handler:    _MonoFSRouter_GetUpstreamBlame_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

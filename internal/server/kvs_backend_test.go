@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/kvs/pkg/localstore"
+	pb "github.com/radryc/monofs/api/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

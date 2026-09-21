@@ -19,7 +19,7 @@ services:
   # MinIO S3-compatible object storage
   minio:
     <<: *otel-syslog-logging
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     ports:
       - "19000:9000"  # S3 API
       - "19001:9001"  # Web Console
@@ -41,7 +41,7 @@ services:
   # Create the monofs bucket on startup
   minio-init:
     <<: *otel-syslog-logging
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     depends_on:
       minio:
         condition: service_healthy

@@ -149,6 +149,14 @@ func (n *MonoNode) EnableVirtualMonorepo() error {
 	return nil
 }
 
+// SetRepoFilter restricts which repositories appear in the sparse workspace
+// view. It must be called after EnableVirtualMonorepo. Pass nil to clear.
+func (n *MonoNode) SetRepoFilter(filter *RepoFilter) {
+	if n.workspace != nil {
+		n.workspace.SetRepoFilter(filter)
+	}
+}
+
 // EnableWorkspaceGitProjection exposes a synthetic root .git file backed by a
 // local gitdir snapshot so Git-aware tools can treat the mounted workspace as
 // a monorepo worktree.

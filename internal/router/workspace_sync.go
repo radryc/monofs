@@ -391,6 +391,11 @@ func updateWorkspaceSyncSummary(job *pb.WorkspaceSyncJob) {
 		case pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED:
 			summary.RepositoriesSucceeded++
 			summary.RepositoriesPublished++
+		case pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_ROLLED_BACK:
+			// The repository was published and then reverted after a
+			// later repository in the same logical changeset failed; the
+			// overall job fails because of the failing repository.
+			summary.RepositoriesConflicted++
 		case pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_CONFLICT:
 			summary.RepositoriesConflicted++
 		case pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_FAILED:
@@ -455,6 +460,10 @@ func workspaceRepositoryResultFromPublish(progress *pb.RepoSyncProgress, actionL
 		result.Status = pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_UNCHANGED
 	case pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED:
 		result.Status = pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED
+	case pb.RepoSyncStatus_REPO_SYNC_STATUS_ROLLED_BACK:
+		// The repository was published and then reverted after a later
+		// repository in the same logical changeset failed.
+		result.Status = pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_ROLLED_BACK
 	case pb.RepoSyncStatus_REPO_SYNC_STATUS_CONFLICT, pb.RepoSyncStatus_REPO_SYNC_STATUS_DIVERGED, pb.RepoSyncStatus_REPO_SYNC_STATUS_MISSING_BRANCH:
 		result.Status = pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_CONFLICT
 		if result.ConflictReason == "" {
@@ -478,7 +487,8 @@ func workspaceEventTypeForRepository(repo *pb.WorkspaceSyncRepositoryResult) pb.
 		return pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_REPOSITORY_COMPLETED
 	case pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_REFRESH_REQUIRED,
 		pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_REFRESHED,
-		pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED:
+		pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED,
+		pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_ROLLED_BACK:
 		return pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_REPOSITORY_COMPLETED
 	case pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_CONFLICT:
 		return pb.WorkspaceSyncEventType_WORKSPACE_SYNC_EVENT_REPOSITORY_CONFLICTED
