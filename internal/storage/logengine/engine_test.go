@@ -85,6 +85,84 @@ func TestLogEngine_IngestAndQuery(t *testing.T) {
 	}
 }
 
+func TestLogEngine_LogSpanIDAndLabelsRoundTrip(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_labels_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	backend := NewMockS3Store(filepath.Join(tmpDir, "remote"))
+	cfg := Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	}
+	engine := New(backend, cfg)
+
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	err = engine.IngestLogs(ctx, "chunk-labels", []LogRecord{{
+		Timestamp:  base,
+		Level:      "error",
+		Service:    "guardian",
+		TraceID:    "trc-labels",
+		SpanID:     "span-labels",
+		RawMessage: "rollout failed",
+		Labels: map[string]string{
+			"guardian.partition": "doctor",
+			"k8s.pod.name":       "guardiand-0",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("failed to ingest logs: %v", err)
+	}
+
+	results, err := engine.QueryLogs(ctx, `{service="guardian"}`, "", base.Add(-time.Minute), base.Add(time.Minute), 0)
+	if err != nil {
+		t.Fatalf("failed to query logs: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("returned %d records, want 1", len(results))
+	}
+	if results[0].SpanID != "span-labels" {
+		t.Fatalf("span_id = %q, want span-labels", results[0].SpanID)
+	}
+	if results[0].Labels["guardian.partition"] != "doctor" {
+		t.Fatalf("labels[guardian.partition] = %q, want doctor", results[0].Labels["guardian.partition"])
+	}
+	if results[0].Labels["k8s.pod.name"] != "guardiand-0" {
+		t.Fatalf("labels[k8s.pod.name] = %q, want guardiand-0", results[0].Labels["k8s.pod.name"])
+	}
+
+	// Labels are selectable as stream matchers.
+	filtered, err := engine.QueryLogs(ctx, `{service="guardian",guardian.partition="doctor"}`, "", time.Time{}, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("failed to query logs by label: %v", err)
+	}
+	if len(filtered) != 1 {
+		t.Fatalf("label-filtered returned %d records, want 1", len(filtered))
+	}
+
+	// Underscore-normalized label names (as Grafana emits) must map back to the
+	// dotted storage keys.
+	normalized, err := engine.QueryLogs(ctx, `{service="guardian",guardian_partition="doctor"}`, "", time.Time{}, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("failed to query logs by normalized label: %v", err)
+	}
+	if len(normalized) != 1 {
+		t.Fatalf("normalized-label query returned %d records, want 1", len(normalized))
+	}
+
+	// A non-matching label value must not return the record.
+	empty, err := engine.QueryLogs(ctx, `{service="guardian",guardian.partition="other"}`, "", time.Time{}, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("failed to query logs by non-matching label: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("non-matching label returned %d records, want 0", len(empty))
+	}
+}
+
 func TestLogEngine_QueryLogsRespectsTimeRange(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "logengine_range_test")
 	if err != nil {

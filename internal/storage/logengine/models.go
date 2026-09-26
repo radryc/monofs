@@ -41,7 +41,11 @@ type LogRecord struct {
 	Level      string    `json:"severity_text,omitempty"`
 	Service    string    `json:"service"`
 	TraceID    string    `json:"trace_id,omitempty"`
+	SpanID     string    `json:"span_id,omitempty"`
 	RawMessage string    `json:"body"`
+	// Labels is a flat map of normalized resource/point attributes for
+	// cross-signal correlation (e.g. {"guardian.partition": "doctor"}).
+	Labels map[string]string `json:"attributes,omitempty"`
 }
 
 // MetricRecord represents a single metric data point.

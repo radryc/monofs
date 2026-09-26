@@ -65,7 +65,9 @@ func protoToLogRecords(entries []*pb.LogEntry) []logengine.LogRecord {
 			Level:      e.Level,
 			Service:    e.Service,
 			TraceID:    e.TraceId,
+			SpanID:     e.SpanId,
 			RawMessage: e.RawMessage,
+			Labels:     e.Labels,
 		})
 	}
 	return out
