@@ -206,6 +206,8 @@ func (i *Ingester) writeLogParquet(ctx context.Context, path string, logs []LogR
 		schema.NewByteArrayNode("service", parquet.Repetitions.Required, -1),
 		schema.NewByteArrayNode("trace_id", parquet.Repetitions.Required, -1),
 		schema.NewByteArrayNode("raw_message", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("span_id", parquet.Repetitions.Required, -1),
+		schema.NewByteArrayNode("labels_json", parquet.Repetitions.Required, -1),
 	}
 	parquetSchema, err := schema.NewGroupNode("log_record", parquet.Repetitions.Required, fields, -1)
 	if err != nil {
@@ -287,6 +289,33 @@ func (i *Ingester) writeLogParquet(ctx context.Context, path string, logs []LogR
 	}
 	msgWriter.WriteBatch(messages, nil, nil)
 	msgWriter.Close()
+
+	// SpanID
+	cw, err = rgw.NextColumn()
+	if err != nil {
+		return err
+	}
+	spanWriter := cw.(*file.ByteArrayColumnChunkWriter)
+	spanIDs := make([]parquet.ByteArray, len(logs))
+	for idx, l := range logs {
+		spanIDs[idx] = parquet.ByteArray(l.SpanID)
+	}
+	spanWriter.WriteBatch(spanIDs, nil, nil)
+	spanWriter.Close()
+
+	// Labels JSON
+	cw, err = rgw.NextColumn()
+	if err != nil {
+		return err
+	}
+	lblWriter := cw.(*file.ByteArrayColumnChunkWriter)
+	labels := make([]parquet.ByteArray, len(logs))
+	for idx, l := range logs {
+		b, _ := json.Marshal(l.Labels)
+		labels[idx] = b
+	}
+	lblWriter.WriteBatch(labels, nil, nil)
+	lblWriter.Close()
 
 	if err := rgw.Close(); err != nil {
 		return err

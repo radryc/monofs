@@ -440,6 +440,27 @@ func (q *QueryEngine) scanLogParquet(ctx context.Context, path string, validRows
 		msgBuf := make([]parquet.ByteArray, n)
 		msgCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), msgBuf, nil, nil) //nolint:errcheck
 
+		// col 5: span_id, col 6: labels_json. Optional for backward
+		// compatibility with chunks written before the schema extension.
+		var spanBuf []parquet.ByteArray
+		if rg.NumColumns() > 5 {
+			spanCol, err := rg.Column(5)
+			if err != nil {
+				return err
+			}
+			spanBuf = make([]parquet.ByteArray, n)
+			spanCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), spanBuf, nil, nil) //nolint:errcheck
+		}
+		var lblBuf []parquet.ByteArray
+		if rg.NumColumns() > 6 {
+			lblCol, err := rg.Column(6)
+			if err != nil {
+				return err
+			}
+			lblBuf = make([]parquet.ByteArray, n)
+			lblCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), lblBuf, nil, nil) //nolint:errcheck
+		}
+
 		for i := 0; i < n; i++ {
 			if validRows != nil && !validRows.ContainsInt(i) {
 				continue
@@ -457,6 +478,12 @@ func (q *QueryEngine) scanLogParquet(ctx context.Context, path string, validRows
 				Service:    string(svcBuf[i]),
 				TraceID:    string(traceBuf[i]),
 				RawMessage: string(msgBuf[i]),
+			}
+			if spanBuf != nil {
+				record.SpanID = string(spanBuf[i])
+			}
+			if lblBuf != nil && len(lblBuf[i]) > 0 {
+				json.Unmarshal(lblBuf[i], &record.Labels) //nolint:errcheck
 			}
 			if !compiled.matchesRecord(record) {
 				continue
@@ -525,15 +552,27 @@ func (q compiledLogQuery) matchesRecord(record LogRecord) bool {
 
 func logRecordField(record LogRecord, name string) (string, bool) {
 	switch name {
-	case "service":
+	case "service", "service_name":
 		return record.Service, true
 	case "level", "severity_text":
 		return record.Level, true
 	case "trace_id":
 		return record.TraceID, record.TraceID != ""
+	case "span_id":
+		return record.SpanID, record.SpanID != ""
 	case "body", "raw_message":
 		return record.RawMessage, true
 	default:
+		if value, ok := record.Labels[name]; ok && value != "" {
+			return value, true
+		}
+		// Query labels may be underscore-normalized while stored attribute
+		// keys are dotted (e.g. guardian_partition vs guardian.partition).
+		if alt := strings.ReplaceAll(name, "_", "."); alt != name {
+			if value, ok := record.Labels[alt]; ok && value != "" {
+				return value, true
+			}
+		}
 		return "", false
 	}
 }
