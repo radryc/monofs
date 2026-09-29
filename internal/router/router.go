@@ -1368,18 +1368,6 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 	return nil
 }
 
-func streamRepositoryFiles(ctx context.Context, client pb.MonoFSClient, storageID string) ([]string, error) {
-	var files []string
-	err := forEachRepositoryFile(ctx, client, storageID, func(filePath string) error {
-		files = append(files, filePath)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return files, nil
-}
-
 // forEachRepositoryFile streams a repository's file list from a node and invokes
 // fn for each path without materializing the whole list, so callers can process
 // very large repositories in bounded memory.
@@ -1402,6 +1390,64 @@ func forEachRepositoryFile(ctx context.Context, client pb.MonoFSClient, storageI
 			}
 		}
 	}
+}
+
+// streamAndSyncOwnedFiles streams file paths from sourceClient for storageID,
+// selects those whose HRW target is targetNodeID, and syncs them to
+// targetClient in bounded batches. Memory stays O(batch) regardless of repo
+// size. onSynced (optional) is invoked with each batch's synced count.
+func (r *Router) streamAndSyncOwnedFiles(
+	streamCtx context.Context,
+	sourceClient pb.MonoFSClient,
+	sourceNodeID, targetNodeID, storageID string,
+	sharder *sharding.HRW,
+	targetClient pb.MonoFSClient,
+	onSynced func(int64),
+) (checked int64, moved int64, err error) {
+	const syncBatchSize = 5000
+	batch := make([]*pb.FileInfo, 0, syncBatchSize)
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		resp, syncErr := targetClient.SyncMetadataFromNode(ctx, &pb.SyncMetadataFromNodeRequest{
+			SourceNodeId: sourceNodeID,
+			TargetNodeId: targetNodeID,
+			Files:        batch,
+		})
+		cancel()
+		if syncErr != nil {
+			r.logger.Warn("failed to sync files to target node",
+				"source_node", sourceNodeID,
+				"target_node", targetNodeID,
+				"storage_id", storageID,
+				"file_count", len(batch),
+				"error", syncErr)
+			batch = batch[:0]
+			return
+		}
+		moved += resp.FilesSynced
+		if onSynced != nil {
+			onSynced(resp.FilesSynced)
+		}
+		batch = batch[:0]
+	}
+
+	err = forEachRepositoryFile(streamCtx, sourceClient, storageID, func(filePath string) error {
+		checked++
+		targetNode := sharder.GetNode(storageID + ":" + filePath)
+		if targetNode == nil || targetNode.ID != targetNodeID {
+			return nil
+		}
+		batch = append(batch, &pb.FileInfo{StorageId: storageID, FilePath: filePath})
+		if len(batch) >= syncBatchSize {
+			flush()
+		}
+		return nil
+	})
+	flush()
+	return checked, moved, err
 }
 
 func telemetryShardKey(signal, chunkID string) string {
@@ -2078,54 +2124,21 @@ func (r *Router) syncFailoverCache(failedNodeID, backupNodeID string, backupClie
 	totalSynced := int64(0)
 
 	for _, storageID := range allRepos {
-		// Collect files from all healthy source nodes for this repo
-		filesBySource := make(map[string][]*pb.FileInfo)
-
+		// Stream each source node's files and sync the ones HRW assigns to the
+		// failed node to the backup, in bounded batches.
 		for sourceID, client := range sourceClients {
-			listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			files, err := streamRepositoryFiles(listCtx, client, storageID)
+			listCtx, listCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			_, moved, err := r.streamAndSyncOwnedFiles(
+				listCtx, client, sourceID, failedNodeID, storageID, sharder, backupClient, nil)
 			listCancel()
-
 			if err != nil {
-				r.logger.Debug("failover sync: failed to get file list",
+				r.logger.Debug("failover sync: failed to stream file list",
 					"source_node", sourceID,
 					"storage_id", storageID,
 					"error", err)
 				continue
 			}
-
-			// Filter: only files that HRW assigns to the failed node
-			for _, filePath := range files {
-				key := storageID + ":" + filePath
-				targetNode := sharder.GetNode(key)
-				if targetNode != nil && targetNode.ID == failedNodeID {
-					filesBySource[sourceID] = append(filesBySource[sourceID], &pb.FileInfo{
-						StorageId: storageID,
-						FilePath:  filePath,
-					})
-				}
-			}
-		}
-
-		// Sync filtered files to backup node
-		for sourceNodeID, files := range filesBySource {
-			syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			resp, err := backupClient.SyncMetadataFromNode(syncCtx, &pb.SyncMetadataFromNodeRequest{
-				SourceNodeId: sourceNodeID,
-				TargetNodeId: backupNodeID,
-				Files:        files,
-			})
-			syncCancel()
-
-			if err != nil {
-				r.logger.Warn("failover sync: failed to sync files",
-					"source_node", sourceNodeID,
-					"backup_node", backupNodeID,
-					"file_count", len(files),
-					"error", err)
-			} else {
-				totalSynced += resp.FilesSynced
-			}
+			totalSynced += moved
 		}
 	}
 
@@ -2516,99 +2529,38 @@ func (r *Router) recoverNode(nodeID string, missingRepos, incompleteRepos []stri
 
 		sharder := sharding.NewHRW(activeNodes)
 
-		// STEP 3: Collect files from source nodes and determine which belong to this node
+		// STEP 3: Stream files from source nodes and sync the ones HRW assigns
+		// to this node, in bounded batches.
 		repoFilesRecovered := int64(0)
-		filesToSync := []struct {
-			sourceNodeID string
-			filePath     string
-		}{}
-
 		for sourceID, sourceState := range sourceNodes {
-			listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			files, err := streamRepositoryFiles(listCtx, sourceState.client, storageID)
+			listCtx, listCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			_, _, err := r.streamAndSyncOwnedFiles(
+				listCtx, sourceState.client, sourceID, nodeID, storageID, sharder, targetState.client,
+				func(n int64) {
+					repoFilesRecovered += n
+					totalRecovered += n
+				})
 			listCancel()
-
 			if err != nil {
 				r.logger.Warn("failed to get file list from source node",
 					"source_node", sourceID,
 					"storage_id", storageID,
 					"error", err)
-				continue
-			}
-
-			// Identify files that should belong to target node according to HRW
-			for _, filePath := range files {
-				key := storageID + ":" + filePath
-				targetNode := sharder.GetNode(key)
-
-				if targetNode != nil && targetNode.ID == nodeID {
-					// This file should be on the recovering node
-					filesToSync = append(filesToSync, struct {
-						sourceNodeID string
-						filePath     string
-					}{sourceID, filePath})
-				}
 			}
 		}
 
-		// STEP 4: Sync files if this node owns any
-		if len(filesToSync) == 0 {
+		// STEP 4: If this node owns no files for the repo, just mark onboarded.
+		if repoFilesRecovered == 0 {
 			r.logger.Info("node does not own any files for this repository, skipping file sync",
 				"node_id", nodeID,
 				"storage_id", storageID,
 				"repo_name", repoInfo.repoID)
-			// Mark as onboarded even though no files synced - repo is registered
 			markCtx, markCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, _ = targetState.client.MarkRepositoryOnboarded(markCtx, &pb.MarkRepositoryOnboardedRequest{
 				StorageId: storageID,
 			})
 			markCancel()
 			continue
-		}
-
-		// STEP 5: Sync the identified files in batch
-		r.logger.Info("syncing files to recovering node",
-			"node_id", nodeID,
-			"storage_id", storageID,
-			"file_count", len(filesToSync))
-
-		// Group files by source node
-		filesBySource := make(map[string][]*pb.FileInfo)
-		for _, fileInfo := range filesToSync {
-			if _, exists := filesBySource[fileInfo.sourceNodeID]; !exists {
-				filesBySource[fileInfo.sourceNodeID] = []*pb.FileInfo{}
-			}
-			filesBySource[fileInfo.sourceNodeID] = append(filesBySource[fileInfo.sourceNodeID], &pb.FileInfo{
-				StorageId: storageID,
-				FilePath:  fileInfo.filePath,
-			})
-		}
-
-		// Sync files from each source node
-		for sourceNodeID, files := range filesBySource {
-			syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			resp, err := targetState.client.SyncMetadataFromNode(syncCtx, &pb.SyncMetadataFromNodeRequest{
-				SourceNodeId: sourceNodeID,
-				TargetNodeId: nodeID,
-				Files:        files,
-			})
-			syncCancel()
-
-			if err != nil {
-				r.logger.Warn("failed to sync files from source node",
-					"source_node", sourceNodeID,
-					"target_node", nodeID,
-					"file_count", len(files),
-					"error", err)
-			} else {
-				repoFilesRecovered += resp.FilesSynced
-				totalRecovered += resp.FilesSynced
-				r.logger.Info("synced files from source node",
-					"source_node", sourceNodeID,
-					"target_node", nodeID,
-					"synced", resp.FilesSynced,
-					"total", len(files))
-			}
 		}
 
 		// STEP 6: Mark repository as onboarded (only after successful sync)
