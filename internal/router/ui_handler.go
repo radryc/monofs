@@ -644,13 +644,13 @@ func (r *Router) buildDependenciesData() *DependenciesData {
 		tracked.mu.RUnlock()
 	}
 
-	// Query every healthy node for files in the dependency repo.
-	type nodeResult struct {
-		nodeID string
-		files  []string
-	}
-	var results []nodeResult
-	var resMu sync.Mutex
+	// Query every healthy node for files in the dependency repo, streaming
+	// each node's list and aggregating as entries arrive so no per-node slice
+	// is retained. Paths look like "go/mod/cache/..." (first segment = tool).
+	var mu sync.Mutex
+	uniqueFiles := make(map[string]bool)
+	toolCounts := make(map[string]int)
+	nodeCounts := make(map[string]int)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 6)
 
@@ -669,8 +669,23 @@ func (r *Router) buildDependenciesData() *DependenciesData {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			files, err := streamRepositoryFiles(ctx, state.client, storageID)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			n := 0
+			err := forEachRepositoryFile(ctx, state.client, storageID, func(f string) error {
+				parts := strings.SplitN(f, "/", 2)
+				tool := "unknown"
+				if len(parts) >= 1 && parts[0] != "" {
+					tool = parts[0]
+				}
+				mu.Lock()
+				if !uniqueFiles[f] {
+					uniqueFiles[f] = true
+					toolCounts[tool]++
+				}
+				mu.Unlock()
+				n++
+				return nil
+			})
 			cancel()
 
 			if err != nil {
@@ -678,38 +693,13 @@ func (r *Router) buildDependenciesData() *DependenciesData {
 					"node_id", state.info.NodeId, "error", err)
 				return
 			}
-
-			resMu.Lock()
-			results = append(results, nodeResult{
-				nodeID: state.info.NodeId,
-				files:  files,
-			})
-			resMu.Unlock()
+			mu.Lock()
+			nodeCounts[state.info.NodeId] = n
+			mu.Unlock()
 		}()
 	}
 
 	wg.Wait()
-
-	// Aggregate: deduplicate files across nodes and group by tool prefix.
-	// Paths look like "go/mod/cache/..." where the first segment is the tool.
-	uniqueFiles := make(map[string]bool)
-	toolCounts := make(map[string]int)
-
-	for _, nr := range results {
-		for _, f := range nr.files {
-			if uniqueFiles[f] {
-				continue // already counted (replication / dual-active)
-			}
-			uniqueFiles[f] = true
-
-			parts := strings.SplitN(f, "/", 2)
-			tool := "unknown"
-			if len(parts) >= 1 && parts[0] != "" {
-				tool = parts[0]
-			}
-			toolCounts[tool]++
-		}
-	}
 
 	data.TotalFiles = len(uniqueFiles)
 
@@ -726,11 +716,11 @@ func (r *Router) buildDependenciesData() *DependenciesData {
 	data.Ecosystems = len(data.Tools)
 
 	// Build per-node distribution.
-	for _, nr := range results {
-		if len(nr.files) > 0 {
+	for nodeID, count := range nodeCounts {
+		if count > 0 {
 			data.Nodes = append(data.Nodes, DepsNodeInfo{
-				NodeID: nr.nodeID,
-				Files:  len(nr.files),
+				NodeID: nodeID,
+				Files:  count,
 			})
 		}
 	}
