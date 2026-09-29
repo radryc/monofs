@@ -1575,8 +1575,13 @@ func (x *GetAttrResponse) GetFound() bool {
 }
 
 type ReadDirRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Path  string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// start_after resumes after this entry name (exclusive); entries are
+	// returned in name order. Empty starts from the beginning.
+	StartAfter string `protobuf:"bytes,2,opt,name=start_after,json=startAfter,proto3" json:"start_after,omitempty"`
+	// limit caps the number of entries returned; <= 0 means all.
+	Limit         int32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1616,6 +1621,20 @@ func (x *ReadDirRequest) GetPath() string {
 		return x.Path
 	}
 	return ""
+}
+
+func (x *ReadDirRequest) GetStartAfter() string {
+	if x != nil {
+		return x.StartAfter
+	}
+	return ""
+}
+
+func (x *ReadDirRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
 }
 
 type DirEntry struct {
@@ -11942,9 +11961,12 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x03uid\x18\b \x01(\rR\x03uid\x12\x10\n" +
 	"\x03gid\x18\t \x01(\rR\x03gid\x12\x14\n" +
 	"\x05found\x18\n" +
-	" \x01(\bR\x05found\"$\n" +
+	" \x01(\bR\x05found\"[\n" +
 	"\x0eReadDirRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"D\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1f\n" +
+	"\vstart_after\x18\x02 \x01(\tR\n" +
+	"startAfter\x12\x14\n" +
+	"\x05limit\x18\x03 \x01(\x05R\x05limit\"D\n" +
 	"\bDirEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04mode\x18\x02 \x01(\rR\x04mode\x12\x10\n" +

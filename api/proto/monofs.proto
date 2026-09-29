@@ -267,6 +267,11 @@ message GetAttrResponse {
 
 message ReadDirRequest {
     string path = 1;
+    // start_after resumes after this entry name (exclusive); entries are
+    // returned in name order. Empty starts from the beginning.
+    string start_after = 2;
+    // limit caps the number of entries returned; <= 0 means all.
+    int32 limit = 3;
 }
 
 message DirEntry {

@@ -863,9 +863,6 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 		if err := s.removeFromDirectoryIndex(tx, req.StorageId, parentDir, entryName); err != nil {
 			s.logger.Warn("failed to remove file from dir index", "file_path", req.FilePath, "error", err)
 		}
-		if err := s.removeFromDirectorySummary(tx, req.StorageId, parentDir, entryName); err != nil {
-			return fmt.Errorf("failed to remove file from dir summary: %w", err)
-		}
 		if err := tx.Delete(bucketDirMeta, makeDirMetaKey(req.StorageId, req.FilePath)); err != nil && err != metastore.ErrKeyNotFound {
 			return fmt.Errorf("failed to delete dir metadata: %w", err)
 		}
@@ -1016,41 +1013,31 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 			}
 		}
 
-		// 6. Delete all canonical directory metadata for this repo
+		// 6. Delete all canonical directory metadata and the per-entry
+		// directory-index records it governs. Iterating dir meta enumerates
+		// every repository directory; their entries are keyed by a hash of
+		// (storageID, dirPath), so they cannot be deleted by a storageID prefix
+		// scan directly.
 		dirMetaKeys, err := prefixScanKeys(tx, bucketDirMeta, prefix)
 		if err != nil {
 			return fmt.Errorf("scan dir metadata: %w", err)
 		}
 		for _, key := range dirMetaKeys {
 			keyStr := string(key)
+			dirPath := strings.TrimPrefix(keyStr, string(prefix))
 			if err := tx.Delete(bucketDirMeta, key); err != nil && err != metastore.ErrKeyNotFound {
 				s.logger.Warn("failed to delete dir metadata", "key", keyStr)
 			}
-		}
-
-		// 7. Delete all directory summaries for this repo
-		dirSummaryKeys, err := prefixScanKeys(tx, bucketDirSummary, prefix)
-		if err != nil {
-			return fmt.Errorf("scan dir summaries: %w", err)
-		}
-		for _, key := range dirSummaryKeys {
-			keyStr := string(key)
-			if err := tx.Delete(bucketDirSummary, key); err != nil && err != metastore.ErrKeyNotFound {
-				s.logger.Warn("failed to delete dir summary", "key", keyStr)
-			}
-		}
-
-		// 8. Delete all directory indexes for this repo
-		dirKeys, err := prefixScanKeys(tx, bucketDirIndex, prefix)
-		if err != nil {
-			return fmt.Errorf("scan dir indexes: %w", err)
-		}
-		for _, key := range dirKeys {
-			keyStr := string(key)
-			if err := tx.Delete(bucketDirIndex, key); err != nil && err != metastore.ErrKeyNotFound {
-				s.logger.Warn("failed to delete dir index", "key", keyStr)
+			if dirPath != "" {
+				if _, err := deleteDirEntries(tx, storageID, dirPath); err != nil {
+					s.logger.Warn("failed to delete dir entries", "dir_path", dirPath, "error", err)
+				}
 			}
 			dirsDeleted++
+		}
+		// Root entries have no directory metadata record.
+		if _, err := deleteDirEntries(tx, storageID, ""); err != nil {
+			s.logger.Warn("failed to delete root dir entries", "storage_id", storageID, "error", err)
 		}
 
 		return nil

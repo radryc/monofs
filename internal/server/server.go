@@ -130,8 +130,7 @@ const (
 	bucketPathIndex        = "pathindex"         // Path to hash mapping (key: "storageID:filePath", value: SHA-256 hash)
 	bucketRepoLookup       = "repolookup"        // Display path to storageID mapping (key: displayPath, value: storageID)
 	bucketDirMeta          = "dirmeta"           // Canonical directory metadata (key: "storageID:dirPath", value: dirMetadata)
-	bucketDirSummary       = "dirsummary"        // Canonical replicated child summaries (key: "storageID:dirPath", value: []dirIndexEntry)
-	bucketDirIndex         = "dirindex"          // Directory index (key: "storageID:sha256(dirPath)", value: []dirIndexEntry)
+	bucketDirEntries       = "direntry"          // One record per directory child (see direntry.go)
 	bucketOwnedFiles       = "ownedfiles"        // Files owned by this node (key: "storageID:filePath", value: "1")
 	bucketReplicaFiles     = "replicafiles"      // Replica file tracking (key: "storageID:filePath", value: ownerNodeID)
 	bucketOnboardingStatus = "onboarding_status" // Repository onboarding status (key: storage_id, value: "true"/"false")
@@ -145,13 +144,6 @@ func makeStorageKey(storageID, filePath string) []byte {
 	compositeKey := storageID + ":" + filePath
 	hash := sha256.Sum256([]byte(compositeKey))
 	return []byte(hex.EncodeToString(hash[:]))
-}
-
-// makeDirIndexKey generates a directory index key.
-// Format: "storageID:sha256(directoryPath)"
-func makeDirIndexKey(storageID, dirPath string) []byte {
-	hash := sha256.Sum256([]byte(dirPath))
-	return []byte(storageID + ":" + hex.EncodeToString(hash[:]))
 }
 
 // makeDirMetaKey generates a canonical directory metadata key.
@@ -1146,7 +1138,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 
 		// Accumulate directory-index mutations for the whole batch and flush
 		// once per touched directory, keeping memory bounded by batch size.
-		pendingDirEntries := make(map[string][]dirIndexEntry)
+		pendingDirEntries := make(map[string]dirIndexEntry)
 
 		// Batch insert all files
 		for _, pf := range prepared {
@@ -1189,12 +1181,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 				filesFailed++
 				continue
 			}
-			if err := s.upsertPathIntoDirectorySummary(tx, storageID, pf.filePath, pf.mode, pf.size, pf.mtime, pf.isDir, string(pf.key)); err != nil {
-				s.logger.Error("failed to store canonical dir summaries", "error", err, "path", pf.filePath)
-				filesFailed++
-				continue
-			}
-			accumulateDirectoryIndexEntry(pendingDirEntries, pf.filePath, pf.mode, pf.size, pf.mtime, pf.isDir, string(pf.key))
+			accumulateDirectoryIndexEntry(pendingDirEntries, storageID, pf.filePath, pf.mode, pf.size, pf.mtime, pf.isDir, string(pf.key))
 
 			if filesIngested < 3 { // Log first 3 keys for debugging
 				s.logger.Info("stored ownership key", "key", string(pf.ownershipKey))
@@ -1213,10 +1200,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 			if err := s.upsertDirectoryHierarchy(tx, storageID, dh.filePath, dh.mode, dh.mtime, dh.isDir); err != nil {
 				return fmt.Errorf("store canonical directories from dir hint %q: %w", dh.filePath, err)
 			}
-			if err := s.upsertPathIntoDirectorySummary(tx, storageID, dh.filePath, dh.mode, dh.size, dh.mtime, dh.isDir, string(dh.hashKey)); err != nil {
-				return fmt.Errorf("store canonical dir summaries from dir hint %q: %w", dh.filePath, err)
-			}
-			accumulateDirectoryIndexEntry(pendingDirEntries, dh.filePath, dh.mode, dh.size, dh.mtime, dh.isDir, string(dh.hashKey))
+			accumulateDirectoryIndexEntry(pendingDirEntries, storageID, dh.filePath, dh.mode, dh.size, dh.mtime, dh.isDir, string(dh.hashKey))
 		}
 		if len(dirHints) > 0 {
 			s.logger.Info("processed dir hints",
@@ -1226,7 +1210,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 
 		// Flush accumulated directory-index entries (batch files + hints) once
 		// per touched directory.
-		if err := flushDirectoryIndexEntries(tx, storageID, pendingDirEntries); err != nil {
+		if err := flushDirectoryIndexEntries(tx, pendingDirEntries); err != nil {
 			return err
 		}
 
