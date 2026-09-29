@@ -416,15 +416,12 @@ func (s *Server) buildDirectoryEntriesFromCanonical(tx *nutsdb.Tx, storageID, di
 		}
 	}
 
-	dirKeys, err := tx.GetKeys(bucketDirMeta)
-	if err != nil && err != nutsdb.ErrBucketNotFound {
+	dirKeys, err := prefixScanKeys(tx, bucketDirMeta, []byte(storageID+":"))
+	if err != nil {
 		return nil, directoryExists, err
 	}
 	for _, key := range dirKeys {
 		keyStr := string(key)
-		if !strings.HasPrefix(keyStr, storageID+":") {
-			continue
-		}
 		candidate := strings.TrimPrefix(keyStr, storageID+":")
 		if candidate == "" {
 			continue
@@ -1368,15 +1365,11 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 			fileMetadata = append(fileMetadata, meta)
 		}
 
-		dirKeys, err := tx.GetKeys(bucketDirMeta)
-		if err != nil && err != nutsdb.ErrBucketNotFound {
+		dirKeys, err := prefixScanKeys(tx, bucketDirMeta, prefix)
+		if err != nil {
 			return err
 		}
 		for _, key := range dirKeys {
-			keyStr := string(key)
-			if !strings.HasPrefix(keyStr, storageID+":") {
-				continue
-			}
 			value, err := tx.Get(bucketDirMeta, key)
 			if err != nil {
 				continue
