@@ -2,12 +2,14 @@
 package router
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3036,153 +3038,132 @@ func (r *Router) rebalanceRepository(storageID string) {
 	// Create HRW sharder with current topology
 	sharder := sharding.NewHRW(activeNodes)
 
-	// PHASE 1: Collect all files from all nodes for this repository
-	allFiles := make(map[string]string) // filePath -> currentNodeID
-
-	for nodeID, state := range nodeStates {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		files, err := streamRepositoryFiles(ctx, state.client, storageID)
-		cancel()
-
-		if err != nil {
-			r.logger.Warn("failed to get file list during rebalancing",
-				"node", nodeID,
-				"storage_id", storageID,
-				"error", err)
-			continue
-		}
-
-		for _, filePath := range files {
-			allFiles[filePath] = nodeID
-		}
+	// PHASE 1+2: stream each source node's file list and copy the files that
+	// must move to their new owner in bounded batches. Confirmed copies are
+	// recorded to a temp plan for later cleanup, so peak memory is O(batch)
+	// instead of O(repository).
+	const syncBatchSize = 2000
+	plan, planErr := newRebalanceMovePlan()
+	if planErr != nil {
+		r.logger.Warn("failed to create rebalance move plan; source cleanup will be skipped",
+			"storage_id", storageID, "error", planErr)
+		plan = nil
+	}
+	if plan != nil {
+		defer plan.close()
 	}
 
-	r.logger.Info("collected files for rebalancing",
-		"storage_id", storageID,
-		"file_count", len(allFiles))
+	var filesChecked, filesMoved, filesToMove int64
+	attemptedTargets := make(map[string]bool)
+	planRecordErrored := false
 
-	// PHASE 2: Copy files to new locations (DON'T delete from old)
-	filesMoved := int64(0)
-	filesChecked := int64(0)
-	filesToMove := make(map[string]struct {
-		from string
-		to   string
-	})
-
-	for filePath, currentNodeID := range allFiles {
-		filesChecked++
-
-		// Calculate where this file should be
-		key := storageID + ":" + filePath
-		targetNode := sharder.GetNode(key)
-		if targetNode == nil {
-			r.logger.Warn("no target node for file", "file", filePath)
-			continue
+	flushBatch := func(sourceNodeID, targetNodeID string, batch []*pb.FileInfo) {
+		if len(batch) == 0 {
+			return
 		}
-
-		// If file needs to move, record it
-		if targetNode.ID != currentNodeID {
-			filesToMove[filePath] = struct {
-				from string
-				to   string
-			}{currentNodeID, targetNode.ID}
-		}
-
-		// Update progress
-		if filesChecked%100 == 0 {
-			repo.mu.Lock()
-			repo.rebalanceProgress = float64(filesChecked) / float64(len(allFiles)) * 0.5 // First 50%
-			repo.mu.Unlock()
-		}
-	}
-
-	r.logger.Info("identified files to move",
-		"storage_id", storageID,
-		"files_to_move", len(filesToMove),
-		"files_checked", filesChecked)
-
-	// Group files by (source, target) pair for batch syncing
-	filesByRoute := make(map[string]map[string][]*pb.FileInfo) // targetNodeID -> sourceNodeID -> files
-	for filePath, moveInfo := range filesToMove {
-		if filesByRoute[moveInfo.to] == nil {
-			filesByRoute[moveInfo.to] = make(map[string][]*pb.FileInfo)
-		}
-		if filesByRoute[moveInfo.to][moveInfo.from] == nil {
-			filesByRoute[moveInfo.to][moveInfo.from] = []*pb.FileInfo{}
-		}
-		filesByRoute[moveInfo.to][moveInfo.from] = append(filesByRoute[moveInfo.to][moveInfo.from], &pb.FileInfo{
-			StorageId: storageID,
-			FilePath:  filePath,
-		})
-	}
-
-	// successfullyMoved tracks files confirmed present on the target. Only
-	// these may be deleted from the source during cleanup; deleting anything
-	// else risks data loss if a sync failed or was partial.
-	successfullyMoved := make(map[string]struct{}, len(filesToMove))
-
-	// Copy files to new locations in batches
-	for targetNodeID, sourceMap := range filesByRoute {
 		targetState := nodeStates[targetNodeID]
-		if targetState == nil {
-			r.logger.Warn("target node not found", "target_node", targetNodeID)
-			continue
+		if targetState == nil || targetState.client == nil {
+			r.logger.Warn("target node unavailable during rebalancing",
+				"target_node", targetNodeID, "storage_id", storageID)
+			return
 		}
-
-		for sourceNodeID, files := range sourceMap {
-			// Sync batch of files from source to target
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			resp, err := targetState.client.SyncMetadataFromNode(ctx, &pb.SyncMetadataFromNodeRequest{
-				SourceNodeId: sourceNodeID,
-				TargetNodeId: targetNodeID,
-				Files:        files,
-			})
-			cancel()
-
-			if err != nil {
-				r.logger.Warn("failed to copy files during rebalancing",
-					"from", sourceNodeID,
-					"to", targetNodeID,
-					"file_count", len(files),
-					"error", err)
-			} else {
-				filesMoved += resp.FilesSynced
-				r.logger.Info("copied files during rebalancing",
-					"from", sourceNodeID,
-					"to", targetNodeID,
-					"synced", resp.FilesSynced,
-					"total", len(files))
-
-				// Only mark the batch deletable when the sync reported full
-				// success. A partial sync must not trigger source deletion.
-				if resp.Success && resp.FilesSynced == int64(len(files)) {
-					for _, f := range files {
-						successfullyMoved[f.GetFilePath()] = struct{}{}
-					}
-				} else {
-					r.logger.Warn("rebalancing sync incomplete, source copies retained",
-						"from", sourceNodeID,
-						"to", targetNodeID,
-						"synced", resp.FilesSynced,
-						"total", len(files),
-						"success", resp.Success)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		resp, err := targetState.client.SyncMetadataFromNode(ctx, &pb.SyncMetadataFromNodeRequest{
+			SourceNodeId: sourceNodeID,
+			TargetNodeId: targetNodeID,
+			Files:        batch,
+		})
+		cancel()
+		if err != nil {
+			r.logger.Warn("failed to copy files during rebalancing",
+				"from", sourceNodeID, "to", targetNodeID,
+				"file_count", len(batch), "error", err)
+			return
+		}
+		filesMoved += resp.FilesSynced
+		// Only a fully-confirmed batch is eligible for source deletion. A
+		// partial sync must never trigger deletion (data-loss guard).
+		if !resp.Success || resp.FilesSynced != int64(len(batch)) {
+			r.logger.Warn("rebalancing sync incomplete, source copies retained",
+				"from", sourceNodeID, "to", targetNodeID,
+				"synced", resp.FilesSynced, "total", len(batch), "success", resp.Success)
+			return
+		}
+		if plan != nil && !planRecordErrored {
+			for _, f := range batch {
+				if err := plan.record(rebalanceMoveEntry{
+					From: sourceNodeID, To: targetNodeID, Path: f.GetFilePath(),
+				}); err != nil {
+					r.logger.Warn("failed to record rebalance move; source cleanup will be skipped",
+						"storage_id", storageID, "error", err)
+					planRecordErrored = true
+					break
 				}
-
-				// Update progress
-				repo.mu.Lock()
-				repo.rebalanceProgress = 0.5 + (float64(filesMoved)/float64(len(filesToMove)))*0.4 // 50-90%
-				repo.mu.Unlock()
 			}
 		}
 	}
 
-	// Mark affected nodes for directory index rebuild
-	// Track which nodes received new files during rebalancing
-	affectedNodes := make(map[string]bool)
-	for _, moveInfo := range filesToMove {
-		affectedNodes[moveInfo.to] = true
+	nodesProcessed := 0
+	for sourceNodeID := range nodeStates {
+		r.mu.RLock()
+		sourceState := r.nodes[sourceNodeID]
+		r.mu.RUnlock()
+		if sourceState == nil || sourceState.client == nil {
+			continue
+		}
+
+		batches := make(map[string][]*pb.FileInfo)
+		streamCtx, streamCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		err := forEachRepositoryFile(streamCtx, sourceState.client, storageID, func(filePath string) error {
+			filesChecked++
+			targetNode := sharder.GetNode(storageID + ":" + filePath)
+			if targetNode == nil {
+				r.logger.Warn("no target node for file", "file", filePath)
+				return nil
+			}
+			if targetNode.ID == sourceNodeID {
+				return nil
+			}
+			filesToMove++
+			attemptedTargets[targetNode.ID] = true
+			batch := append(batches[targetNode.ID], &pb.FileInfo{StorageId: storageID, FilePath: filePath})
+			batches[targetNode.ID] = batch
+			if len(batch) >= syncBatchSize {
+				flushBatch(sourceNodeID, targetNode.ID, batch)
+				batches[targetNode.ID] = nil
+			}
+			return nil
+		})
+		streamCancel()
+		if err != nil {
+			r.logger.Warn("failed to get file list during rebalancing",
+				"node", sourceNodeID, "storage_id", storageID, "error", err)
+		}
+		for targetNodeID, batch := range batches {
+			flushBatch(sourceNodeID, targetNodeID, batch)
+		}
+
+		nodesProcessed++
+		repo.mu.Lock()
+		repo.rebalanceProgress = 0.9 * float64(nodesProcessed) / float64(len(nodeStates))
+		repo.mu.Unlock()
 	}
-	for nodeID := range affectedNodes {
+
+	if planRecordErrored && plan != nil {
+		// The move plan is incomplete; skip cleanup rather than risk deleting
+		// source copies that were never confirmed on the target.
+		plan.remove()
+		plan = nil
+	}
+
+	r.logger.Info("files routed during rebalancing",
+		"storage_id", storageID,
+		"files_checked", filesChecked,
+		"files_to_move", filesToMove,
+		"files_moved", filesMoved)
+
+	// Mark target nodes that received files for directory index rebuild.
+	for nodeID := range attemptedTargets {
 		r.markForIndexRebuild(nodeID, storageID)
 	}
 
@@ -3251,43 +3232,70 @@ func (r *Router) rebalanceRepository(storageID string) {
 
 	// PHASE 6: Cleanup old locations (async, best effort). Only files confirmed
 	// copied to their new home are eligible for deletion.
-	go r.cleanupOldFileLocations(storageID, filesToMove, successfullyMoved)
+	go r.cleanupOldFileLocations(storageID, plan)
+}
+
+// rebalanceCleanupGracePeriod is how long source copies are retained after the
+// topology switch before cleanup deletes them. A variable (not const) so tests
+// can shorten it.
+var rebalanceCleanupGracePeriod = 5 * time.Minute
+
+// rebalanceMoveEntry records one file that was copied to a new owner and must
+// be deleted from its old owner after the grace period.
+type rebalanceMoveEntry struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Path string `json:"path"`
+}
+
+// rebalanceMovePlan is a temp-file-backed append-only log of confirmed moves.
+// Keeping it on disk bounds rebalance memory to O(batch) instead of O(repo).
+type rebalanceMovePlan struct {
+	path string
+	file *os.File
+	enc  *json.Encoder
+}
+
+func newRebalanceMovePlan() (*rebalanceMovePlan, error) {
+	f, err := os.CreateTemp("", "monofs-rebalance-*.jsonl")
+	if err != nil {
+		return nil, err
+	}
+	return &rebalanceMovePlan{path: f.Name(), file: f, enc: json.NewEncoder(f)}, nil
+}
+
+func (p *rebalanceMovePlan) record(e rebalanceMoveEntry) error {
+	return p.enc.Encode(e)
+}
+
+func (p *rebalanceMovePlan) close() {
+	if p.file != nil {
+		p.file.Close()
+		p.file = nil
+	}
+}
+
+func (p *rebalanceMovePlan) remove() {
+	os.Remove(p.path)
 }
 
 // cleanupOldFileLocations removes files from old locations after rebalancing.
-// This is called ONLY after rebalancing (not during recovery) to avoid data loss.
-// Safety measures:
-// 1. 5-minute grace period ensures all clients have refreshed routing cache
-// 2. Deletion is best-effort (failures are logged but don't fail rebalancing)
-// 3. Only deletes files that were successfully copied to new locations
-func (r *Router) cleanupOldFileLocations(storageID string, filesToMove map[string]struct {
-	from string
-	to   string
-}, successfullyMoved map[string]struct{}) {
-	// Wait for dual-active period + grace period
-	// This ensures all clients have refreshed their routing cache
-	gracePeriod := 5 * time.Minute
-	time.Sleep(gracePeriod)
+// It streams the move plan from disk so memory stays bounded regardless of
+// repository size. It runs ONLY after rebalancing (not during recovery) to
+// avoid data loss, and only deletes files whose copy to the new owner was
+// fully confirmed.
+func (r *Router) cleanupOldFileLocations(storageID string, plan *rebalanceMovePlan) {
+	if plan == nil {
+		return
+	}
+	defer plan.remove()
 
-	// Build summary of which nodes will have files deleted
-	nodeCleanupCount := make(map[string]int)
-	for _, moveInfo := range filesToMove {
-		nodeCleanupCount[moveInfo.from]++
+	// Wait for the dual-active / grace period so clients refresh routing.
+	gracePeriod := rebalanceCleanupGracePeriod
+	if gracePeriod > 0 {
+		time.Sleep(gracePeriod)
 	}
 
-	// Format node summary for logging
-	nodeSummary := make([]string, 0, len(nodeCleanupCount))
-	for nodeID, count := range nodeCleanupCount {
-		nodeSummary = append(nodeSummary, fmt.Sprintf("%s:%d", nodeID, count))
-	}
-
-	r.logger.Info("starting cleanup of old file locations after rebalancing",
-		"storage_id", storageID,
-		"files_to_cleanup", len(filesToMove),
-		"grace_period", gracePeriod,
-		"nodes_to_cleanup", nodeSummary)
-
-	// Get current node states
 	r.mu.RLock()
 	nodeStates := make(map[string]*nodeState)
 	for nodeID, state := range r.nodes {
@@ -3295,81 +3303,85 @@ func (r *Router) cleanupOldFileLocations(storageID string, filesToMove map[strin
 	}
 	r.mu.RUnlock()
 
+	f, err := os.Open(plan.path)
+	if err != nil {
+		r.logger.Warn("failed to open rebalance move plan for cleanup",
+			"storage_id", storageID, "error", err)
+		return
+	}
+	defer f.Close()
+
+	r.logger.Info("starting cleanup of old file locations after rebalancing",
+		"storage_id", storageID, "grace_period", gracePeriod)
+
 	deletedCount := 0
 	failedCount := 0
 	skippedCount := 0
 	deletedPerNode := make(map[string]int)
 
-	for filePath, moveInfo := range filesToMove {
-		if _, ok := successfullyMoved[filePath]; !ok {
-			// The copy to the target was never confirmed; keep the source copy.
-			skippedCount++
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var entry rebalanceMoveEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
 		}
-		sourceState := nodeStates[moveInfo.from]
+		sourceState := nodeStates[entry.From]
 		if sourceState == nil || sourceState.client == nil {
 			r.logger.Warn("source node not available for cleanup",
-				"file", filePath,
-				"source_node", moveInfo.from,
-				"storage_id", storageID)
+				"file", entry.Path, "source_node", entry.From, "storage_id", storageID)
 			skippedCount++
 			continue
 		}
 
-		// Delete old copy from source node
+		// Delete old copy from source node.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		resp, err := sourceState.client.DeleteFile(ctx, &pb.DeleteFileRequest{
 			StorageId: storageID,
-			FilePath:  filePath,
+			FilePath:  entry.Path,
 		})
 		cancel()
 
 		if err != nil {
 			r.logger.Warn("failed to delete old file copy",
-				"file", filePath,
-				"source_node", moveInfo.from,
-				"target_node", moveInfo.to,
-				"storage_id", storageID,
-				"error", err)
+				"file", entry.Path, "source_node", entry.From,
+				"target_node", entry.To, "storage_id", storageID, "error", err)
 			failedCount++
 		} else if !resp.Success {
 			r.logger.Warn("failed to delete old file copy (server error)",
-				"file", filePath,
-				"source_node", moveInfo.from,
-				"target_node", moveInfo.to,
-				"storage_id", storageID,
-				"message", resp.Message)
+				"file", entry.Path, "source_node", entry.From,
+				"target_node", entry.To, "storage_id", storageID, "message", resp.Message)
 			failedCount++
 		} else {
 			deletedCount++
-			deletedPerNode[moveInfo.from]++
-
-			// Log progress every 100 files
-			if deletedCount%100 == 0 {
+			deletedPerNode[entry.From]++
+			if deletedCount%1000 == 0 {
 				r.logger.Info("cleanup progress",
 					"storage_id", storageID,
 					"deleted", deletedCount,
 					"failed", failedCount,
 					"skipped", skippedCount,
-					"remaining", len(filesToMove)-deletedCount-failedCount-skippedCount,
 					"deleted_per_node", deletedPerNode)
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		r.logger.Warn("error reading rebalance move plan", "storage_id", storageID, "error", err)
+	}
 
+	total := deletedCount + failedCount + skippedCount
 	r.logger.Info("rebalancing cleanup complete",
 		"storage_id", storageID,
 		"files_deleted", deletedCount,
 		"files_failed", failedCount,
 		"files_skipped", skippedCount,
-		"total_files", len(filesToMove),
+		"total_files", total,
 		"deleted_per_node", deletedPerNode)
 
-	// Log warning if many files failed to delete
-	if failedCount > 0 && float64(failedCount)/float64(len(filesToMove)) > 0.1 {
+	if failedCount > 0 && total > 0 && float64(failedCount)/float64(total) > 0.1 {
 		r.logger.Warn("significant number of files failed to delete during cleanup",
 			"storage_id", storageID,
-			"failed_percentage", float64(failedCount)/float64(len(filesToMove))*100)
+			"failed_percentage", float64(failedCount)/float64(total)*100)
 	}
 }
 
