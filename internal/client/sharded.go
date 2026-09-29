@@ -1101,6 +1101,111 @@ func (sc *ShardedClient) readDirFromNode(ctx context.Context, client pb.MonoFSCl
 	return entries, nil
 }
 
+// ReadDirStream lists a directory and invokes fn for each distinct entry in
+// name order. It merges the (sorted) listings from every healthy node with a
+// k-way merge, so memory is O(healthy nodes) rather than O(entries). It returns
+// an error instead of a partial listing if any node stream fails.
+func (sc *ShardedClient) ReadDirStream(ctx context.Context, path string, fn func(*pb.DirEntry) error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	sc.mu.RLock()
+	var healthyNodes []sharding.Node
+	if sc.hrw != nil {
+		healthyNodes = sc.hrw.GetHealthyNodes()
+	}
+	clients := make([]pb.MonoFSClient, 0, len(healthyNodes))
+	nodeIDs := make([]string, 0, len(healthyNodes))
+	for _, node := range healthyNodes {
+		if client, ok := sc.clients[node.ID]; ok {
+			clients = append(clients, client)
+			nodeIDs = append(nodeIDs, node.ID)
+		}
+	}
+	sc.mu.RUnlock()
+
+	if len(clients) == 0 {
+		return fmt.Errorf("no healthy nodes available")
+	}
+
+	type nodeStream struct {
+		nodeID string
+		stream pb.MonoFS_ReadDirClient
+		cancel context.CancelFunc
+		cur    *pb.DirEntry
+	}
+	streams := make([]*nodeStream, 0, len(clients))
+	defer func() {
+		for _, ns := range streams {
+			ns.cancel()
+		}
+	}()
+
+	advance := func(ns *nodeStream) error {
+		entry, err := ns.stream.Recv()
+		if err == io.EOF {
+			ns.cur = nil
+			ns.cancel()
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("readdir stream from node %s: %w", ns.nodeID, err)
+		}
+		ns.cur = entry
+		return nil
+	}
+
+	for i, client := range clients {
+		// No per-node timeout here: a large directory legitimately takes longer
+		// than a single RPC; the caller's context bounds the whole operation.
+		nodeCtx, cancel := context.WithCancel(ctx)
+		stream, err := client.ReadDir(nodeCtx, &pb.ReadDirRequest{Path: path})
+		if err != nil {
+			cancel()
+			return fmt.Errorf("readdir RPC to node %s: %w", nodeIDs[i], err)
+		}
+		ns := &nodeStream{nodeID: nodeIDs[i], stream: stream, cancel: cancel}
+		if err := advance(ns); err != nil {
+			cancel()
+			return err
+		}
+		if ns.cur == nil {
+			cancel()
+			continue
+		}
+		streams = append(streams, ns)
+	}
+
+	var lastName string
+	haveLast := false
+	for {
+		best := -1
+		for i, ns := range streams {
+			if ns.cur == nil {
+				continue
+			}
+			if best == -1 || ns.cur.Name < streams[best].cur.Name {
+				best = i
+			}
+		}
+		if best == -1 {
+			return nil
+		}
+		ns := streams[best]
+		if !haveLast || ns.cur.Name != lastName {
+			lastName = ns.cur.Name
+			haveLast = true
+			if err := fn(ns.cur); err != nil {
+				return err
+			}
+		}
+		if err := advance(ns); err != nil {
+			return err
+		}
+	}
+}
+
 // Read performs a read operation routed via HRW.
 func (sc *ShardedClient) Read(ctx context.Context, path string, offset, size int64) ([]byte, error) {
 	// Check if context is already canceled before starting

@@ -1151,6 +1151,8 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 		if resolved == nil || !resolved.isDir {
 			return nil
 		}
+		// Emit in name order so clients can merge node listings with a heap.
+		sort.Slice(resolved.entries, func(i, j int) bool { return resolved.entries[i].Name < resolved.entries[j].Name })
 		for _, entry := range resolved.entries {
 			entryLogicalPath := kvsChildLogicalPath(resolved.logicalPath, entry.Name)
 			if err := stream.Send(&pb.DirEntry{
@@ -1169,6 +1171,8 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 		if resolved == nil || !resolved.isDir {
 			return nil
 		}
+		// Emit in name order so clients can merge node listings with a heap.
+		sort.Slice(resolved.entries, func(i, j int) bool { return resolved.entries[i].Name < resolved.entries[j].Name })
 		for _, entry := range resolved.entries {
 			entryLogicalPath := kvsChildLogicalPath(resolved.logicalPath, entry.Name)
 			if err := stream.Send(&pb.DirEntry{
