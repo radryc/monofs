@@ -1367,22 +1367,37 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 }
 
 func streamRepositoryFiles(ctx context.Context, client pb.MonoFSClient, storageID string) ([]string, error) {
-	stream, err := client.StreamRepositoryFiles(ctx, &pb.GetRepositoryFilesRequest{StorageId: storageID})
+	var files []string
+	err := forEachRepositoryFile(ctx, client, storageID, func(filePath string) error {
+		files = append(files, filePath)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
+	return files, nil
+}
 
-	files := make([]string, 0)
+// forEachRepositoryFile streams a repository's file list from a node and invokes
+// fn for each path without materializing the whole list, so callers can process
+// very large repositories in bounded memory.
+func forEachRepositoryFile(ctx context.Context, client pb.MonoFSClient, storageID string, fn func(filePath string) error) error {
+	stream, err := client.StreamRepositoryFiles(ctx, &pb.GetRepositoryFilesRequest{StorageId: storageID})
+	if err != nil {
+		return err
+	}
 	for {
 		item, err := stream.Recv()
 		if err == io.EOF {
-			return files, nil
+			return nil
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if item != nil && item.GetFilePath() != "" {
-			files = append(files, item.GetFilePath())
+			if err := fn(item.GetFilePath()); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -2835,90 +2850,67 @@ func (r *Router) onboardNewNode(nodeID string) {
 		}
 		r.mu.RUnlock()
 
-		// Collect all files from existing nodes
-		allFiles := make(map[string]string) // filePath -> sourceNodeID
-		for sourceNodeID, sourceState := range existingNodes {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			files, err := streamRepositoryFiles(ctx, sourceState.client, repoID)
-			cancel()
-
-			if err != nil {
-				r.logger.Warn("failed to get file list from node",
-					"node", sourceNodeID,
-					"repo", repoID,
-					"error", err)
-				continue
-			}
-
-			for _, filePath := range files {
-				allFiles[filePath] = sourceNodeID
-			}
-		}
-
-		r.logger.Info("found files for rebalancing",
-			"repo", repoID,
-			"file_count", len(allFiles))
-
-		// Determine which files should belong to the new node
-		// Group files by source node for batch syncing
-		filesToSync := make(map[string][]*pb.FileInfo) // sourceNodeID -> files
-
-		for filePath, sourceNodeID := range allFiles {
-			totalChecked++
-
-			// Compute HRW hash for this file
-			key := repoID + ":" + filePath
-			targetNode := sharder.GetNode(key)
-
-			if targetNode != nil && targetNode.ID == nodeID {
-				// This file should belong to the new node
-				if _, exists := filesToSync[sourceNodeID]; !exists {
-					filesToSync[sourceNodeID] = []*pb.FileInfo{}
-				}
-				filesToSync[sourceNodeID] = append(filesToSync[sourceNodeID], &pb.FileInfo{
-					StorageId: repoID,
-					FilePath:  filePath,
-				})
-			}
-		}
-
-		// Batch sync files from each source node
-		for sourceNodeID, files := range filesToSync {
+		// Stream files from each existing node and sync the ones the new node
+		// should own in bounded chunks, so memory stays O(batch) regardless of
+		// repository size.
+		const syncBatchSize = 5000
+		for sourceNodeID := range existingNodes {
 			r.mu.RLock()
 			sourceState := r.nodes[sourceNodeID]
 			r.mu.RUnlock()
-
-			if sourceState == nil {
+			if sourceState == nil || sourceState.client == nil {
 				continue
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			resp, err := newNode.client.SyncMetadataFromNode(ctx, &pb.SyncMetadataFromNodeRequest{
-				SourceNodeId: sourceNodeID,
-				TargetNodeId: nodeID,
-				Files:        files,
-			})
-			cancel()
-
-			if err != nil {
-				r.logger.Warn("failed to sync files from source node",
-					"source_node", sourceNodeID,
-					"file_count", len(files),
-					"error", err)
-			} else {
+			batch := make([]*pb.FileInfo, 0, syncBatchSize)
+			flush := func() {
+				if len(batch) == 0 {
+					return
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				resp, err := newNode.client.SyncMetadataFromNode(ctx, &pb.SyncMetadataFromNodeRequest{
+					SourceNodeId: sourceNodeID,
+					TargetNodeId: nodeID,
+					Files:        batch,
+				})
+				cancel()
+				if err != nil {
+					r.logger.Warn("failed to sync files from source node",
+						"source_node", sourceNodeID,
+						"file_count", len(batch),
+						"error", err)
+					return
+				}
 				totalSynced += resp.FilesSynced
-				r.logger.Info("synced files from source node",
-					"source_node", sourceNodeID,
-					"synced", resp.FilesSynced,
-					"total", len(files))
-
-				// Update progress
 				r.mu.Lock()
 				if totalChecked > 0 {
 					state.syncProgress = float64(totalSynced) / float64(totalChecked)
 				}
 				r.mu.Unlock()
+				batch = batch[:0]
 			}
+
+			streamCtx, streamCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			err := forEachRepositoryFile(streamCtx, sourceState.client, repoID, func(filePath string) error {
+				totalChecked++
+				key := repoID + ":" + filePath
+				targetNode := sharder.GetNode(key)
+				if targetNode != nil && targetNode.ID == nodeID {
+					batch = append(batch, &pb.FileInfo{StorageId: repoID, FilePath: filePath})
+					if len(batch) >= syncBatchSize {
+						flush()
+					}
+				}
+				return nil
+			})
+			streamCancel()
+			if err != nil {
+				r.logger.Warn("failed to stream file list from node",
+					"node", sourceNodeID,
+					"repo", repoID,
+					"error", err)
+			}
+			flush()
 		}
 	}
 

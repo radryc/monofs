@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -199,6 +200,21 @@ func splitOwnedFileKey(key []byte) (storageID, filePath string, ok bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+// prefixScanKeys returns every key in bucket that starts with prefix. A missing
+// match yields an empty slice rather than an error. Unlike GetKeys it never
+// materializes keys outside the requested prefix, which keeps per-repository
+// operations bounded by repository size instead of total node size.
+func prefixScanKeys(tx *nutsdb.Tx, bucket string, prefix []byte) ([][]byte, error) {
+	keys, _, err := tx.PrefixScanEntries(bucket, prefix, "", 0, -1, true, false)
+	if err != nil {
+		if errors.Is(err, nutsdb.ErrPrefixScan) || errors.Is(err, nutsdb.ErrBucketNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return keys, nil
 }
 
 func storedMetadataSize(data []byte) (int64, error) {
