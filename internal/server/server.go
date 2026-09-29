@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -135,6 +134,7 @@ const (
 	bucketOwnedFiles       = "ownedfiles"        // Files owned by this node (key: "storageID:filePath", value: "1")
 	bucketReplicaFiles     = "replicafiles"      // Replica file tracking (key: "storageID:filePath", value: ownerNodeID)
 	bucketOnboardingStatus = "onboarding_status" // Repository onboarding status (key: storage_id, value: "true"/"false")
+	bucketNodeCounters     = "nodecounters"      // Persisted node usage counters (key: "usage")
 )
 
 // makeStorageKey generates a SHA-256 hash key for database storage.
@@ -248,6 +248,53 @@ func loadOwnedUsage(tx *nutsdb.Tx) (int64, int64, error) {
 	}
 
 	return totalFiles, totalBytes, nil
+}
+
+// usageCounterRecord is the persisted form of the node's owned-files/bytes
+// counters. Persisting it lets startup avoid an O(total files) scan.
+type usageCounterRecord struct {
+	TotalFiles int64 `json:"total_files"`
+	OwnedBytes int64 `json:"owned_bytes"`
+}
+
+const usageCounterKey = "usage"
+
+// loadUsageCounters reads the persisted usage counters. found is false when no
+// record exists yet (fresh or pre-upgrade database), in which case the caller
+// should fall back to a one-time scan.
+func loadUsageCounters(tx *nutsdb.Tx) (totalFiles, ownedBytes int64, found bool, err error) {
+	value, getErr := tx.Get(bucketNodeCounters, []byte(usageCounterKey))
+	if getErr != nil {
+		if getErr == nutsdb.ErrKeyNotFound || getErr == nutsdb.ErrBucketNotFound {
+			return 0, 0, false, nil
+		}
+		return 0, 0, false, getErr
+	}
+	var rec usageCounterRecord
+	if unmarshalErr := json.Unmarshal(value, &rec); unmarshalErr != nil {
+		// Treat a corrupt record as absent and let the caller rescan.
+		return 0, 0, false, nil
+	}
+	return rec.TotalFiles, rec.OwnedBytes, true, nil
+}
+
+// persistUsageCounters stores the current atomic counters. It is called after
+// each mutating operation so the persisted value drifts by at most one
+// in-flight operation if the process crashes.
+func (s *Server) persistUsageCounters() {
+	rec := usageCounterRecord{
+		TotalFiles: s.totalFiles.Load(),
+		OwnedBytes: s.ownedBytes.Load(),
+	}
+	value, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	if err := s.db.Update(func(tx *nutsdb.Tx) error {
+		return tx.Put(bucketNodeCounters, []byte(usageCounterKey), value, 0)
+	}); err != nil {
+		s.logger.Warn("failed to persist usage counters", "error", err)
+	}
 }
 
 // getHashFromPath retrieves the stored hash for a given storageID:filePath from the index.
@@ -371,6 +418,13 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, dbSync bool, logger 
 		return nil, fmt.Errorf("failed to create onboarding status bucket: %w", err)
 	}
 
+	if err := db.Update(func(tx *nutsdb.Tx) error {
+		return tx.NewBucket(nutsdb.DataStructureBTree, bucketNodeCounters)
+	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
+		db.Close()
+		return nil, fmt.Errorf("failed to create node counters bucket: %w", err)
+	}
+
 	s := &Server{
 		nodeID:       nodeID,
 		address:      address,
@@ -398,20 +452,42 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, dbSync bool, logger 
 		}
 	}
 
-	// Initialize ownership counters from database.
+	// Initialize ownership counters. Prefer the persisted record so startup is
+	// O(1); fall back to a one-time scan on fresh/pre-upgrade databases and
+	// persist the result so subsequent starts are fast.
 	var initialCount int64
 	var initialBytes int64
+	countersPersisted := false
 	if err := s.db.View(func(tx *nutsdb.Tx) error {
-		var err error
-		initialCount, initialBytes, err = loadOwnedUsage(tx)
-		return err
+		count, bytes_, found, err := loadUsageCounters(tx)
+		if err != nil {
+			return err
+		}
+		if found {
+			initialCount, initialBytes = count, bytes_
+			countersPersisted = true
+			return nil
+		}
+		count, bytes_, err = loadOwnedUsage(tx)
+		if err != nil {
+			return err
+		}
+		initialCount, initialBytes = count, bytes_
+		return nil
 	}); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize ownership counters: %w", err)
 	}
 	s.totalFiles.Store(initialCount)
 	s.ownedBytes.Store(initialBytes)
-	logger.Info("initialized ownership counters", "total_files", initialCount, "owned_bytes", initialBytes)
+	if !countersPersisted {
+		// Backfill the persisted record after the one-time scan.
+		s.persistUsageCounters()
+	}
+	logger.Info("initialized ownership counters",
+		"total_files", initialCount,
+		"owned_bytes", initialBytes,
+		"persisted", countersPersisted)
 
 	return s, nil
 }
@@ -924,6 +1000,7 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 	if usedBytesDelta != 0 {
 		s.ownedBytes.Add(usedBytesDelta)
 	}
+	s.persistUsageCounters()
 	serverIngestFilesTotal.Inc()
 	serverIngestBytesTotal.Add(float64(meta.Size))
 
@@ -1140,6 +1217,10 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 				"display_path", displayPath)
 		}
 
+		// Accumulate directory-index mutations for the whole batch and flush
+		// once per touched directory, keeping memory bounded by batch size.
+		pendingDirEntries := make(map[string][]dirIndexEntry)
+
 		// Batch insert all files
 		for _, pf := range prepared {
 			// Check if file already exists
@@ -1186,6 +1267,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 				filesFailed++
 				continue
 			}
+			accumulateDirectoryIndexEntry(pendingDirEntries, pf.filePath, pf.mode, pf.size, pf.mtime, pf.isDir, string(pf.key))
 
 			if filesIngested < 3 { // Log first 3 keys for debugging
 				s.logger.Info("stored ownership key", "key", string(pf.ownershipKey))
@@ -1200,103 +1282,25 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 
 		// Process dir-hint entries: update the directory index for files
 		// owned by other nodes so this node has a complete dir listing.
+		for _, dh := range dirHints {
+			if err := s.upsertDirectoryHierarchy(tx, storageID, dh.filePath, dh.mode, dh.mtime, dh.isDir); err != nil {
+				return fmt.Errorf("store canonical directories from dir hint %q: %w", dh.filePath, err)
+			}
+			if err := s.upsertPathIntoDirectorySummary(tx, storageID, dh.filePath, dh.mode, dh.size, dh.mtime, dh.isDir, string(dh.hashKey)); err != nil {
+				return fmt.Errorf("store canonical dir summaries from dir hint %q: %w", dh.filePath, err)
+			}
+			accumulateDirectoryIndexEntry(pendingDirEntries, dh.filePath, dh.mode, dh.size, dh.mtime, dh.isDir, string(dh.hashKey))
+		}
 		if len(dirHints) > 0 {
-			// Build an in-memory dir map from all dir-hint entries,
-			// then merge into the existing on-disk dir index.
-			dirMap := make(map[string][]dirIndexEntry)
-			for _, dh := range dirHints {
-				if err := s.upsertDirectoryHierarchy(tx, storageID, dh.filePath, dh.mode, dh.mtime, dh.isDir); err != nil {
-					return fmt.Errorf("store canonical directories from dir hint %q: %w", dh.filePath, err)
-				}
-				if err := s.upsertPathIntoDirectorySummary(tx, storageID, dh.filePath, dh.mode, dh.size, dh.mtime, dh.isDir, string(dh.hashKey)); err != nil {
-					return fmt.Errorf("store canonical dir summaries from dir hint %q: %w", dh.filePath, err)
-				}
-				parts := strings.Split(dh.filePath, "/")
-				for i := 0; i < len(parts); i++ {
-					var dirPath, entryName string
-					var isDir bool
-					if i == 0 {
-						dirPath = ""
-						entryName = parts[0]
-						isDir = (i < len(parts)-1)
-					} else {
-						dirPath = strings.Join(parts[:i], "/")
-						entryName = parts[i]
-						isDir = (i < len(parts)-1)
-					}
-					if i == len(parts)-1 && dh.isDir {
-						isDir = true
-					}
-					entries := dirMap[dirPath]
-					found := false
-					for j, entry := range entries {
-						if entry.Name == entryName {
-							if !isDir {
-								entries[j] = dirIndexEntry{
-									Name: entryName, Mode: dh.mode,
-									Size: dh.size, Mtime: dh.mtime,
-									HashKey: string(dh.hashKey), IsDir: false,
-								}
-							} else if dh.mtime > entry.Mtime {
-								entries[j].Mtime = dh.mtime
-							}
-							found = true
-							break
-						}
-					}
-					if !found {
-						e := dirIndexEntry{Name: entryName, IsDir: isDir, Mtime: dh.mtime}
-						if !isDir {
-							e.Mode = dh.mode
-							e.Size = dh.size
-							e.HashKey = string(dh.hashKey)
-						} else if dh.mode&0222 == 0 {
-							e.Mode = 0555 | uint32(syscall.S_IFDIR)
-						} else {
-							e.Mode = 0755 | uint32(syscall.S_IFDIR)
-						}
-						entries = append(entries, e)
-					}
-					dirMap[dirPath] = entries
-				}
-			}
-
-			// Merge with existing on-disk dir index entries.
-			for dirPath, newEntries := range dirMap {
-				dirIndexKey := makeDirIndexKey(storageID, dirPath)
-				// Read existing entries.
-				var existing []dirIndexEntry
-				if val, err := tx.Get(bucketDirIndex, dirIndexKey); err == nil {
-					json.Unmarshal(val, &existing)
-				}
-				// Merge: keep existing entries, add/update from newEntries.
-				merged := existing
-				for _, ne := range newEntries {
-					found := false
-					for j, ex := range merged {
-						if ex.Name == ne.Name {
-							// Prefer the entry with actual file data.
-							if !ne.IsDir && ne.Size > 0 {
-								merged[j] = ne
-							}
-							found = true
-							break
-						}
-					}
-					if !found {
-						merged = append(merged, ne)
-					}
-				}
-				sort.Slice(merged, func(i, j int) bool {
-					return merged[i].Name < merged[j].Name
-				})
-				val, _ := json.Marshal(merged)
-				tx.Put(bucketDirIndex, dirIndexKey, val, 0)
-			}
 			s.logger.Info("processed dir hints",
 				"storage_id", storageID,
-				"hint_files", len(dirHints),
-				"dirs_updated", len(dirMap))
+				"hint_files", len(dirHints))
+		}
+
+		// Flush accumulated directory-index entries (batch files + hints) once
+		// per touched directory.
+		if err := flushDirectoryIndexEntries(tx, storageID, pendingDirEntries); err != nil {
+			return err
 		}
 
 		return nil
@@ -1317,6 +1321,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 	if usedBytesDelta != 0 {
 		s.ownedBytes.Add(usedBytesDelta)
 	}
+	s.persistUsageCounters()
 
 	s.logger.Info("batch ingestion completed",
 		"files_ingested", filesIngested,

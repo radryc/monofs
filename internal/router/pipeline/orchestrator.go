@@ -146,6 +146,11 @@ func (o *Orchestrator) executeRun(run *PipelineRun, cfg *PipelineConfig, event W
 	entrypoints := cfg.EntrypointJobs()
 	jobsStarted := 0
 	for _, jobName := range entrypoints {
+		// A concurrent task result may have already driven this entrypoint to a
+		// terminal state before executeRun acquired the lock; do not reset it.
+		if j, ok := run.Jobs[jobName]; !ok || j.State != JobPending {
+			continue
+		}
 		if o.canRunJob(cfg, run, jobName, event, affected) {
 			enqueued := o.enqueueJobTasks(run, cfg, jobName, affected)
 			if enqueued > 0 {
@@ -160,10 +165,18 @@ func (o *Orchestrator) executeRun(run *PipelineRun, cfg *PipelineConfig, event W
 	}
 
 	if jobsStarted == 0 {
-		o.setRunStateLocked(run, RunSucceeded)
-		now := time.Now()
-		run.FinishedAt = &now
-		notify = true
+		if o.hasActiveJobs(run) {
+			// Downstream jobs are already in flight (e.g. enqueued by a task
+			// result that raced ahead); let them finish the run.
+			if run.State == RunPending {
+				o.setRunStateLocked(run, RunRunning)
+			}
+		} else {
+			o.setRunStateLocked(run, RunSucceeded)
+			now := time.Now()
+			run.FinishedAt = &now
+			notify = true
+		}
 	}
 
 	o.mu.Unlock()
@@ -381,9 +394,10 @@ func (o *Orchestrator) OnTaskResult(ctx context.Context, result *TaskResult) {
 		}
 	}
 
+	newState := run.State
 	o.mu.Unlock()
 
-	if !isTerminalRunState(prevState) && isTerminalRunState(run.State) {
+	if !isTerminalRunState(prevState) && isTerminalRunState(newState) {
 		o.notifyRunFinished(run)
 	}
 }
@@ -456,6 +470,15 @@ func (o *Orchestrator) advancePipeline(ctx context.Context, run *PipelineRun) {
 			enqueued := o.enqueueJobTasks(run, cfg, jobName, run.Affected)
 			if enqueued > 0 {
 				o.setJobStateLocked(run, jobName, JobRunning)
+				// Mark the run in progress so a concurrently starting
+				// executeRun does not re-initialize already-handled jobs.
+				if run.State == RunPending {
+					o.setRunStateLocked(run, RunRunning)
+					if run.StartedAt == nil {
+						now := time.Now()
+						run.StartedAt = &now
+					}
+				}
 			} else {
 				o.setJobStateLocked(run, jobName, JobSkipped)
 				completed[jobName] = true
@@ -627,6 +650,16 @@ func (o *Orchestrator) setJobStateLocked(run *PipelineRun, jobName string, state
 	if job, ok := run.Jobs[jobName]; ok {
 		job.State = state
 	}
+}
+
+func (o *Orchestrator) hasActiveJobs(run *PipelineRun) bool {
+	for _, job := range run.Jobs {
+		switch job.State {
+		case JobPending, JobClaimed, JobRunning:
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Orchestrator) anyJobFailed(run *PipelineRun) bool {

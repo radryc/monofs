@@ -893,6 +893,7 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 		if deletedBytes != 0 {
 			s.ownedBytes.Add(-deletedBytes)
 		}
+		s.persistUsageCounters()
 	}
 
 	// Do not evict blob hashes from fetchers on per-file cleanup.
@@ -1083,6 +1084,7 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 	if deletedBytes != 0 {
 		s.ownedBytes.Add(-deletedBytes)
 	}
+	s.persistUsageCounters()
 
 	// Clear intermediate directory cache
 	s.intermediateDirCache.Range(func(key, value interface{}) bool {
