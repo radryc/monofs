@@ -2,7 +2,6 @@ package registry
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -116,26 +115,4 @@ func (s *UploadSession) Digest() (string, error) {
 	}
 	_ = s.SeekToStart()
 	return "sha256:" + fmt.Sprintf("%x", h.Sum(nil)), nil
-}
-
-type uploadStateJSON struct {
-	ID        string `json:"id"`
-	Repo      string `json:"repo"`
-	Size      int64  `json:"size"`
-	StartedAt int64  `json:"started_at"`
-}
-
-func (um *UploadManager) MarshalJSON() ([]byte, error) {
-	um.mu.RLock()
-	defer um.mu.RUnlock()
-	states := make([]uploadStateJSON, 0, len(um.sessions))
-	for _, s := range um.sessions {
-		states = append(states, uploadStateJSON{
-			ID:        s.ID,
-			Repo:      s.Repo,
-			Size:      s.Size,
-			StartedAt: s.StartedAt.Unix(),
-		})
-	}
-	return json.Marshal(states)
 }

@@ -92,7 +92,9 @@ func (s *Service) GetUpstreamLog(ctx context.Context, req *pb.UpstreamLogRequest
 // GetUpstreamTags lists the tags on an upstream repository with their resolved
 // commit hashes.
 func (s *Service) GetUpstreamTags(ctx context.Context, req *pb.UpstreamTagsRequest) (*pb.UpstreamTagsResponse, error) {
-	repo, err := s.openUpstreamRepo(ctx, req.GetRepoUrl(), "main")
+	// Pass an empty ref so the remote's default branch (HEAD) is used rather
+	// than assuming "main"; tags do not depend on the checked-out branch.
+	repo, err := s.openUpstreamRepo(ctx, req.GetRepoUrl(), "")
 	if err != nil {
 		return nil, err
 	}

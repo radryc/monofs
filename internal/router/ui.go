@@ -183,8 +183,11 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/registry/repos", r.handleRegistryRepos)
 	mux.HandleFunc("/api/registry/repos/", r.handleRegistryRepoDetail)
 
+	mux.HandleFunc("/api/dependencies", r.handleDependenciesAPI)
+
 	mux.HandleFunc("/api/pipelines", r.handlePipelinesAPI)
 	mux.HandleFunc("/api/pipelines/", r.handlePipelinesAPI)
+	mux.HandleFunc("/api/pipelines/help", r.handlePipelineHelp)
 
 	mux.HandleFunc("/api/webhooks/github", r.handleGitHubWebhook)
 	mux.HandleFunc("/api/webhooks/gitlab", r.handleGitLabWebhook)
@@ -668,7 +671,8 @@ func (r *Router) handleRebalance(w http.ResponseWriter, req *http.Request) {
 
 // handleSearchAPI handles search requests
 func (r *Router) handleSearchAPI(w http.ResponseWriter, req *http.Request) {
-	if r.searchClient == nil {
+	client := r.searchClientSnapshot()
+	if client == nil {
 		http.Error(w, "Search service not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -698,7 +702,7 @@ func (r *Router) handleSearchAPI(w http.ResponseWriter, req *http.Request) {
 	ctx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
 	defer cancel()
 
-	resp, err := r.searchClient.Search(ctx, &pb.SearchRequest{
+	resp, err := client.Search(ctx, &pb.SearchRequest{
 		Query:         searchReq.Query,
 		StorageId:     searchReq.StorageID,
 		CaseSensitive: searchReq.CaseSensitive,
@@ -717,7 +721,8 @@ func (r *Router) handleSearchAPI(w http.ResponseWriter, req *http.Request) {
 
 // handleSearchIndexes returns all search indexes
 func (r *Router) handleSearchIndexes(w http.ResponseWriter, req *http.Request) {
-	if r.searchClient == nil {
+	client := r.searchClientSnapshot()
+	if client == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -730,7 +735,7 @@ func (r *Router) handleSearchIndexes(w http.ResponseWriter, req *http.Request) {
 	ctx, cancel := context.WithTimeout(req.Context(), 10*time.Second)
 	defer cancel()
 
-	resp, err := r.searchClient.ListIndexes(ctx, &pb.ListIndexesRequest{})
+	resp, err := client.ListIndexes(ctx, &pb.ListIndexesRequest{})
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -748,7 +753,8 @@ func (r *Router) handleSearchIndexes(w http.ResponseWriter, req *http.Request) {
 func (r *Router) handleSearchRebuild(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	if r.searchClient == nil {
+	client := r.searchClientSnapshot()
+	if client == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":   "Search service not configured or unavailable",
@@ -781,7 +787,7 @@ func (r *Router) handleSearchRebuild(w http.ResponseWriter, req *http.Request) {
 	defer cancel()
 
 	if rebuildReq.All {
-		resp, err := r.searchClient.RebuildAllIndexes(ctx, &pb.RebuildAllIndexesRequest{
+		resp, err := client.RebuildAllIndexes(ctx, &pb.RebuildAllIndexesRequest{
 			Force: rebuildReq.Force,
 		})
 		if err != nil {
@@ -794,7 +800,7 @@ func (r *Router) handleSearchRebuild(w http.ResponseWriter, req *http.Request) {
 		}
 		json.NewEncoder(w).Encode(resp)
 	} else {
-		resp, err := r.searchClient.RebuildIndex(ctx, &pb.RebuildIndexRequest{
+		resp, err := client.RebuildIndex(ctx, &pb.RebuildIndexRequest{
 			StorageId: rebuildReq.StorageID,
 			Force:     rebuildReq.Force,
 		})
@@ -812,7 +818,8 @@ func (r *Router) handleSearchRebuild(w http.ResponseWriter, req *http.Request) {
 
 // handleSearchStats returns search service statistics
 func (r *Router) handleSearchStats(w http.ResponseWriter, req *http.Request) {
-	if r.searchClient == nil {
+	client := r.searchClientSnapshot()
+	if client == nil {
 		http.Error(w, "Search service not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -820,7 +827,7 @@ func (r *Router) handleSearchStats(w http.ResponseWriter, req *http.Request) {
 	ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
 	defer cancel()
 
-	resp, err := r.searchClient.GetStats(ctx, &pb.StatsRequest{})
+	resp, err := client.GetStats(ctx, &pb.StatsRequest{})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get stats: %v", err), http.StatusInternalServerError)
 		return

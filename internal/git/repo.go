@@ -273,27 +273,6 @@ func resolveReference(repo *git.Repository, branch string) (*plumbing.Reference,
 	return nil, fmt.Errorf("failed to get branch ref (tried local, remote, tag, HEAD): %w", err)
 }
 
-// resolveReferenceWithFallback tries the specified branch, then falls back to main/master
-func resolveReferenceWithFallback(repo *git.Repository, branch string) (*plumbing.Reference, error) {
-	// Try the specified branch first
-	if branch != "" {
-		ref, err := resolveReference(repo, branch)
-		if err == nil {
-			return ref, nil
-		}
-	}
-
-	// Fallback to common default branches
-	for _, fallbackBranch := range []string{"main", "master"} {
-		ref, err := resolveReference(repo, fallbackBranch)
-		if err == nil {
-			return ref, nil
-		}
-	}
-
-	return nil, fmt.Errorf("failed to resolve reference (tried %q, main, master)", branch)
-}
-
 // ResolveCommit resolves a branch, tag, or commit SHA ref to its commit hash,
 // peeling annotated tags down to their target commit.
 func (rm *RepoManager) ResolveCommit(repo *git.Repository, ref string) (plumbing.Hash, error) {

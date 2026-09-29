@@ -21,6 +21,7 @@ import (
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
 	"github.com/radryc/monofs/pkg/authz"
+	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -141,6 +142,7 @@ type Router struct {
 	routersCacheAt time.Time
 
 	// Search service integration
+	searchMu     sync.RWMutex
 	searchClient pb.MonoFSSearchClient
 	searchConn   *grpc.ClientConn
 	searchAddr   string
@@ -185,6 +187,7 @@ type Router struct {
 	clients     map[string]*clientState // clientID -> state
 	clientsMu   sync.RWMutex
 	stopClients chan struct{}
+	closeOnce   sync.Once
 
 	// Guardian clients (guardian-* prefixed clients with special config)
 	guardianClients   map[string]*guardianClientState // clientID -> guardian state
@@ -445,6 +448,13 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 	r.version.Store(1)
 	r.namespaceGeneration.Store(1)
 
+	// Load partition-level grants (if configured) and apply ingest enforcement.
+	if evaluator := buildGrantEvaluator(cfg, logger); evaluator != nil {
+		r.SetGrantEvaluator(evaluator, cfg.AuthzEnforceIngest)
+	} else if cfg.AuthzEnforceIngest {
+		logger.Warn("authz ingest enforcement requested but no grant source configured; all ingest will be denied")
+	}
+
 	if cfg.AutoPushEnabled {
 		interval := cfg.AutoPushInterval
 		if interval <= 0 {
@@ -586,10 +596,29 @@ func (r *Router) SetSearchClient(addr string) error {
 		return nil
 	}
 
-	r.searchConn = conn
-	r.searchClient = pb.NewMonoFSSearchClient(conn)
+	r.setSearchClientConn(conn)
 	r.logger.Info("search service client configured", "addr", addr)
 	return nil
+}
+
+// setSearchClientConn stores the search connection under lock, closing any
+// previous connection so it is not leaked.
+func (r *Router) setSearchClientConn(conn *grpc.ClientConn) {
+	r.searchMu.Lock()
+	old := r.searchConn
+	r.searchConn = conn
+	r.searchClient = pb.NewMonoFSSearchClient(conn)
+	r.searchMu.Unlock()
+	if old != nil && old != conn {
+		old.Close()
+	}
+}
+
+// searchClientSnapshot returns the current search client under lock.
+func (r *Router) searchClientSnapshot() pb.MonoFSSearchClient {
+	r.searchMu.RLock()
+	defer r.searchMu.RUnlock()
+	return r.searchClient
 }
 
 // retrySearchConnection retries connecting to search service in background
@@ -597,8 +626,14 @@ func (r *Router) retrySearchConnection(addr string) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		if r.searchClient != nil {
+	for {
+		select {
+		case <-r.stopClients:
+			return
+		case <-ticker.C:
+		}
+
+		if r.searchClientSnapshot() != nil {
 			// Already connected
 			return
 		}
@@ -614,8 +649,7 @@ func (r *Router) retrySearchConnection(addr string) {
 			continue
 		}
 
-		r.searchConn = conn
-		r.searchClient = pb.NewMonoFSSearchClient(conn)
+		r.setSearchClientConn(conn)
 		r.logger.Info("search service client connected after retry", "addr", addr)
 		return
 	}
@@ -787,6 +821,7 @@ func (r *Router) RegisterNode(nodeID, address string, weight uint32) error {
 	// Connect to the node to verify it's reachable
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpcx.IPv4DialerOption(),
 	)
 	if err != nil {
 		return fmt.Errorf("connect to node %s: %w", nodeID, err)
@@ -1400,18 +1435,6 @@ func (r *Router) telemetryNodeClient(signal, chunkID string) (pb.MonoFSClient, e
 	return state.client, nil
 }
 
-// anyHealthyNodeClient returns the gRPC client for any healthy active node.
-func (r *Router) anyHealthyNodeClient() (pb.MonoFSClient, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, state := range r.nodes {
-		if state != nil && state.info != nil && state.info.Healthy && state.status == NodeActive && state.client != nil {
-			return state.client, nil
-		}
-	}
-	return nil, fmt.Errorf("no healthy nodes available")
-}
-
 // allHealthyNodeClients returns gRPC clients for all healthy active nodes.
 func (r *Router) allHealthyNodeClients() []pb.MonoFSClient {
 	r.mu.RLock()
@@ -1643,6 +1666,29 @@ func (r *Router) healthCheckLoop() {
 
 // checkAllNodes checks health of all registered nodes.
 func (r *Router) checkAllNodes() {
+	// Probe existing node connections without holding the router lock. A slow
+	// or dead node must not stall routing for every other request while its
+	// health check is in flight.
+	type nodeProbe struct {
+		info *pb.NodeInfoResponse
+		err  error
+	}
+	probes := make(map[string]nodeProbe)
+	r.mu.RLock()
+	clients := make(map[string]pb.MonoFSClient, len(r.nodes))
+	for id, st := range r.nodes {
+		if st.client != nil {
+			clients[id] = st.client
+		}
+	}
+	r.mu.RUnlock()
+	for id, probeClient := range clients {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		info, err := probeClient.GetNodeInfo(ctx, &pb.NodeInfoRequest{})
+		cancel()
+		probes[id] = nodeProbe{info: info, err: err}
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1691,6 +1737,7 @@ func (r *Router) checkAllNodes() {
 		if state.client == nil && state.conn == nil {
 			conn, err := grpc.NewClient(state.info.Address,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpcx.IPv4DialerOption(),
 			)
 			if err != nil {
 				r.logger.Debug("failed to connect to node", "node_id", nodeID, "error", err)
@@ -1714,11 +1761,20 @@ func (r *Router) checkAllNodes() {
 			r.logger.Info("established connection to node", "node_id", nodeID, "address", state.info.Address)
 		}
 
-		// Active health check if we have a connection
+		// Active health check using the probe taken before the lock was held.
 		if state.client != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			nodeInfo, err := state.client.GetNodeInfo(ctx, &pb.NodeInfoRequest{})
-			cancel()
+			probe, probed := probes[nodeID]
+			var nodeInfo *pb.NodeInfoResponse
+			var err error
+			if probed {
+				nodeInfo, err = probe.info, probe.err
+			} else {
+				// Connection was established during this pass; probe it inline
+				// (one-time per node lifetime).
+				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+				nodeInfo, err = state.client.GetNodeInfo(ctx, &pb.NodeInfoRequest{})
+				cancel()
+			}
 
 			if err != nil {
 				errText := err.Error()
@@ -1821,46 +1877,52 @@ func (r *Router) evalPolicy(req *workspacepolicy.EvaluationRequest) (*workspacep
 	return workspacepolicy.Evaluate(cfg, req), nil
 }
 
-// Close shuts down the router and all connections.
+// Close shuts down the router and all connections. It is idempotent.
 func (r *Router) Close() error {
-	r.StopHealthCheck()
+	r.closeOnce.Do(func() {
+		r.StopHealthCheck()
 
-	// Stop UI handler
-	close(r.stopUI)
-	r.stopFetcherReconnectLoop()
+		// Stop the UI handler and background client/search-retry goroutines.
+		close(r.stopUI)
+		close(r.stopClients)
+		r.stopFetcherReconnectLoop()
 
-	// Flush and stop the guardian version store background ticker.
-	r.guardianVersions.close()
+		// Flush and stop the guardian version store background ticker.
+		r.guardianVersions.close()
 
-	if r.autoPushWorker != nil {
-		r.autoPushWorker.Stop()
-	}
-
-	if r.autoRefreshWorker != nil {
-		r.autoRefreshWorker.Stop()
-	}
-
-	if r.workspaceJobStore != nil {
-		r.workspaceJobStore.Close()
-	}
-
-	// Close search connection
-	if r.searchConn != nil {
-		r.searchConn.Close()
-	}
-
-	r.swapFetcherClient(nil)
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	for _, state := range r.nodes {
-		if state.conn != nil {
-			state.conn.Close()
+		if r.autoPushWorker != nil {
+			r.autoPushWorker.Stop()
 		}
-	}
-	r.nodes = nil
 
+		if r.autoRefreshWorker != nil {
+			r.autoRefreshWorker.Stop()
+		}
+
+		if r.workspaceJobStore != nil {
+			r.workspaceJobStore.Close()
+		}
+
+		// Close search connection.
+		r.searchMu.Lock()
+		conn := r.searchConn
+		r.searchConn = nil
+		r.searchClient = nil
+		r.searchMu.Unlock()
+		if conn != nil {
+			conn.Close()
+		}
+
+		r.swapFetcherClient(nil)
+
+		r.mu.Lock()
+		for _, state := range r.nodes {
+			if state.conn != nil {
+				state.conn.Close()
+			}
+		}
+		r.nodes = nil
+		r.mu.Unlock()
+	})
 	return nil
 }
 
@@ -2890,55 +2952,6 @@ func (r *Router) onboardNewNode(nodeID string) {
 	}
 }
 
-// triggerRebalanceOnRecovery handles rebalancing when a previously unhealthy node recovers.
-// This ensures that files are redistributed correctly when nodes come back online.
-func (r *Router) triggerRebalanceOnRecovery(nodeID string) {
-	r.logger.Info("triggering rebalancing after node recovery",
-		"node_id", nodeID,
-		"topology_version", r.version.Load())
-
-	// Wait briefly for other nodes to potentially recover as well
-	// This prevents a flurry of rebalancing operations when multiple nodes recover simultaneously
-	time.Sleep(2 * time.Second)
-
-	// First check if the node still needs onboarding (may have missed repo ingestion)
-	r.mu.RLock()
-	state := r.nodes[nodeID]
-	if state == nil || !state.info.Healthy {
-		r.mu.RUnlock()
-		r.logger.Debug("node no longer healthy, skipping recovery rebalance", "node_id", nodeID)
-		return
-	}
-
-	// Check if there are any ingested repos to rebalance
-	if len(r.ingestedRepos) == 0 {
-		r.mu.RUnlock()
-		r.logger.Debug("no repositories to rebalance", "node_id", nodeID)
-		return
-	}
-
-	allRepos := make([]string, 0, len(r.ingestedRepos))
-	for storageID := range r.ingestedRepos {
-		allRepos = append(allRepos, storageID)
-	}
-	r.mu.RUnlock()
-
-	// Check onboarding status first - the node might need to sync repos it missed
-	if state.client != nil && !state.onboardRequested {
-		r.checkAndRecoverNode(nodeID, state)
-	}
-
-	// Then trigger rebalancing for all repositories
-	r.logger.Info("rebalancing all repositories after node recovery",
-		"node_id", nodeID,
-		"repo_count", len(allRepos),
-		"topology_version", r.version.Load())
-
-	for _, storageID := range allRepos {
-		go r.rebalanceRepository(storageID)
-	}
-}
-
 // rebalanceRepository redistributes files for a specific repository across all active nodes.
 // Uses atomic rebalancing with dual-state period to ensure zero downtime.
 func (r *Router) rebalanceRepository(storageID string) {
@@ -2991,7 +3004,9 @@ func (r *Router) rebalanceRepository(storageID string) {
 	activeNodes := make([]sharding.Node, 0, len(r.nodes))
 	nodeStates := make(map[string]*nodeState)
 	for nodeID, state := range r.nodes {
-		if state.info.Healthy && state.status == NodeActive {
+		// Require a live client: statically registered nodes are Active before
+		// the health check connects them, and this loop dereferences the client.
+		if state.info.Healthy && state.status == NodeActive && state.client != nil {
 			activeNodes = append(activeNodes, sharding.Node{
 				ID:      state.info.NodeId,
 				Address: state.info.Address,
@@ -3109,6 +3124,11 @@ func (r *Router) rebalanceRepository(storageID string) {
 		})
 	}
 
+	// successfullyMoved tracks files confirmed present on the target. Only
+	// these may be deleted from the source during cleanup; deleting anything
+	// else risks data loss if a sync failed or was partial.
+	successfullyMoved := make(map[string]struct{}, len(filesToMove))
+
 	// Copy files to new locations in batches
 	for targetNodeID, sourceMap := range filesByRoute {
 		targetState := nodeStates[targetNodeID]
@@ -3140,6 +3160,21 @@ func (r *Router) rebalanceRepository(storageID string) {
 					"to", targetNodeID,
 					"synced", resp.FilesSynced,
 					"total", len(files))
+
+				// Only mark the batch deletable when the sync reported full
+				// success. A partial sync must not trigger source deletion.
+				if resp.Success && resp.FilesSynced == int64(len(files)) {
+					for _, f := range files {
+						successfullyMoved[f.GetFilePath()] = struct{}{}
+					}
+				} else {
+					r.logger.Warn("rebalancing sync incomplete, source copies retained",
+						"from", sourceNodeID,
+						"to", targetNodeID,
+						"synced", resp.FilesSynced,
+						"total", len(files),
+						"success", resp.Success)
+				}
 
 				// Update progress
 				repo.mu.Lock()
@@ -3222,8 +3257,9 @@ func (r *Router) rebalanceRepository(storageID string) {
 		}
 	}
 
-	// PHASE 6: Cleanup old locations (async, best effort)
-	go r.cleanupOldFileLocations(storageID, filesToMove)
+	// PHASE 6: Cleanup old locations (async, best effort). Only files confirmed
+	// copied to their new home are eligible for deletion.
+	go r.cleanupOldFileLocations(storageID, filesToMove, successfullyMoved)
 }
 
 // cleanupOldFileLocations removes files from old locations after rebalancing.
@@ -3235,7 +3271,7 @@ func (r *Router) rebalanceRepository(storageID string) {
 func (r *Router) cleanupOldFileLocations(storageID string, filesToMove map[string]struct {
 	from string
 	to   string
-}) {
+}, successfullyMoved map[string]struct{}) {
 	// Wait for dual-active period + grace period
 	// This ensures all clients have refreshed their routing cache
 	gracePeriod := 5 * time.Minute
@@ -3273,6 +3309,11 @@ func (r *Router) cleanupOldFileLocations(storageID string, filesToMove map[strin
 	deletedPerNode := make(map[string]int)
 
 	for filePath, moveInfo := range filesToMove {
+		if _, ok := successfullyMoved[filePath]; !ok {
+			// The copy to the target was never confirmed; keep the source copy.
+			skippedCount++
+			continue
+		}
 		sourceState := nodeStates[moveInfo.from]
 		if sourceState == nil || sourceState.client == nil {
 			r.logger.Warn("source node not available for cleanup",

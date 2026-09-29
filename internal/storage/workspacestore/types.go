@@ -2,8 +2,6 @@ package workspacestore
 
 import (
 	"encoding/json"
-	"fmt"
-	"sort"
 	"sync"
 	"time"
 
@@ -111,22 +109,4 @@ func (e *jobEntry) snapshot() *pb.WorkspaceSyncJob {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return proto.Clone(e.job).(*pb.WorkspaceSyncJob)
-}
-
-func auditEventsByTimestamp(audit []*AuditEvent) {
-	sort.Slice(audit, func(i, j int) bool {
-		return audit[i].Timestamp < audit[j].Timestamp
-	})
-}
-
-func jobIndexKey(jobID string) string {
-	return "job:" + jobID
-}
-
-func bundleIndexKey(bundleID string) string {
-	return "bundle:" + bundleID
-}
-
-func auditIndexKey(jobID, timestamp string) string {
-	return fmt.Sprintf("audit:%s:%s", jobID, timestamp)
 }

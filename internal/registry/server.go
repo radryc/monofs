@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/opencontainers/go-digest"
@@ -26,15 +26,31 @@ type Server struct {
 	logger  *slog.Logger
 	dataNS  string
 
-	blobDownloadCount atomic.Int64
-	blobUploadCount   atomic.Int64
+	stop      chan struct{}
+	closeOnce sync.Once
 }
 
 func NewServer(client *Client, nextProxy *Proxy, logger *slog.Logger, dataNS string) *Server {
-	blobs := NewBlobStore(client)
-	tags := NewTagStore(client, blobs)
+	var blobs *BlobStore
+	var tags *TagStore
+	var stats *Stats
+	if nextProxy != nil {
+		// Share the proxy's stores/sink so cache metrics and tags are not
+		// split across two independent instances.
+		blobs = nextProxy.Blobs()
+		tags = nextProxy.Tags()
+		stats = nextProxy.Stats()
+	}
+	if blobs == nil {
+		blobs = NewBlobStore(client)
+	}
+	if tags == nil {
+		tags = NewTagStore(client, blobs)
+	}
+	if stats == nil {
+		stats = &Stats{}
+	}
 	uploads := NewUploadManager()
-	stats := &Stats{}
 
 	if nextProxy == nil {
 		nextProxy = NewProxy(UpstreamConfig{
@@ -52,18 +68,34 @@ func NewServer(client *Client, nextProxy *Proxy, logger *slog.Logger, dataNS str
 		client:  client,
 		logger:  logger,
 		dataNS:  dataNS,
+		stop:    make(chan struct{}),
 	}
 	go s.uploadCleanupLoop()
 	return s
 }
 
+// Close stops background maintenance loops. It is safe to call more than once.
+func (s *Server) Close() {
+	s.closeOnce.Do(func() {
+		close(s.stop)
+		if s.tags != nil {
+			s.tags.Close()
+		}
+	})
+}
+
 func (s *Server) uploadCleanupLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		removed := s.uploads.Cleanup(30 * time.Minute)
-		if removed > 0 {
-			s.logger.Debug("cleaned up stale uploads", "count", removed)
+	for {
+		select {
+		case <-ticker.C:
+			removed := s.uploads.Cleanup(30 * time.Minute)
+			if removed > 0 {
+				s.logger.Debug("cleaned up stale uploads", "count", removed)
+			}
+		case <-s.stop:
+			return
 		}
 	}
 }
@@ -145,6 +177,10 @@ func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
 
 	case "blobs":
 		if len(rest) == 1 {
+			if rest[0] == "uploads" && r.Method == "POST" {
+				s.handleStartUpload(w, r, repo)
+				return
+			}
 			dig := rest[0]
 			switch r.Method {
 			case "GET", "HEAD":
@@ -236,14 +272,21 @@ func (s *Server) handleGetManifest(w http.ResponseWriter, r *http.Request, repo,
 	writeOCIError(w, "MANIFEST_UNKNOWN", "manifest not found")
 }
 
+// maxManifestBytes bounds the size of an uploaded manifest body.
+const maxManifestBytes = 16 << 20 // 16 MiB
+
 func (s *Server) handlePutManifest(w http.ResponseWriter, r *http.Request, repo, ref string) {
 	ctx := r.Context()
-	data, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxManifestBytes+1))
 	if err != nil {
 		writeOCIError(w, "BLOB_UNKNOWN", "failed to read manifest body")
 		return
 	}
-	defer r.Body.Close()
+	if len(data) > maxManifestBytes {
+		writeOCIError(w, "MANIFEST_INVALID", "manifest body too large")
+		return
+	}
 
 	dgst, err := s.tags.PutManifest(ctx, repo, ref, data)
 	if err != nil {
@@ -446,14 +489,15 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request, re
 }
 
 func (s *Server) handleUploadCancel(w http.ResponseWriter, r *http.Request, repo, uuid string) {
+	if session, ok := s.uploads.Get(uuid); !ok || session.Repo != repo {
+		writeOCIError(w, "BLOB_UPLOAD_UNKNOWN", "upload session not found")
+		return
+	}
 	s.uploads.Remove(uuid)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleListTags(w http.ResponseWriter, r *http.Request, _ string) {
-	path := strings.TrimPrefix(r.URL.Path, "/v2/")
-	repo := strings.TrimSuffix(path, "/tags/list")
-
+func (s *Server) handleListTags(w http.ResponseWriter, r *http.Request, repo string) {
 	ctx := r.Context()
 	tags, err := s.tags.ListTags(ctx, repo)
 	if err != nil {
@@ -507,7 +551,7 @@ func (s *Server) handleRepos(w http.ResponseWriter, r *http.Request) {
 		if info.Name == "" {
 			continue
 		}
-		items = append(items, repoItem{Name: info.Name, UpdatedAt: info.UpdatedAt})
+		items = append(items, repoItem(info))
 	}
 	if items == nil {
 		items = []repoItem{}

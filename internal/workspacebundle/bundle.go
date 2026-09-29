@@ -137,8 +137,13 @@ func validateOperation(storageID string, idx int, op Operation) error {
 	if op.Kind == OperationSymlink && strings.TrimSpace(op.Target) == "" {
 		return fmt.Errorf("repository %q operation %d symlink target is required", storageID, idx)
 	}
-	if op.Kind == OperationRename && strings.TrimSpace(op.Target) == "" {
-		return fmt.Errorf("repository %q operation %d rename target is required", storageID, idx)
+	if op.Kind == OperationRename {
+		if strings.TrimSpace(op.Target) == "" {
+			return fmt.Errorf("repository %q operation %d rename target is required", storageID, idx)
+		}
+		if !isSafeRelativePath(op.Target) {
+			return fmt.Errorf("repository %q operation %d rename target %q is invalid", storageID, idx, op.Target)
+		}
 	}
 	return nil
 }
@@ -155,7 +160,7 @@ func isSafeRelativePath(path string) bool {
 		return false
 	}
 	for _, part := range strings.Split(clean, "/") {
-		if part == ".git" {
+		if strings.EqualFold(part, ".git") {
 			return false
 		}
 	}

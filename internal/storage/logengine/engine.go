@@ -1,7 +1,6 @@
 package logengine
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -187,27 +186,4 @@ func (s *MockS3Store) ListChunks(ctx context.Context, prefix string) ([]string, 
 		}
 	}
 	return chunks, nil
-}
-
-// dummyReadSeekCloser is a utility for testing
-type dummyReadSeekCloser struct {
-	*bytes.Reader
-}
-
-func (d *dummyReadSeekCloser) Close() error {
-	return nil
-}
-
-type tempFileReadSeekCloser struct {
-	*os.File
-}
-
-func (t *tempFileReadSeekCloser) Close() error {
-	name := t.Name()
-	err := t.File.Close()
-	removeErr := os.Remove(name)
-	if err != nil {
-		return err
-	}
-	return removeErr
 }

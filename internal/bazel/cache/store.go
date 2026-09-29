@@ -72,9 +72,6 @@ func NewStore(opts StoreOptions) (*Store, error) {
 	return &Store{dir: opts.Dir, opts: opts}, nil
 }
 
-// Dir returns the root data directory.
-func (s *Store) Dir() string { return s.dir }
-
 // --- Action Cache (AC) ---
 
 // GetAC retrieves an Action Cache entry by digest.

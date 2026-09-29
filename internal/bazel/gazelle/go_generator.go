@@ -239,18 +239,18 @@ func (g *GoGenerator) buildBazelContent(relDir, importPath string, srcs, testSrc
 		// If it's under cmd/..., it's a main package.
 		if strings.HasPrefix(relDir, "cmd/") {
 			b.WriteString("load(\"@rules_go//go:def.bzl\", \"go_binary\")\n\n")
-			b.WriteString(fmt.Sprintf("go_binary(\n"))
+			b.WriteString("go_binary(\n")
 			b.WriteString(fmt.Sprintf("    name = %q,\n", filepath.Base(relDir)))
 		} else {
 			pkgName := filepath.Base(relDir)
 			if relDir == "." {
 				pkgName = filepath.Base(importPath)
 			}
-			b.WriteString(fmt.Sprintf("go_library(\n"))
+			b.WriteString("go_library(\n")
 			b.WriteString(fmt.Sprintf("    name = %q,\n", pkgName))
 		}
 
-		b.WriteString(fmt.Sprintf("    srcs = [\n"))
+		b.WriteString("    srcs = [\n")
 		for _, s := range srcs {
 			b.WriteString(fmt.Sprintf("        %q,\n", s))
 		}
@@ -277,12 +277,12 @@ func (g *GoGenerator) buildBazelContent(relDir, importPath string, srcs, testSrc
 		if relDir == "." {
 			pkgName = filepath.Base(importPath)
 		}
-		b.WriteString(fmt.Sprintf("go_test(\n"))
+		b.WriteString("go_test(\n")
 		b.WriteString(fmt.Sprintf("    name = %q,\n", pkgName+"_test"))
 
 		allSrcs := append([]string{}, srcs...)
 		allSrcs = append(allSrcs, testSrcs...)
-		b.WriteString(fmt.Sprintf("    srcs = [\n"))
+		b.WriteString("    srcs = [\n")
 		for _, s := range allSrcs {
 			b.WriteString(fmt.Sprintf("        %q,\n", s))
 		}

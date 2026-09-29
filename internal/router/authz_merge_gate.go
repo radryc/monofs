@@ -92,11 +92,20 @@ func (r *Router) enforceOwnershipGate(ctx context.Context, logicalBranch string,
 		return nil
 	}
 
+	// The concrete resolver exposes Governed(), needed to separate "governed
+	// but foreign" from "ungoverned". Without it the gate cannot make a safe
+	// decision, so fail closed rather than silently opening.
+	resolver := r.ownershipResolverFull
+	if resolver == nil {
+		return fmt.Errorf("review required: ownership gate is enabled but no ownership resolver is configured")
+	}
+
 	decision, unowned, err := r.evaluateSubtreeOwnership(ctx, paths)
 	if err != nil {
-		// Default-open on resolution failure (mirrors the disabled gate).
-		r.logger.Warn("ownership gate resolution failed, allowing push", "error", err)
-		return nil
+		// Fail closed on resolution failure: a security gate must not open
+		// just because ownership could not be determined.
+		r.logger.Warn("ownership gate resolution failed, denying push", "error", err)
+		return fmt.Errorf("review required: unable to verify subtree ownership: %w", err)
 	}
 	if decision == MergeDecisionDirect {
 		return nil
@@ -105,9 +114,9 @@ func (r *Router) enforceOwnershipGate(ctx context.Context, logicalBranch string,
 	// Filter to only the *governed* unowned paths; ungoverned paths are open.
 	governed := unowned[:0]
 	for _, p := range unowned {
-		g, err := r.ownershipResolverFull.Governed(ctx, p)
+		g, err := resolver.Governed(ctx, p)
 		if err != nil {
-			r.logger.Warn("ownership gate governance check failed", "path", p, "error", err)
+			r.logger.Warn("ownership gate governance check failed, treating as governed", "path", p, "error", err)
 			governed = append(governed, p)
 			continue
 		}
@@ -122,6 +131,15 @@ func (r *Router) enforceOwnershipGate(ctx context.Context, logicalBranch string,
 	owners := r.ownersForUnowned(ctx, governed)
 	return fmt.Errorf("review required: %s owned by %s; use a logical branch so a pull request is opened",
 		strings.Join(governed, ", "), strings.Join(owners, ", "))
+}
+
+// reviewersFromOwnerRefs renders owner references as reviewer strings.
+func reviewersFromOwnerRefs(refs []authz.OwnerRef) []string {
+	reviewers := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		reviewers = append(reviewers, ref.String())
+	}
+	return reviewers
 }
 
 // ownersForUnowned returns the maintainer references that govern the given

@@ -151,6 +151,13 @@ type compiledLogQuery struct {
 const (
 	metricDiscoveryMatcherName = "__doctor_discovery__"
 	metricDiscoveryModeNames   = "metric_names"
+	metricDiscoveryModeLabels  = "label_names"
+	metricDiscoveryModeValues  = "label_values:"
+
+	// maxDiscoveredLabelValues bounds how many distinct values a single label
+	// discovery call returns. High-cardinality labels (trace_id, task ids) would
+	// otherwise make the value union unbounded.
+	maxDiscoveredLabelValues = 10000
 )
 
 // NewQueryEngine creates a new QueryEngine.
@@ -662,8 +669,22 @@ func (q *QueryEngine) QueryMetrics(ctx context.Context, query MetricQuery, from,
 // StreamMetrics yields metric data points matching the given query in the time range.
 func (q *QueryEngine) StreamMetrics(ctx context.Context, query MetricQuery, from, to time.Time, yield func(MetricRecord) error) error {
 	query, discoveryMode := stripMetricDiscoveryMatchers(query)
-	if discoveryMode == metricDiscoveryModeNames {
+	switch {
+	case discoveryMode == metricDiscoveryModeNames:
 		results, err := q.discoverMetricNames(ctx, query, from, to)
+		if err != nil {
+			return err
+		}
+		return emitQueryResults(results, yield)
+	case discoveryMode == metricDiscoveryModeLabels:
+		results, err := q.discoverMetricLabels(ctx, query, from, to)
+		if err != nil {
+			return err
+		}
+		return emitQueryResults(results, yield)
+	case strings.HasPrefix(discoveryMode, metricDiscoveryModeValues):
+		label := strings.TrimPrefix(discoveryMode, metricDiscoveryModeValues)
+		results, err := q.discoverMetricLabelValues(ctx, query, label, from, to)
 		if err != nil {
 			return err
 		}
@@ -708,26 +729,40 @@ func (q *QueryEngine) StreamMetrics(ctx context.Context, query MetricQuery, from
 	return nil
 }
 
-func (q *QueryEngine) discoverMetricNames(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
+// metricDiscoveryCandidates lists the metric chunks whose manifests match the
+// query and time range. Discovery never scans sample data, so it stays cheap
+// regardless of metric frequency.
+func (q *QueryEngine) metricDiscoveryCandidates(ctx context.Context, query MetricQuery, from, to time.Time) ([]candidateChunk, *queryPathObserver, error) {
 	observer := beginQueryPathObservation(SignalMetrics)
-	defer observer.finish()
 
 	listStart := time.Now()
 	chunkIDs, err := q.store.ListChunks(ctx, "chunks/metrics/")
 	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list metric chunks: %w", err)
+		observer.finish()
+		return nil, nil, fmt.Errorf("failed to list metric chunks: %w", err)
 	}
 	observer.addChunksListed(len(chunkIDs))
 
 	compiledMatchers, err := compileMetricMatchers(query.LabelMatchers)
 	if err != nil {
-		return nil, err
+		observer.finish()
+		return nil, nil, err
 	}
 	candidates, err := q.metricCandidates(ctx, chunkIDs, query, compiledMatchers, from, to, observer)
 	if err != nil {
+		observer.finish()
+		return nil, nil, err
+	}
+	return candidates, observer, nil
+}
+
+func (q *QueryEngine) discoverMetricNames(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
+	candidates, observer, err := q.metricDiscoveryCandidates(ctx, query, from, to)
+	if err != nil {
 		return nil, err
 	}
+	defer observer.finish()
 
 	seen := make(map[string]struct{})
 	results := make([]MetricRecord, 0)
@@ -747,6 +782,82 @@ func (q *QueryEngine) discoverMetricNames(ctx context.Context, query MetricQuery
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].MetricName < results[j].MetricName
 	})
+	observer.addReturnedRecords(len(results))
+	return results, nil
+}
+
+// discoverMetricLabels returns one record per distinct metric label name found
+// in the matching chunk manifests. Label names are carried in the record's
+// Labels map (with empty values).
+func (q *QueryEngine) discoverMetricLabels(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
+	candidates, observer, err := q.metricDiscoveryCandidates(ctx, query, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer observer.finish()
+
+	seen := make(map[string]struct{})
+	names := make([]string, 0)
+	for _, candidate := range candidates {
+		for name := range candidate.manifest.MetricLabelValues {
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+
+	results := make([]MetricRecord, 0, len(names))
+	for _, name := range names {
+		results = append(results, MetricRecord{Labels: map[string]string{name: ""}})
+	}
+	observer.addReturnedRecords(len(results))
+	return results, nil
+}
+
+// discoverMetricLabelValues returns one record per distinct value of the given
+// label found in the matching chunk manifests.
+func (q *QueryEngine) discoverMetricLabelValues(ctx context.Context, query MetricQuery, labelName string, from, to time.Time) ([]MetricRecord, error) {
+	if labelName == "" {
+		return nil, fmt.Errorf("label name is required")
+	}
+	candidates, observer, err := q.metricDiscoveryCandidates(ctx, query, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer observer.finish()
+
+	seen := make(map[string]struct{})
+	values := make([]string, 0)
+	for _, candidate := range candidates {
+		for _, value := range candidate.manifest.MetricLabelValues[labelName] {
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			values = append(values, value)
+			if len(values) >= maxDiscoveredLabelValues {
+				break
+			}
+		}
+		if len(values) >= maxDiscoveredLabelValues {
+			break
+		}
+	}
+	sort.Strings(values)
+
+	results := make([]MetricRecord, 0, len(values))
+	for _, value := range values {
+		results = append(results, MetricRecord{Labels: map[string]string{labelName: value}})
+	}
 	observer.addReturnedRecords(len(results))
 	return results, nil
 }

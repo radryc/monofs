@@ -187,7 +187,6 @@ func (w *autoRefreshWorker) probeRepo(storageID string, repo *ingestedRepo, reas
 			w.recordFailure(storageID)
 		}
 	}
-	return
 }
 
 func (w *autoRefreshWorker) recordFailure(storageID string) {

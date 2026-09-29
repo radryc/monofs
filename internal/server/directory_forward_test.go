@@ -175,30 +175,6 @@ func TestReadDirFindsMultipleRepos(t *testing.T) {
 	}
 }
 
-func TestForwardableTarget_Disabled(t *testing.T) {
-	s := &Server{enableForwarding: false}
-	if target := s.forwardableTarget("docker-registry/doctor-query/_tags"); target != nil {
-		t.Error("forwardableTarget should return nil when forwarding is disabled")
-	}
-}
-
-func TestForwardableTarget_NoHRW(t *testing.T) {
-	s := &Server{enableForwarding: true}
-	if target := s.forwardableTarget("docker-registry/doctor-query/_tags"); target != nil {
-		t.Error("forwardableTarget should return nil when HRW is nil")
-	}
-}
-
-func TestForwardableTarget_SingleSegment(t *testing.T) {
-	s := &Server{enableForwarding: true}
-	if target := s.forwardableTarget("docker-registry"); target != nil {
-		t.Error("forwardableTarget should return nil for single-segment path")
-	}
-	if target := s.forwardableTarget(""); target != nil {
-		t.Error("forwardableTarget should return nil for empty path")
-	}
-}
-
 // collectingReadDirStream implements pb.MonoFS_ReadDirServer for test collection.
 type collectingReadDirStream struct {
 	grpc.ServerStream

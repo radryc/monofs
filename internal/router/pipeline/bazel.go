@@ -185,12 +185,6 @@ func (ctx *BazelJobContext) BazelCommand(action string) string {
 	return strings.Join(args, " ")
 }
 
-// BEPFilePath returns the path to the BEP file for the given action
-// within the given workspace directory.
-func BEPFilePath(workDir, action string) string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("bazel-bep-%s.json", action))
-}
-
 // BazelStepConfig configures a pipeline step that runs Bazel.
 type BazelStepConfig struct {
 	// Action is "build", "test", or "run".

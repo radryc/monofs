@@ -122,6 +122,16 @@ func (h *monofsFileHandle) Fsync(ctx context.Context, flags uint32) syscall.Errn
 func (h *monofsFileHandle) Release(ctx context.Context) syscall.Errno {
 	h.logger.Debug("handle release")
 
+	// Drop the node's cached handle reference if it still points at this file,
+	// otherwise a later MonoNode.Write fallback would reuse a closed fd.
+	if h.node != nil {
+		h.node.mu.Lock()
+		if h.node.localHandle == h.file {
+			h.node.localHandle = nil
+		}
+		h.node.mu.Unlock()
+	}
+
 	if h.file != nil {
 		if err := h.file.Close(); err != nil {
 			h.logger.Warn("handle release: close failed (possible data loss)",

@@ -94,14 +94,6 @@ var (
 		Help:      "Total number of files ingested (forwarded to nodes) by the router.",
 	})
 
-	// routerIngestBytesTotal counts raw bytes of file content ingested through the router.
-	routerIngestBytesTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Namespace: "monofs",
-		Subsystem: "router",
-		Name:      "ingest_bytes_total",
-		Help:      "Total bytes of file content ingested by the router.",
-	})
-
 	// routerNativeReadOpsTotal counts NativeRead (FUSE-path) read operations through the router.
 	routerNativeReadOpsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "monofs",

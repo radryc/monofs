@@ -62,20 +62,6 @@ func DetectProvider(repoCloneURL, gitLabBaseURL, githubToken, gitlabToken string
 	return nil, fmt.Errorf("unknown provider for host: %s", host)
 }
 
-func CompareURL(repoCloneURL, sourceBranch, targetBranch string) string {
-	host := parseHost(repoCloneURL)
-	owner, repo := parseOwnerRepo(repoCloneURL)
-
-	switch {
-	case host == "github.com":
-		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, url.PathEscape(targetBranch), url.PathEscape(sourceBranch))
-	case host == "gitlab.com" || strings.Contains(host, "gitlab"):
-		return fmt.Sprintf("https://%s/%s/%s/-/merge_requests/new?merge_request[source_branch]=%s&merge_request[target_branch]=%s", host, owner, repo, url.QueryEscape(sourceBranch), url.QueryEscape(targetBranch))
-	default:
-		return fmt.Sprintf("Create PR: %s → %s on %s", sourceBranch, targetBranch, repoCloneURL)
-	}
-}
-
 func parseHost(cloneURL string) string {
 	u := cloneURL
 	if strings.HasPrefix(u, "git@") {

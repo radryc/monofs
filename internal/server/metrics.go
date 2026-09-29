@@ -24,14 +24,6 @@ var (
 		Help:      "Total bytes of file content streamed to clients via the Read RPC.",
 	})
 
-	// serverWriteBytesTotal counts raw bytes received from clients via Write RPC.
-	serverWriteBytesTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Namespace: "monofs",
-		Subsystem: "server",
-		Name:      "write_bytes_total",
-		Help:      "Total bytes of file content received from clients via the Write RPC.",
-	})
-
 	// serverIngestFilesTotal counts individual files ingested into the node.
 	serverIngestFilesTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "monofs",

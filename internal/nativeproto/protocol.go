@@ -498,25 +498,6 @@ func EncodeHelloResponse(resp HelloResponse) []byte {
 	return enc.Bytes()
 }
 
-func DecodeHelloResponse(data []byte) (HelloResponse, error) {
-	dec := decoder{data: data}
-	var resp HelloResponse
-	var err error
-	if resp.SelectedVersion, err = dec.u16(); err != nil {
-		return HelloResponse{}, err
-	}
-	if resp.ServerCaps, err = dec.u64(); err != nil {
-		return HelloResponse{}, err
-	}
-	if resp.MaxFrameBytes, err = dec.u32(); err != nil {
-		return HelloResponse{}, err
-	}
-	if resp.MaxReadBytes, err = dec.u32(); err != nil {
-		return HelloResponse{}, err
-	}
-	return resp, nil
-}
-
 func EncodeMountRequest(req MountRequest) []byte {
 	var enc encoder
 	enc.u32(req.MountFlags)
@@ -670,24 +651,6 @@ func EncodeGetAttrResponse(resp GetAttrResponse) []byte {
 	return enc.Bytes()
 }
 
-func DecodeGetAttrResponse(data []byte) (GetAttrResponse, error) {
-	dec := decoder{data: data}
-	var resp GetAttrResponse
-	var err error
-	if resp.Found, err = dec.bool(); err != nil {
-		return GetAttrResponse{}, err
-	}
-	if resp.AttrTTLMS, err = dec.u32(); err != nil {
-		return GetAttrResponse{}, err
-	}
-	if resp.Found {
-		if resp.Attr, err = decodeAttr(&dec); err != nil {
-			return GetAttrResponse{}, err
-		}
-	}
-	return resp, nil
-}
-
 func EncodeReadDirRequest(req ReadDirRequest) []byte {
 	var enc encoder
 	enc.objectID(req.DirObjectID)
@@ -747,6 +710,12 @@ func DecodeReadDirResponse(data []byte) (ReadDirResponse, error) {
 	count, err := dec.u32()
 	if err != nil {
 		return ReadDirResponse{}, err
+	}
+	// Each entry consumes at least one byte, so a count larger than the
+	// remaining frame cannot be valid. Reject it before allocating to avoid
+	// an attacker-controlled memory amplification from a single small frame.
+	if int64(count) > int64(dec.remaining()) {
+		return ReadDirResponse{}, io.ErrUnexpectedEOF
 	}
 	resp.Entries = make([]DirEntry, 0, count)
 	for i := uint32(0); i < count; i++ {

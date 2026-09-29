@@ -237,21 +237,15 @@ func TestGitHubSignatureVerification(t *testing.T) {
 	mac.Write(body)
 	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 
-	r := httptest.NewRequest("POST", "/webhook", bytes.NewReader(body))
-	r.Header.Set("X-Hub-Signature-256", sig)
-
-	if !h.verifyGitHubSignature(sig, r) {
+	if !h.verifyGitHubSignature(sig, body) {
 		t.Fatal("valid signature should verify")
 	}
 
-	r2 := httptest.NewRequest("POST", "/webhook", bytes.NewReader(body))
-	r2.Header.Set("X-Hub-Signature-256", "sha256=badsignature")
-
-	if h.verifyGitHubSignature("sha256=badsignature", r2) {
+	if h.verifyGitHubSignature("sha256=badsignature", body) {
 		t.Fatal("invalid signature should not verify")
 	}
 
-	if h.verifyGitHubSignature("", r2) {
+	if h.verifyGitHubSignature("", body) {
 		t.Fatal("empty signature should not verify")
 	}
 }

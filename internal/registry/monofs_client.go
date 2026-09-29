@@ -15,6 +15,7 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -79,6 +80,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 	conn, err := grpc.NewClient(
 		cfg.RouterAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpcx.IPv4DialerOption(),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(1024*1024*1024),
 			grpc.MaxCallSendMsgSize(1024*1024*1024),
@@ -382,7 +384,8 @@ func (c *Client) Exists(ctx context.Context, path string) (bool, error) {
 			return true, nil
 		}
 		if status.Code(err) == codes.NotFound {
-			return false, nil
+			// Not on this node; the file may be sharded to another one.
+			continue
 		}
 	}
 	return false, nil
@@ -406,25 +409,32 @@ func (c *Client) Stat(ctx context.Context, path string) (*pb.GetAttrResponse, er
 	return nil, os.ErrNotExist
 }
 
-// Delete removes a file.
+// Delete removes a file from every node that may hold a copy.
 func (c *Client) Delete(ctx context.Context, path string) error {
 	nodes, err := c.healthyNodes(ctx)
 	if err != nil {
 		return err
 	}
-	fullPath := c.dataPath(path)
+	// Resolve the same (storageID, relative path) tuple that Write used, so
+	// the delete targets the exact keys the data was stored under.
+	_, storageID, relPath := c.resolveWritePaths(path)
+
+	var lastErr error
 	for _, node := range nodes {
 		callCtx, cancel := context.WithTimeout(ctx, c.rpcTimeout)
-		_, err := node.client.DeleteFile(callCtx, &pb.DeleteFileRequest{StorageId: "", FilePath: fullPath})
+		_, err := node.client.DeleteFile(callCtx, &pb.DeleteFileRequest{StorageId: storageID, FilePath: relPath})
 		cancel()
-		if err != nil {
-			if status.Code(err) != codes.NotFound {
-				return err
-			}
+		if err != nil && status.Code(err) != codes.NotFound {
+			lastErr = err
 		}
-		return nil
 	}
-	return fmt.Errorf("delete %s: no nodes", path)
+	if lastErr != nil {
+		return fmt.Errorf("delete %s: %w", path, lastErr)
+	}
+	if len(nodes) == 0 {
+		return fmt.Errorf("delete %s: no nodes", path)
+	}
+	return nil
 }
 
 // ListDir lists directory entries.
@@ -434,31 +444,41 @@ func (c *Client) ListDir(ctx context.Context, path string) ([]string, error) {
 		return nil, err
 	}
 	fullPath := c.dataPath(path)
+	var lastErr error
 	for _, node := range nodes {
 		callCtx, cancel := context.WithTimeout(ctx, c.rpcTimeout)
 		stream, err := node.client.ReadDir(callCtx, &pb.ReadDirRequest{Path: fullPath})
 		if err != nil {
 			cancel()
-			if status.Code(err) == codes.NotFound {
-				return nil, nil
-			}
+			lastErr = err
 			continue
 		}
 		var entries []string
+		complete := true
 		for {
 			entry, recvErr := stream.Recv()
 			if recvErr == io.EOF {
-				cancel()
-				return entries, nil
+				break
 			}
 			if recvErr != nil {
-				cancel()
-				return entries, nil
+				lastErr = recvErr
+				complete = false
+				break
 			}
 			if name := entry.GetName(); name != "" {
 				entries = append(entries, name)
 			}
 		}
+		cancel()
+		if complete {
+			return entries, nil
+		}
+	}
+	if lastErr != nil {
+		if status.Code(lastErr) == codes.NotFound {
+			return nil, nil
+		}
+		return nil, lastErr
 	}
 	return nil, fmt.Errorf("list %s: no nodes", path)
 }
@@ -531,6 +551,7 @@ func (c *Client) refreshNodes(ctx context.Context) error {
 		nodeConn, dialErr := grpc.NewClient(
 			nodeAddr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpcx.IPv4DialerOption(),
 			grpc.WithDefaultCallOptions(
 				grpc.MaxCallRecvMsgSize(1024*1024*1024),
 				grpc.MaxCallSendMsgSize(1024*1024*1024),

@@ -221,16 +221,6 @@ func (n *MonoNode) newChild(name string, isDir bool, mode uint32, size uint64) *
 	}
 }
 
-// toErrno converts any error to syscall.Errno.
-// All backend errors are mapped to EIO for simplicity.
-func toErrno(err error) syscall.Errno {
-	if err == nil {
-		return 0
-	}
-	// Map all errors to EIO as per requirements
-	return syscall.EIO
-}
-
 // recordAndConvertError records an I/O error metric on the client and converts to errno.
 // Context cancellations (FUSE kernel aborting the request) are NOT counted as errors.
 func (n *MonoNode) recordAndConvertError(err error) syscall.Errno {
@@ -375,10 +365,6 @@ func isDependencyPath(path string) bool {
 		(len(path) > len(prefix) && path[:len(prefix)] == prefix)
 }
 
-func (n *MonoNode) virtualMonorepoEnabled() bool {
-	return n.workspace != nil
-}
-
 func (n *MonoNode) shouldHideWorkspacePath(path string) bool {
 	return n.workspace != nil && n.workspace.ShouldHidePath(path)
 }
@@ -404,13 +390,6 @@ func (n *MonoNode) isWorkspaceSystemViewPath() bool {
 
 func (n *MonoNode) isWorkspaceReadOnlyPath() bool {
 	return isWorkspaceReadOnlyPath(n.path)
-}
-
-func (n *MonoNode) shouldHideWorkspaceChild(name string) bool {
-	if n.workspace != nil && n.path == "" && name == syntheticWorkspaceGitName {
-		return true
-	}
-	return n.workspace != nil && n.workspace.ShouldHideChild(n.path, name)
 }
 
 func (n *MonoNode) shouldReserveWorkspaceRoot(name string) bool {

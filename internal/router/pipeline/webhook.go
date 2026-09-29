@@ -87,18 +87,18 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WebhookHandler) handleGitHub(w http.ResponseWriter, r *http.Request, eventType string) {
-	if h.webhookCfg.GitHubSecret != "" {
-		sig := r.Header.Get("X-Hub-Signature-256")
-		if !h.verifyGitHubSignature(sig, r) {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
-	}
-
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body failed", http.StatusBadRequest)
 		return
+	}
+
+	if h.webhookCfg.GitHubSecret != "" {
+		sig := r.Header.Get("X-Hub-Signature-256")
+		if !h.verifyGitHubSignature(sig, body) {
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	var event WebhookEvent
@@ -132,8 +132,7 @@ func (h *WebhookHandler) handleGitHub(w http.ResponseWriter, r *http.Request, ev
 
 func (h *WebhookHandler) handleGitLab(w http.ResponseWriter, r *http.Request, eventType string) {
 	if h.webhookCfg.GitLabSecret != "" {
-		token := r.Header.Get("X-Gitlab-Token")
-		if token != h.webhookCfg.GitLabSecret {
+		if !h.verifyGitLabSignature(r.Header.Get("X-Gitlab-Token")) {
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
@@ -199,7 +198,7 @@ func (h *WebhookHandler) processEvent(event WebhookEvent) {
 	}
 }
 
-func (h *WebhookHandler) verifyGitHubSignature(sigHeader string, r *http.Request) bool {
+func (h *WebhookHandler) verifyGitHubSignature(sigHeader string, body []byte) bool {
 	if sigHeader == "" || !strings.HasPrefix(sigHeader, "sha256=") {
 		return false
 	}
@@ -208,14 +207,13 @@ func (h *WebhookHandler) verifyGitHubSignature(sigHeader string, r *http.Request
 		return false
 	}
 	mac := hmac.New(sha256.New, []byte(h.webhookCfg.GitHubSecret))
-	body, _ := io.ReadAll(r.Body)
 	mac.Write(body)
 	expected := mac.Sum(nil)
 	return hmac.Equal(sigBytes, expected)
 }
 
 func (h *WebhookHandler) verifyGitLabSignature(token string) bool {
-	return token == h.webhookCfg.GitLabSecret
+	return h.webhookCfg.GitLabSecret != "" && hmac.Equal([]byte(token), []byte(h.webhookCfg.GitLabSecret))
 }
 
 type gitHubPushEvent struct {

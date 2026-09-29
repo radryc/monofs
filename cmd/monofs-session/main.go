@@ -189,13 +189,6 @@ type SessionCommand struct {
 	socketPath string
 }
 
-// NewSessionCommand creates a session command handler
-func NewSessionCommand(overlayDir string) *SessionCommand {
-	return &SessionCommand{
-		socketPath: filepath.Join(overlayDir, "session.sock"),
-	}
-}
-
 func defaultSessionSocketPath() string {
 	overlayDir := firstNonEmpty(
 		os.Getenv("MONOFS_OVERLAY_DIR"),
@@ -473,10 +466,6 @@ Run 'find / -name session.sock 2>/dev/null' to locate existing sockets.
 	}
 
 	return &resp, nil
-}
-
-func (sc *SessionCommand) sendCommandWithPath(action, path string) (*SessionResponse, error) {
-	return sc.sendRequest(SessionRequest{Action: action, Path: path})
 }
 
 // sendRequest sends an arbitrary SessionRequest to the FUSE daemon and returns the response.

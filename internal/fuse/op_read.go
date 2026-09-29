@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -145,7 +146,7 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 			n.logger.Debug("read: reload failed after retries", "path", n.path, "error", err)
 			n.updateBackendError(err)
 			// Only count real errors, not context cancellations
-			if err != context.Canceled && err != context.DeadlineExceeded {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				if n.client != nil {
 					n.client.RecordError()
 				}

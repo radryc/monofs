@@ -85,8 +85,9 @@ type Service struct {
 	searchCount atomic.Int64
 
 	// Shutdown
-	stopChan chan struct{}
-	workers  int
+	stopChan  chan struct{}
+	workers   int
+	closeOnce sync.Once
 }
 
 // Config holds service configuration
@@ -97,18 +98,6 @@ type Config struct {
 	QueueSize  int    // Size of job queue
 	RouterAddr string // Router address for cluster access (enables fetching from storage nodes)
 	Logger     *slog.Logger
-}
-
-// DefaultConfig returns default configuration
-func DefaultConfig() Config {
-	return Config{
-		IndexDir:   "/data/index",
-		CacheDir:   "/data/cache",
-		Workers:    2,
-		QueueSize:  100,
-		RouterAddr: "",
-		Logger:     slog.Default(),
-	}
 }
 
 // NewService creates a new search service
@@ -236,16 +225,20 @@ func NewService(cfg Config) (*Service, error) {
 	return s, nil
 }
 
-// Close shuts down the service
+// Close shuts down the service. It is idempotent.
 func (s *Service) Close() error {
-	close(s.stopChan)
-	s.workerWg.Wait()
-	s.jobsWg.Wait()
-	s.saveStats()
-	if err := s.indexer.Close(); err != nil {
-		s.logger.Warn("failed to close indexer", "error", err)
-	}
-	return s.db.Close()
+	var closeErr error
+	s.closeOnce.Do(func() {
+		close(s.stopChan)
+		s.workerWg.Wait()
+		s.jobsWg.Wait()
+		s.saveStats()
+		if err := s.indexer.Close(); err != nil {
+			s.logger.Warn("failed to close indexer", "error", err)
+		}
+		closeErr = s.db.Close()
+	})
+	return closeErr
 }
 
 // worker processes indexing jobs

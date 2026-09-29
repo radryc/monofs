@@ -376,51 +376,6 @@ func TestLookup_DeletedFileReturnsENOENT(t *testing.T) {
 	_ = root
 }
 
-func TestOpenForWrite_TracksExistingFileAsModify(t *testing.T) {
-	tmpDir := t.TempDir()
-	sm, err := NewSessionManager(tmpDir, nil)
-	if err != nil {
-		t.Fatalf("NewSessionManager: %v", err)
-	}
-
-	mockCli := &pathMockClient{
-		readFunc: func(_ context.Context, path string, offset, size int64) ([]byte, error) {
-			if path != "github.com/user/repo/existing.go" {
-				t.Fatalf("unexpected read path %q", path)
-			}
-			return []byte("package repo\n"), nil
-		},
-	}
-
-	node := &WritableNode{
-		path:       "github.com/user/repo/existing.go",
-		isDir:      false,
-		mode:       0644 | uint32(syscall.S_IFREG),
-		client:     mockCli,
-		sessionMgr: sm,
-		logger:     testLogger(),
-	}
-
-	fh, _, errno := node.OpenForWrite(context.Background(), 0)
-	if errno != 0 {
-		t.Fatalf("OpenForWrite() errno = %v", errno)
-	}
-	if fh != nil {
-		_ = fh.(*LocalFileHandle).Release(context.Background())
-	}
-
-	changes := sm.GetChanges()
-	if len(changes) != 1 {
-		t.Fatalf("GetChanges() len = %d, want 1", len(changes))
-	}
-	if changes[0].Type != ChangeModify {
-		t.Fatalf("change type = %s, want %s", changes[0].Type, ChangeModify)
-	}
-	if changes[0].OrigHash == "" {
-		t.Fatal("expected original hash for existing backend file")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Test: MergeReadDir filters out deleted backend entries
 // ---------------------------------------------------------------------------

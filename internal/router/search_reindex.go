@@ -16,14 +16,15 @@ var searchReindexDebounceDelay = 5 * time.Second
 // the search service. It is asynchronous and best-effort: failures are logged
 // but never fail the triggering operation. reason is used only for logging.
 func (r *Router) triggerSearchReindex(storageID, displayPath, source, ref, reason string) {
-	if r.searchClient == nil || storageID == "" {
+	client := r.searchClientSnapshot()
+	if client == nil || storageID == "" {
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
 
-		resp, err := r.searchClient.IndexRepository(ctx, &pb.IndexRequest{
+		resp, err := client.IndexRepository(ctx, &pb.IndexRequest{
 			StorageId:   storageID,
 			DisplayPath: displayPath,
 			Source:      source,
@@ -48,7 +49,7 @@ func (r *Router) triggerSearchReindex(storageID, displayPath, source, ref, reaso
 // storageID within searchReindexDebounceDelay, so bursts of guardian writes do
 // not trigger an index storm. The final debounced call triggers a re-index.
 func (r *Router) requestSearchReindexDebounced(storageID, displayPath, source, ref, reason string) {
-	if r.searchClient == nil || storageID == "" {
+	if r.searchClientSnapshot() == nil || storageID == "" {
 		return
 	}
 
