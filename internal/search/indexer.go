@@ -260,9 +260,64 @@ func (i *Indexer) indexFromMonoFS(ctx context.Context, req IndexRequest, start t
 		return nil, fmt.Errorf("failed to create builder: %w", err)
 	}
 
-	// Walk the repository tree using MonoFS client
+	// Walk the tree with a bounded pipeline: one producer enumerates paths (no
+	// per-file list is materialized), a fixed pool of readers fetches content
+	// concurrently, and a single consumer feeds the Zoekt builder (which is not
+	// safe for concurrent use and itself flushes bounded shards). Peak memory
+	// is O(workers * maxFileSize), independent of repository size.
+	const (
+		readWorkers = 8
+		maxFileSize = 1024 * 1024
+	)
+	fileRefs := make(chan monofsFileRef, 1024)
+	docs := make(chan index.Document, 256)
+
+	producerErr := make(chan error, 1)
+	go func() {
+		defer close(fileRefs)
+		producerErr <- i.enumerateMonoFSFiles(ctx, req.DisplayPath, "", fileRefs)
+	}()
+
+	var readWg sync.WaitGroup
+	for w := 0; w < readWorkers; w++ {
+		readWg.Add(1)
+		go func() {
+			defer readWg.Done()
+			for ref := range fileRefs {
+				content, err := i.monofsClient.Read(ctx, ref.full, 0, maxFileSize)
+				if err != nil {
+					i.logger.Warn("failed to read file", "path", ref.full, "error", err)
+					continue
+				}
+				if len(content) >= maxFileSize {
+					continue
+				}
+				if isBinaryContent(content) {
+					continue
+				}
+				select {
+				case docs <- index.Document{Name: ref.name, Content: content, Branches: []string{req.Ref}}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		readWg.Wait()
+		close(docs)
+	}()
+
 	var filesIndexed int64
-	if err := i.walkMonoFSTree(ctx, req.DisplayPath, "", req.Ref, builder, &filesIndexed); err != nil {
+	for doc := range docs {
+		if err := builder.Add(doc); err != nil {
+			i.logger.Warn("failed to add file to index", "path", doc.Name, "error", err)
+			continue
+		}
+		filesIndexed++
+	}
+
+	if err := <-producerErr; err != nil {
 		builder.Finish() // Clean up builder
 		return nil, fmt.Errorf("failed to walk repository: %w", err)
 	}
@@ -297,15 +352,23 @@ func (i *Indexer) indexFromMonoFS(ctx context.Context, req IndexRequest, start t
 	}, nil
 }
 
-// walkMonoFSTree recursively walks the repository tree using MonoFS client
-func (i *Indexer) walkMonoFSTree(ctx context.Context, repoPath, subPath, branch string, builder *index.Builder, filesIndexed *int64) error {
-	// Construct the full path in MonoFS
+// monofsFileRef identifies a file to index: its full MonoFS path and the
+// repository-relative name recorded in the index.
+type monofsFileRef struct {
+	full string
+	name string
+}
+
+// enumerateMonoFSFiles walks the repository tree via the MonoFS client and
+// streams each indexable file reference to out. It holds at most one
+// directory's entry list at a time. Subdirectory failures are logged and
+// skipped; only a top-level ReadDir failure is returned.
+func (i *Indexer) enumerateMonoFSFiles(ctx context.Context, repoPath, subPath string, out chan<- monofsFileRef) error {
 	fullPath := repoPath
 	if subPath != "" {
 		fullPath = filepath.Join(repoPath, subPath)
 	}
 
-	// Read directory entries
 	entries, err := i.monofsClient.ReadDir(ctx, fullPath)
 	if err != nil {
 		return fmt.Errorf("failed to read directory %s: %w", fullPath, err)
@@ -318,67 +381,27 @@ func (i *Indexer) walkMonoFSTree(ctx context.Context, repoPath, subPath, branch 
 		}
 
 		// Check if it's a directory (mode has directory bit set)
-		isDir := (entry.Mode & 0040000) != 0
-
-		if isDir {
+		if (entry.Mode & 0040000) != 0 {
 			// Skip .git directory
 			if entry.Name == ".git" {
 				continue
 			}
-
-			// Recurse into subdirectory
-			if err := i.walkMonoFSTree(ctx, repoPath, entryPath, branch, builder, filesIndexed); err != nil {
-				i.logger.Warn("failed to walk subdirectory",
-					"path", entryPath,
-					"error", err)
-				// Continue with other entries
+			if err := i.enumerateMonoFSFiles(ctx, repoPath, entryPath, out); err != nil {
+				i.logger.Warn("failed to walk subdirectory", "path", entryPath, "error", err)
 				continue
 			}
-		} else {
-			// It's a file - fetch and index it
-			filePath := filepath.Join(repoPath, entryPath)
+			continue
+		}
 
-			// Skip binary files based on extension
-			if isBinaryFile(filePath) {
-				continue
-			}
+		filePath := filepath.Join(repoPath, entryPath)
+		if isBinaryFile(filePath) {
+			continue
+		}
 
-			// Read file content via MonoFS client
-			// We read in chunks, limit to 1MB max
-			const maxSize = 1024 * 1024
-			content, err := i.monofsClient.Read(ctx, filePath, 0, maxSize)
-			if err != nil {
-				i.logger.Warn("failed to read file",
-					"path", filePath,
-					"error", err)
-				continue
-			}
-
-			// Skip if file is too large (truncated read)
-			if len(content) >= maxSize {
-				continue
-			}
-
-			// Skip binary content
-			if isBinaryContent(content) {
-				continue
-			}
-
-			// Add to index
-			doc := index.Document{
-				Name:     entryPath,
-				Content:  content,
-				Branches: []string{branch},
-			}
-
-			if err := builder.Add(doc); err != nil {
-				i.logger.Warn("failed to add file to index",
-					"path", entryPath,
-					"error", err)
-				continue
-			}
-
-			*filesIndexed++
+		select {
+		case out <- monofsFileRef{full: filePath, name: entryPath}:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 

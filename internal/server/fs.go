@@ -960,112 +960,97 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 			// Ignore: bucket may not exist
 		}
 
-		// 4. Delete all owned files
-		prefix := storageID + ":"
-		ownedKeys, err := tx.GetKeys(bucketOwnedFiles)
-		if err == nil {
-			for _, key := range ownedKeys {
-				keyStr := string(key)
-				if !strings.HasPrefix(keyStr, prefix) {
-					continue
+		// 4. Delete all owned files (prefix-scoped so other repositories' keys
+		// are never materialized).
+		prefix := []byte(storageID + ":")
+		ownedKeys, err := prefixScanKeys(tx, bucketOwnedFiles, prefix)
+		if err != nil {
+			return fmt.Errorf("scan owned files: %w", err)
+		}
+		for _, key := range ownedKeys {
+			keyStr := string(key)
+			_, filePath, ok := splitOwnedFileKey(key)
+			if ok {
+				size, sizeErr := loadStoredMetadataSize(tx, makeStorageKey(storageID, filePath))
+				if sizeErr != nil {
+					return fmt.Errorf("load owned metadata size %q: %w", keyStr, sizeErr)
 				}
-				_, filePath, ok := splitOwnedFileKey(key)
-				if ok {
-					size, sizeErr := loadStoredMetadataSize(tx, makeStorageKey(storageID, filePath))
-					if sizeErr != nil {
-						return fmt.Errorf("load owned metadata size %q: %w", keyStr, sizeErr)
-					}
-					deletedBytes += size
+				deletedBytes += size
+				if err := tx.Delete(bucketMetadata, makeStorageKey(storageID, filePath)); err != nil && err != nutsdb.ErrKeyNotFound {
+					s.logger.Warn("failed to delete owned file metadata", "key", keyStr)
 				}
-				// Delete from metadata bucket
-				if ok {
-					if err := tx.Delete(bucketMetadata, makeStorageKey(storageID, filePath)); err != nil && err != nutsdb.ErrKeyNotFound {
-						s.logger.Warn("failed to delete owned file metadata", "key", keyStr)
-					}
-				}
-				if !ok {
-					s.logger.Warn("failed to parse owned file key", "key", keyStr)
-				}
-				// Delete ownership tracking
-				if err := tx.Delete(bucketOwnedFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
-					s.logger.Warn("failed to delete ownership key", "key", keyStr)
-				}
-				// Delete from path index
-				if err := tx.Delete(bucketPathIndex, key); err != nil && err != nutsdb.ErrKeyNotFound {
-					// path index may use different key format
-				}
-				filesDeleted++
+			} else {
+				s.logger.Warn("failed to parse owned file key", "key", keyStr)
 			}
+			// Delete ownership tracking
+			if err := tx.Delete(bucketOwnedFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
+				s.logger.Warn("failed to delete ownership key", "key", keyStr)
+			}
+			// Delete from path index
+			if err := tx.Delete(bucketPathIndex, key); err != nil && err != nutsdb.ErrKeyNotFound {
+				// path index may use different key format
+			}
+			filesDeleted++
 		}
 
 		// 5. Delete all replica files
-		replicaKeys, err := tx.GetKeys(bucketReplicaFiles)
-		if err == nil {
-			for _, key := range replicaKeys {
-				keyStr := string(key)
-				if !strings.HasPrefix(keyStr, prefix) {
-					continue
-				}
-				if err := tx.Delete(bucketReplicaFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
-					s.logger.Warn("failed to delete replica key", "key", keyStr)
-				}
-				// Also clean the metadata entry. Replica keys are
-				// "storageID:filePath:primary:nodeID", so derive the canonical
-				// metadata key from the storageID and file path rather than
-				// reusing the replica key.
-				trimmed := strings.TrimPrefix(keyStr, prefix)
-				if idx := strings.LastIndex(trimmed, ":primary:"); idx > 0 {
-					filePath := trimmed[:idx]
-					if err := tx.Delete(bucketMetadata, makeStorageKey(storageID, filePath)); err != nil && err != nutsdb.ErrKeyNotFound {
-						// may not exist
-					}
+		replicaKeys, err := prefixScanKeys(tx, bucketReplicaFiles, prefix)
+		if err != nil {
+			return fmt.Errorf("scan replica files: %w", err)
+		}
+		for _, key := range replicaKeys {
+			keyStr := string(key)
+			if err := tx.Delete(bucketReplicaFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
+				s.logger.Warn("failed to delete replica key", "key", keyStr)
+			}
+			// Also clean the metadata entry. Replica keys are
+			// "storageID:filePath:primary:nodeID", so derive the canonical
+			// metadata key from the storageID and file path rather than
+			// reusing the replica key.
+			trimmed := strings.TrimPrefix(keyStr, string(prefix))
+			if idx := strings.LastIndex(trimmed, ":primary:"); idx > 0 {
+				filePath := trimmed[:idx]
+				if err := tx.Delete(bucketMetadata, makeStorageKey(storageID, filePath)); err != nil && err != nutsdb.ErrKeyNotFound {
+					// may not exist
 				}
 			}
 		}
 
 		// 6. Delete all canonical directory metadata for this repo
-		dirMetaPrefix := storageID + ":"
-		dirMetaKeys, err := tx.GetKeys(bucketDirMeta)
-		if err == nil {
-			for _, key := range dirMetaKeys {
-				keyStr := string(key)
-				if !strings.HasPrefix(keyStr, dirMetaPrefix) {
-					continue
-				}
-				if err := tx.Delete(bucketDirMeta, key); err != nil && err != nutsdb.ErrKeyNotFound {
-					s.logger.Warn("failed to delete dir metadata", "key", keyStr)
-				}
+		dirMetaKeys, err := prefixScanKeys(tx, bucketDirMeta, prefix)
+		if err != nil {
+			return fmt.Errorf("scan dir metadata: %w", err)
+		}
+		for _, key := range dirMetaKeys {
+			keyStr := string(key)
+			if err := tx.Delete(bucketDirMeta, key); err != nil && err != nutsdb.ErrKeyNotFound {
+				s.logger.Warn("failed to delete dir metadata", "key", keyStr)
 			}
 		}
 
 		// 7. Delete all directory summaries for this repo
-		dirSummaryKeys, err := tx.GetKeys(bucketDirSummary)
-		if err == nil {
-			for _, key := range dirSummaryKeys {
-				keyStr := string(key)
-				if !strings.HasPrefix(keyStr, dirMetaPrefix) {
-					continue
-				}
-				if err := tx.Delete(bucketDirSummary, key); err != nil && err != nutsdb.ErrKeyNotFound {
-					s.logger.Warn("failed to delete dir summary", "key", keyStr)
-				}
+		dirSummaryKeys, err := prefixScanKeys(tx, bucketDirSummary, prefix)
+		if err != nil {
+			return fmt.Errorf("scan dir summaries: %w", err)
+		}
+		for _, key := range dirSummaryKeys {
+			keyStr := string(key)
+			if err := tx.Delete(bucketDirSummary, key); err != nil && err != nutsdb.ErrKeyNotFound {
+				s.logger.Warn("failed to delete dir summary", "key", keyStr)
 			}
 		}
 
 		// 8. Delete all directory indexes for this repo
-		dirPrefix := storageID + ":"
-		dirKeys, err := tx.GetKeys(bucketDirIndex)
-		if err == nil {
-			for _, key := range dirKeys {
-				keyStr := string(key)
-				if !strings.HasPrefix(keyStr, dirPrefix) {
-					continue
-				}
-				if err := tx.Delete(bucketDirIndex, key); err != nil && err != nutsdb.ErrKeyNotFound {
-					s.logger.Warn("failed to delete dir index", "key", keyStr)
-				}
-				dirsDeleted++
+		dirKeys, err := prefixScanKeys(tx, bucketDirIndex, prefix)
+		if err != nil {
+			return fmt.Errorf("scan dir indexes: %w", err)
+		}
+		for _, key := range dirKeys {
+			keyStr := string(key)
+			if err := tx.Delete(bucketDirIndex, key); err != nil && err != nutsdb.ErrKeyNotFound {
+				s.logger.Warn("failed to delete dir index", "key", keyStr)
 			}
+			dirsDeleted++
 		}
 
 		return nil
