@@ -211,36 +211,39 @@ func TestExtractFileName(t *testing.T) {
 	}
 }
 
-// TestMakeDirIndexKey verifies directory index key generation.
-func TestMakeDirIndexKey(t *testing.T) {
+// TestMakeDirEntryKey verifies per-entry directory index key generation.
+func TestMakeDirEntryKey(t *testing.T) {
 	storageID := "abcd1234"
 	dirPath := "src/internal"
+	name := "file.go"
 
-	// Test determinism
-	key1 := makeDirIndexKey(storageID, dirPath)
-	key2 := makeDirIndexKey(storageID, dirPath)
-
+	key1 := makeDirEntryKey(storageID, dirPath, name)
+	key2 := makeDirEntryKey(storageID, dirPath, name)
 	if string(key1) != string(key2) {
-		t.Errorf("makeDirIndexKey not deterministic: %s != %s", string(key1), string(key2))
+		t.Fatalf("makeDirEntryKey not deterministic")
 	}
 
-	// Test uniqueness for different paths
-	key3 := makeDirIndexKey(storageID, "src/other")
-	if string(key1) == string(key3) {
-		t.Errorf("makeDirIndexKey collision: same key for different paths")
+	if string(makeDirEntryKey(storageID, dirPath, "other.go")) == string(key1) {
+		t.Errorf("makeDirEntryKey collision: same key for different names")
+	}
+	if string(makeDirEntryKey(storageID, "src/other", name)) == string(key1) {
+		t.Errorf("makeDirEntryKey collision: same key for different paths")
+	}
+	if string(makeDirEntryKey("different_id", dirPath, name)) == string(key1) {
+		t.Errorf("makeDirEntryKey collision: same key for different storage IDs")
 	}
 
-	// Test storage ID separation
-	key4 := makeDirIndexKey("different_id", dirPath)
-	if string(key1) == string(key4) {
-		t.Errorf("makeDirIndexKey collision: same key for different storage IDs")
+	// Layout: 32-byte dir hash | 0x00 | name.
+	if len(key1) != dirEntryPrefixLen+len(name) {
+		t.Fatalf("key length = %d, want %d", len(key1), dirEntryPrefixLen+len(name))
 	}
-
-	// Test format (should be storageID:hash(dirPath))
-	keyStr := string(key1)
-	dirHash := sha256.Sum256([]byte(dirPath))
-	expected := storageID + ":" + hex.EncodeToString(dirHash[:])
-	if keyStr != expected {
-		t.Errorf("makeDirIndexKey format incorrect: expected %q, got %q", expected, keyStr)
+	if key1[dirEntryIDLen] != 0x00 {
+		t.Errorf("separator byte = %#x, want 0x00", key1[dirEntryIDLen])
+	}
+	if string(key1[:dirEntryPrefixLen]) != string(dirEntryPrefix(storageID, dirPath)) {
+		t.Errorf("key prefix mismatch")
+	}
+	if string(key1[dirEntryPrefixLen:]) != name {
+		t.Errorf("key name = %q, want %q", string(key1[dirEntryPrefixLen:]), name)
 	}
 }

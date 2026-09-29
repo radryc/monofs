@@ -2,13 +2,11 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 	"syscall"
 	"testing"
 
 	pb "github.com/radryc/monofs/api/proto"
-	"github.com/radryc/monofs/internal/metastore"
 )
 
 // TestHooksDirectorySharding tests whether hooks directory gets properly indexed
@@ -82,20 +80,7 @@ func TestHooksDirectorySharding(t *testing.T) {
 	}
 
 	// Now check root directory index in database - should contain "hooks", "Makefile", "README.md"
-	rootKey := makeDirIndexKey(storageID, "")
-	var rootIndex []dirIndexEntry
-
-	err = server.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, rootKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &rootIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read root directory index: %v", err)
-	}
+	rootIndex := readDirEntries(t, server, storageID, "")
 
 	t.Logf("Root directory has %d entries", len(rootIndex))
 	for _, entry := range rootIndex {

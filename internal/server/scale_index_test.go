@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -55,16 +54,7 @@ func TestBatchIngestMaintainsDirectoryIndexWithoutRebuild(t *testing.T) {
 
 func assertDirIndexContains(t *testing.T, s *Server, storageID, dirPath string, want []string) {
 	t.Helper()
-	var index []dirIndexEntry
-	if err := s.db.View(func(tx metastore.Tx) error {
-		val, err := tx.Get(bucketDirIndex, makeDirIndexKey(storageID, dirPath))
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(val, &index)
-	}); err != nil {
-		t.Fatalf("dir index %q: %v", dirPath, err)
-	}
+	index := readDirEntries(t, s, storageID, dirPath)
 	names := make(map[string]bool, len(index))
 	for _, e := range index {
 		names[e.Name] = true
@@ -126,14 +116,17 @@ func TestDeleteRepositoryScopedToRepo(t *testing.T) {
 	if got := countPrefix(bucketOwnedFiles, "repo-a:"); got != 0 {
 		t.Fatalf("repo-a owned files remain after delete: %d", got)
 	}
-	if got := countPrefix(bucketDirIndex, "repo-a:"); got != 0 {
-		t.Fatalf("repo-a dir indexes remain after delete: %d", got)
+	if got := countDirEntries(t, s, "repo-a", ""); got != 0 {
+		t.Fatalf("repo-a root dir entries remain after delete: %d", got)
+	}
+	if got := countDirEntries(t, s, "repo-a", "a"); got != 0 {
+		t.Fatalf("repo-a/a dir entries remain after delete: %d", got)
 	}
 	if got := countPrefix(bucketOwnedFiles, "repo-b:"); got != 1 {
 		t.Fatalf("repo-b owned files = %d, want 1", got)
 	}
-	if got := countPrefix(bucketDirIndex, "repo-b:"); got == 0 {
-		t.Fatal("repo-b dir indexes were removed by repo-a delete")
+	if got := countDirEntries(t, s, "repo-b", "b"); got == 0 {
+		t.Fatal("repo-b dir entries were removed by repo-a delete")
 	}
 }
 
@@ -195,5 +188,70 @@ func TestUsageCountersPersistAcrossRestart(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("loadUsageCounters: %v", err)
+	}
+}
+
+// TestReadDirPagination verifies resumable name-ordered pages over the
+// per-entry directory index.
+func TestReadDirPagination(t *testing.T) {
+	tmpDir := t.TempDir()
+	s, err := NewServer("test-node", "localhost:9000",
+		filepath.Join(tmpDir, "test.db"), filepath.Join(tmpDir, "git"), false, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer s.Close()
+
+	storageID := "page-storage"
+	displayPath := "page-repo"
+	if _, err := s.RegisterRepository(context.Background(), &pb.RegisterRepositoryRequest{
+		StorageId: storageID, DisplayPath: displayPath, Source: "src",
+	}); err != nil {
+		t.Fatalf("RegisterRepository: %v", err)
+	}
+
+	names := []string{"a.go", "b.go", "c.go", "d.go", "e.go"}
+	files := make([]*pb.FileMetadata, 0, len(names))
+	for _, n := range names {
+		files = append(files, &pb.FileMetadata{Path: "dir/" + n, Mode: 0644, Size: 1, Mtime: 1, BlobHash: n})
+	}
+	if _, err := s.IngestFileBatch(context.Background(), &pb.IngestFileBatchRequest{
+		StorageId: storageID, DisplayPath: displayPath, Source: "src", Files: files,
+	}); err != nil {
+		t.Fatalf("IngestFileBatch: %v", err)
+	}
+
+	readPage := func(startAfter string, limit int) []string {
+		t.Helper()
+		stream := &mockReadDirStream{}
+		if err := s.ReadDir(&pb.ReadDirRequest{
+			Path:       displayPath + "/dir",
+			StartAfter: startAfter,
+			Limit:      int32(limit),
+		}, stream); err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		out := make([]string, 0, len(stream.entries))
+		for _, e := range stream.entries {
+			out = append(out, e.Name)
+		}
+		return out
+	}
+
+	var got []string
+	page := readPage("", 2)
+	got = append(got, page...)
+	for len(page) == 2 {
+		page = readPage(page[len(page)-1], 2)
+		got = append(got, page...)
+	}
+
+	if len(got) != len(names) {
+		t.Fatalf("paged entries = %v, want %v", got, names)
+	}
+	for i := range names {
+		if got[i] != names[i] {
+			t.Fatalf("paged entries = %v, want %v", got, names)
+		}
 	}
 }
