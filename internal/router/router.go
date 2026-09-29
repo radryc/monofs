@@ -238,6 +238,7 @@ type Router struct {
 	authzEnforceRead   bool
 	authzEnforceIngest bool
 	breakGlassAdmins   map[string]bool
+	serviceIdentity    authz.Identity
 
 	// Ownership gate (Phase 3 VCS governance)
 	ownershipResolverFull *authz.OwnershipResolver // concrete resolver (OwnersOf, Governed)

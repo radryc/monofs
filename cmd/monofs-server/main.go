@@ -28,6 +28,7 @@ import (
 	"github.com/radryc/monofs/internal/telemetry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -217,6 +218,12 @@ func main() {
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
 		grpc.MaxRecvMsgSize(1024*1024*1024), // 1 GB
 		grpc.MaxSendMsgSize(1024*1024*1024),
+		// Accept keepalive pings from long-idle clients (e.g. guardian's
+		// result-processor) without kicking them with ENHANCE_YOUR_CALM.
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second,
+			PermitWithoutStream: true,
+		}),
 	)
 
 	// Create server with NutsDB backend

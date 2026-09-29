@@ -26,6 +26,7 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage"
+	"github.com/radryc/monofs/pkg/authz"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -66,6 +67,15 @@ func (s *mockIngestStream) SendHeader(metadata.MD) error {
 }
 
 func (s *mockIngestStream) SetTrailer(metadata.MD) {
+}
+
+// detachedIngestContext returns a context that outlives the HTTP request but
+// still carries the caller's authenticated identity, so ingest authorization
+// evaluates the original principal. The request context is cancelled as soon as
+// the handler returns, so it cannot be reused directly by the async goroutine.
+func detachedIngestContext(req *http.Request) context.Context {
+	id, _ := authz.IdentityFromContext(req.Context())
+	return authz.ContextWithIdentity(context.Background(), id)
 }
 
 func (r *Router) injectGuardianPartitionFromSource(ctx context.Context, source, ref, partitionName, token string) error {
@@ -229,7 +239,18 @@ func (r *Router) ServeHTTP() http.Handler {
 	})
 	mux.HandleFunc("/", r.handleSPA(dist))
 
-	return mux
+	// Also serve the same UI/API under a path prefix (e.g. /monofs) so that
+	// deployments which route a sub-path to the router without rewriting the
+	// path (like the AWS ALB) work. The SPA is built with a matching Vite base
+	// in those deployments; requests are stripped back to the root mux.
+	outer := http.NewServeMux()
+	outer.Handle("/monofs/", http.StripPrefix("/monofs", mux))
+	outer.HandleFunc("/monofs", func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, "/monofs/", http.StatusMovedPermanently)
+	})
+	outer.Handle("/", mux)
+
+	return outer
 }
 
 // handleSPA serves the Vue SPA index.html for all non-asset routes.
@@ -324,7 +345,7 @@ func (r *Router) handleIngest(w http.ResponseWriter, req *http.Request) {
 
 	// Start ingestion asynchronously to avoid blocking HTTP request
 	go func() {
-		stream := &mockIngestStream{ctx: context.Background()}
+		stream := &mockIngestStream{ctx: detachedIngestContext(req)}
 
 		err := r.IngestRepository(&pb.IngestRequest{
 			Source:          source,
@@ -437,7 +458,7 @@ func (r *Router) handleIngestFileUpload(w http.ResponseWriter, req *http.Request
 	go func() {
 		defer os.RemoveAll(tempDir)
 
-		stream := &mockIngestStream{ctx: context.Background()}
+		stream := &mockIngestStream{ctx: detachedIngestContext(req)}
 		err := r.IngestRepository(&pb.IngestRequest{
 			Source:        tempDir,
 			Ref:           ref,
