@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -94,7 +94,7 @@ func TestFileUpdateReplacesEntry(t *testing.T) {
 	srcKey := makeDirIndexKey(storageID, "src")
 	var srcIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, srcKey)
 		if err != nil {
 			return err
@@ -202,7 +202,7 @@ func TestDirectoryMtimePropagation(t *testing.T) {
 	rootKey := makeDirIndexKey(storageID, "")
 	var rootIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, rootKey)
 		if err != nil {
 			return err
@@ -299,7 +299,7 @@ func TestConcurrentDirectoryOperations(t *testing.T) {
 	pkgKey := makeDirIndexKey(storageID, "pkg")
 	var pkgIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, pkgKey)
 		if err != nil {
 			return err
@@ -326,7 +326,7 @@ func TestConcurrentDirectoryOperations(t *testing.T) {
 		moduleKey := makeDirIndexKey(storageID, "pkg/"+entry.Name)
 		var moduleIndex []dirIndexEntry
 
-		err = s.db.View(func(tx *nutsdb.Tx) error {
+		err = s.db.View(func(tx metastore.Tx) error {
 			value, err := tx.Get(bucketDirIndex, moduleKey)
 			if err != nil {
 				return err
@@ -397,7 +397,7 @@ func TestSingleComponentPath(t *testing.T) {
 	rootKey := makeDirIndexKey(storageID, "")
 	var rootIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, rootKey)
 		if err != nil {
 			return err
@@ -496,7 +496,7 @@ func TestLargeDirectory(t *testing.T) {
 	bigdirKey := makeDirIndexKey(storageID, "bigdir")
 	var bigdirIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, bigdirKey)
 		if err != nil {
 			return err
@@ -595,7 +595,7 @@ func TestMixedBatchAndSingleOperations(t *testing.T) {
 	srcKey := makeDirIndexKey(storageID, "src")
 	var srcIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, srcKey)
 		if err != nil {
 			return err

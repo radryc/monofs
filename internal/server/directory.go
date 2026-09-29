@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 	"google.golang.org/grpc"
 )
 
@@ -29,7 +29,7 @@ func normalizeExplicitDirectoryMode(mode uint32) uint32 {
 	return perm | uint32(syscall.S_IFDIR)
 }
 
-func (s *Server) upsertDirectoryMetadata(tx *nutsdb.Tx, storageID, dirPath string, mode uint32, mtime int64, explicit bool) error {
+func (s *Server) upsertDirectoryMetadata(tx metastore.Tx, storageID, dirPath string, mode uint32, mtime int64, explicit bool) error {
 	if dirPath == "" {
 		return nil
 	}
@@ -73,7 +73,7 @@ func (s *Server) upsertDirectoryMetadata(tx *nutsdb.Tx, storageID, dirPath strin
 	return nil
 }
 
-func (s *Server) upsertDirectoryHierarchy(tx *nutsdb.Tx, storageID, filePath string, mode uint32, mtime int64, explicitLeafDir bool) error {
+func (s *Server) upsertDirectoryHierarchy(tx metastore.Tx, storageID, filePath string, mode uint32, mtime int64, explicitLeafDir bool) error {
 	parts := strings.Split(filePath, "/")
 	lastDirPart := len(parts) - 2
 	if explicitLeafDir {
@@ -94,7 +94,7 @@ func (s *Server) upsertDirectoryHierarchy(tx *nutsdb.Tx, storageID, filePath str
 	return nil
 }
 
-func (s *Server) getDirectoryMetadataTx(tx *nutsdb.Tx, storageID, dirPath string) (*dirMetadata, error) {
+func (s *Server) getDirectoryMetadataTx(tx metastore.Tx, storageID, dirPath string) (*dirMetadata, error) {
 	value, err := tx.Get(bucketDirMeta, makeDirMetaKey(storageID, dirPath))
 	if err != nil {
 		return nil, err
@@ -112,7 +112,7 @@ func (s *Server) lookupCanonicalDirectory(storageID, dirPath string) *pb.LookupR
 	}
 
 	var meta *dirMetadata
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		var err error
 		meta, err = s.getDirectoryMetadataTx(tx, storageID, dirPath)
 		return err
@@ -161,7 +161,7 @@ func directChildName(parentDir, candidate string) (string, bool) {
 	return remainder, true
 }
 
-func storeDirectoryIndex(tx *nutsdb.Tx, storageID, dirPath string, entries []dirIndexEntry) error {
+func storeDirectoryIndex(tx metastore.Tx, storageID, dirPath string, entries []dirIndexEntry) error {
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Name < entries[j].Name
 	})
@@ -184,7 +184,7 @@ func normalizeSummaryEntry(entry dirIndexEntry) dirIndexEntry {
 	return entry
 }
 
-func storeDirectorySummary(tx *nutsdb.Tx, storageID, dirPath string, entries []dirIndexEntry) error {
+func storeDirectorySummary(tx metastore.Tx, storageID, dirPath string, entries []dirIndexEntry) error {
 	normalized := make([]dirIndexEntry, 0, len(entries))
 	for _, entry := range entries {
 		normalized = append(normalized, normalizeSummaryEntry(entry))
@@ -199,7 +199,7 @@ func storeDirectorySummary(tx *nutsdb.Tx, storageID, dirPath string, entries []d
 	return tx.Put(bucketDirSummary, makeDirMetaKey(storageID, dirPath), value, 0)
 }
 
-func (s *Server) loadDirectorySummaryTx(tx *nutsdb.Tx, storageID, dirPath string) ([]dirIndexEntry, error) {
+func (s *Server) loadDirectorySummaryTx(tx metastore.Tx, storageID, dirPath string) ([]dirIndexEntry, error) {
 	value, err := tx.Get(bucketDirSummary, makeDirMetaKey(storageID, dirPath))
 	if err != nil {
 		return nil, err
@@ -220,7 +220,7 @@ func isDirSummaryMissingOrCorrupt(err error) bool {
 	if err == nil {
 		return false
 	}
-	if err == nutsdb.ErrKeyNotFound {
+	if err == metastore.ErrKeyNotFound {
 		return true
 	}
 	// nutsdb MMap reads can return "bad file descriptor" when segment files
@@ -231,7 +231,7 @@ func isDirSummaryMissingOrCorrupt(err error) bool {
 		strings.Contains(msg, "read err")
 }
 
-func (s *Server) upsertDirectorySummaryEntry(tx *nutsdb.Tx, storageID, dirPath string, entry dirIndexEntry) error {
+func (s *Server) upsertDirectorySummaryEntry(tx metastore.Tx, storageID, dirPath string, entry dirIndexEntry) error {
 	entry = normalizeSummaryEntry(entry)
 	entries, err := s.loadDirectorySummaryTx(tx, storageID, dirPath)
 	if err != nil && !isDirSummaryMissingOrCorrupt(err) {
@@ -257,7 +257,7 @@ func (s *Server) upsertDirectorySummaryEntry(tx *nutsdb.Tx, storageID, dirPath s
 	return storeDirectorySummary(tx, storageID, dirPath, entries)
 }
 
-func (s *Server) removeFromDirectorySummary(tx *nutsdb.Tx, storageID, parentDir, entryName string) error {
+func (s *Server) removeFromDirectorySummary(tx metastore.Tx, storageID, parentDir, entryName string) error {
 	entries, err := s.loadDirectorySummaryTx(tx, storageID, parentDir)
 	if isDirSummaryMissingOrCorrupt(err) {
 		// Nothing to remove; summary will be rebuilt on the next upsert.
@@ -282,7 +282,7 @@ func (s *Server) removeFromDirectorySummary(tx *nutsdb.Tx, storageID, parentDir,
 	return storeDirectorySummary(tx, storageID, parentDir, filtered)
 }
 
-func (s *Server) upsertPathIntoDirectorySummary(tx *nutsdb.Tx, storageID, filePath string, mode uint32, size uint64, mtime int64, explicitLeafDir bool, hashKey string) error {
+func (s *Server) upsertPathIntoDirectorySummary(tx metastore.Tx, storageID, filePath string, mode uint32, size uint64, mtime int64, explicitLeafDir bool, hashKey string) error {
 	parts := strings.Split(filePath, "/")
 	for i := 0; i < len(parts); i++ {
 		var dirPath string
@@ -322,7 +322,7 @@ func (s *Server) upsertPathIntoDirectorySummary(tx *nutsdb.Tx, storageID, filePa
 	return nil
 }
 
-func (s *Server) buildDirectoryEntriesFromCanonical(tx *nutsdb.Tx, storageID, dirPath string) ([]dirIndexEntry, bool, error) {
+func (s *Server) buildDirectoryEntriesFromCanonical(tx metastore.Tx, storageID, dirPath string) ([]dirIndexEntry, bool, error) {
 	entries := make(map[string]dirIndexEntry)
 	directoryExists := dirPath == ""
 
@@ -337,7 +337,7 @@ func (s *Server) buildDirectoryEntriesFromCanonical(tx *nutsdb.Tx, storageID, di
 		for _, entry := range summaryEntries {
 			entries[entry.Name] = normalizeSummaryEntry(entry)
 		}
-	} else if err != nutsdb.ErrKeyNotFound {
+	} else if err != metastore.ErrKeyNotFound {
 		return nil, false, err
 	}
 
@@ -347,7 +347,7 @@ func (s *Server) buildDirectoryEntriesFromCanonical(tx *nutsdb.Tx, storageID, di
 	}
 
 	keys, _, err := tx.PrefixScanEntries(bucketPathIndex, []byte(prefix), "", 0, -1, true, false)
-	if err != nil && err != nutsdb.ErrBucketNotFound && err != nutsdb.ErrPrefixScan {
+	if err != nil && err != metastore.ErrBucketNotFound && err != metastore.ErrPrefixScan {
 		return nil, false, err
 	}
 	for _, key := range keys {
@@ -468,7 +468,7 @@ func (s *Server) rebuildDirectoryIndexFromCanonical(storageID, dirPath string) (
 		entries []dirIndexEntry
 		found   bool
 	)
-	err := s.db.Update(func(tx *nutsdb.Tx) error {
+	err := s.db.Update(func(tx metastore.Tx) error {
 		var err error
 		entries, found, err = s.buildDirectoryEntriesFromCanonical(tx, storageID, dirPath)
 		if err != nil || !found {
@@ -487,7 +487,7 @@ func (s *Server) lookupDirectorySummaryFile(storageID, filePath string) *pb.Look
 	entryName := extractFileName(filePath)
 
 	var foundEntry *dirIndexEntry
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		entries, err := s.loadDirectorySummaryTx(tx, storageID, parentDir)
 		if err != nil {
 			return err
@@ -522,7 +522,7 @@ func (s *Server) lookupDirectorySummaryFile(storageID, filePath string) *pb.Look
 	}
 }
 
-func (s *Server) pruneImplicitDirectories(tx *nutsdb.Tx, storageID, startDir string) error {
+func (s *Server) pruneImplicitDirectories(tx metastore.Tx, storageID, startDir string) error {
 	for dirPath := startDir; dirPath != ""; dirPath = extractDirPath(dirPath) {
 		meta, err := s.getDirectoryMetadataTx(tx, storageID, dirPath)
 		if err != nil {
@@ -540,13 +540,13 @@ func (s *Server) pruneImplicitDirectories(tx *nutsdb.Tx, storageID, startDir str
 			return nil
 		}
 
-		if err := tx.Delete(bucketDirMeta, makeDirMetaKey(storageID, dirPath)); err != nil && err != nutsdb.ErrKeyNotFound {
+		if err := tx.Delete(bucketDirMeta, makeDirMetaKey(storageID, dirPath)); err != nil && err != metastore.ErrKeyNotFound {
 			return err
 		}
-		if err := tx.Delete(bucketDirSummary, makeDirMetaKey(storageID, dirPath)); err != nil && err != nutsdb.ErrKeyNotFound {
+		if err := tx.Delete(bucketDirSummary, makeDirMetaKey(storageID, dirPath)); err != nil && err != metastore.ErrKeyNotFound {
 			return err
 		}
-		if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != nutsdb.ErrKeyNotFound {
+		if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != metastore.ErrKeyNotFound {
 			return err
 		}
 		parentDir := extractDirPath(dirPath)
@@ -579,7 +579,7 @@ func (s *Server) pruneImplicitDirectories(tx *nutsdb.Tx, storageID, startDir str
 // - Updates "" (root) to include "cmd" as a directory
 // - Updates "cmd" to include "thanos" as a directory
 // - Updates "cmd/thanos" to include "main.go" as a file
-func (s *Server) updateDirectoryIndexHierarchy(tx *nutsdb.Tx, storageID, filePath string, fileHashKey []byte, mode uint32, size uint64, mtime int64, explicitLeafDir bool) error {
+func (s *Server) updateDirectoryIndexHierarchy(tx metastore.Tx, storageID, filePath string, fileHashKey []byte, mode uint32, size uint64, mtime int64, explicitLeafDir bool) error {
 	if err := s.upsertDirectoryHierarchy(tx, storageID, filePath, mode, mtime, explicitLeafDir); err != nil {
 		return err
 	}
@@ -757,7 +757,7 @@ func accumulateDirectoryIndexEntry(pending map[string][]dirIndexEntry, filePath 
 
 // flushDirectoryIndexEntries merges accumulated entries into the on-disk
 // directory index, writing each touched directory exactly once.
-func flushDirectoryIndexEntries(tx *nutsdb.Tx, storageID string, pending map[string][]dirIndexEntry) error {
+func flushDirectoryIndexEntries(tx metastore.Tx, storageID string, pending map[string][]dirIndexEntry) error {
 	for dirPath, newEntries := range pending {
 		dirIndexKey := makeDirIndexKey(storageID, dirPath)
 		var existing []dirIndexEntry
@@ -811,7 +811,7 @@ func (s *Server) checkVirtualDirectory(storageID, dirPath string) *pb.LookupResp
 		"dir_index_key", string(dirIndexKey))
 
 	var foundEntry *dirIndexEntry
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, dirIndexKey)
 		if err != nil {
 			s.logger.Debug("dir index not found for parent",
@@ -902,7 +902,7 @@ func (s *Server) checkVirtualFile(storageID, filePath string) *pb.LookupResponse
 		"dir_index_key", string(dirIndexKey))
 
 	var foundEntry *dirIndexEntry
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, dirIndexKey)
 		if err != nil {
 			s.logger.Debug("dir index not found for parent",
@@ -995,7 +995,7 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 		}
 		repoCount := 0
 
-		s.db.View(func(tx *nutsdb.Tx) error {
+		s.db.View(func(tx metastore.Tx) error {
 			// Use GetKeys first to get only keys (lighter), then batch Get values
 			keys, err := tx.GetKeys(bucketRepos)
 			if err != nil {
@@ -1083,7 +1083,7 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 			intermediateDirs[dir] = true
 		}
 
-		s.db.View(func(tx *nutsdb.Tx) error {
+		s.db.View(func(tx metastore.Tx) error {
 			// Use GetKeys first, then batch Get values
 			keys, err := tx.GetKeys(bucketRepos)
 			if err != nil {
@@ -1199,7 +1199,7 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 	var sentEntries int
 	dbStartTime := time.Now()
 
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, dirIndexKey)
 		if err != nil {
 			// Directory index not found - this could be a new directory or error
@@ -1335,12 +1335,12 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 
 	s.logger.Info("scanning for files", "prefix", string(prefix), "bucket", bucketOwnedFiles)
 
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		// Use PrefixScan to get all keys with this storageID prefix
 		// Note: PrefixScan returns values, but we stored "1" as value and key contains the path
 		// So we need PrefixScanEntries to get keys
 		keys, _, err := tx.PrefixScanEntries(bucketOwnedFiles, prefix, "", 0, -1, true, false)
-		if err != nil && err != nutsdb.ErrBucketNotFound && err != nutsdb.ErrPrefixScan {
+		if err != nil && err != metastore.ErrBucketNotFound && err != metastore.ErrPrefixScan {
 			s.logger.Error("prefix scan failed", "error", err)
 			return err
 		}
@@ -1527,7 +1527,7 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 
 	// Write all directory indexes to database
 	dirsIndexed := int64(0)
-	err = s.db.Update(func(tx *nutsdb.Tx) error {
+	err = s.db.Update(func(tx metastore.Tx) error {
 		for _, meta := range fileMetadata {
 			if err := s.upsertDirectoryHierarchy(tx, storageID, meta.FilePath, meta.Mode, meta.Mtime, meta.IsDir); err != nil {
 				return fmt.Errorf("backfill dir metadata for %q: %w", meta.FilePath, err)
@@ -1610,7 +1610,7 @@ func (s *Server) BuildDirectoryIndexes(ctx context.Context, req *pb.BuildDirecto
 
 // removeFromDirectoryIndex removes a single entry (file or subdirectory) from a parent
 // directory's index. Must be called within a NutsDB transaction.
-func (s *Server) removeFromDirectoryIndex(tx *nutsdb.Tx, storageID, parentDir, entryName string) error {
+func (s *Server) removeFromDirectoryIndex(tx metastore.Tx, storageID, parentDir, entryName string) error {
 	dirIndexKey := makeDirIndexKey(storageID, parentDir)
 
 	value, err := tx.Get(bucketDirIndex, dirIndexKey)
@@ -1674,7 +1674,7 @@ func (s *Server) DeleteDirectoryRecursive(ctx context.Context, req *pb.DeleteDir
 	var filePaths []string
 	var dirPaths []string
 
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		var walkDir func(path string) error
 		walkDir = func(path string) error {
 			dirIndexKey := makeDirIndexKey(storageID, path)
@@ -1717,7 +1717,7 @@ func (s *Server) DeleteDirectoryRecursive(ctx context.Context, req *pb.DeleteDir
 	var filesDeleted, dirsDeleted int64
 
 	// Delete all collected entries in an update transaction
-	err = s.db.Update(func(tx *nutsdb.Tx) error {
+	err = s.db.Update(func(tx metastore.Tx) error {
 		// Delete all files
 		for _, fp := range filePaths {
 			fullPath := storageID + ":" + fp

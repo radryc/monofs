@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -259,7 +259,7 @@ func TestClearFailoverCache(t *testing.T) {
 
 	// Add entries to bucketFailover (the actual failover cache)
 	// Key format: "failedNodeID:storageID:filePath"
-	err = server.db.Update(func(tx *nutsdb.Tx) error {
+	err = server.db.Update(func(tx metastore.Tx) error {
 		if err := tx.Put(bucketFailover, []byte(failedNodeID+":"+storageID+":file1.txt"), []byte("metadata1"), 0); err != nil {
 			return err
 		}
@@ -294,9 +294,9 @@ func TestClearFailoverCache(t *testing.T) {
 
 	// Verify only the failed node's entries were cleared
 	count := 0
-	err = server.db.View(func(tx *nutsdb.Tx) error {
+	err = server.db.View(func(tx metastore.Tx) error {
 		keys, _, err := tx.PrefixScanEntries(bucketFailover, []byte(""), "", 0, -1, true, false)
-		if err != nil && err != nutsdb.ErrBucketNotFound && err != nutsdb.ErrPrefixScan {
+		if err != nil && err != metastore.ErrBucketNotFound && err != metastore.ErrPrefixScan {
 			return err
 		}
 		count = len(keys)
@@ -379,7 +379,7 @@ func TestOwnershipTracking(t *testing.T) {
 
 	// Verify ownership tracking
 	ownershipKey := []byte(storageID + ":" + filePath)
-	err = server.db.View(func(tx *nutsdb.Tx) error {
+	err = server.db.View(func(tx metastore.Tx) error {
 		_, err := tx.Get(bucketOwnedFiles, ownershipKey)
 		return err
 	})
@@ -406,7 +406,7 @@ func TestReplicaTracking(t *testing.T) {
 	filePath := "replica-file.txt"
 
 	key := []byte(storageID + ":" + filePath)
-	err = server.db.Update(func(tx *nutsdb.Tx) error {
+	err = server.db.Update(func(tx metastore.Tx) error {
 		return tx.Put(bucketReplicaFiles, key, []byte(ownerNodeID), 0)
 	})
 	if err != nil {
@@ -415,7 +415,7 @@ func TestReplicaTracking(t *testing.T) {
 
 	// Verify retrieval
 	var value []byte
-	err = server.db.View(func(tx *nutsdb.Tx) error {
+	err = server.db.View(func(tx metastore.Tx) error {
 		val, err := tx.Get(bucketReplicaFiles, key)
 		if err != nil {
 			return err
@@ -525,7 +525,7 @@ func TestMultipleNodeFailoverCleanup(t *testing.T) {
 
 	// Simulate multiple node failures - add entries to bucketFailover (the actual failover cache)
 	nodes := []string{"node1", "node2", "node3"}
-	err = server.db.Update(func(tx *nutsdb.Tx) error {
+	err = server.db.Update(func(tx metastore.Tx) error {
 		for i, nodeID := range nodes {
 			for j := 0; j < 5; j++ {
 				// Key format: "nodeID:storageID:filePath"
@@ -556,9 +556,9 @@ func TestMultipleNodeFailoverCleanup(t *testing.T) {
 
 	// Verify all failover entries are cleaned up
 	count := 0
-	err = server.db.View(func(tx *nutsdb.Tx) error {
+	err = server.db.View(func(tx metastore.Tx) error {
 		keys, _, err := tx.PrefixScanEntries(bucketFailover, []byte(""), "", 0, -1, true, false)
-		if err != nil && err != nutsdb.ErrBucketNotFound && err != nutsdb.ErrPrefixScan {
+		if err != nil && err != metastore.ErrBucketNotFound && err != metastore.ErrPrefixScan {
 			return err
 		}
 		count = len(keys)
@@ -676,7 +676,7 @@ func TestIngestReplicaBatch(t *testing.T) {
 
 	// Verify replica data is in bucketReplicaFiles
 	replicaCount := 0
-	err = server.db.View(func(tx *nutsdb.Tx) error {
+	err = server.db.View(func(tx metastore.Tx) error {
 		for _, file := range files {
 			replicaKey := makeReplicaKey(storageID, file.Path, primaryNodeID)
 			_, err := tx.Get(bucketReplicaFiles, replicaKey)
@@ -696,7 +696,7 @@ func TestIngestReplicaBatch(t *testing.T) {
 
 	// Verify metadata is also stored (for serving during failover)
 	metadataCount := 0
-	err = server.db.View(func(tx *nutsdb.Tx) error {
+	err = server.db.View(func(tx metastore.Tx) error {
 		for _, file := range files {
 			metaKey := makeStorageKey(storageID, file.Path)
 			_, err := tx.Get(bucketMetadata, metaKey)
@@ -789,7 +789,7 @@ func TestIngestReplicaBatchRegistersRepo(t *testing.T) {
 
 	// Verify repo was auto-registered
 	var repoExists bool
-	err = server.db.View(func(tx *nutsdb.Tx) error {
+	err = server.db.View(func(tx metastore.Tx) error {
 		_, err := tx.Get(bucketRepos, []byte(storageID))
 		repoExists = (err == nil)
 		return nil
@@ -861,7 +861,7 @@ func TestReplicaDataUsedDuringFailover(t *testing.T) {
 
 	// Step 3: Verify failover cache has the data
 	var failoverCacheHasData bool
-	err = server.db.View(func(tx *nutsdb.Tx) error {
+	err = server.db.View(func(tx metastore.Tx) error {
 		failoverKey := makeFailoverKey(primaryNodeID, storageID, "important.txt")
 		_, err := tx.Get(bucketFailover, failoverKey)
 		failoverCacheHasData = (err == nil)

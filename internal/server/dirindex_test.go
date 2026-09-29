@@ -7,8 +7,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 )
 
 // TestDirectoryIndexHierarchy verifies that all parent directories are updated
@@ -62,7 +62,7 @@ func TestDirectoryIndexHierarchy(t *testing.T) {
 	rootKey := makeDirIndexKey(storageID, "")
 	var rootIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, rootKey)
 		if err != nil {
 			return err
@@ -95,7 +95,7 @@ func TestDirectoryIndexHierarchy(t *testing.T) {
 	cmdKey := makeDirIndexKey(storageID, "cmd")
 	var cmdIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, cmdKey)
 		if err != nil {
 			return err
@@ -128,7 +128,7 @@ func TestDirectoryIndexHierarchy(t *testing.T) {
 	thanosKey := makeDirIndexKey(storageID, "cmd/thanos")
 	var thanosIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, thanosKey)
 		if err != nil {
 			return err
@@ -220,7 +220,7 @@ func TestDirectoryIndexMultipleFiles(t *testing.T) {
 	rootKey := makeDirIndexKey(storageID, "")
 	var rootIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, rootKey)
 		if err != nil {
 			return err
@@ -265,7 +265,7 @@ func TestDirectoryIndexMultipleFiles(t *testing.T) {
 	cmdKey := makeDirIndexKey(storageID, "cmd")
 	var cmdIndex []dirIndexEntry
 
-	err = s.db.View(func(tx *nutsdb.Tx) error {
+	err = s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, cmdKey)
 		if err != nil {
 			return err
@@ -480,7 +480,7 @@ func TestDirHintPopulatesIndex(t *testing.T) {
 	// The dir index for "pkg" should have ALL 3 entries:
 	// enry.go (local), classifier.go (dir-hint), common.go (dir-hint).
 	var dirIndex []dirIndexEntry
-	s.db.View(func(tx *nutsdb.Tx) error {
+	s.db.View(func(tx metastore.Tx) error {
 		val, err := tx.Get(bucketDirIndex, makeDirIndexKey(storageID, "pkg"))
 		if err != nil {
 			t.Fatalf("dir index for 'pkg' not found: %v", err)
@@ -505,7 +505,7 @@ func TestDirHintPopulatesIndex(t *testing.T) {
 	// Dir-hint entries should NOT have created metadata or ownership.
 	key := makeStorageKey(storageID, "pkg/classifier.go")
 	var metadataExists bool
-	s.db.View(func(tx *nutsdb.Tx) error {
+	s.db.View(func(tx metastore.Tx) error {
 		_, err := tx.Get(bucketMetadata, key)
 		metadataExists = (err == nil)
 		return nil
@@ -515,7 +515,7 @@ func TestDirHintPopulatesIndex(t *testing.T) {
 	}
 
 	var ownershipExists bool
-	s.db.View(func(tx *nutsdb.Tx) error {
+	s.db.View(func(tx metastore.Tx) error {
 		_, err := tx.Get(bucketOwnedFiles, []byte(storageID+":pkg/classifier.go"))
 		ownershipExists = (err == nil)
 		return nil
