@@ -11,6 +11,7 @@ import {
 
 const route = useRoute()
 const store = useAppStore()
+const logoSrc = import.meta.env.BASE_URL + 'static/static/monofs.png'
 
 onMounted(async () => {
   if (store.version) return
@@ -46,7 +47,7 @@ const navItems = [
       <!-- Logo -->
       <div class="px-5 py-5 border-b border-slate-700/40">
         <div class="flex items-center gap-3">
-          <img :src="'/static/static/monofs.png'" alt="MonoFS" class="h-10 w-auto">
+          <img :src="logoSrc" alt="MonoFS" class="h-10 w-auto">
           <div>
             <span class="text-sm font-bold text-slate-200 tracking-widest">MONOFS</span>
             <div class="text-xs text-slate-500 mt-0.5">v{{ store.version || '...' }}</div>
