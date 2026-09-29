@@ -66,6 +66,11 @@ type RouterConfig struct {
 	GracefulFailoverDelay time.Duration // Wait for planned restarts/upgrades, default: 60s
 	GuardianIngestTimeout time.Duration // Timeout for guardian batch ingestion to nodes, default: 5m
 
+	// SearchIndexGuardian indexes Guardian-managed partitions in the search
+	// service. Default false: they have no clonable upstream git remote, so
+	// indexing would fall back to a failing git clone.
+	SearchIndexGuardian bool
+
 	// Authz (partition-level authorization)
 	AuthzEnforceIngest bool
 	AuthzGrantsPath    string

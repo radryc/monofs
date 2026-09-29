@@ -5,14 +5,37 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
 )
 
+// isGuardianRepo reports whether a repository is a Guardian-managed partition.
+// These are served through the Guardian KVS backend and have no upstream git
+// remote the search service can clone, so they are not indexed.
+func isGuardianRepo(displayPath, source string) bool {
+	displayPath = strings.TrimSpace(displayPath)
+	if displayPath == "guardian" || strings.HasPrefix(displayPath, "guardian/") {
+		return true
+	}
+	source = strings.TrimSpace(source)
+	return strings.HasPrefix(source, "guardian://") || strings.Contains(source, "remote-guardian")
+}
+
 // IndexRepository implements the IndexRepository RPC
 func (s *Service) IndexRepository(ctx context.Context, req *pb.IndexRequest) (*pb.IndexResponse, error) {
+	if s.shouldSkipGuardian(req.DisplayPath, req.Source) {
+		s.logger.Info("skipping index request for guardian repository",
+			"storage_id", req.StorageId,
+			"display_path", req.DisplayPath)
+		return &pb.IndexResponse{
+			Queued:  false,
+			Message: "guardian repositories are not indexed",
+		}, nil
+	}
+
 	s.logger.Info("received index request",
 		"storage_id", req.StorageId,
 		"display_path", req.DisplayPath,
@@ -355,6 +378,16 @@ func (s *Service) RebuildIndex(ctx context.Context, req *pb.RebuildIndexRequest)
 		branch = job.Branch
 	}
 
+	if s.shouldSkipGuardian(displayPath, repoURL) {
+		s.logger.Info("skipping rebuild for guardian repository",
+			"storage_id", req.StorageId,
+			"display_path", displayPath)
+		return &pb.RebuildIndexResponse{
+			Queued:  false,
+			Message: "guardian repositories are not indexed",
+		}, nil
+	}
+
 	// Delete existing index if force rebuild
 	if req.Force {
 		s.indexer.DeleteIndex(displayPath)
@@ -403,6 +436,9 @@ func (s *Service) RebuildAllIndexes(ctx context.Context, req *pb.RebuildAllIndex
 		for _, val := range values {
 			var meta RepoMeta
 			if err := json.Unmarshal(val, &meta); err != nil {
+				continue
+			}
+			if s.shouldSkipGuardian(meta.DisplayPath, meta.RepoURL) {
 				continue
 			}
 
