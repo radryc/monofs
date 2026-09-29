@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 )
 
 // TestBatchIngestMaintainsDirectoryIndexWithoutRebuild verifies that batch
@@ -56,7 +56,7 @@ func TestBatchIngestMaintainsDirectoryIndexWithoutRebuild(t *testing.T) {
 func assertDirIndexContains(t *testing.T, s *Server, storageID, dirPath string, want []string) {
 	t.Helper()
 	var index []dirIndexEntry
-	if err := s.db.View(func(tx *nutsdb.Tx) error {
+	if err := s.db.View(func(tx metastore.Tx) error {
 		val, err := tx.Get(bucketDirIndex, makeDirIndexKey(storageID, dirPath))
 		if err != nil {
 			return err
@@ -113,7 +113,7 @@ func TestDeleteRepositoryScopedToRepo(t *testing.T) {
 	countPrefix := func(bucket, prefix string) int {
 		t.Helper()
 		n := 0
-		if err := s.db.View(func(tx *nutsdb.Tx) error {
+		if err := s.db.View(func(tx metastore.Tx) error {
 			keys, err := prefixScanKeys(tx, bucket, []byte(prefix))
 			n = len(keys)
 			return err
@@ -180,7 +180,7 @@ func TestUsageCountersPersistAcrossRestart(t *testing.T) {
 
 	// The counter record must be persisted, and the startup loader must return
 	// it (found=true) so NewServer can skip the O(total files) scan.
-	if err := s.db.View(func(tx *nutsdb.Tx) error {
+	if err := s.db.View(func(tx metastore.Tx) error {
 		count, bytes_, found, err := loadUsageCounters(tx)
 		if err != nil {
 			return err

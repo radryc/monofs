@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nutsdb/nutsdb"
 	"github.com/radryc/kvs/pkg/kvsapi"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -85,7 +85,7 @@ func (s *Server) repoInfoByStorageID(storageID string) (repoInfo, bool) {
 		return repoInfo{}, false
 	}
 	var info repoInfo
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketRepos, []byte(storageID))
 		if err != nil {
 			return err
@@ -102,10 +102,10 @@ func (s *Server) ensureRepositoryRegistration(storageID, displayPath, repoURL, b
 	if storageID == "" || displayPath == "" {
 		return fmt.Errorf("storage id and display path are required")
 	}
-	return s.db.Update(func(tx *nutsdb.Tx) error {
+	return s.db.Update(func(tx metastore.Tx) error {
 		repoKey := []byte(storageID)
 		existingRepoData, existsErr := tx.Get(bucketRepos, repoKey)
-		isNewRepo := existsErr == nutsdb.ErrKeyNotFound
+		isNewRepo := existsErr == metastore.ErrKeyNotFound
 
 		info := &repoInfo{
 			StorageID:      storageID,

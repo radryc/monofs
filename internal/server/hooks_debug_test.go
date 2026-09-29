@@ -7,8 +7,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 )
 
 // TestHooksDirectorySharding tests whether hooks directory gets properly indexed
@@ -85,7 +85,7 @@ func TestHooksDirectorySharding(t *testing.T) {
 	rootKey := makeDirIndexKey(storageID, "")
 	var rootIndex []dirIndexEntry
 
-	err = server.db.View(func(tx *nutsdb.Tx) error {
+	err = server.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketDirIndex, rootKey)
 		if err != nil {
 			return err
