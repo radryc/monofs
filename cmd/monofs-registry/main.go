@@ -96,6 +96,7 @@ func main() {
 
 	proxy := registry.NewProxy(upstreamConfig, registry.NewBlobStore(client), registry.NewTagStore(client, registry.NewBlobStore(client)), &registry.Stats{}, logger)
 	server := registry.NewServer(client, proxy, logger, *dataNS)
+	defer server.Close()
 
 	httpServer := &http.Server{
 		Addr:    *listen,

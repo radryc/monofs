@@ -143,23 +143,6 @@ func (om *OverlayManager) toSlice(entries map[string]fuse.DirEntry) []fuse.DirEn
 	return result
 }
 
-// ShouldUseLocalFile checks if a file should be read from local overlay.
-func (om *OverlayManager) ShouldUseLocalFile(monofsPath string) bool {
-	if om.sessionMgr == nil {
-		return false
-	}
-	return om.sessionMgr.HasLocalOverride(monofsPath)
-}
-
-// GetLocalContent reads file content from local overlay.
-func (om *OverlayManager) GetLocalContent(monofsPath string) ([]byte, error) {
-	localPath, err := om.sessionMgr.GetLocalPath(monofsPath)
-	if err != nil {
-		return nil, err
-	}
-	return os.ReadFile(localPath)
-}
-
 // GetLocalAttr gets file attributes from local overlay.
 // First checks OverlayDB, falls back to os.Stat for freshness.
 func (om *OverlayManager) GetLocalAttr(monofsPath string) (*LocalAttr, error) {
@@ -190,14 +173,6 @@ func (om *OverlayManager) GetLocalAttr(monofsPath string) (*LocalAttr, error) {
 	}
 
 	return attr, nil
-}
-
-// IsPathDeleted checks if a path has been deleted in the current session.
-func (om *OverlayManager) IsPathDeleted(monofsPath string) bool {
-	if om.sessionMgr == nil {
-		return false
-	}
-	return om.sessionMgr.IsDeleted(monofsPath)
 }
 
 // LocalAttr represents file attributes from local overlay.

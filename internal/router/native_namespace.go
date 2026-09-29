@@ -529,13 +529,6 @@ func (r *Router) nativeReadDirFromNode(ctx context.Context, client pb.MonoFSClie
 	return entries, nil
 }
 
-func ceilDiv(value uint64, divisor uint32) uint64 {
-	if value == 0 {
-		return 0
-	}
-	return (value + uint64(divisor) - 1) / uint64(divisor)
-}
-
 func maxInt64(a, b int64) int64 {
 	if a > b {
 		return a

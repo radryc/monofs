@@ -230,7 +230,7 @@ func (g *Generator) generateModuleBazel(repos []ManifestRepository) string {
 		for _, repo := range sorted {
 			modName := DisplayPathToModuleName(repo.DisplayPath)
 			b.WriteString(fmt.Sprintf("bazel_dep(name = %q, version = \"0.0.0\")\n", modName))
-			b.WriteString(fmt.Sprintf("local_path_override(\n"))
+			b.WriteString("local_path_override(\n")
 			b.WriteString(fmt.Sprintf("    module_name = %q,\n", modName))
 			b.WriteString(fmt.Sprintf("    path = %q,\n", repo.DisplayPath))
 			b.WriteString(")\n")

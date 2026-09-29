@@ -19,7 +19,7 @@ services:
   # MinIO S3-compatible object storage
   minio:
     <<: *otel-syslog-logging
-    image: quay.io/minio/minio:latest
+    image: docker.io/bitnamilegacy/minio:latest
     ports:
       - "19000:9000"  # S3 API
       - "19001:9001"  # Web Console
@@ -41,16 +41,16 @@ services:
   # Create the monofs bucket on startup
   minio-init:
     <<: *otel-syslog-logging
-    image: quay.io/minio/mc:latest
+    image: docker.io/bitnamilegacy/minio-client:latest
     depends_on:
       minio:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
       sleep 5;
-      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin;
-      /usr/bin/mc mb myminio/monofs || true;
-      /usr/bin/mc policy set download myminio/monofs || true;
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb myminio/monofs || true;
+      mc policy set download myminio/monofs || true;
       exit 0;
       "
     networks:

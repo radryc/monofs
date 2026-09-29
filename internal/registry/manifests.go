@@ -201,10 +201,13 @@ func (t *TagStore) DeleteTag(ctx context.Context, repo, tag string) error {
 func (t *TagStore) ListTags(ctx context.Context, repo string) ([]string, error) {
 	t.mu.RLock()
 	if cached, ok := t.tagCache[repo]; ok {
+		// Copy before sorting: the cached slice is shared and must not be
+		// mutated or aliased to callers.
+		tags := append([]string(nil), cached...)
 		t.mu.RUnlock()
 		t.touchRepo(repo)
-		sort.Strings(cached)
-		return cached, nil
+		sort.Strings(tags)
+		return tags, nil
 	}
 	t.mu.RUnlock()
 
@@ -386,7 +389,9 @@ func (t *TagStore) PutManifest(ctx context.Context, repo, ref string, content []
 
 	d := digest.Digest(ref)
 	if err := d.Validate(); err == nil {
-		dgst = ref
+		if string(d) != dgst {
+			return "", fmt.Errorf("manifest digest mismatch: ref %s does not match computed %s", d, dgst)
+		}
 		return dgst, nil
 	}
 

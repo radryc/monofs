@@ -5,11 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -27,8 +27,6 @@ func (s *Server) EnableForwarding(routerAddr string, refreshInterval time.Durati
 	}
 
 	s.hrwMu.Lock()
-	defer s.hrwMu.Unlock()
-
 	s.routerAddr = routerAddr
 	s.enableForwarding = true
 	s.refreshInterval = refreshInterval
@@ -39,8 +37,10 @@ func (s *Server) EnableForwarding(routerAddr string, refreshInterval time.Durati
 	s.stopRefresh = make(chan struct{})
 	s.peerConns = make(map[string]*grpc.ClientConn)
 	s.peerClients = make(map[string]pb.MonoFSClient)
+	s.hrwMu.Unlock()
 
-	// Initial topology refresh
+	// Initial topology refresh. refreshTopology acquires hrwMu itself, so the
+	// lock must be released before calling it (sync.RWMutex is not reentrant).
 	if err := s.refreshTopology(); err != nil {
 		s.logger.Warn("initial topology refresh failed, will retry", "error", err)
 		// Don't return error - we'll retry in the background
@@ -113,6 +113,7 @@ func (s *Server) refreshTopology() error {
 	if s.routerConn == nil {
 		conn, err := grpc.NewClient(s.routerAddr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpcx.IPv4DialerOption(),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(100*1024*1024)),
 		)
 		if err != nil {
@@ -167,6 +168,7 @@ func (s *Server) refreshTopology() error {
 
 		conn, err := grpc.NewClient(nodeAddr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpcx.IPv4DialerOption(),
 		)
 		if err != nil {
 			s.logger.Warn("failed to connect to peer node",
@@ -200,33 +202,6 @@ func (s *Server) refreshTopology() error {
 	return nil
 }
 
-// shouldHandleLocally checks if this node should handle the request based on HRW.
-// Returns true if local, false if should forward to another node.
-func (s *Server) shouldHandleLocally(storageID, filePath string) bool {
-	s.hrwMu.RLock()
-	defer s.hrwMu.RUnlock()
-
-	if !s.enableForwarding || s.hrw == nil {
-		// Forwarding disabled or no topology - handle locally
-		return true
-	}
-
-	// Build shard key (same format as client)
-	shardKey := storageID
-	if filePath != "" {
-		shardKey = storageID + ":" + filePath
-	}
-
-	// Get the node that should own this key
-	targetNode := s.hrw.GetNode(shardKey)
-	if targetNode == nil {
-		// No healthy nodes - handle locally as fallback
-		return true
-	}
-
-	return targetNode.ID == s.nodeID
-}
-
 // getTargetNode returns the node that should handle the given key.
 func (s *Server) getTargetNode(storageID, filePath string) *sharding.Node {
 	s.hrwMu.RLock()
@@ -242,24 +217,6 @@ func (s *Server) getTargetNode(storageID, filePath string) *sharding.Node {
 	}
 
 	return s.hrw.GetNode(shardKey)
-}
-
-// forwardableTarget returns the target node for forwarding based on the path's
-// namespace/repo prefix, or nil if this node should handle the request locally.
-func (s *Server) forwardableTarget(path string) *sharding.Node {
-	if !s.enableForwarding || s.hrw == nil {
-		return nil
-	}
-	parts := strings.SplitN(path, "/", 3)
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return nil
-	}
-	shardKey := parts[0] + "/" + parts[1]
-	target := s.hrw.GetNode(shardKey)
-	if target != nil && target.ID == s.nodeID {
-		return nil
-	}
-	return target
 }
 
 // isNodeHealthy checks if a node is currently healthy.
@@ -482,67 +439,6 @@ func (s *Server) getPeerClient(nodeID string) pb.MonoFSClient {
 	}
 
 	return s.peerClients[nodeID]
-}
-
-// forwardResult is a generic wrapper for forwarding responses.
-type forwardResult[T any] struct {
-	resp T
-	ok   bool
-}
-
-// forwardToTarget forwards the request to the appropriate node if needed.
-// It handles the HRW routing logic: tries the primary node first, then falls back to backups.
-// Returns (forwarded=true, result, nil) if a successful response was received.
-// Returns (forwarded=false, zero-value, nil) if the request should be handled locally.
-//
-// The forwardFn should perform the actual RPC call to the target node and return (response, success, error).
-// The success boolean indicates whether the response is valid/usable (e.g., resp.Found for Lookup/GetAttr).
-func (s *Server) forwardToTarget(ctx context.Context, storageID, filePath string, forwardFn func(node *sharding.Node) (forwardResult[interface{}], error)) (bool, interface{}, error) {
-	if !s.enableForwarding || isAlreadyForwarded(ctx) {
-		return false, nil, nil
-	}
-
-	targetNode := s.getTargetNode(storageID, filePath)
-	if targetNode == nil {
-		return false, nil, nil
-	}
-
-	// Try primary node first if healthy and not self
-	if targetNode.ID != s.nodeID && s.isNodeHealthy(targetNode.ID) {
-		s.logger.Debug("forwarding to primary node",
-			"storage_id", storageID,
-			"file_path", filePath,
-			"target_node", targetNode.ID)
-		result, err := forwardFn(targetNode)
-		if err == nil && result.ok {
-			return true, result.resp, nil
-		}
-		// Primary failed, will try backups below
-	}
-
-	// Primary is unhealthy or failed, try backup nodes
-	if !s.isNodeHealthy(targetNode.ID) {
-		backupNodes := s.getBackupNodes(storageID, filePath)
-		for _, backup := range backupNodes {
-			if backup.ID == s.nodeID {
-				// This node is a backup, handle locally
-				return false, nil, nil
-			}
-			s.logger.Debug("forwarding to backup node",
-				"storage_id", storageID,
-				"file_path", filePath,
-				"primary", targetNode.ID,
-				"backup", backup.ID)
-			result, err := forwardFn(backup)
-			if err == nil && result.ok {
-				return true, result.resp, nil
-			}
-			// Try next backup
-		}
-	}
-
-	// No successful forwarding, handle locally
-	return false, nil, nil
 }
 
 // GetForwardingStats returns statistics about the forwarding functionality.

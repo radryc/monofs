@@ -13,6 +13,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -50,7 +51,6 @@ type fetcherConn struct {
 
 	// Health tracking
 	healthy    atomic.Bool
-	lastError  time.Time
 	errorCount atomic.Int64
 }
 
@@ -121,6 +121,7 @@ func NewClient(config ClientConfig, logger *slog.Logger) (*Client, error) {
 func (c *Client) connectFetcher(address string) (*fetcherConn, error) {
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpcx.IPv4DialerOption(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                30 * time.Second,
 			Timeout:             10 * time.Second,
@@ -393,7 +394,7 @@ func (c *Client) FetchBlob(ctx context.Context, req *FetchRequest, sourceType So
 	}
 
 	// Fetch with retries — cycle through all healthy fetchers, tracking
-	// which have been tried to avoid the oscillating pair bug in selectFetcherExcluding.
+	// which have been tried to avoid repeatedly selecting the same pair.
 	var lastErr error
 	tried := make(map[*fetcherConn]bool)
 	for attempt := 0; attempt < c.config.MaxRetries; attempt++ {
@@ -564,19 +565,6 @@ func (c *Client) selectFetcher(sourceKey string) *fetcherConn {
 	return healthy[idx]
 }
 
-func (c *Client) selectFetcherExcluding(sourceKey string, exclude *fetcherConn) *fetcherConn {
-	c.mu.RLock()
-	fetchers := c.fetchers
-	c.mu.RUnlock()
-
-	for _, f := range fetchers {
-		if f != exclude && f.healthy.Load() {
-			return f
-		}
-	}
-	return nil
-}
-
 func (c *Client) nextHealthyFetcherExcluding(sourceKey string, tried map[*fetcherConn]bool) *fetcherConn {
 	c.mu.RLock()
 	fetchers := c.fetchers
@@ -638,7 +626,6 @@ func (c *Client) checkFetcherHealth(f *fetcherConn) {
 	if err != nil {
 		f.healthy.Store(false)
 		f.errorCount.Add(1)
-		f.lastError = time.Now()
 	} else {
 		f.healthy.Store(true)
 	}
@@ -752,7 +739,6 @@ type ClientStats struct {
 func (fc *fetcherConn) recordError() {
 	fc.healthy.Store(false)
 	fc.errorCount.Add(1)
-	fc.lastError = time.Now()
 }
 
 // streamReader wraps a gRPC stream as an io.ReadCloser.

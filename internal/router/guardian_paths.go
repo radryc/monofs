@@ -844,6 +844,15 @@ func authorizeGuardianMutation(principal *guardianPrincipal, logicalPath string,
 	switch principal.Role {
 	case "control-plane", "cli":
 		return nil
+	case "pipeline":
+		// The pipeline orchestrator/worker machinery owns the ephemeral
+		// pipeline config and queue namespaces. It has no access to
+		// partition data, scans, or the doctor namespace.
+		if logicalPath == "/.pipelines" || strings.HasPrefix(logicalPath, "/.pipelines/") ||
+			logicalPath == "/.queues" || strings.HasPrefix(logicalPath, "/.queues/") {
+			return nil
+		}
+		return fmt.Errorf("pipeline principal %q may only mutate pipeline machinery paths", principal.PrincipalID)
 	case "doctor":
 		if logicalPath == "/doctor" || strings.HasPrefix(logicalPath, "/doctor/") {
 			return nil
@@ -854,6 +863,39 @@ func authorizeGuardianMutation(principal *guardianPrincipal, logicalPath string,
 		return fmt.Errorf("doctor principal %q may only mutate Doctor namespace paths", principal.PrincipalID)
 	case "pusher":
 		if strings.Contains(logicalPath, "/.state/") {
+			// State is writable only inside the pusher's own queue/scan
+			// namespace, never anywhere the string happens to appear.
+			trimmed := strings.TrimPrefix(logicalPath, "/.queues/")
+			trimmed = strings.TrimPrefix(trimmed, "/.scans/")
+			parts := strings.Split(trimmed, "/")
+			pusherName, ok := strings.CutPrefix(principal.PrincipalID, "guardian-pusher-")
+			if !ok || pusherName == "" || len(parts) < 2 || parts[0] != pusherName {
+				return fmt.Errorf("pusher principal %q may only mutate its own state paths", principal.PrincipalID)
+			}
+			return nil
+		}
+		if strings.HasPrefix(logicalPath, "/.scans/") {
+			trimmed := strings.TrimPrefix(logicalPath, "/.scans/")
+			parts := strings.Split(trimmed, "/")
+			if len(parts) < 2 {
+				return fmt.Errorf("pusher principal %q cannot mutate scan root %q", principal.PrincipalID, logicalPath)
+			}
+			pusherName, ok := strings.CutPrefix(principal.PrincipalID, "guardian-pusher-")
+			if !ok || pusherName == "" {
+				return fmt.Errorf("pusher principal %q has no namespace-qualified identity", principal.PrincipalID)
+			}
+			if parts[0] != pusherName {
+				return fmt.Errorf("pusher principal %q may only mutate its own scan namespace", principal.PrincipalID)
+			}
+			if deleteOp {
+				if parts[1] != ".claims" {
+					return fmt.Errorf("pusher principal %q may not delete non-claim scan paths", principal.PrincipalID)
+				}
+				return nil
+			}
+			if parts[1] != ".claims" && parts[1] != ".results" {
+				return fmt.Errorf("pusher principal %q may only write scan claim or result paths", principal.PrincipalID)
+			}
 			return nil
 		}
 		if !strings.HasPrefix(logicalPath, "/.queues/") {
@@ -864,8 +906,11 @@ func authorizeGuardianMutation(principal *guardianPrincipal, logicalPath string,
 		if len(parts) < 2 {
 			return fmt.Errorf("pusher principal %q cannot mutate queue root %q", principal.PrincipalID, logicalPath)
 		}
-		pusherName := strings.TrimPrefix(principal.PrincipalID, "guardian-pusher-")
-		if pusherName != principal.PrincipalID && pusherName != "" && parts[0] != pusherName {
+		pusherName, ok := strings.CutPrefix(principal.PrincipalID, "guardian-pusher-")
+		if !ok || pusherName == "" {
+			return fmt.Errorf("pusher principal %q has no namespace-qualified identity", principal.PrincipalID)
+		}
+		if parts[0] != pusherName {
 			return fmt.Errorf("pusher principal %q may only mutate its own queue", principal.PrincipalID)
 		}
 		if deleteOp {

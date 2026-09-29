@@ -35,11 +35,10 @@ type SessionSocketHandler struct {
 	ingester    BlobIngester // optional, nil if not configured
 	deleter     BlobDeleter  // optional, nil if not configured
 	refresher   WorkspaceRefresher
-	upstream    UpstreamReader  // optional, nil if not configured
-	diffReader  DiffReader      // optional, for reading original file content
-	verifier    BackendVerifier // optional, for verifying backend has files before cleanup
-	attrCache   *cache.Cache    // optional, for invalidation after push
-	rootNode    *MonoNode       // optional, for kernel dentry cache invalidation
+	upstream    UpstreamReader // optional, nil if not configured
+	diffReader  DiffReader     // optional, for reading original file content
+	attrCache   *cache.Cache   // optional, for invalidation after push
+	rootNode    *MonoNode      // optional, for kernel dentry cache invalidation
 	listener    net.Listener
 	logger      *slog.Logger
 	wg          sync.WaitGroup
@@ -96,24 +95,6 @@ type WorkspaceRefresherFunc func(ctx context.Context, repos []monoclient.Workspa
 
 func (f WorkspaceRefresherFunc) RefreshWorkspaceRepositories(ctx context.Context, repos []monoclient.WorkspaceRepository) (*monoclient.WorkspaceRefreshResult, error) {
 	return f(ctx, repos)
-}
-
-// BackendVerifier verifies that files are accessible in the backend before
-// removing overlay entries. This ensures atomic cleanup by confirming the
-// backend has the data before overlay cleanup proceeds.
-type BackendVerifier interface {
-	// VerifyBlobs checks if the specified paths are accessible in the backend.
-	// Returns true if all paths are verified, false otherwise.
-	VerifyBlobs(ctx context.Context, paths []string) (bool, error)
-}
-
-// BackendVerifierFunc is a convenience adapter that turns a plain function
-// into a BackendVerifier implementation.
-type BackendVerifierFunc func(ctx context.Context, paths []string) (bool, error)
-
-// VerifyBlobs implements BackendVerifier.
-func (f BackendVerifierFunc) VerifyBlobs(ctx context.Context, paths []string) (bool, error) {
-	return f(ctx, paths)
 }
 
 // DiffReader reads original file content from the cluster, bypassing the
@@ -1487,45 +1468,19 @@ func (h *SessionSocketHandler) handleUploadDeps() SessionResponse {
 //
 // The order is critical for correctness:
 //
-//  1. Optional verification — verify backend has files before cleanup (atomic cleanup)
-//  2. DB cleanup — overlay entries removed so Lookup/Readdir stop resolving
+//  1. DB cleanup — overlay entries removed so Lookup/Readdir stop resolving
 //     to the overlay. New FUSE requests now fall through to the backend.
-//  3. Attr cache invalidation — cached attributes cleared so Getattr
+//  2. Attr cache invalidation — cached attributes cleared so Getattr
 //     re-fetches from the backend with correct (read-only) permissions.
-//  4. Kernel dentry invalidation — NotifyEntry for the entire dependency
+//  3. Kernel dentry invalidation — NotifyEntry for the entire dependency
 //     subtree forces the kernel to forget its dentry cache. After this,
 //     all in-flight FUSE ops for dependency/ paths have completed and no
 //     new ones will reference overlay files.
-//  5. Disk cleanup — bulk-remove the dependency/ directory tree from the
+//  4. Disk cleanup — bulk-remove the dependency/ directory tree from the
 //     overlay session. Safe because no kernel references remain.
-//  6. Mark push timestamp — enables DIRECT_IO bypass for stale page cache.
+//  5. Mark push timestamp — enables DIRECT_IO bypass for stale page cache.
 func (h *SessionSocketHandler) handleRemoveBlobChanges() {
-	// Phase 0: Optional verification - ensure backend has the files before cleanup.
-	// This provides atomic cleanup semantics - if verification fails, we don't
-	// remove overlay entries, preventing the "file not found" race condition.
-	if h.verifier != nil && h.sessionMgr != nil {
-		// Get a sample of dependency files to verify
-		depFiles := h.sessionMgr.GetDependencyFilePaths(10) // Sample up to 10 files
-		if len(depFiles) > 0 {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			verified, verifyErr := h.verifier.VerifyBlobs(ctx, depFiles)
-			cancel()
-			if verifyErr != nil {
-				h.logger.Warn("backend verification failed, skipping cleanup",
-					"error", verifyErr, "sample_size", len(depFiles))
-				return
-			}
-			if !verified {
-				h.logger.Warn("backend verification returned false, skipping cleanup",
-					"sample_size", len(depFiles))
-				return
-			}
-			h.logger.Info("backend verification passed, proceeding with cleanup",
-				"sample_size", len(depFiles))
-		}
-	}
-
-	// Phase 1: Remove overlay DB entries (no disk I/O on the dep files).
+	// Remove overlay DB entries (no disk I/O on the dep files).
 	removed, err := h.sessionMgr.RemoveBlobChanges()
 	if err != nil {
 		h.logger.Warn("failed to remove dep changes after push", "error", err)
@@ -1692,8 +1647,7 @@ func (h *SessionSocketHandler) handleDiff(filterPath string, showBlobs bool) Ses
 				h.logger.Warn("diff: cannot read new file", "path", c.Path, "error", err)
 				fd.Diff = fmt.Sprintf("(cannot read new file: %v)", err)
 			} else {
-				var header string
-				header = fmt.Sprintf("diff --git a/%s b/%s\nnew file mode 100644\n", c.Path, c.Path)
+				header := fmt.Sprintf("diff --git a/%s b/%s\nnew file mode 100644\n", c.Path, c.Path)
 				diff, _ := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
 					A:        difflib.SplitLines(""),
 					B:        difflib.SplitLines(string(newContent)),
@@ -2616,18 +2570,6 @@ func (h *SessionSocketHandler) sendError(conn net.Conn, msg string) {
 		Error:   msg,
 	}
 	json.NewEncoder(conn).Encode(resp)
-}
-
-func formatCommitMessage(result *CommitResult) string {
-	repoSummary := ""
-	if result.Repositories > 0 {
-		repoSummary = fmt.Sprintf(" across %d repositories", result.Repositories)
-	}
-	if result.FilesFailed > 0 {
-		return fmt.Sprintf("Processed %d files%s: %d uploaded, %d failed",
-			result.FilesProcessed, repoSummary, result.FilesUploaded, result.FilesFailed)
-	}
-	return fmt.Sprintf("Successfully processed %d files%s", result.FilesProcessed, repoSummary)
 }
 
 func formatWorkspacePullMessage(result *monoclient.WorkspaceRefreshResult) string {

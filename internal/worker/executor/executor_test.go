@@ -25,7 +25,6 @@ func TestExecutorSimpleCommand(t *testing.T) {
 		},
 	}
 	e := New(cfg)
-	defer e.Close()
 
 	ctx := context.Background()
 	req := &ExecuteRequest{

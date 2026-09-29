@@ -127,10 +127,6 @@ func queuePrefix(runID string) string {
 	return "/.queues/pipeline/" + runID
 }
 
-func taskPath(runID, taskID string) string {
-	return queuePrefix(runID) + "/tasks/" + taskID + ".json"
-}
-
 func claimPath(runID, taskID string) string {
 	return queuePrefix(runID) + "/.claims/" + taskID + ".json"
 }
@@ -284,8 +280,10 @@ func (w *Worker) executeTask(ctx context.Context, runID, taskID string, task *Ta
 		ClaimedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	claimData, _ := json.Marshal(claim)
-	if err := w.client.WritePath(ctx, cPath, claimData, ""); err != nil {
-		w.logger.Debug("claim failed (already claimed)", "task_id", taskID)
+	// "absent" makes the claim an atomic create-if-not-exists so that only one
+	// worker wins the task; losers receive AlreadyExists and must not run it.
+	if err := w.client.WritePath(ctx, cPath, claimData, "absent"); err != nil {
+		w.logger.Debug("claim failed (already claimed), skipping task", "task_id", taskID)
 		return
 	}
 

@@ -29,6 +29,8 @@ type Store struct {
 
 	compactMu   sync.Mutex
 	stopCompact chan struct{}
+	done        chan struct{}
+	closeOnce   sync.Once
 	checkpoint  *Checkpoint
 }
 
@@ -46,8 +48,16 @@ func New(cfg StoreConfig, logger *slog.Logger) (*Store, error) {
 		auditEvents:   make([]*AuditEvent, 0),
 		ledgerEntries: make([][]byte, 0),
 		stopCompact:   make(chan struct{}),
+		done:          make(chan struct{}),
 		nextSeq:       1,
 	}
+
+	// Always start the compaction goroutine (it no-ops without a WAL) so Close
+	// can reliably wait for it regardless of configuration.
+	go func() {
+		defer close(s.done)
+		s.compactLoop()
+	}()
 
 	if cfg.StateDir == "" {
 		logger.Info("workspace state dir not configured, operating in memory-only mode")
@@ -71,8 +81,6 @@ func New(cfg StoreConfig, logger *slog.Logger) (*Store, error) {
 	if err := s.recover(); err != nil {
 		return nil, fmt.Errorf("recover workspace state: %w", err)
 	}
-
-	go s.compactLoop()
 
 	return s, nil
 }
@@ -252,14 +260,17 @@ func (s *Store) ReplayLedgerEntries(callback func([]byte) error) error {
 }
 
 func (s *Store) Close() {
-	close(s.stopCompact)
+	s.closeOnce.Do(func() {
+		close(s.stopCompact)
+		<-s.done
 
-	if s.wal != nil {
-		if err := s.compact(); err != nil {
-			s.logger.Error("final compaction failed", "error", err)
+		if s.wal != nil {
+			if err := s.compact(); err != nil {
+				s.logger.Error("final compaction failed", "error", err)
+			}
+			s.wal.Close()
 		}
-		s.wal.Close()
-	}
+	})
 }
 
 func (s *Store) loadCheckpoint() error {
@@ -353,7 +364,11 @@ func (s *Store) recover() error {
 }
 
 func (s *Store) compactLoop() {
-	ticker := time.NewTicker(s.cfg.CompactionInterval)
+	interval := s.cfg.CompactionInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

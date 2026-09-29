@@ -617,7 +617,7 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 					existing.RepoURL = req.Source
 					updated = true
 				}
-				if existing.GuardianURL != req.GuardianUrl {
+				if req.GuardianUrl != "" && existing.GuardianURL != req.GuardianUrl {
 					existing.GuardianURL = req.GuardianUrl
 					updated = true
 				}
@@ -835,7 +835,9 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 		existingRepoData, existsErr := tx.Get(bucketRepos, repoKey)
 		isNewRepo := existsErr == nutsdb.ErrKeyNotFound
 
-		// Build repo info - if existing, preserve fields but ensure branch is set
+		// Build repo info - if existing, preserve repo-level fields not carried
+		// by a single-file write so IngestFile does not erase metadata such as
+		// the resolved commit, fetch type, or backend set by RegisterRepository.
 		info := &repoInfo{
 			StorageID:   storageID,
 			DisplayPath: displayPath,
@@ -843,18 +845,25 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 			RepoURL:     meta.Source,
 		}
 
-		// If repo exists but branch is empty and we have a branch, update it
 		if !isNewRepo && existsErr == nil {
 			var existing repoInfo
 			if json.Unmarshal(existingRepoData, &existing) == nil {
-				if existing.Branch == "" && meta.Ref != "" {
-					// Update with new branch
+				info.CommitHash = existing.CommitHash
+				info.CommitTime = existing.CommitTime
+				info.CommitMessage = existing.CommitMessage
+				info.FetchType = existing.FetchType
+				info.StorageBackend = existing.StorageBackend
+				info.GuardianURL = existing.GuardianURL
+				if existing.Branch != "" {
+					// Keep existing branch.
+					info.Branch = existing.Branch
+				} else if meta.Ref != "" {
 					s.logger.Info("updating repo branch",
 						"storage_id", storageID,
 						"branch", meta.Ref)
-				} else if existing.Branch != "" {
-					// Keep existing branch
-					info.Branch = existing.Branch
+				}
+				if meta.Source == "" {
+					info.RepoURL = existing.RepoURL
 				}
 			}
 		}
@@ -1097,6 +1106,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 				info.CommitMessage = existing.CommitMessage
 				info.FetchType = existing.FetchType
 				info.StorageBackend = existing.StorageBackend
+				info.GuardianURL = existing.GuardianURL
 				if existing.Branch == "" && branch != "" {
 					s.logger.Info("updating repo branch in batch",
 						"storage_id", storageID,

@@ -308,6 +308,10 @@ func extractTarGz(r io.Reader, destDir string) error {
 		}
 
 		target := filepath.Join(destDir, header.Name)
+		// Guard against zip-slip: reject entries that escape the destination.
+		if rel, relErr := filepath.Rel(destDir, target); relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("tar entry %q escapes destination directory", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:

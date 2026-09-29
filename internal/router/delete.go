@@ -140,14 +140,6 @@ func (r *Router) deleteRepositoryFromAllNodes(ctx context.Context, storageID str
 	return totalFilesDeleted, totalDirsDeleted, int(nodeErrors)
 }
 
-// deleteRepositoryFromNodes is a compatibility wrapper used by cleanupStalePartialRepos.
-func (r *Router) deleteRepositoryFromNodes(storageID string, filesDeletedPtr *int64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	totalFiles, _, _ := r.deleteRepositoryFromAllNodes(ctx, storageID)
-	*filesDeletedPtr = totalFiles
-}
-
 func (r *Router) deleteRepositoryFromKVSNode(ctx context.Context, storageID, displayPath string) (int64, int64, int, bool) {
 	target, ok := r.guardianKVSMutationTarget(displayPath)
 	if !ok {
@@ -196,14 +188,15 @@ func (r *Router) deleteRepositoryFromKVSNode(ctx context.Context, storageID, dis
 
 // deleteSearchIndex removes the search index for the repository.
 func (r *Router) deleteSearchIndex(ctx context.Context, storageID string) {
-	if r.searchClient == nil {
+	client := r.searchClientSnapshot()
+	if client == nil {
 		return
 	}
 
 	deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	resp, err := r.searchClient.DeleteIndex(deleteCtx, &pb.DeleteIndexRequest{
+	resp, err := client.DeleteIndex(deleteCtx, &pb.DeleteIndexRequest{
 		StorageId: storageID,
 	})
 	if err != nil {

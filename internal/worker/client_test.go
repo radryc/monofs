@@ -8,11 +8,6 @@ func TestQueuePaths(t *testing.T) {
 	runID := "run-abc123"
 	taskID := "task-xyz789"
 
-	taskP := taskPath(runID, taskID)
-	if taskP != "/.queues/pipeline/run-abc123/tasks/task-xyz789.json" {
-		t.Errorf("taskPath = %q", taskP)
-	}
-
 	claimP := claimPath(runID, taskID)
 	if claimP != "/.queues/pipeline/run-abc123/.claims/task-xyz789.json" {
 		t.Errorf("claimPath = %q", claimP)

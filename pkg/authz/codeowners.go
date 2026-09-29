@@ -165,11 +165,10 @@ func codeownersMatchSegments(pattern, path []string) bool {
 // codeownersMatchSegment matches a single "*" / "?" glob segment.
 func codeownersMatchSegment(pattern, segment string) bool {
 	// Dynamic programming match over runes.
-	pv := []rune(pattern)
 	sv := []rune(segment)
 	dp := make([]bool, len(sv)+1)
 	dp[0] = true
-	for _, p := range pv {
+	for _, p := range pattern {
 		next := make([]bool, len(sv)+1)
 		switch p {
 		case '*':

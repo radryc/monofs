@@ -2,6 +2,9 @@ package router
 
 import (
 	"context"
+	"encoding/json"
+	"log/slog"
+	"path/filepath"
 	"strings"
 
 	pb "github.com/radryc/monofs/api/proto"
@@ -9,6 +12,46 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// buildGrantEvaluator constructs the partition grant evaluator from router
+// configuration. Precedence: inline JSON > explicit path > default path under
+// the guardian state dir. On a configured-but-unloadable source it returns a
+// deny-all evaluator so enforcement fails closed rather than silently opening.
+func buildGrantEvaluator(cfg RouterConfig, logger *slog.Logger) authz.GrantEvaluator {
+	if raw := strings.TrimSpace(cfg.AuthzGrantsJSON); raw != "" {
+		var grants []authz.Grant
+		if err := json.Unmarshal([]byte(raw), &grants); err != nil {
+			logger.Error("failed to parse authz grants JSON; ingest authorization will deny all", "error", err)
+			return authz.DenyAllEvaluator{}
+		}
+		store, err := authz.NewGrantStore("")
+		if err != nil {
+			logger.Error("failed to create authz grant store; ingest authorization will deny all", "error", err)
+			return authz.DenyAllEvaluator{}
+		}
+		if err := store.Replace(grants); err != nil {
+			logger.Error("invalid authz grants JSON; ingest authorization will deny all", "error", err)
+			return authz.DenyAllEvaluator{}
+		}
+		logger.Info("loaded authz grants from JSON", "count", len(grants))
+		return store
+	}
+
+	path := strings.TrimSpace(cfg.AuthzGrantsPath)
+	if path == "" && strings.TrimSpace(cfg.GuardianStateDir) != "" {
+		path = filepath.Join(cfg.GuardianStateDir, "authz_grants.json")
+	}
+	if path == "" {
+		return nil
+	}
+	store, err := authz.NewGrantStore(path)
+	if err != nil {
+		logger.Error("failed to load authz grants; ingest authorization will deny all", "path", path, "error", err)
+		return authz.DenyAllEvaluator{}
+	}
+	logger.Info("loaded authz grants", "path", path, "count", len(store.Grants()))
+	return store
+}
 
 // SetGrantEvaluator installs a grant evaluator and toggles ingest enforcement.
 func (r *Router) SetGrantEvaluator(store authz.GrantEvaluator, enforce bool) {
@@ -35,8 +78,17 @@ func (r *Router) isBreakGlassAdmin(id authz.Identity) bool {
 }
 
 func (r *Router) authorizeIngest(ctx context.Context, req *pb.IngestRequest, displayPath string) error {
-	if !r.authzEnforceIngest || r.grantEvaluator == nil {
+	r.mu.RLock()
+	enforce := r.authzEnforceIngest
+	evaluator := r.grantEvaluator
+	r.mu.RUnlock()
+
+	if !enforce {
 		return nil
+	}
+	if evaluator == nil {
+		// Enforcement is on but no grants could be loaded: fail closed.
+		return status.Errorf(codes.PermissionDenied, "ingest authorization enforced but no grant evaluator is configured")
 	}
 
 	id, _ := authz.IdentityFromContext(ctx)
@@ -50,7 +102,7 @@ func (r *Router) authorizeIngest(ctx context.Context, req *pb.IngestRequest, dis
 		return nil
 	}
 
-	if r.grantEvaluator.Can(ctx, id, partition, authz.ActionIngest) {
+	if evaluator.Can(ctx, id, partition, authz.ActionIngest) {
 		return nil
 	}
 

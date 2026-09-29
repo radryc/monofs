@@ -385,6 +385,9 @@ func applyRepositoryOperations(root string, operations []workspacebundle.Operati
 			}
 		case workspacebundle.OperationRename:
 			target := filepath.Join(root, filepath.Clean(op.Target))
+			if rel, relErr := filepath.Rel(root, target); relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				return fmt.Errorf("rename target %q escapes repository root", op.Target)
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 				return err
 			}

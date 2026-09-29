@@ -34,6 +34,18 @@ func TestGuardianPathMappingRoundTrip(t *testing.T) {
 			relative:    ".archive/genomics/core/deploy-1/state.json",
 		},
 		{
+			name:        "scan request file",
+			logicalPath: "/.scans/aws-975049940689/requests/scan-1.json",
+			displayPath: "guardian-system",
+			relative:    ".scans/aws-975049940689/requests/scan-1.json",
+		},
+		{
+			name:        "scan result file",
+			logicalPath: "/.scans/aws-975049940689/.results/scan-1.json",
+			displayPath: "guardian-system",
+			relative:    ".scans/aws-975049940689/.results/scan-1.json",
+		},
+		{
 			name:        "doctor catalog file",
 			logicalPath: "/doctor/v1/catalog/manifests/traces/default/2026-04-09/15/trace-1.json",
 			displayPath: "doctor/v1",
