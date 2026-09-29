@@ -21,6 +21,7 @@ import (
 	"github.com/sourcegraph/zoekt/query"
 	"github.com/sourcegraph/zoekt/search"
 
+	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/client"
 )
 
@@ -359,6 +360,13 @@ type monofsFileRef struct {
 	name string
 }
 
+// dirStreamer is implemented by clients that can stream a directory listing
+// (e.g. ShardedClient.ReadDirStream) so huge flat directories need not be
+// buffered in memory.
+type dirStreamer interface {
+	ReadDirStream(ctx context.Context, path string, fn func(*pb.DirEntry) error) error
+}
+
 // enumerateMonoFSFiles walks the repository tree via the MonoFS client and
 // streams each indexable file reference to out. It holds at most one
 // directory's entry list at a time. Subdirectory failures are logged and
@@ -369,12 +377,7 @@ func (i *Indexer) enumerateMonoFSFiles(ctx context.Context, repoPath, subPath st
 		fullPath = filepath.Join(repoPath, subPath)
 	}
 
-	entries, err := i.monofsClient.ReadDir(ctx, fullPath)
-	if err != nil {
-		return fmt.Errorf("failed to read directory %s: %w", fullPath, err)
-	}
-
-	for _, entry := range entries {
+	handle := func(entry *pb.DirEntry) error {
 		entryPath := entry.Name
 		if subPath != "" {
 			entryPath = filepath.Join(subPath, entry.Name)
@@ -384,27 +387,45 @@ func (i *Indexer) enumerateMonoFSFiles(ctx context.Context, repoPath, subPath st
 		if (entry.Mode & 0040000) != 0 {
 			// Skip .git directory
 			if entry.Name == ".git" {
-				continue
+				return nil
 			}
 			if err := i.enumerateMonoFSFiles(ctx, repoPath, entryPath, out); err != nil {
 				i.logger.Warn("failed to walk subdirectory", "path", entryPath, "error", err)
-				continue
 			}
-			continue
+			return nil
 		}
 
 		filePath := filepath.Join(repoPath, entryPath)
 		if isBinaryFile(filePath) {
-			continue
+			return nil
 		}
 
 		select {
 		case out <- monofsFileRef{full: filePath, name: entryPath}:
+			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 
+	// Prefer a streaming client so a directory with millions of entries is
+	// consumed incrementally instead of materialized as one slice.
+	if ds, ok := i.monofsClient.(dirStreamer); ok {
+		if err := ds.ReadDirStream(ctx, fullPath, handle); err != nil {
+			return fmt.Errorf("failed to read directory %s: %w", fullPath, err)
+		}
+		return nil
+	}
+
+	entries, err := i.monofsClient.ReadDir(ctx, fullPath)
+	if err != nil {
+		return fmt.Errorf("failed to read directory %s: %w", fullPath, err)
+	}
+	for _, entry := range entries {
+		if err := handle(entry); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
