@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 )
 
 const (
@@ -31,7 +31,7 @@ func (s *Server) SyncMetadataFromNode(ctx context.Context, req *pb.SyncMetadataF
 	syncedCount := int64(0)
 	missingCount := int64(0)
 
-	err := s.db.Update(func(tx *nutsdb.Tx) error {
+	err := s.db.Update(func(tx metastore.Tx) error {
 		for _, fileInfo := range fileList {
 			// Check if we have replica metadata for this file
 			replicaKey := makeReplicaKey(fileInfo.StorageId, fileInfo.FilePath, failedNodeID)
@@ -93,10 +93,10 @@ func (s *Server) ClearFailoverCache(ctx context.Context, req *pb.ClearFailoverCa
 	deletedCount := int64(0)
 	prefix := []byte(recoveredNodeID + ":")
 
-	err := s.db.Update(func(tx *nutsdb.Tx) error {
+	err := s.db.Update(func(tx metastore.Tx) error {
 		// Get all keys in failover bucket with prefix
 		keys, _, err := tx.PrefixScanEntries(bucketFailover, prefix, "", 0, -1, true, false)
-		if err != nil && err != nutsdb.ErrBucketNotFound && err != nutsdb.ErrPrefixScan {
+		if err != nil && err != metastore.ErrBucketNotFound && err != metastore.ErrPrefixScan {
 			return err
 		}
 
@@ -136,14 +136,14 @@ func (s *Server) checkFailoverCache(storageID, filePath string) (*storedMetadata
 	var metadata storedMetadata
 	found := false
 
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		// Scan failover bucket for matching file
 		// Key format: "failedNodeID:storageID:filePath"
 		// We need to find entries with suffix ":storageID:filePath"
 
 		// Get all keys in failover bucket
 		keys, _, err := tx.PrefixScanEntries(bucketFailover, []byte(""), "", 0, -1, true, false)
-		if err != nil && err != nutsdb.ErrBucketNotFound && err != nutsdb.ErrPrefixScan {
+		if err != nil && err != metastore.ErrBucketNotFound && err != metastore.ErrPrefixScan {
 			return err
 		}
 
@@ -164,7 +164,7 @@ func (s *Server) checkFailoverCache(storageID, filePath string) (*storedMetadata
 			}
 		}
 
-		return nutsdb.ErrKeyNotFound
+		return metastore.ErrKeyNotFound
 	})
 
 	if err != nil || !found {

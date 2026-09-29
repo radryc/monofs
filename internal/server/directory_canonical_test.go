@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 )
 
 func TestCanonicalDirectorySurvivesIndexLoss(t *testing.T) {
@@ -63,9 +63,9 @@ func TestCanonicalDirectorySurvivesIndexLoss(t *testing.T) {
 		t.Fatalf("DeleteFile failed: %v", err)
 	}
 
-	err = s.db.Update(func(tx *nutsdb.Tx) error {
+	err = s.db.Update(func(tx metastore.Tx) error {
 		for _, dirPath := range []string{"", "docs", "docs/empty"} {
-			if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != nutsdb.ErrKeyNotFound {
+			if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != metastore.ErrKeyNotFound {
 				return err
 			}
 		}
@@ -176,9 +176,9 @@ func TestDirHintRebuildWithoutDirIndex(t *testing.T) {
 		t.Fatalf("BuildDirectoryIndexes failed: %v", err)
 	}
 
-	err = s.db.Update(func(tx *nutsdb.Tx) error {
+	err = s.db.Update(func(tx metastore.Tx) error {
 		for _, dirPath := range []string{"", "pkg"} {
-			if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != nutsdb.ErrKeyNotFound {
+			if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != metastore.ErrKeyNotFound {
 				return err
 			}
 		}
@@ -250,7 +250,7 @@ func TestBuildDirectoryIndexesBackfillsCanonicalState(t *testing.T) {
 		t.Fatalf("marshal legacy metadata: %v", err)
 	}
 
-	err = s.db.Update(func(tx *nutsdb.Tx) error {
+	err = s.db.Update(func(tx metastore.Tx) error {
 		repoValue, err := json.Marshal(&repoInfo{
 			StorageID:   storageID,
 			DisplayPath: displayPath,
@@ -288,9 +288,9 @@ func TestBuildDirectoryIndexesBackfillsCanonicalState(t *testing.T) {
 		t.Fatalf("BuildDirectoryIndexes failed: %v", err)
 	}
 
-	err = s.db.Update(func(tx *nutsdb.Tx) error {
+	err = s.db.Update(func(tx metastore.Tx) error {
 		for _, dirPath := range []string{"", "docs"} {
-			if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != nutsdb.ErrKeyNotFound {
+			if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != metastore.ErrKeyNotFound {
 				return err
 			}
 		}

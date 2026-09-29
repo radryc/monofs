@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/metastore"
 	"github.com/radryc/monofs/internal/router/workspaceledger"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
@@ -37,7 +37,7 @@ type Server struct {
 	logger       *slog.Logger
 
 	// NutsDB for metadata storage
-	db *nutsdb.DB
+	db *metastore.Store
 
 	// Fetcher client for external blob retrieval (required)
 	fetcherClient *fetcher.Client
@@ -206,10 +206,10 @@ func splitOwnedFileKey(key []byte) (storageID, filePath string, ok bool) {
 // match yields an empty slice rather than an error. Unlike GetKeys it never
 // materializes keys outside the requested prefix, which keeps per-repository
 // operations bounded by repository size instead of total node size.
-func prefixScanKeys(tx *nutsdb.Tx, bucket string, prefix []byte) ([][]byte, error) {
+func prefixScanKeys(tx metastore.Tx, bucket string, prefix []byte) ([][]byte, error) {
 	keys, _, err := tx.PrefixScanEntries(bucket, prefix, "", 0, -1, true, false)
 	if err != nil {
-		if errors.Is(err, nutsdb.ErrPrefixScan) || errors.Is(err, nutsdb.ErrBucketNotFound) {
+		if errors.Is(err, metastore.ErrPrefixScan) || errors.Is(err, metastore.ErrBucketNotFound) {
 			return nil, nil
 		}
 		return nil, err
@@ -228,10 +228,10 @@ func storedMetadataSize(data []byte) (int64, error) {
 	return int64(meta.Size), nil
 }
 
-func loadStoredMetadataSize(tx *nutsdb.Tx, metadataKey []byte) (int64, error) {
+func loadStoredMetadataSize(tx metastore.Tx, metadataKey []byte) (int64, error) {
 	value, err := tx.Get(bucketMetadata, metadataKey)
 	if err != nil {
-		if err == nutsdb.ErrKeyNotFound {
+		if err == metastore.ErrKeyNotFound {
 			return 0, nil
 		}
 		return 0, err
@@ -239,10 +239,10 @@ func loadStoredMetadataSize(tx *nutsdb.Tx, metadataKey []byte) (int64, error) {
 	return storedMetadataSize(value)
 }
 
-func loadOwnedUsage(tx *nutsdb.Tx) (int64, int64, error) {
+func loadOwnedUsage(tx metastore.Tx) (int64, int64, error) {
 	keys, err := tx.GetKeys(bucketOwnedFiles)
 	if err != nil {
-		if err == nutsdb.ErrBucketNotFound {
+		if err == metastore.ErrBucketNotFound {
 			return 0, 0, nil
 		}
 		return 0, 0, err
@@ -278,10 +278,10 @@ const usageCounterKey = "usage"
 // loadUsageCounters reads the persisted usage counters. found is false when no
 // record exists yet (fresh or pre-upgrade database), in which case the caller
 // should fall back to a one-time scan.
-func loadUsageCounters(tx *nutsdb.Tx) (totalFiles, ownedBytes int64, found bool, err error) {
+func loadUsageCounters(tx metastore.Tx) (totalFiles, ownedBytes int64, found bool, err error) {
 	value, getErr := tx.Get(bucketNodeCounters, []byte(usageCounterKey))
 	if getErr != nil {
-		if getErr == nutsdb.ErrKeyNotFound || getErr == nutsdb.ErrBucketNotFound {
+		if getErr == metastore.ErrKeyNotFound || getErr == metastore.ErrBucketNotFound {
 			return 0, 0, false, nil
 		}
 		return 0, 0, false, getErr
@@ -306,7 +306,7 @@ func (s *Server) persistUsageCounters() {
 	if err != nil {
 		return
 	}
-	if err := s.db.Update(func(tx *nutsdb.Tx) error {
+	if err := s.db.Update(func(tx metastore.Tx) error {
 		return tx.Put(bucketNodeCounters, []byte(usageCounterKey), value, 0)
 	}); err != nil {
 		s.logger.Warn("failed to persist usage counters", "error", err)
@@ -320,7 +320,7 @@ func (s *Server) getHashFromPath(storageID, filePath string) ([]byte, bool) {
 	var hash []byte
 	found := false
 
-	s.db.View(func(tx *nutsdb.Tx) error {
+	s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketPathIndex, indexKey)
 		if err == nil {
 			hash = value
@@ -344,101 +344,12 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, dbSync bool, logger 
 	}
 	logger = logger.With("component", "server", "node_id", nodeID)
 
-	// Open NutsDB with performance optimizations
-	opt := nutsdb.DefaultOptions
-	opt.Dir = dbPath
-	opt.SegmentSize = 64 * 1024 * 1024             // 64MB segments
-	opt.EntryIdxMode = nutsdb.HintKeyAndRAMIdxMode // Use hint file for faster startup (only keys in RAM)
-	opt.RWMode = nutsdb.MMap                       // Use mmap for faster reads
-	opt.SyncEnable = dbSync
-	db, err := nutsdb.Open(opt)
+	// Open the embedded metadata store. Pebble is an LSM with a sorted,
+	// on-disk key index and bounded caches, so the key space is not resident
+	// in memory. "Buckets" are emulated as key prefixes by the store.
+	db, err := metastore.Open(dbPath, metastore.Options{Sync: dbSync})
 	if err != nil {
-		return nil, fmt.Errorf("failed to open nutsdb: %w", err)
-	}
-
-	// Initialize buckets
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketMetadata)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create metadata bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketRepos)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create repos bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketPathIndex)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create path index bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketRepoLookup)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create repo lookup bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketDirMeta)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create directory metadata bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketDirSummary)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create directory summary bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketDirIndex)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create directory index bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketFailover)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create failover bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketOwnedFiles)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create owned files bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketReplicaFiles)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create replica files bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketOnboardingStatus)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create onboarding status bucket: %w", err)
-	}
-
-	if err := db.Update(func(tx *nutsdb.Tx) error {
-		return tx.NewBucket(nutsdb.DataStructureBTree, bucketNodeCounters)
-	}); err != nil && err != nutsdb.ErrBucketAlreadyExist {
-		db.Close()
-		return nil, fmt.Errorf("failed to create node counters bucket: %w", err)
+		return nil, fmt.Errorf("failed to open metadata store: %w", err)
 	}
 
 	s := &Server{
@@ -474,7 +385,7 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, dbSync bool, logger 
 	var initialCount int64
 	var initialBytes int64
 	countersPersisted := false
-	if err := s.db.View(func(tx *nutsdb.Tx) error {
+	if err := s.db.View(func(tx metastore.Tx) error {
 		count, bytes_, found, err := loadUsageCounters(tx)
 		if err != nil {
 			return err
@@ -550,7 +461,7 @@ func (s *Server) lookupStorageID(displayPath string) (string, bool) {
 	var storageID string
 	found := false
 
-	s.db.View(func(tx *nutsdb.Tx) error {
+	s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketRepoLookup, []byte(displayPath))
 		if err == nil {
 			storageID = string(value)
@@ -611,7 +522,7 @@ func (s *Server) resolvePathToStorage(path string) (storageID, filePath string, 
 // repoExistsByStorageID checks if a repository exists by storage ID.
 func (s *Server) repoExistsByStorageID(storageID string) bool {
 	exists := false
-	s.db.View(func(tx *nutsdb.Tx) error {
+	s.db.View(func(tx metastore.Tx) error {
 		_, err := tx.Get(bucketRepos, []byte(storageID))
 		exists = (err == nil)
 		return nil
@@ -621,7 +532,7 @@ func (s *Server) repoExistsByStorageID(storageID string) bool {
 
 // repoExistsByStorageIDTx checks if a repository exists within an existing transaction.
 // Use this version when already inside a transaction to avoid deadlocks.
-func (s *Server) repoExistsByStorageIDTx(tx *nutsdb.Tx, storageID string) bool {
+func (s *Server) repoExistsByStorageIDTx(tx metastore.Tx, storageID string) bool {
 	_, err := tx.Get(bucketRepos, []byte(storageID))
 	return err == nil
 }
@@ -654,7 +565,7 @@ func (s *Server) isIntermediateDir(path string) bool {
 	// Check database - scan bucketRepoLookup for display paths that start with this prefix
 	pathPrefix := path + "/"
 	isIntermediate := false
-	s.db.View(func(tx *nutsdb.Tx) error {
+	s.db.View(func(tx metastore.Tx) error {
 		// Use GetKeys to get only keys (lighter than GetAll), then check prefixes
 		keys, err := tx.GetKeys(bucketRepoLookup)
 		if err != nil {
@@ -691,7 +602,7 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 	storageBackend := registerRepositoryStorageBackend(req)
 
 	// Store repository info in database
-	err := s.db.Update(func(tx *nutsdb.Tx) error {
+	err := s.db.Update(func(tx metastore.Tx) error {
 		// Check if already registered
 		if s.repoExistsByStorageIDTx(tx, req.StorageId) {
 			// Repository already exists — update GuardianURL if a new one is provided.
@@ -775,7 +686,7 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 
 	// Verify registration by reading it back
 	var verifyInfo repoInfo
-	verifyErr := s.db.View(func(tx *nutsdb.Tx) error {
+	verifyErr := s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketRepos, []byte(req.StorageId))
 		if err != nil {
 			return err
@@ -887,7 +798,7 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 	// Store in NutsDB (metadata, path index, repo info, and directory index)
 	var newFiles int64
 	var usedBytesDelta int64
-	err = s.db.Update(func(tx *nutsdb.Tx) error {
+	err = s.db.Update(func(tx metastore.Tx) error {
 		ownershipKey := []byte(storageID + ":" + meta.Path)
 		_, ownershipErr := tx.Get(bucketOwnedFiles, ownershipKey)
 		fileExists := (ownershipErr == nil)
@@ -925,7 +836,7 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 		// This handles the case where RegisterRepository was called first without branch
 		repoKey := []byte(storageID)
 		existingRepoData, existsErr := tx.Get(bucketRepos, repoKey)
-		isNewRepo := existsErr == nutsdb.ErrKeyNotFound
+		isNewRepo := existsErr == metastore.ErrKeyNotFound
 
 		// Build repo info - if existing, preserve repo-level fields not carried
 		// by a single-file write so IngestFile does not erase metadata such as
@@ -982,7 +893,7 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 		// Router will mark it as onboarded after all files are ingested
 		onboardKey := []byte(storageID)
 		_, onboardErr := tx.Get(bucketOnboardingStatus, onboardKey)
-		if onboardErr == nutsdb.ErrKeyNotFound {
+		if onboardErr == metastore.ErrKeyNotFound {
 			// First file for this repo - mark as pending onboarding
 			if err := tx.Put(bucketOnboardingStatus, onboardKey, []byte("false"), 0); err != nil {
 				return err
@@ -1175,11 +1086,11 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 	var newFiles int64
 	var usedBytesDelta int64
 
-	err := s.db.Update(func(tx *nutsdb.Tx) error {
+	err := s.db.Update(func(tx metastore.Tx) error {
 		// Store or update repository info - always update to ensure branch is set
 		repoKey := []byte(storageID)
 		existingRepoData, existsErr := tx.Get(bucketRepos, repoKey)
-		isNewRepo := existsErr == nutsdb.ErrKeyNotFound
+		isNewRepo := existsErr == metastore.ErrKeyNotFound
 
 		info := &repoInfo{
 			StorageID:      storageID,
@@ -1485,11 +1396,11 @@ func (s *Server) IngestReplicaBatch(ctx context.Context, req *pb.IngestReplicaBa
 	var filesReplicated int64
 	var filesFailed int64
 
-	err := s.db.Update(func(tx *nutsdb.Tx) error {
+	err := s.db.Update(func(tx metastore.Tx) error {
 		// Ensure repo is registered (same as IngestFileBatch)
 		repoKey := []byte(storageID)
 		_, existsErr := tx.Get(bucketRepos, repoKey)
-		if existsErr == nutsdb.ErrKeyNotFound {
+		if existsErr == metastore.ErrKeyNotFound {
 			info := &repoInfo{
 				StorageID:   storageID,
 				DisplayPath: displayPath,
@@ -1629,10 +1540,10 @@ func (s *Server) GetPredictorStats(ctx context.Context, req *pb.PredictorStatsRe
 func (s *Server) ListRepositories(ctx context.Context, req *pb.ListRepositoriesRequest) (*pb.ListRepositoriesResponse, error) {
 	var repoIDs []string
 
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		keys, err := tx.GetKeys(bucketRepos)
 		if err != nil {
-			if err == nutsdb.ErrBucketNotFound || err == nutsdb.ErrNotFoundKey {
+			if err == metastore.ErrBucketNotFound || err == metastore.ErrNotFoundKey {
 				return nil
 			}
 			return err
@@ -1659,7 +1570,7 @@ func (s *Server) ListRepositories(ctx context.Context, req *pb.ListRepositoriesR
 func (s *Server) GetRepositoryInfo(ctx context.Context, req *pb.GetRepositoryInfoRequest) (*pb.GetRepositoryInfoResponse, error) {
 	var repoInfoData repoInfo
 
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketRepos, []byte(req.StorageId))
 		if err != nil {
 			return err
@@ -1688,10 +1599,10 @@ func (s *Server) GetRepositoryInfo(ctx context.Context, req *pb.GetRepositoryInf
 func (s *Server) GetOnboardingStatus(ctx context.Context, req *pb.OnboardingStatusRequest) (*pb.OnboardingStatusResponse, error) {
 	repositories := make(map[string]bool)
 
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		keys, err := tx.GetKeys(bucketOnboardingStatus)
 		if err != nil {
-			if err == nutsdb.ErrBucketNotFound || err == nutsdb.ErrNotFoundKey {
+			if err == metastore.ErrBucketNotFound || err == metastore.ErrNotFoundKey {
 				return nil
 			}
 			return err
@@ -1723,7 +1634,7 @@ func (s *Server) GetOnboardingStatus(ctx context.Context, req *pb.OnboardingStat
 
 // MarkRepositoryOnboarded marks a repository as fully onboarded.
 func (s *Server) MarkRepositoryOnboarded(ctx context.Context, req *pb.MarkRepositoryOnboardedRequest) (*pb.MarkRepositoryOnboardedResponse, error) {
-	err := s.db.Update(func(tx *nutsdb.Tx) error {
+	err := s.db.Update(func(tx metastore.Tx) error {
 		return tx.Put(bucketOnboardingStatus, []byte(req.StorageId), []byte("true"), 0)
 	})
 

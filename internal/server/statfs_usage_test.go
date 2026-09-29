@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 )
 
 func newUsageTestServer(t *testing.T) *Server {
@@ -123,7 +123,7 @@ func TestLoadOwnedUsageRestoresBytesFromMetadata(t *testing.T) {
 
 	var totalFiles int64
 	var totalBytes int64
-	if err := server.db.View(func(tx *nutsdb.Tx) error {
+	if err := server.db.View(func(tx metastore.Tx) error {
 		var err error
 		totalFiles, totalBytes, err = loadOwnedUsage(tx)
 		return err

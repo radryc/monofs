@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/metastore"
 	"github.com/radryc/monofs/internal/storage/logengine"
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -119,7 +119,7 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		"cached", cached)
 
 	var found *pb.LookupResponse
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketMetadata, key)
 		if err != nil {
 			s.logger.Debug("lookup key not found in db",
@@ -365,7 +365,7 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 		"cached", cached)
 
 	var found *pb.GetAttrResponse
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketMetadata, key)
 		if err != nil {
 			s.logger.Debug("getattr key not found", "key", string(key), "error", err)
@@ -628,7 +628,7 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		"hash_key", string(key),
 		"cached", cached)
 
-	err := s.db.View(func(tx *nutsdb.Tx) error {
+	err := s.db.View(func(tx metastore.Tx) error {
 		value, err := tx.Get(bucketMetadata, key)
 		if err != nil {
 			return err
@@ -829,7 +829,7 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 	var fileExisted bool
 	var deletedBytes int64
 
-	err := s.db.Update(func(tx *nutsdb.Tx) error {
+	err := s.db.Update(func(tx metastore.Tx) error {
 		// Check if file exists in owned files bucket
 		ownershipKey := []byte(req.StorageId + ":" + req.FilePath)
 		_, err := tx.Get(bucketOwnedFiles, ownershipKey)
@@ -842,18 +842,18 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 		}
 
 		// Remove from main metadata bucket
-		if err := tx.Delete(bucketMetadata, key); err != nil && err != nutsdb.ErrKeyNotFound {
+		if err := tx.Delete(bucketMetadata, key); err != nil && err != metastore.ErrKeyNotFound {
 			return fmt.Errorf("failed to delete metadata: %w", err)
 		}
 
 		// Remove ownership tracking
-		if err := tx.Delete(bucketOwnedFiles, ownershipKey); err != nil && err != nutsdb.ErrKeyNotFound {
+		if err := tx.Delete(bucketOwnedFiles, ownershipKey); err != nil && err != metastore.ErrKeyNotFound {
 			return fmt.Errorf("failed to delete ownership: %w", err)
 		}
 
 		// Remove from path index
 		pathIndexKey := []byte(req.StorageId + ":" + req.FilePath)
-		if err := tx.Delete(bucketPathIndex, pathIndexKey); err != nil && err != nutsdb.ErrKeyNotFound {
+		if err := tx.Delete(bucketPathIndex, pathIndexKey); err != nil && err != metastore.ErrKeyNotFound {
 			return fmt.Errorf("failed to delete path index: %w", err)
 		}
 
@@ -866,7 +866,7 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 		if err := s.removeFromDirectorySummary(tx, req.StorageId, parentDir, entryName); err != nil {
 			return fmt.Errorf("failed to remove file from dir summary: %w", err)
 		}
-		if err := tx.Delete(bucketDirMeta, makeDirMetaKey(req.StorageId, req.FilePath)); err != nil && err != nutsdb.ErrKeyNotFound {
+		if err := tx.Delete(bucketDirMeta, makeDirMetaKey(req.StorageId, req.FilePath)); err != nil && err != metastore.ErrKeyNotFound {
 			return fmt.Errorf("failed to delete dir metadata: %w", err)
 		}
 		if err := s.pruneImplicitDirectories(tx, req.StorageId, parentDir); err != nil {
@@ -932,7 +932,7 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 	filesDeleted += kvsFilesDeleted
 	dirsDeleted += kvsDirsDeleted
 
-	err = s.db.Update(func(tx *nutsdb.Tx) error {
+	err = s.db.Update(func(tx metastore.Tx) error {
 		// 1. Delete repo info
 		repoKey := []byte(storageID)
 		var displayPath string
@@ -942,21 +942,21 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 				displayPath = info.DisplayPath
 			}
 		}
-		if err := tx.Delete(bucketRepos, repoKey); err != nil && err != nutsdb.ErrKeyNotFound {
+		if err := tx.Delete(bucketRepos, repoKey); err != nil && err != metastore.ErrKeyNotFound {
 			return fmt.Errorf("delete repo info: %w", err)
 		}
 
 		// 2. Delete display path → storage_id lookup
 		if displayPath != "" {
 			lookupKey := []byte(displayPath)
-			if err := tx.Delete(bucketRepoLookup, lookupKey); err != nil && err != nutsdb.ErrKeyNotFound {
+			if err := tx.Delete(bucketRepoLookup, lookupKey); err != nil && err != metastore.ErrKeyNotFound {
 				return fmt.Errorf("delete path lookup: %w", err)
 			}
 		}
 
 		// 3. Delete onboarding status
 		onboardKey := []byte(storageID)
-		if err := tx.Delete(bucketOnboardingStatus, onboardKey); err != nil && err != nutsdb.ErrKeyNotFound {
+		if err := tx.Delete(bucketOnboardingStatus, onboardKey); err != nil && err != metastore.ErrKeyNotFound {
 			// Ignore: bucket may not exist
 		}
 
@@ -976,18 +976,18 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 					return fmt.Errorf("load owned metadata size %q: %w", keyStr, sizeErr)
 				}
 				deletedBytes += size
-				if err := tx.Delete(bucketMetadata, makeStorageKey(storageID, filePath)); err != nil && err != nutsdb.ErrKeyNotFound {
+				if err := tx.Delete(bucketMetadata, makeStorageKey(storageID, filePath)); err != nil && err != metastore.ErrKeyNotFound {
 					s.logger.Warn("failed to delete owned file metadata", "key", keyStr)
 				}
 			} else {
 				s.logger.Warn("failed to parse owned file key", "key", keyStr)
 			}
 			// Delete ownership tracking
-			if err := tx.Delete(bucketOwnedFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
+			if err := tx.Delete(bucketOwnedFiles, key); err != nil && err != metastore.ErrKeyNotFound {
 				s.logger.Warn("failed to delete ownership key", "key", keyStr)
 			}
 			// Delete from path index
-			if err := tx.Delete(bucketPathIndex, key); err != nil && err != nutsdb.ErrKeyNotFound {
+			if err := tx.Delete(bucketPathIndex, key); err != nil && err != metastore.ErrKeyNotFound {
 				// path index may use different key format
 			}
 			filesDeleted++
@@ -1000,7 +1000,7 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 		}
 		for _, key := range replicaKeys {
 			keyStr := string(key)
-			if err := tx.Delete(bucketReplicaFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
+			if err := tx.Delete(bucketReplicaFiles, key); err != nil && err != metastore.ErrKeyNotFound {
 				s.logger.Warn("failed to delete replica key", "key", keyStr)
 			}
 			// Also clean the metadata entry. Replica keys are
@@ -1010,7 +1010,7 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 			trimmed := strings.TrimPrefix(keyStr, string(prefix))
 			if idx := strings.LastIndex(trimmed, ":primary:"); idx > 0 {
 				filePath := trimmed[:idx]
-				if err := tx.Delete(bucketMetadata, makeStorageKey(storageID, filePath)); err != nil && err != nutsdb.ErrKeyNotFound {
+				if err := tx.Delete(bucketMetadata, makeStorageKey(storageID, filePath)); err != nil && err != metastore.ErrKeyNotFound {
 					// may not exist
 				}
 			}
@@ -1023,7 +1023,7 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 		}
 		for _, key := range dirMetaKeys {
 			keyStr := string(key)
-			if err := tx.Delete(bucketDirMeta, key); err != nil && err != nutsdb.ErrKeyNotFound {
+			if err := tx.Delete(bucketDirMeta, key); err != nil && err != metastore.ErrKeyNotFound {
 				s.logger.Warn("failed to delete dir metadata", "key", keyStr)
 			}
 		}
@@ -1035,7 +1035,7 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 		}
 		for _, key := range dirSummaryKeys {
 			keyStr := string(key)
-			if err := tx.Delete(bucketDirSummary, key); err != nil && err != nutsdb.ErrKeyNotFound {
+			if err := tx.Delete(bucketDirSummary, key); err != nil && err != metastore.ErrKeyNotFound {
 				s.logger.Warn("failed to delete dir summary", "key", keyStr)
 			}
 		}
@@ -1047,7 +1047,7 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 		}
 		for _, key := range dirKeys {
 			keyStr := string(key)
-			if err := tx.Delete(bucketDirIndex, key); err != nil && err != nutsdb.ErrKeyNotFound {
+			if err := tx.Delete(bucketDirIndex, key); err != nil && err != metastore.ErrKeyNotFound {
 				s.logger.Warn("failed to delete dir index", "key", keyStr)
 			}
 			dirsDeleted++

@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/metastore"
 	"google.golang.org/grpc"
 )
 
@@ -37,10 +37,10 @@ func (s *Server) repositoryFiles(storageID string) []string {
 	var files []string
 	prefix := []byte(storageID + ":")
 
-	s.db.View(func(tx *nutsdb.Tx) error {
+	s.db.View(func(tx metastore.Tx) error {
 		// Use PrefixScanEntries to get keys matching the storageID prefix
 		keys, _, err := tx.PrefixScanEntries(bucketOwnedFiles, prefix, "", 0, -1, true, false)
-		if err != nil && err != nutsdb.ErrBucketNotFound && err != nutsdb.ErrPrefixScan {
+		if err != nil && err != metastore.ErrBucketNotFound && err != metastore.ErrPrefixScan {
 			return nil // Ignore errors, empty result is okay
 		}
 
