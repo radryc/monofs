@@ -1016,37 +1016,8 @@ initComplete:
 			"errors", replicaErrors)
 	}
 
-	// Build directory indexes on ALL nodes in batch (deferred for performance)
-	sendProgress(pb.IngestProgress_INGESTING, "Building directory indexes...", filesIngested, filesIngested, "")
-
-	r.mu.RLock()
-	indexingNodes := make([]*nodeState, 0, len(r.nodes))
-	for _, state := range r.nodes {
-		if state.info.Healthy && state.status == NodeActive && state.client != nil {
-			indexingNodes = append(indexingNodes, state)
-		}
-	}
-	r.mu.RUnlock()
-
-	for _, state := range indexingNodes {
-		indexCtx, indexCancel := context.WithTimeout(context.Background(), 60*time.Second)
-		resp, err := state.client.BuildDirectoryIndexes(indexCtx, &pb.BuildDirectoryIndexesRequest{
-			StorageId: storageID,
-		})
-		indexCancel()
-
-		if err != nil {
-			r.logger.Error("failed to build directory indexes on node",
-				"node_id", state.info.NodeId,
-				"storage_id", storageID,
-				"error", err)
-		} else {
-			r.logger.Info("directory indexes built on node",
-				"node_id", state.info.NodeId,
-				"storage_id", storageID,
-				"directories_indexed", resp.DirectoriesIndexed)
-		}
-	}
+	// Directory indexes are maintained incrementally by the node during batch
+	// ingestion (see IngestFileBatch), so no repository-wide rebuild is needed.
 
 	// Mark repository as onboarded on ALL nodes
 	r.mu.RLock()

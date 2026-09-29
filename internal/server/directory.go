@@ -698,6 +698,105 @@ func (s *Server) updateDirectoryIndexHierarchy(tx *nutsdb.Tx, storageID, filePat
 	return nil
 }
 
+// accumulateDirectoryIndexEntry records the directory-index entries for every
+// ancestor of filePath into pending, keyed by directory path. Callers
+// accumulate a whole ingest batch and flush once per directory, keeping memory
+// and writes proportional to the batch instead of the repository size.
+func accumulateDirectoryIndexEntry(pending map[string][]dirIndexEntry, filePath string, mode uint32, size uint64, mtime int64, isDir bool, hashKey string) {
+	if filePath == "" {
+		return
+	}
+	parts := strings.Split(filePath, "/")
+	for i := 0; i < len(parts); i++ {
+		var dirPath, entryName string
+		var entryIsDir bool
+		if i == 0 {
+			dirPath = ""
+			entryName = parts[0]
+			entryIsDir = (i < len(parts)-1) || isDir
+		} else {
+			dirPath = strings.Join(parts[:i], "/")
+			entryName = parts[i]
+			entryIsDir = (i < len(parts)-1) || (isDir && i == len(parts)-1)
+		}
+
+		entries := pending[dirPath]
+		found := false
+		for j, entry := range entries {
+			if entry.Name != entryName {
+				continue
+			}
+			if !entryIsDir {
+				entries[j] = dirIndexEntry{
+					Name:    entryName,
+					Mode:    mode,
+					Size:    size,
+					Mtime:   mtime,
+					HashKey: hashKey,
+					IsDir:   false,
+				}
+			} else if mtime > entry.Mtime {
+				entries[j].Mtime = mtime
+			}
+			found = true
+			break
+		}
+		if !found {
+			entry := dirIndexEntry{Name: entryName, IsDir: entryIsDir, Mtime: mtime}
+			if !entryIsDir {
+				entry.Mode = mode
+				entry.Size = size
+				entry.HashKey = hashKey
+			} else if isDir && i == len(parts)-1 {
+				entry.Mode = normalizeExplicitDirectoryMode(mode)
+			} else {
+				entry.Mode = inferDirectoryMode(mode)
+			}
+			entries = append(entries, entry)
+		}
+		pending[dirPath] = entries
+	}
+}
+
+// flushDirectoryIndexEntries merges accumulated entries into the on-disk
+// directory index, writing each touched directory exactly once.
+func flushDirectoryIndexEntries(tx *nutsdb.Tx, storageID string, pending map[string][]dirIndexEntry) error {
+	for dirPath, newEntries := range pending {
+		dirIndexKey := makeDirIndexKey(storageID, dirPath)
+		var existing []dirIndexEntry
+		if val, err := tx.Get(bucketDirIndex, dirIndexKey); err == nil {
+			_ = json.Unmarshal(val, &existing)
+		}
+		merged := existing
+		for _, ne := range newEntries {
+			found := false
+			for j, ex := range merged {
+				if ex.Name != ne.Name {
+					continue
+				}
+				// Prefer the entry carrying file data, or the newer directory.
+				if (!ne.IsDir && ne.Size > 0) || (ne.IsDir && ne.Mtime > ex.Mtime) {
+					merged[j] = ne
+				}
+				found = true
+				break
+			}
+			if !found {
+				merged = append(merged, ne)
+			}
+		}
+		sort.Slice(merged, func(i, j int) bool { return merged[i].Name < merged[j].Name })
+		val, err := json.Marshal(merged)
+		if err != nil {
+			return fmt.Errorf("marshal dir index for %q: %w", dirPath, err)
+		}
+		if err := tx.Put(bucketDirIndex, dirIndexKey, val, 0); err != nil {
+			return fmt.Errorf("store dir index for %q: %w", dirPath, err)
+		}
+	}
+	return nil
+}
+
 // checkVirtualDirectory checks if a path exists as a virtual directory in the directory index.
 // Virtual directories are created automatically when files are stored in subdirectories.
 func (s *Server) checkVirtualDirectory(storageID, dirPath string) *pb.LookupResponse {
