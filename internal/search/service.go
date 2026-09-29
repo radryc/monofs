@@ -88,16 +88,21 @@ type Service struct {
 	stopChan  chan struct{}
 	workers   int
 	closeOnce sync.Once
+
+	// indexGuardian enables indexing of Guardian-managed partitions. Default
+	// false: they have no clonable upstream git remote.
+	indexGuardian bool
 }
 
 // Config holds service configuration
 type Config struct {
-	IndexDir   string // Directory for Zoekt indexes
-	CacheDir   string // Directory for git clones during indexing
-	Workers    int    // Number of concurrent indexing workers
-	QueueSize  int    // Size of job queue
-	RouterAddr string // Router address for cluster access (enables fetching from storage nodes)
-	Logger     *slog.Logger
+	IndexDir      string // Directory for Zoekt indexes
+	CacheDir      string // Directory for git clones during indexing
+	Workers       int    // Number of concurrent indexing workers
+	QueueSize     int    // Size of job queue
+	RouterAddr    string // Router address for cluster access (enables fetching from storage nodes)
+	IndexGuardian bool   // Index Guardian-managed partitions (default false)
+	Logger        *slog.Logger
 }
 
 // NewService creates a new search service
@@ -189,14 +194,15 @@ func NewService(cfg Config) (*Service, error) {
 	}
 
 	s := &Service{
-		indexDir: cfg.IndexDir,
-		cacheDir: cfg.CacheDir,
-		db:       db,
-		indexer:  indexer,
-		logger:   cfg.Logger,
-		jobQueue: make(chan *Job, cfg.QueueSize),
-		stopChan: make(chan struct{}),
-		workers:  cfg.Workers,
+		indexDir:      cfg.IndexDir,
+		cacheDir:      cfg.CacheDir,
+		db:            db,
+		indexer:       indexer,
+		logger:        cfg.Logger,
+		jobQueue:      make(chan *Job, cfg.QueueSize),
+		stopChan:      make(chan struct{}),
+		workers:       cfg.Workers,
+		indexGuardian: cfg.IndexGuardian,
 		stats: ServiceStats{
 			StartedAt: time.Now(),
 		},
@@ -257,6 +263,13 @@ func (s *Service) worker(id int) {
 	}
 }
 
+// shouldSkipGuardian reports whether a repository must be skipped for search
+// indexing. Guardian-managed partitions are skipped unless guardian indexing
+// has been explicitly enabled via Config.IndexGuardian.
+func (s *Service) shouldSkipGuardian(displayPath, source string) bool {
+	return !s.indexGuardian && isGuardianRepo(displayPath, source)
+}
+
 // processJob executes an indexing job
 func (s *Service) processJob(job *Job) {
 	s.jobsWg.Add(1)
@@ -274,6 +287,24 @@ func (s *Service) processJob(job *Job) {
 	s.mu.Unlock()
 	s.activeJobs.Store(job.ID, job)
 	s.saveJob(job)
+
+	// Guardian partitions have no clonable upstream; skip them without error.
+	if s.shouldSkipGuardian(job.DisplayPath, job.RepoURL) {
+		s.mu.Lock()
+		job.Status = pb.IndexStatus_INDEX_STATUS_READY
+		job.ErrorMessage = ""
+		job.Progress = 1.0
+		job.CompletedAt = time.Now()
+		s.stats.JobsCompleted++
+		s.mu.Unlock()
+		s.activeJobs.Delete(job.ID)
+		s.saveJob(job)
+		s.logger.Info("skipping guardian repository indexing",
+			"job_id", job.ID,
+			"storage_id", job.StorageID,
+			"display_path", job.DisplayPath)
+		return
+	}
 
 	// Create context with timeout for indexing (30 minutes max per repo)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)

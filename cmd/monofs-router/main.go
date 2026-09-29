@@ -131,14 +131,15 @@ func main() {
 		encryptionKeyHex = flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
 
 		// Partition authorization + SSO (authz epics A/C)
-		authzEnforceIngest = flag.Bool("authz-enforce-ingest", false, "Enforce partition-scoped ingest authorization")
-		authzGrantsPath    = flag.String("authz-grants-path", "", "Path to authz grant store JSON (defaults to <state-dir>/authz_grants.json")
-		ownershipGate      = flag.Bool("ownership-gate", false, "Enable subtree-ownership review gate on source push (Phase 3 VCS governance)")
-		ownershipTeamMap   = flag.String("ownership-team-mapping", "", "Path to team->IdP group mapping YAML for OWNERS '@team' handles (optional)")
-		oidcIssuer         = flag.String("oidc-issuer", "", "OIDC issuer URL for SSO token verification")
-		oidcAudience       = flag.String("oidc-audience", "", "Expected OIDC audience for SSO tokens")
-		oidcJWKSURL        = flag.String("oidc-jwks-url", "", "OIDC JWKS URL (discovered from issuer when empty)")
-		devDisableAuth     = flag.Bool("insecure-dev-disable-auth", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_INSECURE_DEV_DISABLE_AUTH")), "true"), "Disable all UI/API authentication (development only; insecure)")
+		authzEnforceIngest  = flag.Bool("authz-enforce-ingest", false, "Enforce partition-scoped ingest authorization")
+		authzGrantsPath     = flag.String("authz-grants-path", "", "Path to authz grant store JSON (defaults to <state-dir>/authz_grants.json")
+		ownershipGate       = flag.Bool("ownership-gate", false, "Enable subtree-ownership review gate on source push (Phase 3 VCS governance)")
+		searchIndexGuardian = flag.Bool("search-index-guardian", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_SEARCH_INDEX_GUARDIAN")), "true"), "Index Guardian-managed partitions in search (default false: no clonable upstream)")
+		ownershipTeamMap    = flag.String("ownership-team-mapping", "", "Path to team->IdP group mapping YAML for OWNERS '@team' handles (optional)")
+		oidcIssuer          = flag.String("oidc-issuer", "", "OIDC issuer URL for SSO token verification")
+		oidcAudience        = flag.String("oidc-audience", "", "Expected OIDC audience for SSO tokens")
+		oidcJWKSURL         = flag.String("oidc-jwks-url", "", "OIDC JWKS URL (discovered from issuer when empty)")
+		devDisableAuth      = flag.Bool("insecure-dev-disable-auth", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_INSECURE_DEV_DISABLE_AUTH")), "true"), "Disable all UI/API authentication (development only; insecure)")
 	)
 	flag.Parse()
 	telemetryCfg, err := telemetry.LoadConfig("monofs-router")
@@ -239,6 +240,7 @@ func main() {
 		RebalanceDelay:         *rebalanceDelay,
 		GracefulFailoverDelay:  *gracefulFailoverDelay,
 		GuardianIngestTimeout:  *guardianIngestTimeout,
+		SearchIndexGuardian:    *searchIndexGuardian,
 		AuthzEnforceIngest:     *authzEnforceIngest,
 		AuthzGrantsPath:        strings.TrimSpace(*authzGrantsPath),
 		AuthzGrantsJSON:        strings.TrimSpace(os.Getenv("MONOFS_AUTHZ_GRANTS_JSON")),

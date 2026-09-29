@@ -213,9 +213,13 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 	}
 
 	// Re-index search for affected guardian partitions, debounced per
-	// storageID so bursts of writes coalesce into a single re-index.
-	for _, group := range groups {
-		r.requestSearchReindexDebounced(group.storageID, group.displayPath, "guardian://"+group.displayPath, "main", "guardian_upsert")
+	// storageID so bursts of writes coalesce into a single re-index. Off by
+	// default: guardian partitions have no clonable upstream git remote, so
+	// the indexer would fail cloning them.
+	if r.config.SearchIndexGuardian {
+		for _, group := range groups {
+			r.requestSearchReindexDebounced(group.storageID, group.displayPath, "guardian://"+group.displayPath, "main", "guardian_upsert")
+		}
 	}
 
 	versions := make([]*pb.GuardianFileVersion, 0, len(plans))
