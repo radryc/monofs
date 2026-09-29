@@ -20,11 +20,6 @@ import (
 	"google.golang.org/grpc"
 )
 
-// loggerAccessor interface to get logger from writer
-type loggerAccessor interface {
-	GetLogger() *slog.Logger
-}
-
 // Service implements the BlobFetcher gRPC service.
 type Service struct {
 	pb.UnimplementedBlobFetcherServer
@@ -64,6 +59,8 @@ type Service struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	closeOnce sync.Once
 }
 
 type ServiceConfig struct {
@@ -686,11 +683,14 @@ func (s *Service) processPrefetchJob(job *prefetchJob) {
 	)
 }
 
-// Close shuts down the service.
+// Close shuts down the service. It is idempotent. The prefetch queue is never
+// closed (producers may still be sending); workers exit via context
+// cancellation instead, avoiding a send-on-closed-channel panic.
 func (s *Service) Close() error {
-	s.cancel()
-	close(s.prefetchQueue)
-	s.prefetchWg.Wait()
+	s.closeOnce.Do(func() {
+		s.cancel()
+		s.prefetchWg.Wait()
+	})
 	return nil
 }
 

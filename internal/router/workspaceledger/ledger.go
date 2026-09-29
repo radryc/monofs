@@ -2,7 +2,6 @@ package workspaceledger
 
 import (
 	"encoding/json"
-	"sort"
 	"sync"
 
 	pb "github.com/radryc/monofs/api/proto"
@@ -19,36 +18,14 @@ type Ledger struct {
 	commits   []*pb.LocalCommit
 	outcomes  []*pb.PushOutcome
 	refreshes []*pb.RefreshEvent
-
-	byCommitID  map[string]*pb.LocalCommit
-	byJobID     map[string]*pb.PushOutcome
-	byWorkspace map[string][]int
-	byPrincipal map[string][]int
-	byRepo      map[string][]int
-	byStatus    map[string][]int
 }
 
 func New() *Ledger {
-	return &Ledger{
-		byCommitID:  make(map[string]*pb.LocalCommit),
-		byJobID:     make(map[string]*pb.PushOutcome),
-		byWorkspace: make(map[string][]int),
-		byPrincipal: make(map[string][]int),
-		byRepo:      make(map[string][]int),
-		byStatus:    make(map[string][]int),
-	}
+	return &Ledger{}
 }
 
 func NewWithWAL(wal WALWriter) *Ledger {
-	return &Ledger{
-		wal:         wal,
-		byCommitID:  make(map[string]*pb.LocalCommit),
-		byJobID:     make(map[string]*pb.PushOutcome),
-		byWorkspace: make(map[string][]int),
-		byPrincipal: make(map[string][]int),
-		byRepo:      make(map[string][]int),
-		byStatus:    make(map[string][]int),
-	}
+	return &Ledger{wal: wal}
 }
 
 type ledgerRecord struct {
@@ -84,8 +61,6 @@ func (l *Ledger) InsertRefreshEvent(r *pb.RefreshEvent) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.refreshes = append(l.refreshes, r)
-	l.byWorkspace[r.GetWorkspaceId()] = append(l.byWorkspace[r.GetWorkspaceId()], len(l.refreshes)-1)
-	l.byRepo[r.GetRepoStorageId()] = append(l.byRepo[r.GetRepoStorageId()], len(l.refreshes)-1)
 }
 
 func (l *Ledger) ReplayFromWAL(entryData []byte) error {
@@ -112,29 +87,16 @@ func (l *Ledger) ReplayFromWAL(entryData []byte) error {
 			return err
 		}
 		l.refreshes = append(l.refreshes, &r)
-		l.byWorkspace[r.GetWorkspaceId()] = append(l.byWorkspace[r.GetWorkspaceId()], len(l.refreshes)-1)
-		l.byRepo[r.GetRepoStorageId()] = append(l.byRepo[r.GetRepoStorageId()], len(l.refreshes)-1)
 	}
 	return nil
 }
 
 func (l *Ledger) insertCommitLocked(c *pb.LocalCommit) {
-	idx := len(l.commits)
 	l.commits = append(l.commits, c)
-	l.byCommitID[c.GetLocalCommitId()] = c
-	l.byWorkspace[c.GetWorkspaceId()] = append(l.byWorkspace[c.GetWorkspaceId()], idx)
-	l.byPrincipal[c.GetPrincipalId()] = append(l.byPrincipal[c.GetPrincipalId()], idx)
-	l.byRepo[c.GetRepoStorageId()] = append(l.byRepo[c.GetRepoStorageId()], idx)
 }
 
 func (l *Ledger) insertOutcomeLocked(o *pb.PushOutcome) {
-	idx := len(l.outcomes)
 	l.outcomes = append(l.outcomes, o)
-	l.byJobID[o.GetJobId()] = o
-	l.byWorkspace[o.GetWorkspaceId()] = append(l.byWorkspace[o.GetWorkspaceId()], idx)
-	l.byRepo[o.GetRepoStorageId()] = append(l.byRepo[o.GetRepoStorageId()], idx)
-	statusKey := "outcome:" + o.GetStatus()
-	l.byStatus[statusKey] = append(l.byStatus[statusKey], idx)
 }
 
 func (l *Ledger) Query(req *pb.QueryLedgerRequest) *pb.QueryLedgerResponse {
@@ -253,12 +215,6 @@ func limitSlice[T any](s []T, limit int) []T {
 		return s
 	}
 	return s[:limit]
-}
-
-func sortByTimestamp[T interface{ GetTimestampUnix() int64 }](s []T) {
-	sort.Slice(s, func(i, j int) bool {
-		return s[i].GetTimestampUnix() > s[j].GetTimestampUnix()
-	})
 }
 
 func mustMarshal(v interface{}) []byte {

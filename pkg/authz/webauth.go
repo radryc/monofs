@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,18 +35,75 @@ func DiscoverEndpoints(ctx context.Context, issuer string, client *http.Client) 
 		return OAuthEndpoints{}, fmt.Errorf("authz: discovery returned %d", resp.StatusCode)
 	}
 	var doc struct {
-		AuthorizationEndpoint       string `json:"authorization_endpoint"`
-		TokenEndpoint               string `json:"token_endpoint"`
-		DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
+		AuthorizationEndpoint       string   `json:"authorization_endpoint"`
+		TokenEndpoint               string   `json:"token_endpoint"`
+		DeviceAuthorizationEndpoint string   `json:"device_authorization_endpoint"`
+		ScopesSupported             []string `json:"scopes_supported"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
 		return OAuthEndpoints{}, fmt.Errorf("authz: decode discovery: %w", err)
 	}
 	return OAuthEndpoints{
-		AuthURL:       doc.AuthorizationEndpoint,
-		TokenURL:      doc.TokenEndpoint,
-		DeviceAuthURL: doc.DeviceAuthorizationEndpoint,
+		AuthURL:         doc.AuthorizationEndpoint,
+		TokenURL:        doc.TokenEndpoint,
+		DeviceAuthURL:   doc.DeviceAuthorizationEndpoint,
+		ScopesSupported: doc.ScopesSupported,
 	}, nil
+}
+
+// parseScopes splits a whitespace/comma separated scope list.
+func parseScopes(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool { return r == ' ' || r == ',' })
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// filterSupportedScopes drops requested scopes the issuer does not advertise
+// (keeping "openid" as a floor). When the issuer advertises nothing, the
+// desired scopes are returned unchanged.
+func filterSupportedScopes(desired, supported []string) []string {
+	if len(supported) == 0 {
+		return desired
+	}
+	set := make(map[string]struct{}, len(supported))
+	for _, s := range supported {
+		set[strings.ToLower(strings.TrimSpace(s))] = struct{}{}
+	}
+	out := make([]string, 0, len(desired))
+	for _, s := range desired {
+		if _, ok := set[strings.ToLower(strings.TrimSpace(s))]; ok {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		out = []string{"openid"}
+	}
+	return out
+}
+
+// routePrefixFromRedirect derives the web-auth mount prefix from the OIDC
+// redirect URL. A redirect of ".../monofs/auth/callback" mounts login at
+// "/monofs/auth/login" and callback at "/monofs/auth/callback".
+func routePrefixFromRedirect(redirectURL string) string {
+	u, err := url.Parse(strings.TrimSpace(redirectURL))
+	if err != nil || strings.TrimSpace(u.Path) == "" {
+		return "/auth"
+	}
+	p := strings.TrimSuffix(u.Path, "/")
+	if strings.HasSuffix(p, "/callback") {
+		p = strings.TrimSuffix(p, "/callback")
+	} else if i := strings.LastIndex(p, "/"); i >= 0 {
+		p = p[:i]
+	}
+	if p == "" {
+		return "/auth"
+	}
+	return p
 }
 
 // sessionStore abstracts the session storage backend (in-memory or persistent).
@@ -121,11 +179,20 @@ func NewWebAuthenticator(ctx context.Context, cfg WebAuthConfig) (*WebAuthentica
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 15 * time.Second}
 	}
-	if len(cfg.Scopes) == 0 {
+	if envScopes := strings.TrimSpace(os.Getenv("MONOFS_OIDC_SCOPES")); envScopes != "" {
+		cfg.Scopes = parseScopes(envScopes)
+	} else if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{"openid", "email", "groups", "profile"}
 	}
+	// Default session/state cookies to Secure when the redirect is HTTPS so
+	// production deployments do not leak the session over cleartext.
+	if !cfg.Secure {
+		if u, err := url.Parse(strings.TrimSpace(cfg.RedirectURL)); err == nil && strings.EqualFold(u.Scheme, "https") {
+			cfg.Secure = true
+		}
+	}
 	if cfg.RoutePrefix == "" {
-		cfg.RoutePrefix = "/auth"
+		cfg.RoutePrefix = routePrefixFromRedirect(cfg.RedirectURL)
 	}
 	if cfg.CookieName == "" {
 		cfg.CookieName = defaultSessionCK
@@ -149,6 +216,7 @@ func NewWebAuthenticator(ctx context.Context, cfg WebAuthConfig) (*WebAuthentica
 	if cfg.now == nil {
 		cfg.now = time.Now
 	}
+	supportedScopes := cfg.Endpoints.ScopesSupported
 	if cfg.Endpoints.AuthURL == "" || cfg.Endpoints.TokenURL == "" {
 		eps, err := DiscoverEndpoints(ctx, cfg.Issuer, cfg.HTTPClient)
 		if err != nil {
@@ -160,14 +228,20 @@ func NewWebAuthenticator(ctx context.Context, cfg WebAuthConfig) (*WebAuthentica
 		if cfg.Endpoints.TokenURL == "" {
 			cfg.Endpoints.TokenURL = eps.TokenURL
 		}
+		if len(supportedScopes) == 0 {
+			supportedScopes = eps.ScopesSupported
+		}
 	}
+	cfg.Scopes = filterSupportedScopes(cfg.Scopes, supportedScopes)
 	return &WebAuthenticator{cfg: cfg, pending: make(map[string]pendingLogin)}, nil
 }
 
-func randToken() string {
+func randToken() (string, error) {
 	raw := make([]byte, 24)
-	_, _ = rand.Read(raw)
-	return base64.RawURLEncoding.EncodeToString(raw)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("authz: generate random token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 // LoginHandler starts the login flow: generates PKCE + state, stores the
@@ -178,7 +252,11 @@ func (w *WebAuthenticator) LoginHandler(rw http.ResponseWriter, r *http.Request)
 		http.Error(rw, "login init failed", http.StatusInternalServerError)
 		return
 	}
-	state := randToken()
+	state, err := randToken()
+	if err != nil {
+		http.Error(rw, "login init failed", http.StatusInternalServerError)
+		return
+	}
 	w.mu.Lock()
 	// prune stale pending entries
 	for s, p := range w.pending {

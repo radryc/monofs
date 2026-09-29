@@ -164,64 +164,6 @@ func (r *Router) guardianNodeClient(target guardianNodeTarget) (pb.MonoFSClient,
 	}, nil
 }
 
-func (r *Router) lookupGuardianExistingFiles(ctx context.Context, nodes []guardianNodeTarget, displayPath string, files []*pb.InjectGuardianFile) map[string]bool {
-	existing := make(map[string]bool, len(files))
-	if len(nodes) == 0 || len(files) == 0 {
-		return existing
-	}
-
-	nodeClient, closeConn, err := r.guardianNodeClient(nodes[0])
-	if err != nil {
-		r.logger.Warn("failed to initialize guardian lookup client", "node", nodes[0].id, "error", err)
-		return existing
-	}
-	defer closeConn()
-
-	for _, file := range files {
-		relPath := cleanGuardianRelativePath(file.Path)
-		if relPath == "" {
-			continue
-		}
-
-		attrCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		resp, err := nodeClient.GetAttr(attrCtx, &pb.GetAttrRequest{
-			Path: displayPath + "/" + relPath,
-		})
-		cancel()
-		if err == nil && resp != nil && resp.Found {
-			existing[relPath] = true
-		}
-	}
-
-	return existing
-}
-
-func (r *Router) publishGuardianInjectedFiles(storageID string, files []*pb.InjectGuardianFile, existing map[string]bool) {
-	for _, file := range files {
-		relPath := cleanGuardianRelativePath(file.Path)
-		if relPath == "" {
-			continue
-		}
-
-		changeType := pb.ChangeType_ADDED
-		if existing[relPath] {
-			changeType = pb.ChangeType_MODIFIED
-		}
-
-		event := &pb.ChangeEvent{
-			StorageId:   storageID,
-			FilePath:    relPath,
-			Type:        changeType,
-			NewBlobHash: guardianContentHash(file.Content),
-		}
-		if len(file.Content) < 64*1024 {
-			event.InlineContent = append([]byte(nil), file.Content...)
-		}
-
-		r.publishGuardianChange(event)
-	}
-}
-
 func cleanGuardianRelativePath(input string) string {
 	cleaned := strings.TrimSpace(input)
 	if cleaned == "" {

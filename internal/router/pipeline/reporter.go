@@ -95,19 +95,6 @@ func (r *StatusReporter) ReportGitLab(projectID, sha string, status CommitStatus
 	return nil
 }
 
-func JobStateToCommitState(state JobState) string {
-	switch state {
-	case JobPending, JobClaimed, JobRunning:
-		return "pending"
-	case JobSucceeded:
-		return "success"
-	case JobFailed, JobCancelled:
-		return "failure"
-	default:
-		return "error"
-	}
-}
-
 func RunStateToCommitState(state RunState) string {
 	switch state {
 	case RunPending, RunRunning:

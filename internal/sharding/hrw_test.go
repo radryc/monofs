@@ -310,44 +310,6 @@ func TestHealthyNodeCount(t *testing.T) {
 	}
 }
 
-func TestHashKey(t *testing.T) {
-	hash1 := HashKey("test")
-	hash2 := HashKey("test")
-	hash3 := HashKey("different")
-
-	if hash1 != hash2 {
-		t.Error("same key produced different hashes")
-	}
-
-	if hash1 == hash3 {
-		t.Error("different keys produced same hash")
-	}
-}
-
-func TestHashKeyBytes(t *testing.T) {
-	data := []byte("test data")
-	hash1 := HashKeyBytes(data)
-	hash2 := HashKeyBytes(data)
-
-	if hash1 != hash2 {
-		t.Error("same data produced different hashes")
-	}
-}
-
-func TestHashKeyUint64(t *testing.T) {
-	hash1 := HashKeyUint64(12345)
-	hash2 := HashKeyUint64(12345)
-	hash3 := HashKeyUint64(54321)
-
-	if hash1 != hash2 {
-		t.Error("same value produced different hashes")
-	}
-
-	if hash1 == hash3 {
-		t.Error("different values produced same hash")
-	}
-}
-
 func TestConsistentHashing(t *testing.T) {
 	// Test that HRW maintains consistency when nodes change
 	nodes := []Node{

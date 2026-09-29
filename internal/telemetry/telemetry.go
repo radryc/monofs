@@ -99,9 +99,14 @@ func Setup(ctx context.Context, cfg Config) (*Handle, error) {
 		sdktrace.WithBatcher(traceExporter),
 		sdktrace.WithResource(res),
 	)
+	metricInterval := cfg.MetricInterval
+	if metricInterval <= 0 {
+		// WithInterval panics on a non-positive duration.
+		metricInterval = time.Minute
+	}
 	metricProvider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(cfg.MetricInterval))),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(metricInterval))),
 	)
 	logProvider := sdklog.NewLoggerProvider(
 		sdklog.WithResource(res),

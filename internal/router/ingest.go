@@ -17,6 +17,7 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage"
+	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -425,6 +426,7 @@ initComplete:
 		if state.client == nil {
 			conn, err := grpc.NewClient(state.info.Address,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpcx.IPv4DialerOption(),
 			)
 			if err != nil {
 				r.mu.Unlock()
@@ -508,6 +510,7 @@ initComplete:
 		if state.client == nil {
 			conn, err := grpc.NewClient(state.info.Address,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpcx.IPv4DialerOption(),
 			)
 			if err != nil {
 				r.logger.Error("failed to connect to node", "node_id", node.ID, "error", err)
@@ -1049,7 +1052,9 @@ initComplete:
 	r.mu.RLock()
 	activeNodes := make([]*nodeState, 0, len(r.nodes))
 	for _, state := range r.nodes {
-		if state.info.Healthy && state.status == NodeActive {
+		// A statically registered node may be Active with no client until the
+		// first health check connects it; skip those to avoid a nil panic.
+		if state.info.Healthy && state.status == NodeActive && state.client != nil {
 			activeNodes = append(activeNodes, state)
 		}
 	}

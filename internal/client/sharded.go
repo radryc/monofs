@@ -576,6 +576,7 @@ func (sc *ShardedClient) Lookup(ctx context.Context, path string) (*pb.LookupRes
 
 	// Try up to 3 nodes via HRW ranking (primary + 2 fallbacks)
 	var lastErr error
+	sawCleanNotFound := false
 	maxAttempts := 3
 	if maxAttempts > len(rankedNodes) {
 		maxAttempts = len(rankedNodes)
@@ -629,6 +630,7 @@ func (sc *ShardedClient) Lookup(ctx context.Context, path string) (*pb.LookupRes
 		if resp.Found {
 			return resp, nil
 		}
+		sawCleanNotFound = true
 
 		// Not found on primary - for directories, need to check other nodes
 		// because files may be sharded to different nodes
@@ -687,6 +689,7 @@ func (sc *ShardedClient) Lookup(ctx context.Context, path string) (*pb.LookupRes
 			}
 			return resp, nil
 		}
+		sawCleanNotFound = true
 	}
 
 	// FAILOVER: If all HRW-based attempts failed, try router-based routing
@@ -744,8 +747,10 @@ func (sc *ShardedClient) Lookup(ctx context.Context, path string) (*pb.LookupRes
 		}
 	}
 
-	// Return not found (or last error if all nodes failed)
-	if lastErr != nil {
+	// Return not found when every reachable node cleanly reported not found,
+	// even if another node had a transient RPC error; only surface the error
+	// when no node could give a definitive answer.
+	if lastErr != nil && !sawCleanNotFound {
 		return nil, lastErr
 	}
 	return &pb.LookupResponse{Found: false}, nil
@@ -778,6 +783,7 @@ func (sc *ShardedClient) GetAttr(ctx context.Context, path string) (*pb.GetAttrR
 
 	// Try up to 3 nodes via HRW ranking (primary + 2 fallbacks)
 	var lastErr error
+	sawCleanNotFound := false
 	maxAttempts := 3
 	if maxAttempts > len(rankedNodes) {
 		maxAttempts = len(rankedNodes)
@@ -832,6 +838,7 @@ func (sc *ShardedClient) GetAttr(ctx context.Context, path string) (*pb.GetAttrR
 		}
 
 		// Not found on primary - for directories, need to check other nodes
+		sawCleanNotFound = true
 		break
 	}
 
@@ -880,10 +887,13 @@ func (sc *ShardedClient) GetAttr(ctx context.Context, path string) (*pb.GetAttrR
 			}
 			return resp, nil
 		}
+		sawCleanNotFound = true
 	}
 
-	// Return not found (or last error if all nodes failed)
-	if lastErr != nil {
+	// Return not found when every reachable node cleanly reported not found,
+	// even if another node had a transient RPC error; only surface the error
+	// when no node could give a definitive answer.
+	if lastErr != nil && !sawCleanNotFound {
 		return nil, lastErr
 	}
 	return &pb.GetAttrResponse{Found: false}, nil
@@ -1232,7 +1242,7 @@ func (sc *ShardedClient) Read(ctx context.Context, path string, offset, size int
 						"node_id", nodeID)
 				}
 
-				callCtx, cancel := context.WithTimeout(ctx, sc.rpcTimeout)
+				callCtx, cancel := context.WithTimeout(sc.withClientID(ctx), sc.rpcTimeout)
 				stream, err := client.Read(callCtx, &pb.ReadRequest{
 					Path:   path,
 					Offset: offset,

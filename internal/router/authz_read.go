@@ -13,14 +13,19 @@ import (
 // evaluator is present. Identity is read from ctx (populated by the auth
 // interceptor); anonymous callers are denied when enforcement is on.
 func (r *Router) authorizeRead(ctx context.Context, partition string) error {
-	if !r.authzEnforceRead || r.grantEvaluator == nil {
+	r.mu.RLock()
+	enforce := r.authzEnforceRead
+	evaluator := r.grantEvaluator
+	r.mu.RUnlock()
+
+	if !enforce || evaluator == nil {
 		return nil
 	}
 	id, _ := authz.IdentityFromContext(ctx)
 	if r.isBreakGlassAdmin(id) {
 		return nil
 	}
-	if r.grantEvaluator.Can(ctx, id, partition, authz.ActionView) {
+	if evaluator.Can(ctx, id, partition, authz.ActionView) {
 		return nil
 	}
 	r.logger.Warn("read denied by partition authz",
@@ -31,5 +36,7 @@ func (r *Router) authorizeRead(ctx context.Context, partition string) error {
 
 // SetAuthzEnforceRead toggles read/mount viewer enforcement (tests and wiring).
 func (r *Router) SetAuthzEnforceRead(enforce bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.authzEnforceRead = enforce
 }

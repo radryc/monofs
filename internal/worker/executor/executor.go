@@ -141,6 +141,29 @@ type OutputDirResult struct {
 	TreeDigest string
 }
 
+// resolveWithin joins rel onto base and guarantees the result stays inside
+// base. Absolute paths and any path escaping base via ".." are rejected. It is
+// used to keep untrusted action paths (working dir, inputs, outputs) from
+// traversing outside the executor's sandbox.
+func resolveWithin(base, rel string) (string, error) {
+	baseAbs, err := filepath.Abs(base)
+	if err != nil {
+		return "", err
+	}
+	if rel == "" {
+		return baseAbs, nil
+	}
+	if filepath.IsAbs(rel) {
+		return "", fmt.Errorf("absolute path %q not allowed", rel)
+	}
+	joined := filepath.Join(baseAbs, filepath.Clean(rel))
+	relToBase, err := filepath.Rel(baseAbs, joined)
+	if err != nil || relToBase == ".." || strings.HasPrefix(relToBase, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path %q escapes work directory", rel)
+	}
+	return joined, nil
+}
+
 // Execute runs an action.
 func (e *Executor) Execute(ctx context.Context, req *ExecuteRequest) (*ExecuteResult, error) {
 	// Acquire concurrency slot.
@@ -158,8 +181,13 @@ func (e *Executor) Execute(ctx context.Context, req *ExecuteRequest) (*ExecuteRe
 	start := time.Now()
 	result := &ExecuteResult{}
 
-	// Create isolated workdir.
-	workDir := filepath.Join(e.cfg.WorkDir, req.WorkingDirectory)
+	// Create isolated workdir, contained within the executor root.
+	workDir, err := resolveWithin(e.cfg.WorkDir, req.WorkingDirectory)
+	if err != nil {
+		result.Error = fmt.Sprintf("invalid working directory: %v", err)
+		e.failedExecs.Add(1)
+		return result, nil
+	}
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		result.Error = fmt.Sprintf("mkdir workdir: %v", err)
 		e.failedExecs.Add(1)
@@ -169,7 +197,12 @@ func (e *Executor) Execute(ctx context.Context, req *ExecuteRequest) (*ExecuteRe
 
 	// Fetch input files from cache.
 	for _, f := range req.InputFiles {
-		dst := filepath.Join(workDir, f.Path)
+		dst, err := resolveWithin(workDir, f.Path)
+		if err != nil {
+			result.Error = fmt.Sprintf("invalid input path %s: %v", f.Path, err)
+			e.failedExecs.Add(1)
+			return result, nil
+		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 			result.Error = fmt.Sprintf("mkdir for input %s: %v", f.Path, err)
 			e.failedExecs.Add(1)
@@ -197,6 +230,11 @@ func (e *Executor) Execute(ctx context.Context, req *ExecuteRequest) (*ExecuteRe
 	}
 
 	// Build command.
+	if len(req.Arguments) == 0 {
+		result.Error = "no command specified"
+		e.failedExecs.Add(1)
+		return result, nil
+	}
 	cmd := exec.CommandContext(execCtx, req.Arguments[0], req.Arguments[1:]...)
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), req.EnvironmentVariables...)
@@ -224,14 +262,24 @@ func (e *Executor) Execute(ctx context.Context, req *ExecuteRequest) (*ExecuteRe
 
 	// Capture and upload output files.
 	for _, outPath := range req.OutputFiles {
-		fullPath := filepath.Join(workDir, outPath)
+		fullPath, err := resolveWithin(workDir, outPath)
+		if err != nil {
+			e.logger.Debug("skipping output outside workdir", "path", outPath, "error", err)
+			continue
+		}
 		data, err := os.ReadFile(fullPath)
 		if err != nil {
 			// Output file not produced — not necessarily an error.
 			e.logger.Debug("output file not found", "path", outPath)
 			continue
 		}
-		digest := e.storeCAS(ctx, data)
+		digest, storeErr := e.storeCAS(ctx, data)
+		if storeErr != nil {
+			e.logger.Warn("failed to store output file", "path", outPath, "error", storeErr)
+			e.failedExecs.Add(1)
+			result.Error = storeErr.Error()
+			continue
+		}
 		result.OutputFiles = append(result.OutputFiles, OutputFileResult{
 			Path:   outPath,
 			Digest: digest,
@@ -241,7 +289,11 @@ func (e *Executor) Execute(ctx context.Context, req *ExecuteRequest) (*ExecuteRe
 
 	// Capture and upload output directories.
 	for _, outDir := range req.OutputDirectories {
-		fullDir := filepath.Join(workDir, outDir)
+		fullDir, err := resolveWithin(workDir, outDir)
+		if err != nil {
+			e.logger.Debug("skipping output dir outside workdir", "path", outDir, "error", err)
+			continue
+		}
 		treeDigest, err := e.storeDirectory(ctx, fullDir)
 		if err != nil {
 			e.logger.Debug("output dir not found", "path", outDir, "error", err)
@@ -283,27 +335,28 @@ func (e *Executor) fetchCAS(ctx context.Context, digest string) ([]byte, error) 
 }
 
 // storeCAS uploads a blob to monofs-cache and returns its digest.
-func (e *Executor) storeCAS(ctx context.Context, data []byte) string {
+func (e *Executor) storeCAS(ctx context.Context, data []byte) (string, error) {
 	h := sha256.Sum256(data)
 	digest := fmt.Sprintf("%s/%d", hex.EncodeToString(h[:]), len(data))
 
 	if e.cfg.CacheAddr == "" {
-		return digest
+		return digest, nil
 	}
 
 	url := fmt.Sprintf("http://%s/cas/%s", e.cfg.CacheAddr, digest)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(data))
 	if err != nil {
-		e.logger.Warn("store CAS request failed", "digest", digest, "error", err)
-		return digest
+		return digest, fmt.Errorf("store CAS request %s: %w", digest, err)
 	}
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		e.logger.Warn("store CAS failed", "digest", digest, "error", err)
-		return digest
+		return digest, fmt.Errorf("store CAS %s: %w", digest, err)
 	}
 	resp.Body.Close()
-	return digest
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return digest, fmt.Errorf("store CAS %s: HTTP %d", digest, resp.StatusCode)
+	}
+	return digest, nil
 }
 
 // storeDirectory walks a directory tree, uploads each file to CAS,
@@ -323,7 +376,10 @@ func (e *Executor) storeDirectory(ctx context.Context, dir string) (string, erro
 		if err != nil {
 			return err
 		}
-		digest := e.storeCAS(ctx, data)
+		digest, err := e.storeCAS(ctx, data)
+		if err != nil {
+			return err
+		}
 		manifest.WriteString(fmt.Sprintf("%s %s\n", rel, digest))
 		return nil
 	})
@@ -347,6 +403,3 @@ func (e *Executor) Status() map[string]interface{} {
 		"max_jobs":     e.cfg.MaxJobs,
 	}
 }
-
-// Close releases resources.
-func (e *Executor) Close() error { return nil }

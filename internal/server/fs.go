@@ -762,6 +762,9 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	// Handle offset and size
 	offset := req.Offset
 	size := req.Size
+	if offset < 0 {
+		offset = 0
+	}
 
 	if offset >= int64(len(content)) {
 		return nil
@@ -1005,9 +1008,16 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 				if err := tx.Delete(bucketReplicaFiles, key); err != nil && err != nutsdb.ErrKeyNotFound {
 					s.logger.Warn("failed to delete replica key", "key", keyStr)
 				}
-				// Also clean metadata for replicas
-				if err := tx.Delete(bucketMetadata, key); err != nil && err != nutsdb.ErrKeyNotFound {
-					// may not exist
+				// Also clean the metadata entry. Replica keys are
+				// "storageID:filePath:primary:nodeID", so derive the canonical
+				// metadata key from the storageID and file path rather than
+				// reusing the replica key.
+				trimmed := strings.TrimPrefix(keyStr, prefix)
+				if idx := strings.LastIndex(trimmed, ":primary:"); idx > 0 {
+					filePath := trimmed[:idx]
+					if err := tx.Delete(bucketMetadata, makeStorageKey(storageID, filePath)); err != nil && err != nutsdb.ErrKeyNotFound {
+						// may not exist
+					}
 				}
 			}
 		}

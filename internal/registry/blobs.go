@@ -3,7 +3,6 @@ package registry
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"math"
@@ -23,10 +22,6 @@ func NewBlobStore(client *Client) *BlobStore {
 
 func BlobPath(digest string) string {
 	return "_blobs/" + strings.Replace(digest, ":", "/", 1)
-}
-
-func DigestKey(digest string) string {
-	return "_blobs/" + digest
 }
 
 func (b *BlobStore) Get(ctx context.Context, digest string) ([]byte, error) {
@@ -85,14 +80,6 @@ func (b *BlobStore) readChunked(ctx context.Context, digest string) ([]byte, err
 func (b *BlobStore) Exists(ctx context.Context, digest string) (bool, error) {
 	path := BlobPath(digest)
 	return b.client.Exists(ctx, path)
-}
-
-func (b *BlobStore) Put(ctx context.Context, digest string, content []byte) error {
-	verifiedDigest := "sha256:" + hex.EncodeToString(sha256Hash(content))
-	if digest != verifiedDigest {
-		return fmt.Errorf("digest mismatch: expected %s, got %s", digest, verifiedDigest)
-	}
-	return b.putChunkedFromReader(ctx, digest, bytesReader(content), int64(len(content)))
 }
 
 func (b *BlobStore) PutUnchecked(ctx context.Context, digest string, content []byte) error {
@@ -185,12 +172,13 @@ func (b *BlobStore) Size(ctx context.Context, digest string) (int64, error) {
 				if readErr != nil {
 					return 0, readErr
 				}
-				blobData, readErr := io.ReadAll(rc)
+				// Count bytes by streaming instead of buffering the whole blob.
+				n, readErr := io.Copy(io.Discard, rc)
 				rc.Close()
 				if readErr != nil {
 					return 0, readErr
 				}
-				return int64(len(blobData)), nil
+				return n, nil
 			}
 			break
 		}

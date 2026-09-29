@@ -17,6 +17,10 @@ type OAuthEndpoints struct {
 	DeviceAuthURL string
 	TokenURL      string
 	AuthURL       string // authorization endpoint (used by the PKCE web flow)
+	// ScopesSupported is advertised by the issuer's discovery document. It is
+	// used to avoid requesting scopes the IdP does not understand (for example
+	// Cognito rejects the "groups" scope with invalid_request).
+	ScopesSupported []string
 }
 
 // TokenResponse is a normalized OAuth/OIDC token endpoint response.

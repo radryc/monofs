@@ -308,7 +308,6 @@ type StorageBackend interface {
 type BackendRegistry struct {
 	ingestionBackends map[IngestionType]func() IngestionBackend
 	fetchBackends     map[FetchType]func() FetchBackend
-	storageBackends   map[string]func() StorageBackend
 }
 
 // DefaultRegistry is the global registry
@@ -319,7 +318,6 @@ func NewBackendRegistry() *BackendRegistry {
 	return &BackendRegistry{
 		ingestionBackends: make(map[IngestionType]func() IngestionBackend),
 		fetchBackends:     make(map[FetchType]func() FetchBackend),
-		storageBackends:   make(map[string]func() StorageBackend),
 	}
 }
 
@@ -333,11 +331,6 @@ func (r *BackendRegistry) RegisterFetchBackend(t FetchType, factory func() Fetch
 	r.fetchBackends[t] = factory
 }
 
-// RegisterStorageBackend registers a storage backend factory
-func (r *BackendRegistry) RegisterStorageBackend(t string, factory func() StorageBackend) {
-	r.storageBackends[t] = factory
-}
-
 // CreateIngestionBackend creates a new ingestion backend instance
 func (r *BackendRegistry) CreateIngestionBackend(t IngestionType) (IngestionBackend, error) {
 	factory, ok := r.ingestionBackends[t]
@@ -345,49 +338,4 @@ func (r *BackendRegistry) CreateIngestionBackend(t IngestionType) (IngestionBack
 		return nil, fmt.Errorf("unknown ingestion type: %s", t)
 	}
 	return factory(), nil
-}
-
-// CreateFetchBackend creates a new fetch backend instance
-func (r *BackendRegistry) CreateFetchBackend(t FetchType) (FetchBackend, error) {
-	factory, ok := r.fetchBackends[t]
-	if !ok {
-		return nil, fmt.Errorf("unknown fetch type: %s", t)
-	}
-	return factory(), nil
-}
-
-// CreateStorageBackend creates a new storage backend instance
-func (r *BackendRegistry) CreateStorageBackend(t string) (StorageBackend, error) {
-	factory, ok := r.storageBackends[t]
-	if !ok {
-		return nil, fmt.Errorf("unknown storage backend type: %s", t)
-	}
-	return factory(), nil
-}
-
-// ListIngestionTypes returns available ingestion types
-func (r *BackendRegistry) ListIngestionTypes() []IngestionType {
-	types := make([]IngestionType, 0, len(r.ingestionBackends))
-	for t := range r.ingestionBackends {
-		types = append(types, t)
-	}
-	return types
-}
-
-// ListFetchTypes returns available fetch types
-func (r *BackendRegistry) ListFetchTypes() []FetchType {
-	types := make([]FetchType, 0, len(r.fetchBackends))
-	for t := range r.fetchBackends {
-		types = append(types, t)
-	}
-	return types
-}
-
-// ListStorageBackendTypes returns available storage backend types
-func (r *BackendRegistry) ListStorageBackendTypes() []string {
-	types := make([]string, 0, len(r.storageBackends))
-	for t := range r.storageBackends {
-		types = append(types, t)
-	}
-	return types
 }

@@ -61,8 +61,6 @@ type WriteSession struct {
 	ID        string    `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
 	BasePath  string    `json:"base_path"`
-
-	mu sync.RWMutex
 }
 
 // SessionManager manages write sessions for the FUSE client.
@@ -342,7 +340,11 @@ func (sm *SessionManager) CommitSession() error {
 
 	// Archive to committed/
 	timestamp := time.Now().Format("20060102-150405")
-	archiveName := fmt.Sprintf("%s-%s", timestamp, session.ID[:8])
+	idShort := session.ID
+	if len(idShort) > 8 {
+		idShort = idShort[:8]
+	}
+	archiveName := fmt.Sprintf("%s-%s", timestamp, idShort)
 	archivePath := filepath.Join(sm.overlayBase, "committed", archiveName)
 
 	if err := os.Rename(session.BasePath, archivePath); err != nil {
@@ -1036,43 +1038,6 @@ func (sm *SessionManager) RemoveBlobDisk() {
 	}
 
 	sm.logger.Info("blob disk files removed", "session", current.ID)
-}
-
-// GetDependencyFilePaths returns a sample of dependency file paths for verification.
-// This is used during atomic cleanup to verify the backend has the files before
-// removing overlay entries. Returns up to maxFiles paths.
-func (sm *SessionManager) GetDependencyFilePaths(maxFiles int) []string {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	if sm.current == nil || sm.db == nil {
-		return nil
-	}
-
-	const depPrefix = "dependency/"
-	var paths []string
-
-	// Get all files from overlay DB
-	files, err := sm.db.GetAllFiles()
-	if err != nil {
-		sm.logger.Debug("failed to get files for verification", "error", err)
-		return nil
-	}
-
-	// Filter for dependency files
-	for monofsPath := range files {
-		if len(paths) >= maxFiles {
-			break
-		}
-		if strings.HasPrefix(monofsPath, depPrefix) {
-			// Strip the "dependency/" prefix for backend verification
-			paths = append(paths, monofsPath)
-		}
-	}
-
-	sm.logger.Debug("sampled dependency files for verification",
-		"sample_size", len(paths), "requested", maxFiles)
-	return paths
 }
 
 // forceRemoveFile removes a single file, making its parent directory writable

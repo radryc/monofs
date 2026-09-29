@@ -29,6 +29,15 @@ type Proxy struct {
 	client *http.Client
 }
 
+// Blobs returns the blob store the proxy uses, so a Server can share it.
+func (p *Proxy) Blobs() *BlobStore { return p.blobs }
+
+// Tags returns the tag store the proxy uses, so a Server can share it.
+func (p *Proxy) Tags() *TagStore { return p.tags }
+
+// Stats returns the stats sink the proxy records into, so a Server can share it.
+func (p *Proxy) Stats() *Stats { return p.stats }
+
 func NewProxy(config UpstreamConfig, blobs *BlobStore, tags *TagStore, stats *Stats, logger *slog.Logger) *Proxy {
 	return &Proxy{
 		config: config,

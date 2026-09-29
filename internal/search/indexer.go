@@ -184,6 +184,20 @@ func (i *Indexer) RegisterStorageMapping(displayPath, storageID string) {
 	i.pathToStorageID[displayPath] = storageID
 }
 
+// DisplayPathForStorageID returns the display path currently registered for a
+// storage ID. Index shards are keyed by display path, so callers that only hold
+// a storage ID must translate before calling IndexExists/GetIndexSize/DeleteIndex.
+func (i *Indexer) DisplayPathForStorageID(storageID string) (string, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	for displayPath, sid := range i.pathToStorageID {
+		if sid == storageID {
+			return displayPath, true
+		}
+	}
+	return "", false
+}
+
 // Close closes the indexer
 func (i *Indexer) Close() error {
 	i.mu.Lock()
@@ -635,14 +649,23 @@ func (i *Indexer) Search(ctx context.Context, req SearchRequest) (*SearchResults
 		ChunkMatches:         true,
 	}
 
-	result, err := i.searcher.Search(ctx, q, searchOpts)
+	// Hold a read lock for the duration of the search so Close/ReloadSearcher
+	// cannot close the searcher underneath us.
+	i.mu.RLock()
+	searcher := i.searcher
+	result, err := searcher.Search(ctx, q, searchOpts)
+	i.mu.RUnlock()
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
 
-	// Get storage ID mapping
+	// Deep-copy the storage ID mapping so concurrent RegisterStorageMapping
+	// calls cannot mutate it while results are converted.
 	i.mu.RLock()
-	pathToStorageID := i.pathToStorageID
+	pathToStorageID := make(map[string]string, len(i.pathToStorageID))
+	for displayPath, storageID := range i.pathToStorageID {
+		pathToStorageID[displayPath] = storageID
+	}
 	i.mu.RUnlock()
 
 	// Convert results

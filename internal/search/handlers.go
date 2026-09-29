@@ -171,8 +171,8 @@ func (s *Service) GetIndexStatus(ctx context.Context, req *pb.IndexStatusRequest
 	}
 
 	// Check if index exists but no job record
-	if s.indexer.IndexExists(req.StorageId) {
-		size, _ := s.indexer.GetIndexSize(req.StorageId)
+	if indexDisplayPath := s.displayPathForStorageID(req.StorageId); s.indexer.IndexExists(indexDisplayPath) {
+		size, _ := s.indexer.GetIndexSize(indexDisplayPath)
 		meta, _ := s.loadRepoMeta(req.StorageId)
 		if meta != nil {
 			return &pb.IndexStatusResponse{
@@ -317,6 +317,18 @@ func (s *Service) ListIndexes(ctx context.Context, req *pb.ListIndexesRequest) (
 	}, nil
 }
 
+// displayPathForStorageID resolves the display path used to name index shards.
+// Handlers receive a storage ID but the indexer API is keyed by display path.
+func (s *Service) displayPathForStorageID(storageID string) string {
+	if displayPath, ok := s.indexer.DisplayPathForStorageID(storageID); ok {
+		return displayPath
+	}
+	if meta, err := s.loadRepoMeta(storageID); err == nil && meta != nil && meta.DisplayPath != "" {
+		return meta.DisplayPath
+	}
+	return storageID
+}
+
 // RebuildIndex implements the RebuildIndex RPC
 func (s *Service) RebuildIndex(ctx context.Context, req *pb.RebuildIndexRequest) (*pb.RebuildIndexResponse, error) {
 	var storageID, displayPath, repoURL, branch string
@@ -345,7 +357,7 @@ func (s *Service) RebuildIndex(ctx context.Context, req *pb.RebuildIndexRequest)
 
 	// Delete existing index if force rebuild
 	if req.Force {
-		s.indexer.DeleteIndex(req.StorageId)
+		s.indexer.DeleteIndex(displayPath)
 	}
 
 	// Create new indexing job
@@ -396,7 +408,7 @@ func (s *Service) RebuildAllIndexes(ctx context.Context, req *pb.RebuildAllIndex
 
 			// Delete existing index if force
 			if req.Force {
-				s.indexer.DeleteIndex(meta.StorageID)
+				s.indexer.DeleteIndex(meta.DisplayPath)
 			}
 
 			// Create job
@@ -431,7 +443,7 @@ func (s *Service) RebuildAllIndexes(ctx context.Context, req *pb.RebuildAllIndex
 // DeleteIndex implements the DeleteIndex RPC
 func (s *Service) DeleteIndex(ctx context.Context, req *pb.DeleteIndexRequest) (*pb.DeleteIndexResponse, error) {
 	// Remove from indexer
-	if err := s.indexer.DeleteIndex(req.StorageId); err != nil {
+	if err := s.indexer.DeleteIndex(s.displayPathForStorageID(req.StorageId)); err != nil {
 		return &pb.DeleteIndexResponse{
 			Success: false,
 			Message: fmt.Sprintf("Failed to delete index: %v", err),

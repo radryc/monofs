@@ -3,7 +3,6 @@
 package sharding
 
 import (
-	"encoding/binary"
 	"hash/fnv"
 	"sort"
 	"sync"
@@ -40,6 +39,9 @@ func NewHRW(nodes []Node) *HRW {
 func NewHRWFromProto(nodes []*pb.NodeInfo) *HRW {
 	converted := make([]Node, 0, len(nodes))
 	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
 		converted = append(converted, Node{
 			ID:      n.NodeId,
 			Address: n.Address,
@@ -62,6 +64,9 @@ func (h *HRW) UpdateNodes(nodes []Node) {
 func (h *HRW) UpdateNodesFromProto(nodes []*pb.NodeInfo) {
 	converted := make([]Node, 0, len(nodes))
 	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
 		converted = append(converted, Node{
 			ID:      n.NodeId,
 			Address: n.Address,
@@ -82,6 +87,9 @@ func (h *HRW) UpdateNodeHealthFromProto(nodes []*pb.NodeInfo) {
 	// Build lookup map from incoming nodes
 	incoming := make(map[string]*pb.NodeInfo, len(nodes))
 	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
 		incoming[n.NodeId] = n
 	}
 
@@ -102,6 +110,9 @@ func (h *HRW) UpdateNodeHealthFromProto(nodes []*pb.NodeInfo) {
 
 	// Append truly new nodes (not seen before)
 	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
 		if !seen[n.NodeId] {
 			// Check if we already have this node (just wasn't in incoming)
 			found := false
@@ -284,26 +295,4 @@ func (h *HRW) HealthyNodeCount() int {
 		}
 	}
 	return count
-}
-
-// HashKey returns a consistent hash for the given key.
-// Can be used for debugging or logging.
-func HashKey(key string) uint64 {
-	hasher := fnv.New64a()
-	hasher.Write([]byte(key))
-	return hasher.Sum64()
-}
-
-// HashKeyBytes returns a consistent hash for the given bytes.
-func HashKeyBytes(data []byte) uint64 {
-	hasher := fnv.New64a()
-	hasher.Write(data)
-	return hasher.Sum64()
-}
-
-// HashKeyUint64 returns a consistent hash for a uint64.
-func HashKeyUint64(v uint64) uint64 {
-	b := make([]byte, 8)
-	binary.LittleEndian.PutUint64(b, v)
-	return HashKeyBytes(b)
 }

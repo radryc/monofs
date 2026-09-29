@@ -10,14 +10,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func LoadConfig(path string) (*PipelineConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read pipeline config %s: %w", path, err)
-	}
-	return ParseConfig(data)
-}
-
 func ParseConfig(data []byte) (*PipelineConfig, error) {
 	var cfg PipelineConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
@@ -41,7 +33,7 @@ func (c *PipelineConfig) Validate() error {
 			return fmt.Errorf("job %q: %w", name, err)
 		}
 		if !job.HasRunner() {
-			_ = name
+			return fmt.Errorf("job %q: runs-on (runner type) is required", name)
 		}
 	}
 	if err := c.ValidateDAG(); err != nil {

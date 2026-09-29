@@ -202,11 +202,6 @@ Started: %s
 	s.logger.Info("stub data initialized", "files", len(s.files))
 }
 
-// Register registers the server with a gRPC server.
-func (s *StubServer) Register(grpcServer *grpc.Server) {
-	pb.RegisterMonoFSServer(grpcServer, s)
-}
-
 // Lookup implements the Lookup RPC.
 func (s *StubServer) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupResponse, error) {
 	path := req.ParentPath
@@ -412,28 +407,6 @@ func (s *StubServer) Create(ctx context.Context, req *pb.CreateRequest) (*pb.Cre
 	}, nil
 }
 
-// Write implements the Write RPC (client streaming).
-func (s *StubServer) Write(stream grpc.ClientStreamingServer[pb.WriteRequest, pb.WriteResponse]) error {
-	var totalWritten uint32
-
-	for {
-		req, err := stream.Recv()
-		if err == io.EOF {
-			return stream.SendAndClose(&pb.WriteResponse{
-				Size: totalWritten,
-			})
-		}
-		if err != nil {
-			return err
-		}
-
-		s.logger.Debug("write", "fh", req.Fh, "offset", req.Offset, "len", len(req.Data))
-
-		// For stub, we just count bytes written
-		totalWritten += uint32(len(req.Data))
-	}
-}
-
 // Authenticate implements the Authenticate RPC.
 func (s *StubServer) Authenticate(ctx context.Context, req *pb.AuthRequest) (*pb.AuthResponse, error) {
 	s.logger.Debug("authenticate", "token_len", len(req.Token))
@@ -457,9 +430,4 @@ func (s *StubServer) GetNodeInfo(ctx context.Context, req *pb.NodeInfoRequest) (
 		FilesServed:   s.filesServed.Load(),
 		Kvs:           &pb.KVSNodeStatus{Mode: "disabled", Role: "disabled"},
 	}, nil
-}
-
-// NodeID returns the server's node ID.
-func (s *StubServer) NodeID() string {
-	return s.nodeID
 }
