@@ -5,7 +5,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -15,7 +14,6 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
-	"github.com/radryc/monofs/internal/metastore"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -91,20 +89,7 @@ func TestFileUpdateReplacesEntry(t *testing.T) {
 	}
 
 	// Verify the file entry was updated, not duplicated
-	srcKey := makeDirIndexKey(storageID, "src")
-	var srcIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, srcKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &srcIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read src directory index: %v", err)
-	}
+	srcIndex := readDirEntries(t, s, storageID, "src")
 
 	// Should have exactly one entry for main.go
 	mainGoCount := 0
@@ -199,20 +184,7 @@ func TestDirectoryMtimePropagation(t *testing.T) {
 	}
 
 	// Check that root's "dir" entry has the newer mtime
-	rootKey := makeDirIndexKey(storageID, "")
-	var rootIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, rootKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &rootIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read root directory index: %v", err)
-	}
+	rootIndex := readDirEntries(t, s, storageID, "")
 
 	for _, entry := range rootIndex {
 		if entry.Name == "dir" && entry.IsDir {
@@ -296,20 +268,7 @@ func TestConcurrentDirectoryOperations(t *testing.T) {
 	}
 
 	// Verify all directories exist
-	pkgKey := makeDirIndexKey(storageID, "pkg")
-	var pkgIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, pkgKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &pkgIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read pkg directory index: %v", err)
-	}
+	pkgIndex := readDirEntries(t, s, storageID, "pkg")
 
 	// Should have numGoroutines module directories
 	if len(pkgIndex) != numGoroutines {
@@ -323,21 +282,7 @@ func TestConcurrentDirectoryOperations(t *testing.T) {
 			continue
 		}
 
-		moduleKey := makeDirIndexKey(storageID, "pkg/"+entry.Name)
-		var moduleIndex []dirIndexEntry
-
-		err = s.db.View(func(tx metastore.Tx) error {
-			value, err := tx.Get(bucketDirIndex, moduleKey)
-			if err != nil {
-				return err
-			}
-			return json.Unmarshal(value, &moduleIndex)
-		})
-
-		if err != nil {
-			t.Errorf("Failed to read %s directory index: %v", entry.Name, err)
-			continue
-		}
+		moduleIndex := readDirEntries(t, s, storageID, "pkg/"+entry.Name)
 
 		if len(moduleIndex) != filesPerGoroutine {
 			t.Errorf("Module %s: expected %d files, got %d", entry.Name, filesPerGoroutine, len(moduleIndex))
@@ -394,20 +339,7 @@ func TestSingleComponentPath(t *testing.T) {
 	}
 
 	// Verify root index contains all files
-	rootKey := makeDirIndexKey(storageID, "")
-	var rootIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, rootKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &rootIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read root directory index: %v", err)
-	}
+	rootIndex := readDirEntries(t, s, storageID, "")
 
 	if len(rootIndex) != len(files) {
 		t.Errorf("Expected %d root entries, got %d", len(files), len(rootIndex))
@@ -493,20 +425,7 @@ func TestLargeDirectory(t *testing.T) {
 	}
 
 	// Verify all files are in the directory
-	bigdirKey := makeDirIndexKey(storageID, "bigdir")
-	var bigdirIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, bigdirKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &bigdirIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read bigdir directory index: %v", err)
-	}
+	bigdirIndex := readDirEntries(t, s, storageID, "bigdir")
 
 	if len(bigdirIndex) != numFiles {
 		t.Errorf("Expected %d files in bigdir, got %d", numFiles, len(bigdirIndex))
@@ -592,20 +511,7 @@ func TestMixedBatchAndSingleOperations(t *testing.T) {
 	}
 
 	// Verify all files are present
-	srcKey := makeDirIndexKey(storageID, "src")
-	var srcIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, srcKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &srcIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read src directory index: %v", err)
-	}
+	srcIndex := readDirEntries(t, s, storageID, "src")
 
 	// Should have 4 files + 1 subdir = 5 entries
 	expectedEntries := 5

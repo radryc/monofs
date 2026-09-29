@@ -65,7 +65,7 @@ func TestCanonicalDirectorySurvivesIndexLoss(t *testing.T) {
 
 	err = s.db.Update(func(tx metastore.Tx) error {
 		for _, dirPath := range []string{"", "docs", "docs/empty"} {
-			if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != metastore.ErrKeyNotFound {
+			if _, err := deleteDirEntries(tx, storageID, dirPath); err != nil {
 				return err
 			}
 		}
@@ -85,15 +85,11 @@ func TestCanonicalDirectorySurvivesIndexLoss(t *testing.T) {
 		t.Fatal("expected explicit empty directory to survive file delete")
 	}
 
-	rebuiltRoot, foundRoot, err := s.rebuildDirectoryIndexFromCanonical(storageID, "")
-	if err != nil {
-		t.Fatalf("rebuildDirectoryIndexFromCanonical(root) failed: %v", err)
-	}
-	if !foundRoot {
-		t.Fatal("expected canonical rebuild to find repo root")
-	}
-	if len(rebuiltRoot) != 1 || rebuiltRoot[0].Name != "docs" {
-		t.Fatalf("expected canonical rebuild for root to contain docs, got %+v", rebuiltRoot)
+	// The per-entry index was deleted above; rebuild it from canonical records.
+	if _, err := s.BuildDirectoryIndexes(context.Background(), &pb.BuildDirectoryIndexesRequest{
+		StorageId: storageID,
+	}); err != nil {
+		t.Fatalf("BuildDirectoryIndexes: %v", err)
 	}
 
 	rootStream := &mockReadDirStream{}
@@ -169,23 +165,10 @@ func TestDirHintRebuildWithoutDirIndex(t *testing.T) {
 		t.Fatalf("IngestFileBatch dir hints failed: %v", err)
 	}
 
-	_, err = s.BuildDirectoryIndexes(context.Background(), &pb.BuildDirectoryIndexesRequest{
-		StorageId: storageID,
-	})
-	if err != nil {
-		t.Fatalf("BuildDirectoryIndexes failed: %v", err)
-	}
-
-	err = s.db.Update(func(tx metastore.Tx) error {
-		for _, dirPath := range []string{"", "pkg"} {
-			if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != metastore.ErrKeyNotFound {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("failed to delete dir indexes: %v", err)
+	// Dir-hint entries are indexed incrementally during ingest, so they are
+	// present without any rebuild.
+	if pkg := readDirEntries(t, s, storageID, "pkg"); len(pkg) != 3 {
+		t.Fatalf("expected 3 pkg entries after ingest, got %+v", pkg)
 	}
 
 	stream := &mockReadDirStream{}
@@ -193,7 +176,7 @@ func TestDirHintRebuildWithoutDirIndex(t *testing.T) {
 		t.Fatalf("ReadDir(pkg) failed: %v", err)
 	}
 	if len(stream.entries) != 3 {
-		t.Fatalf("expected 3 entries rebuilt from summaries, got %+v", stream.entries)
+		t.Fatalf("expected 3 entries, got %+v", stream.entries)
 	}
 
 	attrResp, err := s.GetAttr(context.Background(), &pb.GetAttrRequest{
@@ -203,7 +186,7 @@ func TestDirHintRebuildWithoutDirIndex(t *testing.T) {
 		t.Fatalf("GetAttr(common.go) failed: %v", err)
 	}
 	if !attrResp.Found || attrResp.Size != 500 {
-		t.Fatalf("expected summary-backed file attrs, got %+v", attrResp)
+		t.Fatalf("expected entry-backed file attrs, got %+v", attrResp)
 	}
 
 	lookupResp, err := s.Lookup(context.Background(), &pb.LookupRequest{
@@ -214,7 +197,7 @@ func TestDirHintRebuildWithoutDirIndex(t *testing.T) {
 		t.Fatalf("Lookup(classifier.go) failed: %v", err)
 	}
 	if !lookupResp.Found || lookupResp.Size != 2777 {
-		t.Fatalf("expected summary-backed lookup, got %+v", lookupResp)
+		t.Fatalf("expected entry-backed lookup, got %+v", lookupResp)
 	}
 }
 
@@ -286,18 +269,6 @@ func TestBuildDirectoryIndexesBackfillsCanonicalState(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("BuildDirectoryIndexes failed: %v", err)
-	}
-
-	err = s.db.Update(func(tx metastore.Tx) error {
-		for _, dirPath := range []string{"", "docs"} {
-			if err := tx.Delete(bucketDirIndex, makeDirIndexKey(storageID, dirPath)); err != nil && err != metastore.ErrKeyNotFound {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("delete rebuilt dir indexes failed: %v", err)
 	}
 
 	attrResp, err := s.GetAttr(context.Background(), &pb.GetAttrRequest{

@@ -6,6 +6,7 @@
 package metastore
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,9 @@ var (
 	ErrPrefixScan = errors.New("metastore: prefix scan found nothing")
 	// ErrNotFoundKey aliases ErrKeyNotFound.
 	ErrNotFoundKey = ErrKeyNotFound
+	// ErrStopIteration can be returned by a ScanPrefix callback to stop the
+	// scan early without it being treated as an error.
+	ErrStopIteration = errors.New("metastore: stop iteration")
 )
 
 // Tx is the small transaction surface the server relies on. Reads see a
@@ -38,6 +42,13 @@ type Tx interface {
 	Delete(bucket string, key []byte) error
 	GetKeys(bucket string) ([][]byte, error)
 	PrefixScanEntries(bucket string, prefix []byte, reg string, offset, limit int, includeKeys, includeValues bool) (keys, values [][]byte, err error)
+	// ScanPrefix iterates keys in bucket with the given prefix, invoking fn
+	// with the full user key and value. Returning ErrStopIteration from fn
+	// stops iteration and yields a nil error.
+	ScanPrefix(bucket string, prefix []byte, fn func(key, value []byte) error) error
+	// ScanRange iterates keys in bucket within [lower, upper) user-key bounds
+	// (nil = unbounded). Returning ErrStopIteration stops the scan.
+	ScanRange(bucket string, lower, upper []byte, fn func(key, value []byte) error) error
 }
 
 // Options configures the store.
@@ -226,51 +237,135 @@ func (t *tx) GetKeys(bucket string) ([][]byte, error) {
 	return keys, err
 }
 
+func (t *tx) scanBounds(bucket string, lower, upper []byte) (fullLower, fullUpper []byte) {
+	br := t.store.bucketRange(bucket)
+	fullLower = br.lower
+	if lower != nil {
+		fullLower = make([]byte, 0, len(br.lower)+len(lower))
+		fullLower = append(fullLower, br.lower...)
+		fullLower = append(fullLower, lower...)
+	}
+	fullUpper = br.upper
+	if upper != nil {
+		fullUpper = make([]byte, 0, len(br.lower)+len(upper))
+		fullUpper = append(fullUpper, br.lower...)
+		fullUpper = append(fullUpper, upper...)
+	}
+	return fullLower, fullUpper
+}
+
+func (t *tx) ScanPrefix(bucket string, prefix []byte, fn func(key, value []byte) error) error {
+	if len(prefix) == 0 {
+		return t.ScanRange(bucket, nil, nil, fn)
+	}
+	return t.ScanRange(bucket, prefix, prefixUpperBound(prefix), fn)
+}
+
+// ScanRange iterates [lower, upper) user-key bounds, merging the committed
+// snapshot with this transaction's pending batch writes (batch wins; an empty
+// batch value is a deletion).
+func (t *tx) ScanRange(bucket string, lower, upper []byte, fn func(key, value []byte) error) error {
+	fullLower, fullUpper := t.scanBounds(bucket, lower, upper)
+	iterOpts := &pebble.IterOptions{LowerBound: fullLower, UpperBound: fullUpper}
+	// Callbacks receive bucket-relative (user) keys.
+	prefixLen := len(t.store.bucketRange(bucket).lower)
+	emit := func(key, value []byte) error {
+		return fn(key[prefixLen:], value)
+	}
+
+	snapIter, err := t.snap.NewIter(iterOpts)
+	if err != nil {
+		return err
+	}
+	defer snapIter.Close()
+
+	if t.batch == nil {
+		for ok := snapIter.First(); ok; ok = snapIter.Next() {
+			if err := emit(snapIter.Key(), snapIter.Value()); err != nil {
+				if errors.Is(err, ErrStopIteration) {
+					return nil
+				}
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Merge the committed snapshot with the batch so scans observe this
+	// transaction's pending writes and deletes. Batch entries win; a batch
+	// entry with an empty value is a deletion.
+	batchIter, err := t.batch.NewIter(iterOpts)
+	if err != nil {
+		return err
+	}
+	defer batchIter.Close()
+
+	sv := snapIter.First()
+	bv := batchIter.First()
+	for sv || bv {
+		cmp := 1
+		switch {
+		case !sv:
+			cmp = 1
+		case !bv:
+			cmp = -1
+		default:
+			cmp = bytes.Compare(snapIter.Key(), batchIter.Key())
+		}
+		if cmp < 0 {
+			if err := emit(snapIter.Key(), snapIter.Value()); err != nil {
+				if errors.Is(err, ErrStopIteration) {
+					return nil
+				}
+				return err
+			}
+			sv = snapIter.Next()
+			continue
+		}
+		if len(batchIter.Value()) > 0 {
+			if err := emit(batchIter.Key(), batchIter.Value()); err != nil {
+				if errors.Is(err, ErrStopIteration) {
+					return nil
+				}
+				return err
+			}
+		}
+		bv = batchIter.Next()
+		if cmp == 0 {
+			sv = snapIter.Next()
+		}
+	}
+	return nil
+}
+
 func (t *tx) PrefixScanEntries(bucket string, prefix []byte, reg string, offset, limit int, includeKeys, includeValues bool) (keys, values [][]byte, err error) {
 	if reg != "" {
 		return nil, nil, fmt.Errorf("metastore: regex prefix scan is not supported")
 	}
-	br := t.store.bucketRange(bucket)
-	lower := br.lower
-	upper := br.upper
-	if len(prefix) > 0 {
-		lower = make([]byte, 0, len(br.lower)+len(prefix))
-		lower = append(lower, br.lower...)
-		lower = append(lower, prefix...)
-		upper = prefixUpperBound(lower)
-	}
-
-	iter, err := t.snap.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
-	if err != nil {
-		return nil, nil, err
-	}
-	defer iter.Close()
-
 	skipped := 0
-	for valid := iter.First(); valid; valid = iter.Next() {
+	err = t.ScanPrefix(bucket, prefix, func(key, value []byte) error {
 		if offset > 0 && skipped < offset {
 			skipped++
-			continue
+			return nil
 		}
 		if includeKeys {
-			// Return the full user key (bucket prefix stripped), matching the
-			// previous store's scan semantics.
-			k := iter.Key()
-			userKey := k[len(br.lower):]
-			keys = append(keys, append([]byte(nil), userKey...))
+			// ScanPrefix delivers bucket-relative user keys.
+			keys = append(keys, append([]byte(nil), key...))
 		}
 		if includeValues {
-			values = append(values, append([]byte(nil), iter.Value()...))
+			values = append(values, append([]byte(nil), value...))
 		}
-		if limit > 0 {
-			n := len(keys)
-			if !includeKeys {
-				n = len(values)
-			}
-			if n >= limit {
-				break
-			}
+		n := len(keys)
+		if !includeKeys {
+			n = len(values)
 		}
+		if limit > 0 && n >= limit {
+			return ErrStopIteration
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 	return keys, values, nil
 }

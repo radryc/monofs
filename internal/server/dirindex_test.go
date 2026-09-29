@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -59,20 +58,7 @@ func TestDirectoryIndexHierarchy(t *testing.T) {
 	}
 
 	// Verify root directory index contains "cmd" as directory
-	rootKey := makeDirIndexKey(storageID, "")
-	var rootIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, rootKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &rootIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read root directory index: %v", err)
-	}
+	rootIndex := readDirEntries(t, s, storageID, "")
 
 	// Check that "cmd" exists and is a directory
 	found := false
@@ -92,20 +78,7 @@ func TestDirectoryIndexHierarchy(t *testing.T) {
 	}
 
 	// Verify "cmd" directory index contains "thanos" as directory
-	cmdKey := makeDirIndexKey(storageID, "cmd")
-	var cmdIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, cmdKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &cmdIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read 'cmd' directory index: %v", err)
-	}
+	cmdIndex := readDirEntries(t, s, storageID, "cmd")
 
 	// Check that "thanos" exists and is a directory
 	found = false
@@ -125,20 +98,7 @@ func TestDirectoryIndexHierarchy(t *testing.T) {
 	}
 
 	// Verify "cmd/thanos" directory index contains "main.go" as file
-	thanosKey := makeDirIndexKey(storageID, "cmd/thanos")
-	var thanosIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, thanosKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &thanosIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read 'cmd/thanos' directory index: %v", err)
-	}
+	thanosIndex := readDirEntries(t, s, storageID, "cmd/thanos")
 
 	// Check that "main.go" exists and is a file
 	found = false
@@ -217,20 +177,7 @@ func TestDirectoryIndexMultipleFiles(t *testing.T) {
 	}
 
 	// Verify root directory contains files and subdirectories
-	rootKey := makeDirIndexKey(storageID, "")
-	var rootIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, rootKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &rootIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read root directory index: %v", err)
-	}
+	rootIndex := readDirEntries(t, s, storageID, "")
 
 	// Check expected entries
 	expected := map[string]bool{
@@ -262,20 +209,7 @@ func TestDirectoryIndexMultipleFiles(t *testing.T) {
 	}
 
 	// Verify cmd directory contains both files
-	cmdKey := makeDirIndexKey(storageID, "cmd")
-	var cmdIndex []dirIndexEntry
-
-	err = s.db.View(func(tx metastore.Tx) error {
-		value, err := tx.Get(bucketDirIndex, cmdKey)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(value, &cmdIndex)
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to read 'cmd' directory index: %v", err)
-	}
+	cmdIndex := readDirEntries(t, s, storageID, "cmd")
 
 	if len(cmdIndex) != 2 {
 		t.Errorf("Expected 2 files in 'cmd', got %d: %+v", len(cmdIndex), cmdIndex)
@@ -479,14 +413,7 @@ func TestDirHintPopulatesIndex(t *testing.T) {
 
 	// The dir index for "pkg" should have ALL 3 entries:
 	// enry.go (local), classifier.go (dir-hint), common.go (dir-hint).
-	var dirIndex []dirIndexEntry
-	s.db.View(func(tx metastore.Tx) error {
-		val, err := tx.Get(bucketDirIndex, makeDirIndexKey(storageID, "pkg"))
-		if err != nil {
-			t.Fatalf("dir index for 'pkg' not found: %v", err)
-		}
-		return json.Unmarshal(val, &dirIndex)
-	})
+	dirIndex := readDirEntries(t, s, storageID, "pkg")
 
 	names := make(map[string]bool)
 	for _, e := range dirIndex {
