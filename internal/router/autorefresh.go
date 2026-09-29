@@ -287,7 +287,7 @@ func (r *Router) reingestRepoAsync(storageID, reason, branch string) bool {
 			SourceId:      repo.repoID,
 			IngestionType: pb.IngestionType_INGESTION_GIT,
 			FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
-		}, &mockIngestStream{ctx: context.Background()})
+		}, &mockIngestStream{ctx: r.internalIdentityContext()})
 		if err != nil {
 			r.logger.Warn("auto-refresh re-ingest failed", "storage_id", storageID, "reason", reason, "error", err)
 		} else {

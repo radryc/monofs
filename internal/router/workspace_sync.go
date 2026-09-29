@@ -176,7 +176,7 @@ func (r *Router) runWorkspaceRefreshJob(ctx context.Context, entry *workspaceSyn
 			SourceId:      repoResult.GetDisplayPath(),
 			IngestionType: pb.IngestionType_INGESTION_GIT,
 			FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
-		}, &mockIngestStream{ctx: ctx})
+		}, &mockIngestStream{ctx: r.ingestContext(ctx)})
 		if ingestErr != nil {
 			repoCopy := cloneWorkspaceSyncRepositoryResult(repoResult)
 			repoCopy.Status = pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_FAILED

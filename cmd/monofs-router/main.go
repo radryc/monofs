@@ -502,6 +502,15 @@ func main() {
 		if routerAuthURL != "" {
 			waCfg.Endpoints.AuthURL = routerAuthURL
 		}
+		// Land back on the router UI after login (e.g. /monofs/) instead of the
+		// site root, which may be served by a different application.
+		if p := strings.Index(routerRedirect, "://"); p >= 0 {
+			if s := strings.Index(routerRedirect[p+3:], "/"); s >= 0 {
+				if i := strings.LastIndex(routerRedirect[p+3+s:], "/auth/"); i >= 0 {
+					waCfg.PostLoginRedirect = routerRedirect[p+3+s : p+3+s+i] + "/"
+				}
+			}
+		}
 		// Default session persistence under the state dir so browser logins
 		// survive router restarts. Explicit MONOFS_SESSION_DIR overrides this.
 		if os.Getenv("MONOFS_SESSION_DIR") == "" && *guardianStateDir != "" {

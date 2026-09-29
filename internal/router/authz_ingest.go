@@ -62,13 +62,41 @@ func (r *Router) SetGrantEvaluator(store authz.GrantEvaluator, enforce bool) {
 }
 
 // AddBreakGlassAdmin registers a client ID that bypasses partition-level
-// authorization for ingest and read operations.
+// authorization for ingest and read operations. The same principal is recorded
+// as the router's service identity so internal, non-request work (auto-refresh
+// re-ingestion, workspace sync) is attributed rather than treated as anonymous.
 func (r *Router) AddBreakGlassAdmin(clientID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if s := strings.TrimSpace(clientID); s != "" {
 		r.breakGlassAdmins[s] = true
+		r.serviceIdentity = authz.Identity{ClientID: s, Subject: s}
 	}
+}
+
+// internalIdentityContext returns a detached context carrying the router's
+// service identity, for internal work that runs outside an authenticated
+// request. When no break-glass/service identity is configured the identity is
+// anonymous and ingest authorization fails closed under enforcement.
+func (r *Router) internalIdentityContext() context.Context {
+	r.mu.RLock()
+	id := r.serviceIdentity
+	r.mu.RUnlock()
+	return authz.ContextWithIdentity(context.Background(), id)
+}
+
+// ingestContext preserves a caller identity already attached to ctx and falls
+// back to the router service identity for internal callers (workspace sync)
+// that do not carry one. This keeps ingest authorization meaningful while
+// ensuring trusted in-process re-ingestion is not rejected as anonymous.
+func (r *Router) ingestContext(ctx context.Context) context.Context {
+	if id, ok := authz.IdentityFromContext(ctx); ok && !id.IsAnonymous() {
+		return ctx
+	}
+	r.mu.RLock()
+	id := r.serviceIdentity
+	r.mu.RUnlock()
+	return authz.ContextWithIdentity(ctx, id)
 }
 
 func (r *Router) isBreakGlassAdmin(id authz.Identity) bool {

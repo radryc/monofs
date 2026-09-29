@@ -49,6 +49,7 @@ func main() {
 	fetchType := ingestCmd.String("fetch-type", "blob", "Fetch backend type (blob, git, s3, local)")
 	replicateData := ingestCmd.Bool("replicate-data", false, "Replicate blob data to fetch backend during ingestion")
 	ingestClientID := ingestCmd.String("client-id", "", "Client ID for whitelist authentication (optional)")
+	ingestToken := ingestCmd.String("token", os.Getenv("MONOFS_TOKEN"), "Bearer token for authenticated ingest (defaults to $MONOFS_TOKEN)")
 
 	// Delete flags
 	deleteRouter := deleteCmd.String("router", "localhost:9090", "MonoFS router address")
@@ -130,7 +131,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := ingestRepository(*routerAddr, *source, *ref, *sourceID, *ingestionType, *fetchType, *replicateData, *ingestClientID); err != nil {
+		if err := ingestRepository(*routerAddr, *source, *ref, *sourceID, *ingestionType, *fetchType, *replicateData, *ingestClientID, *ingestToken); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: ingestion failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -510,7 +511,7 @@ func validateIngestionParams(source, ref, ingestionType string) error {
 }
 
 // ingestRepository ingests a source via the router.
-func ingestRepository(routerAddr, rawSource, ref, customSourceID, ingestionType, fetchType string, replicateData bool, clientID string) error {
+func ingestRepository(routerAddr, rawSource, ref, customSourceID, ingestionType, fetchType string, replicateData bool, clientID, token string) error {
 	// Validate parameters
 	if err := validateIngestionParams(rawSource, ref, ingestionType); err != nil {
 		return err
@@ -573,10 +574,18 @@ func ingestRepository(routerAddr, rawSource, ref, customSourceID, ingestionType,
 	ingestCtx, ingestCancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer ingestCancel()
 
-	// Attach client ID as gRPC metadata for whitelist authentication
+	// Attach client ID (whitelist) and bearer token (partition authz) as gRPC
+	// metadata. The router runs ingest authorization in enforce mode, so an
+	// anonymous request is rejected even when the source itself is public.
+	mdPairs := []string{}
 	if clientID != "" {
-		md := grpcmd.Pairs("x-client-id", clientID)
-		ingestCtx = grpcmd.NewOutgoingContext(ingestCtx, md)
+		mdPairs = append(mdPairs, "x-client-id", clientID)
+	}
+	if t := strings.TrimSpace(token); t != "" {
+		mdPairs = append(mdPairs, "authorization", "Bearer "+t)
+	}
+	if len(mdPairs) > 0 {
+		ingestCtx = grpcmd.NewOutgoingContext(ingestCtx, grpcmd.Pairs(mdPairs...))
 	}
 
 	stream, err := client.IngestRepository(ingestCtx, &pb.IngestRequest{
@@ -2394,7 +2403,7 @@ func dogfoodRepositories(routerAddr, reposFilter, excludeFilter string) error {
 
 		fmt.Fprintf(os.Stderr, "=== ingest repo: %s (%s) ===\n", name, ref)
 
-		if err := ingestRepository(routerAddr, source, ref, "", "git", "blob", false, ""); err != nil {
+		if err := ingestRepository(routerAddr, source, ref, "", "git", "blob", false, "", os.Getenv("MONOFS_TOKEN")); err != nil {
 			failures = append(failures, name)
 			fmt.Fprintf(os.Stderr, "WARNING: ingest failed for %s: %v\n", name, err)
 			continue
