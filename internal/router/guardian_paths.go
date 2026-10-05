@@ -453,6 +453,9 @@ func guardianFlowMetricLabels(logicalPath string) (partition, intent, pathKind s
 	if parts[0] == ".archive" {
 		return "system", "none", "archive"
 	}
+	if parts[0] == ".registry" {
+		return "system", "none", "registry"
+	}
 	if parts[0] == "doctor" {
 		return "doctor", "none", "doctor"
 	}
