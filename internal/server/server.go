@@ -47,6 +47,10 @@ type Server struct {
 	// Predictor for access pattern learning and prefetching
 	predictor *Predictor
 
+	// AccessControl enforces the repo-managed access policy on read RPCs
+	// (nil when disabled).
+	access *AccessControl
+
 	// Cache for intermediate directories (path -> exists)
 	intermediateDirCache sync.Map
 

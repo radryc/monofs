@@ -26,6 +26,7 @@ import (
 	"github.com/radryc/monofs/internal/server"
 	"github.com/radryc/monofs/internal/storage/logengine"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/pkg/authz"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -147,6 +148,19 @@ func main() {
 	// Metrics
 	metricsAddr := flag.String("metrics-addr", ":9100", "Listen address for Prometheus /metrics endpoint (empty disables)")
 
+	// Access policy (repo-managed ACL) enforcement on read RPCs. Disabled
+	// unless a policy source is configured; observe unless --authz-enforce-read.
+	accessPolicyURL := flag.String("access-policy-url", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_POLICY_URL")), "URL of the compiled access policy bundle (e.g. the router /api/access/policy endpoint)")
+	accessPolicyFile := flag.String("access-policy-file", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_POLICY_FILE")), "Local compiled access policy file (dev alternative to --access-policy-url)")
+	accessPolicyToken := flag.String("access-policy-token", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_POLICY_TOKEN")), "Bearer token for fetching the access policy bundle")
+	accessPolicyInterval := flag.Duration("access-policy-interval", 30*time.Second, "Access policy refresh interval")
+	authzEnforceRead := flag.Bool("authz-enforce-read", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_ACCESS_ENFORCE")), "true"), "Enforce access policy on read RPCs (default false: observe only)")
+	internalToken := flag.String("internal-token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Cluster-internal token; calls presenting it via x-monofs-internal bypass policy (defaults to MONOFS_TOKEN)")
+	authzOIDCIssuer := flag.String("oidc-issuer", strings.TrimSpace(os.Getenv("MONOFS_OIDC_ISSUER")), "OIDC issuer for bearer token verification")
+	authzOIDCAudience := flag.String("oidc-audience", strings.TrimSpace(os.Getenv("MONOFS_OIDC_AUDIENCE")), "OIDC audience for bearer token verification")
+	authzOIDCJWKSURL := flag.String("oidc-jwks-url", strings.TrimSpace(os.Getenv("MONOFS_OIDC_JWKS_URL")), "OIDC JWKS URL (discovered from the issuer when empty)")
+	authzBreakGlass := flag.String("break-glass-token", strings.TrimSpace(os.Getenv("MONOFS_BREAK_GLASS_TOKEN")), "Break-glass admin bearer token")
+
 	flag.Parse()
 
 	if *nodeID == "" {
@@ -206,6 +220,49 @@ func main() {
 		"addr", *addr,
 		"node_id", *nodeID)
 
+	// Node-side access control: verify bearer tokens and, when enforcing,
+	// filter read RPCs by the compiled access policy.
+	var accessVerifiers []authz.TokenVerifier
+	if strings.TrimSpace(*authzOIDCIssuer) != "" && strings.TrimSpace(*authzOIDCAudience) != "" {
+		oidcVerifier, oidcErr := authz.NewOIDCVerifier(authz.OIDCConfig{
+			Issuer:   strings.TrimSpace(*authzOIDCIssuer),
+			Audience: strings.TrimSpace(*authzOIDCAudience),
+			JWKSURL:  strings.TrimSpace(*authzOIDCJWKSURL),
+		})
+		if oidcErr != nil {
+			logger.Error("failed to configure OIDC verifier", "error", oidcErr)
+			os.Exit(1)
+		}
+		accessVerifiers = append(accessVerifiers, oidcVerifier)
+	}
+	if bg := strings.TrimSpace(*authzBreakGlass); bg != "" {
+		accessVerifiers = append(accessVerifiers, authz.NewBreakGlassVerifier(bg, "break-glass-admin"))
+	}
+	var accessVerifier authz.TokenVerifier = authz.NoopVerifier{}
+	switch len(accessVerifiers) {
+	case 1:
+		accessVerifier = accessVerifiers[0]
+	case 2:
+		accessVerifier = authz.NewChainVerifier(accessVerifiers...)
+	}
+	accessControl := server.NewAccessControl(server.AccessControlOptions{
+		Verifier:      accessVerifier,
+		InternalToken: strings.TrimSpace(*internalToken),
+		PolicyFile:    strings.TrimSpace(*accessPolicyFile),
+		PolicyURL:     strings.TrimSpace(*accessPolicyURL),
+		PolicyToken:   strings.TrimSpace(*accessPolicyToken),
+		Interval:      *accessPolicyInterval,
+		Enforce:       *authzEnforceRead,
+		Logger:        logger,
+	})
+	if accessControl != nil {
+		go accessControl.Run(context.Background())
+		logger.Info("access policy enabled",
+			"url", strings.TrimSpace(*accessPolicyURL),
+			"file", strings.TrimSpace(*accessPolicyFile),
+			"enforce_read", *authzEnforceRead)
+	}
+
 	// Create listener
 	lis, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -214,17 +271,24 @@ func main() {
 	}
 
 	// Create gRPC server with raised message limits for inline dep blobs
-	grpcServer := grpc.NewServer(
+	serverOpts := []grpc.ServerOption{
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
-		grpc.MaxRecvMsgSize(1024*1024*1024), // 1 GB
-		grpc.MaxSendMsgSize(1024*1024*1024),
+		grpc.MaxRecvMsgSize(1024 * 1024 * 1024), // 1 GB
+		grpc.MaxSendMsgSize(1024 * 1024 * 1024),
 		// Accept keepalive pings from long-idle clients (e.g. guardian's
 		// result-processor) without kicking them with ENHANCE_YOUR_CALM.
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second,
 			PermitWithoutStream: true,
 		}),
-	)
+	}
+	if accessControl != nil {
+		serverOpts = append(serverOpts,
+			grpc.ChainUnaryInterceptor(accessControl.UnaryInterceptor()),
+			grpc.ChainStreamInterceptor(accessControl.StreamInterceptor()),
+		)
+	}
+	grpcServer := grpc.NewServer(serverOpts...)
 
 	// Create server with NutsDB backend
 	srv, err := server.NewServer(*nodeID, *addr, *dbPath, *gitCache, *dbSync, logger)
@@ -232,6 +296,7 @@ func main() {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)
 	}
+	srv.SetAccessControl(accessControl)
 
 	if *kvsBootstrap && *kvsRaftAddr == "" {
 		logger.Error("invalid kvs configuration", "error", "--kvs-bootstrap requires --kvs-raft-addr")

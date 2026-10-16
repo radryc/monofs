@@ -59,6 +59,7 @@ func main() {
 	keepCache := flag.Bool("keep-cache", false, "Keep existing cache on mount (default: clear cache)")
 	rpcTimeout := flag.Duration("rpc-timeout", 10*time.Second, "Timeout for RPC calls to nodes")
 	clientID := flag.String("client-id", "", "Persistent client identifier (default: auto-generated and stored in ~/.monofs/client-id)")
+	token := flag.String("token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Bearer token presented to cluster services (defaults to MONOFS_TOKEN); required on policy-enforcing clusters")
 	showVersion := flag.Bool("version", false, "Print version information and exit")
 
 	var includeGlobs csvFlag
@@ -161,6 +162,7 @@ func main() {
 		*rpcTimeout,
 		logger.With("component", "sharded-client"),
 		*useExternalAddrs,
+		*token,
 	)
 	c, err := client.NewShardedClient(ctx, clientCfg)
 	if err != nil {
@@ -406,6 +408,7 @@ func newShardedClientConfig(
 	rpcTimeout time.Duration,
 	logger *slog.Logger,
 	useExternalAddresses bool,
+	token string,
 ) client.ShardedClientConfig {
 	return client.ShardedClientConfig{
 		RouterAddr:           routerAddr,
@@ -416,6 +419,7 @@ func newShardedClientConfig(
 		Logger:               logger,
 		MountPoint:           mountpoint,
 		Writable:             writable,
+		Token:                token,
 	}
 }
 
