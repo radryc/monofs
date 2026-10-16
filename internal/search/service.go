@@ -15,6 +15,7 @@ import (
 	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/client"
+	"github.com/radryc/monofs/pkg/authz/policy"
 )
 
 const (
@@ -92,6 +93,11 @@ type Service struct {
 	// indexGuardian enables indexing of Guardian-managed partitions. Default
 	// false: they have no clonable upstream git remote.
 	indexGuardian bool
+
+	// Access policy (optional). A nil policy disables hit filtering; enforceRead
+	// turns observe-mode decisions into enforcement.
+	policy      *policy.Loader
+	enforceRead bool
 }
 
 // Config holds service configuration
@@ -103,6 +109,12 @@ type Config struct {
 	RouterAddr    string // Router address for cluster access (enables fetching from storage nodes)
 	IndexGuardian bool   // Index Guardian-managed partitions (default false)
 	Logger        *slog.Logger
+	// AccessPolicy supplies compiled read-authorization decisions for search
+	// hits. When nil, access-policy filtering is disabled (rollout default).
+	AccessPolicy *policy.Loader
+	// EnforceRead enables access-policy enforcement on search hits. Default
+	// false: decisions are only logged (observe rollout).
+	EnforceRead bool
 }
 
 // NewService creates a new search service
@@ -203,6 +215,8 @@ func NewService(cfg Config) (*Service, error) {
 		stopChan:      make(chan struct{}),
 		workers:       cfg.Workers,
 		indexGuardian: cfg.IndexGuardian,
+		policy:        cfg.AccessPolicy,
+		enforceRead:   cfg.EnforceRead,
 		stats: ServiceStats{
 			StartedAt: time.Now(),
 		},
