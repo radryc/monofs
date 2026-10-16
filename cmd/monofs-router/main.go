@@ -141,6 +141,14 @@ func main() {
 		oidcAudience        = flag.String("oidc-audience", "", "Expected OIDC audience for SSO tokens")
 		oidcJWKSURL         = flag.String("oidc-jwks-url", "", "OIDC JWKS URL (discovered from issuer when empty)")
 		devDisableAuth      = flag.Bool("insecure-dev-disable-auth", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_INSECURE_DEV_DISABLE_AUTH")), "true"), "Disable all UI/API authentication (development only; insecure)")
+
+		// Access policy (repo-managed ACL)
+		accessPolicyURL        = flag.String("access-policy-url", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_POLICY_URL")), "URL of the compiled access policy bundle (e.g. http://guardiand:8090/api/access/policy); empty disables access policy filtering")
+		accessPolicyFile       = flag.String("access-policy-file", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_POLICY_FILE")), "Local compiled access policy file (dev alternative to --access-policy-url)")
+		accessPolicyToken      = flag.String("access-policy-token", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_POLICY_TOKEN")), "Bearer token for fetching the access policy bundle")
+		accessPolicyInterval   = flag.Duration("access-policy-interval", 30*time.Second, "Access policy refresh interval")
+		accessEnforce          = flag.Bool("access-enforce", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_ACCESS_ENFORCE")), "true"), "Enforce access policy filtering on reads (default: observe only)")
+		accessPolicyServeToken = flag.String("access-policy-serve-token", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_SERVE_TOKEN")), "Bearer token required by the internal /api/access/policy endpoint (empty allows unauthenticated)")
 	)
 	flag.Parse()
 	telemetryCfg, err := telemetry.LoadConfig("monofs-router")
@@ -247,6 +255,12 @@ func main() {
 		AuthzGrantsJSON:        strings.TrimSpace(os.Getenv("MONOFS_AUTHZ_GRANTS_JSON")),
 		OwnershipGateEnabled:   *ownershipGate,
 		AllowLocalIngest:       *localIngestEnabled,
+		AccessPolicyURL:        strings.TrimSpace(*accessPolicyURL),
+		AccessPolicyFile:       strings.TrimSpace(*accessPolicyFile),
+		AccessPolicyToken:      strings.TrimSpace(*accessPolicyToken),
+		AccessPolicyInterval:   *accessPolicyInterval,
+		AccessEnforce:          *accessEnforce,
+		AccessPolicyServeToken: strings.TrimSpace(*accessPolicyServeToken),
 	}
 	r := router.NewRouter(cfg, logger)
 	r.SetVersion(Version, Commit, BuildTime)
@@ -342,6 +356,10 @@ func main() {
 
 	// Start health checking
 	r.StartHealthCheck()
+
+	// Start access policy loading (no-op unless --access-policy-url or
+	// --access-policy-file is set).
+	r.StartAccessPolicy(context.Background())
 
 	// Build the SSO verifier. It accepts OIDC tokens (when configured) and,
 	// as a break-glass path, a static admin token supplied via MONOFS_TOKEN.

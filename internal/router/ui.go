@@ -156,6 +156,7 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/confirm-fetcher-key", r.handleConfirmFetcherKey)
 	mux.HandleFunc("/api/logengine", r.handleLogEngineAPI)
 	mux.HandleFunc("/api/fs/ls", r.handleFSList)
+	mux.HandleFunc("/api/access/policy", r.handleAccessPolicy)
 
 	// Whitelist API routes
 	mux.HandleFunc("/api/whitelist", r.handleWhitelistAPI)
@@ -555,7 +556,7 @@ func (r *Router) handleRepositoriesList(w http.ResponseWriter, req *http.Request
 	const cacheTTL = 3 * time.Second
 	r.repoCacheMu.RLock()
 	if r.repoCache != nil && time.Since(r.repoCacheAt) < cacheTTL {
-		data := r.repoCache
+		data := r.filterRepositoriesData(req, r.repoCache)
 		r.repoCacheMu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(data)
@@ -580,6 +581,7 @@ func (r *Router) handleRepositoriesList(w http.ResponseWriter, req *http.Request
 		r.repoCache = repos
 		r.repoCacheAt = time.Now()
 		r.repoCacheMu.Unlock()
+		data = r.filterRepositoriesData(req, repos)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -722,6 +724,12 @@ func (r *Router) handleSearchAPI(w http.ResponseWriter, req *http.Request) {
 
 	ctx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
 	defer cancel()
+
+	// Forward the caller's bearer token so the search service can apply the
+	// access policy to hits using the original identity.
+	if authHeader := strings.TrimSpace(req.Header.Get("Authorization")); authHeader != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", authHeader)
+	}
 
 	resp, err := client.Search(ctx, &pb.SearchRequest{
 		Query:         searchReq.Query,
@@ -1026,6 +1034,21 @@ func (r *Router) handleFileContent(w http.ResponseWriter, req *http.Request) {
 	}
 
 	displayPath := repo.repoID
+
+	// Access policy: hide repositories the caller may not read.
+	callerID, _ := authz.IdentityFromContext(req.Context())
+	var visible bool
+	if strings.HasPrefix(displayPath, "guardian/") || displayPath == "guardian-system" {
+		visible = r.canReadGuardianRepo(callerID, displayPath)
+	} else {
+		visible = r.canReadDisplayPath(callerID, displayPath)
+	}
+	if !visible {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "access denied"})
+		return
+	}
 
 	// Get the node that has this file
 	nodeResp, err := r.GetNodeForFile(ctx, &pb.GetNodeForFileRequest{
@@ -1638,6 +1661,13 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 func (r *Router) handleDependenciesAPI(w http.ResponseWriter, req *http.Request) {
+	// Dependencies live under the shared "dependency" display path.
+	if callerID, _ := authz.IdentityFromContext(req.Context()); !r.canReadDisplayPath(callerID, "dependency") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "access denied"})
+		return
+	}
 	data, err := r.sendUIRequest(UIRequestDependencies, 10*time.Second)
 	if err != nil {
 		r.logger.Error("failed to get dependencies", "error", err)
@@ -1830,9 +1860,14 @@ func (r *Router) handleGuardianPartitions(w http.ResponseWriter, req *http.Reque
 	}
 
 	data := r.buildRepositoriesData()
+	id, _ := authz.IdentityFromContext(req.Context())
 	var guardianRepos []map[string]interface{}
 	for _, repo := range data.Repositories {
 		if isGuardian, ok := repo["is_guardian"].(bool); ok && isGuardian {
+			repoID, _ := repo["repo_id"].(string)
+			if repoID != "" && !r.canReadGuardianRepo(id, repoID) {
+				continue
+			}
 			guardianRepos = append(guardianRepos, repo)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/pkg/authz"
 )
 
 func (r *Router) handleWorkspaceSyncJobsAPI(w http.ResponseWriter, req *http.Request) {
@@ -24,6 +25,7 @@ func (r *Router) handleWorkspaceSyncJobsAPI(w http.ResponseWriter, req *http.Req
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
 			return
 		}
+		resp = r.filterWorkspaceJobs(req, resp)
 		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
@@ -41,6 +43,18 @@ func (r *Router) handleWorkspaceSyncJobsAPI(w http.ResponseWriter, req *http.Req
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
 			return
+		}
+		if r.accessPolicySnapshot() != nil {
+			id, _ := authz.IdentityFromContext(req.Context())
+			paths := make([]string, 0, len(job.Repositories))
+			for _, repo := range job.Repositories {
+				paths = append(paths, repo.DisplayPath)
+			}
+			if !r.canReadWorkspaceJob(id, paths) {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "job not found"})
+				return
+			}
 		}
 		_ = json.NewEncoder(w).Encode(job)
 		return
