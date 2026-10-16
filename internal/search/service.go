@@ -115,6 +115,9 @@ type Config struct {
 	// EnforceRead enables access-policy enforcement on search hits. Default
 	// false: decisions are only logged (observe rollout).
 	EnforceRead bool
+	// InternalToken presents the cluster-internal identity on node reads so
+	// index builds keep working on policy-enforcing clusters.
+	InternalToken string
 }
 
 // NewService creates a new search service
@@ -171,6 +174,7 @@ func NewService(cfg Config) (*Service, error) {
 				Logger:               cfg.Logger,
 				Hostname:             "search-service",
 				Version:              "indexer",
+				Token:                cfg.InternalToken,
 			})
 			cancel()
 

@@ -98,6 +98,10 @@ type RouterConfig struct {
 	AccessPolicyInterval   time.Duration
 	AccessEnforce          bool
 	AccessPolicyServeToken string
+
+	// InternalToken is presented on router -> node calls so storage nodes can
+	// treat control-plane traffic as internal when read enforcement is on.
+	InternalToken string
 }
 
 // RouterPeer identifies another router instance to aggregate UI data from.
@@ -257,6 +261,9 @@ type Router struct {
 	authzEnforceIngest bool
 	breakGlassAdmins   map[string]bool
 	serviceIdentity    authz.Identity
+
+	// internalToken is presented on router -> node calls (policy bypass).
+	internalToken string
 
 	// Access policy (repo-managed ACL) for UI/API read filtering.
 	accessPolicyMu sync.RWMutex
@@ -474,6 +481,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		stopUI:                    make(chan struct{}),
 		logger:                    logger,
 		whitelist:                 newWhitelistStore(),
+		internalToken:             strings.TrimSpace(cfg.InternalToken),
 	}
 	r.version.Store(1)
 	r.namespaceGeneration.Store(1)
@@ -1923,8 +1931,10 @@ func (r *Router) checkAllNodes() {
 		// Try to create client connection if needed (for statically registered nodes)
 		if state.client == nil && state.conn == nil {
 			conn, err := grpc.NewClient(state.info.Address,
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpcx.IPv4DialerOption(),
+				append([]grpc.DialOption{
+					grpc.WithTransportCredentials(insecure.NewCredentials()),
+					grpcx.IPv4DialerOption(),
+				}, r.internalDialOptions()...)...,
 			)
 			if err != nil {
 				r.logger.Debug("failed to connect to node", "node_id", nodeID, "error", err)

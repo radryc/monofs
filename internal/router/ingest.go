@@ -428,8 +428,10 @@ initComplete:
 		// Ensure we have a gRPC client connection
 		if state.client == nil {
 			conn, err := grpc.NewClient(state.info.Address,
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpcx.IPv4DialerOption(),
+				append([]grpc.DialOption{
+					grpc.WithTransportCredentials(insecure.NewCredentials()),
+					grpcx.IPv4DialerOption(),
+				}, r.internalDialOptions()...)...,
 			)
 			if err != nil {
 				r.mu.Unlock()
@@ -512,8 +514,10 @@ initComplete:
 		// Ensure connection exists
 		if state.client == nil {
 			conn, err := grpc.NewClient(state.info.Address,
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpcx.IPv4DialerOption(),
+				append([]grpc.DialOption{
+					grpc.WithTransportCredentials(insecure.NewCredentials()),
+					grpcx.IPv4DialerOption(),
+				}, r.internalDialOptions()...)...,
 			)
 			if err != nil {
 				r.logger.Error("failed to connect to node", "node_id", node.ID, "error", err)

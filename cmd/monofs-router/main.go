@@ -149,6 +149,7 @@ func main() {
 		accessPolicyInterval   = flag.Duration("access-policy-interval", 30*time.Second, "Access policy refresh interval")
 		accessEnforce          = flag.Bool("access-enforce", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_ACCESS_ENFORCE")), "true"), "Enforce access policy filtering on reads (default: observe only)")
 		accessPolicyServeToken = flag.String("access-policy-serve-token", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_SERVE_TOKEN")), "Bearer token required by the internal /api/access/policy endpoint (empty allows unauthenticated)")
+		internalToken          = flag.String("internal-token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Cluster-internal token presented on router -> node calls so nodes bypass read enforcement for control-plane traffic (defaults to MONOFS_TOKEN)")
 	)
 	flag.Parse()
 	telemetryCfg, err := telemetry.LoadConfig("monofs-router")
@@ -261,6 +262,7 @@ func main() {
 		AccessPolicyInterval:   *accessPolicyInterval,
 		AccessEnforce:          *accessEnforce,
 		AccessPolicyServeToken: strings.TrimSpace(*accessPolicyServeToken),
+		InternalToken:          strings.TrimSpace(*internalToken),
 	}
 	r := router.NewRouter(cfg, logger)
 	r.SetVersion(Version, Commit, BuildTime)

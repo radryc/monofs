@@ -115,6 +115,19 @@ func (a *AccessControl) authenticate(ctx context.Context) context.Context {
 				return authz.ContextWithIdentity(ctx, authz.Identity{ClientID: "monofs-internal"})
 			}
 		}
+		// Control-plane services (router, guardian, doctor) share the cluster
+		// token and present it as a bearer; treat a matching bearer as an
+		// internal call too.
+		for _, value := range md.Get("authorization") {
+			token := value
+			if strings.HasPrefix(strings.ToLower(token), "bearer ") {
+				token = strings.TrimSpace(token[len("Bearer "):])
+			}
+			if token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(a.internalToken)) == 1 {
+				ctx = contextWithInternalCall(ctx)
+				return authz.ContextWithIdentity(ctx, authz.Identity{ClientID: "monofs-internal"})
+			}
+		}
 	}
 	var raw string
 	if md != nil {
