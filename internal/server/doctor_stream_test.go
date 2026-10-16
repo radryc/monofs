@@ -16,9 +16,10 @@ import (
 )
 
 type doctorStreamBackendStub struct {
-	logs    []logengine.LogRecord
-	metrics []logengine.MetricRecord
-	traces  []logengine.SpanRecord
+	logs         []logengine.LogRecord
+	metrics      []logengine.MetricRecord
+	traces       []logengine.SpanRecord
+	metricSeries []logengine.MetricSeriesMeta
 
 	queryLogsCalls    int
 	streamLogsCalls   int
@@ -64,6 +65,15 @@ func (s *doctorStreamBackendStub) StreamMetrics(_ context.Context, _ logengine.M
 	s.streamMetricCalls++
 	for _, record := range s.metrics {
 		if err := yield(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *doctorStreamBackendStub) StreamMetricSeries(_ context.Context, _ logengine.MetricQuery, _ time.Time, _ time.Time, yield func(logengine.MetricSeriesMeta) error) error {
+	for _, meta := range s.metricSeries {
+		if err := yield(meta); err != nil {
 			return err
 		}
 	}

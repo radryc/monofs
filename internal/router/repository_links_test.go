@@ -48,6 +48,42 @@ func TestBuildRepositoryProductLinkIgnoresUnmanagedRepos(t *testing.T) {
 	}
 }
 
+func TestBuildRepositoryProductLinkRegistryDeepLink(t *testing.T) {
+	t.Parallel()
+
+	link := buildRepositoryProductLink("docker-registry/monofs-router", "", repositoryUIBases{})
+	if link.Kind != "registry" {
+		t.Fatalf("kind = %q, want registry", link.Kind)
+	}
+	if link.Label != "Registry UI" {
+		t.Fatalf("label = %q", link.Label)
+	}
+	if link.URL != "/registry?q=monofs-router" {
+		t.Fatalf("url = %q", link.URL)
+	}
+}
+
+func TestBuildRepositoryProductLinkRegistryEscapesImagePath(t *testing.T) {
+	t.Parallel()
+
+	link := buildRepositoryProductLink("docker-registry/library/nginx", "", repositoryUIBases{})
+	if link.URL != "/registry?q=library%2Fnginx" {
+		t.Fatalf("url = %q", link.URL)
+	}
+}
+
+func TestBuildRepositoryProductLinkRegistryNamespaceRoot(t *testing.T) {
+	t.Parallel()
+
+	link := buildRepositoryProductLink("docker-registry", "", repositoryUIBases{})
+	if link.Kind != "registry" {
+		t.Fatalf("kind = %q, want registry", link.Kind)
+	}
+	if link.URL != "/registry" {
+		t.Fatalf("url = %q", link.URL)
+	}
+}
+
 func TestRepositoryProductStoredURLFallsBackToGuardianSource(t *testing.T) {
 	t.Parallel()
 

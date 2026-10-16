@@ -17,6 +17,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	pb "github.com/radryc/monofs/api/proto"
+	monogit "github.com/radryc/monofs/internal/git"
 	"github.com/radryc/monofs/internal/workspacebundle"
 	"google.golang.org/grpc"
 )
@@ -393,7 +394,7 @@ func (s *Service) pushSourceCommitRepository(ctx context.Context, req *pb.StartW
 
 	pushRef := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", targetBranch, targetBranch))
 	fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "started").Inc()
-	if err := repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}}); err != nil {
+	if err := repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, Auth: monogit.AuthForRepo(repo.RepoURL)}); err != nil {
 		progress.Status, progress.ConflictReason = mapPublishError(err)
 		progress.Message = fmt.Sprintf("push source changes: %v", err)
 		fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "failed").Inc()
@@ -416,6 +417,7 @@ func cloneSourcePushWorktree(ctx context.Context, repo workspacebundle.SourceCom
 	}
 	_, err = gogit.PlainCloneContext(ctx, worktreeRoot, &gogit.CloneOptions{
 		URL:           repo.RepoURL,
+		Auth:          monogit.AuthForRepo(repo.RepoURL),
 		ReferenceName: plumbing.NewBranchReferenceName(repo.Branch),
 		SingleBranch:  true,
 	})
@@ -564,7 +566,7 @@ func (s *Service) rollbackSourcePushRepository(ctx context.Context, req *pb.Star
 	}
 
 	pushRef := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", record.targetBranch, record.targetBranch))
-	if err := handle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}}); err != nil {
+	if err := handle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, Auth: monogit.AuthForRepo(record.repoURL)}); err != nil {
 		progress.Status, progress.ConflictReason = mapPublishError(err)
 		progress.Message = fmt.Sprintf("rollback push failed: %v", err)
 		return progress
@@ -585,6 +587,7 @@ func cloneBranchWorktree(ctx context.Context, repoURL, branch string) (string, e
 	}
 	_, err = gogit.PlainCloneContext(ctx, worktreeRoot, &gogit.CloneOptions{
 		URL:           repoURL,
+		Auth:          monogit.AuthForRepo(repoURL),
 		ReferenceName: plumbing.NewBranchReferenceName(branch),
 		SingleBranch:  true,
 	})
@@ -852,7 +855,7 @@ func (s *Service) pushSinglePreserveCommit(ctx context.Context, req *pb.StartWor
 
 	pushRef := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", targetBranch, targetBranch))
 	fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "started").Inc()
-	if err := rw.repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}}); err != nil {
+	if err := rw.repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, Auth: monogit.AuthForRepo(repo.RepoURL)}); err != nil {
 		progress.Status, progress.ConflictReason = mapPublishError(err)
 		progress.Message = fmt.Sprintf("push commit %s: %v", commit.ID, err)
 		fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "failed").Inc()

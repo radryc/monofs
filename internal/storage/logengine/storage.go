@@ -21,7 +21,12 @@ import (
 const (
 	chunkListCacheTTL  = 10 * time.Second
 	manifestCacheTTL   = time.Minute
+	seriesIndexCacheTTL = 5 * time.Minute
 	cacheSweepInterval = 30 * time.Second
+	// maxSeriesIndexCacheEntries bounds the in-memory series index cache. Each
+	// entry is a small per-chunk slice (tens of KB); the cap keeps a large
+	// store from pinning hundreds of megabytes.
+	maxSeriesIndexCacheEntries = 512
 )
 
 type chunkListCacheEntry struct {
@@ -31,6 +36,11 @@ type chunkListCacheEntry struct {
 
 type manifestCacheEntry struct {
 	manifest  ChunkManifest
+	expiresAt time.Time
+}
+
+type seriesIndexCacheEntry struct {
+	series    []MetricSeriesMeta
 	expiresAt time.Time
 }
 
@@ -55,6 +65,7 @@ type CachedStore struct {
 	mu        sync.RWMutex
 	chunks    map[string]chunkListCacheEntry
 	manifests map[string]manifestCacheEntry
+	series    map[string]seriesIndexCacheEntry
 	nextSweep time.Time
 }
 
@@ -65,6 +76,7 @@ func NewCachedStore(remote ObjectStoreBackend, localDir string) *CachedStore {
 		localDir:  localDir,
 		chunks:    make(map[string]chunkListCacheEntry),
 		manifests: make(map[string]manifestCacheEntry),
+		series:    make(map[string]seriesIndexCacheEntry),
 		nextSweep: time.Now().Add(cacheSweepInterval),
 	}
 }
@@ -83,7 +95,30 @@ func (c *CachedStore) pruneExpiredLocked(now time.Time) {
 			delete(c.manifests, path)
 		}
 	}
+	for path, entry := range c.series {
+		if !now.Before(entry.expiresAt) {
+			delete(c.series, path)
+		}
+	}
 	c.nextSweep = now.Add(cacheSweepInterval)
+}
+
+// trimSeriesIndexLocked enforces the series index cache size cap by dropping
+// entries with the earliest expiry.
+func (c *CachedStore) trimSeriesIndexLocked() {
+	for len(c.series) > maxSeriesIndexCacheEntries {
+		var (
+			oldestPath string
+			oldestTime time.Time
+		)
+		for path, entry := range c.series {
+			if oldestPath == "" || entry.expiresAt.Before(oldestTime) {
+				oldestPath = path
+				oldestTime = entry.expiresAt
+			}
+		}
+		delete(c.series, oldestPath)
+	}
 }
 
 // Write passes through to the remote storage.
@@ -185,6 +220,40 @@ func normalizeChunkPrefix(prefix string) string {
 		return filepath.Join(parts[0], parts[1])
 	}
 	return cleaned
+}
+
+// ReadSeriesIndex returns the cached per-chunk metric series index. Chunks are
+// immutable once written, so entries stay cached until the TTL sweeps them.
+// Chunks written before the series index existed return ErrGhostChunk.
+func (c *CachedStore) ReadSeriesIndex(ctx context.Context, chunkID string) ([]MetricSeriesMeta, error) {
+	path := filepath.Join("chunks", string(SignalMetrics), chunkID, "series.index.json")
+	now := time.Now()
+
+	c.mu.RLock()
+	entry, ok := c.series[path]
+	c.mu.RUnlock()
+	if ok && now.Before(entry.expiresAt) {
+		return entry.series, nil
+	}
+
+	rc, err := c.remote.Read(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	var series []MetricSeriesMeta
+	if err := json.NewDecoder(rc).Decode(&series); err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.pruneExpiredLocked(now)
+	c.series[path] = seriesIndexCacheEntry{series: series, expiresAt: now.Add(seriesIndexCacheTTL)}
+	c.trimSeriesIndexLocked()
+	c.mu.Unlock()
+
+	return series, nil
 }
 
 func (c *CachedStore) invalidatePath(path string) {

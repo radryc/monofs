@@ -85,6 +85,11 @@ func (e *LogEngine) StreamMetrics(ctx context.Context, query MetricQuery, from, 
 	return e.query.StreamMetrics(ctx, query, from, to, yield)
 }
 
+// StreamMetricSeries yields per-series metadata from the chunk series index.
+func (e *LogEngine) StreamMetricSeries(ctx context.Context, query MetricQuery, from, to time.Time, yield func(MetricSeriesMeta) error) error {
+	return e.query.StreamMetricSeries(ctx, query, from, to, yield)
+}
+
 // QueryTraces returns trace spans matching traceID and/or service in the given time range.
 func (e *LogEngine) QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]SpanRecord, error) {
 	return e.query.QueryTraces(ctx, traceID, service, from, to, limit)

@@ -60,6 +60,12 @@ type RouterConfig struct {
 	AutoRefreshInterval    time.Duration
 	AutoRefreshConcurrency int
 
+	// AllowLocalIngest permits ingestion from router-local filesystem paths
+	// (ingestion_type=file, including multipart uploads). Enabled by default so
+	// development changes can be ingested without a repository push; set false
+	// on hardened routers.
+	AllowLocalIngest bool
+
 	// Replication and failover configuration
 	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
 	RebalanceDelay        time.Duration // Wait before triggering permanent rebalance after failure, default: 10m
@@ -101,6 +107,7 @@ func DefaultRouterConfig() RouterConfig {
 		RebalanceDelay:        10 * time.Minute, // Wait 10 minutes before permanent rebalancing
 		GracefulFailoverDelay: 60 * time.Second, // 60 seconds for planned restarts
 		GuardianIngestTimeout: 5 * time.Minute,  // 5 minutes for large guardian file batches
+		AllowLocalIngest:      true,             // Local filesystem ingestion is on unless explicitly disabled
 	}
 }
 
@@ -1180,9 +1187,7 @@ func (r *Router) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 func (r *Router) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
 	return r.fanoutQueryItems(stream.Context(), int(req.GetLimit()), "stream log results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryLogs(callCtx, req)
-	}, func(item []byte) error {
-		return stream.Send(&pb.QueryResultItem{ItemJson: append([]byte(nil), item...)})
-	})
+	}, stream.Send)
 }
 
 // QueryMetrics implements pb.MonoFSRouterServer.
@@ -1200,9 +1205,7 @@ func (r *Router) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 func (r *Router) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
 	return r.fanoutQueryItems(stream.Context(), 0, "stream metric results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryMetrics(callCtx, req)
-	}, func(item []byte) error {
-		return stream.Send(&pb.QueryResultItem{ItemJson: append([]byte(nil), item...)})
-	})
+	}, stream.Send)
 }
 
 // QueryTraces implements pb.MonoFSRouterServer.
@@ -1223,9 +1226,76 @@ func (r *Router) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*
 func (r *Router) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
 	return r.fanoutQueryItems(stream.Context(), int(req.GetLimit()), "stream trace results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryTraces(callCtx, req)
-	}, func(item []byte) error {
-		return stream.Send(&pb.QueryResultItem{ItemJson: append([]byte(nil), item...)})
-	})
+	}, stream.Send)
+}
+
+// StreamMetricSeries implements pb.MonoFSRouterServer. Series metadata is
+// small and already merged per node, so it is forwarded as-is.
+func (r *Router) StreamMetricSeries(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.MetricSeriesItem]) error {
+	clients := r.allHealthyNodeClients()
+	if len(clients) == 0 {
+		return fmt.Errorf("no healthy nodes available")
+	}
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+
+	type result struct {
+		items []*pb.MetricSeriesItem
+		err   error
+	}
+	results := make(chan result, len(clients))
+	var wg sync.WaitGroup
+	for _, c := range clients {
+		wg.Add(1)
+		go func(cl pb.MonoFSClient) {
+			defer wg.Done()
+			nodeStream, err := cl.StreamMetricSeries(ctx, req)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			items := make([]*pb.MetricSeriesItem, 0)
+			for {
+				item, err := nodeStream.Recv()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					results <- result{err: err}
+					return
+				}
+				if item != nil {
+					items = append(items, item)
+				}
+			}
+			results <- result{items: items}
+		}(c)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var firstErr error
+	success := false
+	for res := range results {
+		if res.err != nil {
+			if firstErr == nil {
+				firstErr = res.err
+			}
+			continue
+		}
+		success = true
+		for _, item := range res.items {
+			if err := stream.Send(item); err != nil {
+				return err
+			}
+		}
+	}
+	if !success && firstErr != nil {
+		return firstErr
+	}
+	return nil
 }
 
 // IngestLogs implements pb.MonoFSRouterServer.
@@ -1259,12 +1329,23 @@ func (r *Router) fanoutJSONQueryStream(ctx context.Context, limit int, mergeErrP
 	var merged bytes.Buffer
 	items := 0
 	merged.WriteByte('[')
-	err := r.fanoutQueryItems(ctx, limit, mergeErrPrefix, query, func(item []byte) error {
-		if items > 0 {
-			merged.WriteByte(',')
+	err := r.fanoutQueryItems(ctx, limit, mergeErrPrefix, query, func(item *pb.QueryResultItem) error {
+		records := item.GetItemsJson()
+		if len(records) == 0 {
+			if raw := item.GetItemJson(); len(raw) > 0 {
+				records = [][]byte{raw}
+			}
 		}
-		merged.Write(item)
-		items++
+		for _, record := range records {
+			if limit > 0 && items >= limit {
+				break
+			}
+			if items > 0 {
+				merged.WriteByte(',')
+			}
+			merged.Write(record)
+			items++
+		}
 		return nil
 	})
 	if err != nil {
@@ -1274,7 +1355,21 @@ func (r *Router) fanoutJSONQueryStream(ctx context.Context, limit int, mergeErrP
 	return append([]byte(nil), merged.Bytes()...), nil
 }
 
-func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix string, query func(context.Context, pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error), handle func([]byte) error) error {
+// queryResultItemValid reports whether a streamed item carries decodable JSON,
+// for both legacy single-record and batched messages.
+func queryResultItemValid(item *pb.QueryResultItem) bool {
+	if records := item.GetItemsJson(); len(records) > 0 {
+		for _, record := range records {
+			if !json.Valid(record) {
+				return false
+			}
+		}
+		return true
+	}
+	return json.Valid(item.GetItemJson())
+}
+
+func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix string, query func(context.Context, pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error), handle func(*pb.QueryResultItem) error) error {
 	clients := r.allHealthyNodeClients()
 	if len(clients) == 0 {
 		return fmt.Errorf("no healthy nodes available")
@@ -1284,7 +1379,8 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 	defer cancel()
 
 	type streamEvent struct {
-		item    []byte
+		item    *pb.QueryResultItem
+		count   int
 		err     error
 		started bool
 	}
@@ -1311,12 +1407,19 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 					events <- streamEvent{err: err}
 					return
 				}
-				if item == nil || len(item.GetItemJson()) == 0 {
+				if item == nil {
+					continue
+				}
+				count := len(item.GetItemsJson())
+				if count == 0 && len(item.GetItemJson()) > 0 {
+					count = 1
+				}
+				if count == 0 {
 					continue
 				}
 
 				select {
-				case events <- streamEvent{item: append([]byte(nil), item.GetItemJson()...)}:
+				case events <- streamEvent{item: item, count: count}:
 				case <-ctx.Done():
 					return
 				}
@@ -1347,7 +1450,7 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 			}
 			continue
 		}
-		if !json.Valid(event.item) {
+		if !queryResultItemValid(event.item) {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s: invalid streamed json item", mergeErrPrefix)
 			}
@@ -1362,7 +1465,7 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 			cancel()
 			return err
 		}
-		items++
+		items += event.count
 		if limit > 0 && items >= limit {
 			cancel()
 		}
@@ -3713,6 +3816,12 @@ func (r *Router) validateGuardianToken(token string) (string, bool) {
 
 func (r *Router) authenticateGuardianToken(token string) (*guardianPrincipal, bool) {
 	if r.guardianPrincipals != nil {
+		// Prefer the seeded control-plane principal so the operator token
+		// resolves to a deterministic, fully-authorized identity even when
+		// several registered principals share the same token.
+		if principal, ok := r.guardianPrincipals.validateTokenForPrincipal(token, GuardianControlPlanePrincipalID); ok {
+			return principal, true
+		}
 		if principal, ok := r.guardianPrincipals.validateToken(token); ok {
 			return principal, true
 		}
@@ -3784,6 +3893,16 @@ func (r *Router) authenticateGuardianMutation(token string, mutationCtx *pb.Guar
 				}, true
 			}
 			r.guardianClientsMu.RUnlock()
+			// Guardian's own components claim principal ids such as
+			// "guardiand" or "guardian-repo-import" that are not client
+			// registrations. The seeded operator (break-glass) token is
+			// trusted for guardian mutations under any claimed id; the token
+			// owner's identity is returned so authorization and audit use it.
+			if r.guardianPrincipals != nil {
+				if principal, ok := r.guardianPrincipals.validateTokenForPrincipal(token, GuardianControlPlanePrincipalID); ok {
+					return principal, true
+				}
+			}
 			return nil, false
 		}
 	}

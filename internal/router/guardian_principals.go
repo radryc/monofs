@@ -287,3 +287,21 @@ func (s *guardianPrincipalStore) grantEvaluator() authz.GrantEvaluator {
 	}
 	return &principalGrantEvaluator{grants: allGrants}
 }
+
+// GuardianControlPlanePrincipalID is the principal ID Guardian's registry,
+// reconciler, results processor and observed collector claim for their writes.
+const GuardianControlPlanePrincipalID = "guardiand"
+
+// SeedGuardianPrincipal registers a guardian principal at startup. It is used
+// to seed the break-glass token so every router pod in a multi-router
+// deployment accepts Guardian control-plane and CLI mutations: the guardian
+// principal store is in-memory per pod, so a mutation that lands on a pod that
+// has not seen the client registration would otherwise be rejected with
+// "invalid guardian token".
+func (r *Router) SeedGuardianPrincipal(principalID, token, role, displayName, baseURL string) error {
+	if r.guardianPrincipals == nil {
+		return fmt.Errorf("guardian principal store is not configured")
+	}
+	_, err := r.guardianPrincipals.upsertConnectedClient(principalID, token, role, displayName, baseURL)
+	return err
+}

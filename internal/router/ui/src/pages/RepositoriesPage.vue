@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { useAutoRefresh, formatNumber } from '../composables/useAutoRefresh'
 import PageHeader from '../components/PageHeader.vue'
@@ -193,8 +194,16 @@ const inProgressRepos = computed(() => (data.value?.repositories ?? []).filter(r
                   </div>
                 </td>
                 <td class="px-6 py-3 text-xs text-slate-400">
+                  <RouterLink
+                    v-if="repo.product_kind === 'registry'"
+                    :to="repo.product_ui_url || '/registry'"
+                    class="text-violet-400 hover:text-violet-300"
+                    @click.stop
+                  >
+                    {{ repo.product_ui_label || 'Registry UI' }}
+                  </RouterLink>
                   <a
-                    v-if="repo.product_ui_url"
+                    v-else-if="repo.product_ui_url"
                     :href="repo.product_ui_url"
                     target="_blank"
                     class="text-violet-400 hover:text-violet-300"

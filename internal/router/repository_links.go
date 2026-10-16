@@ -82,6 +82,17 @@ func buildRepositoryProductLink(displayPath, storedURL string, bases repositoryU
 		return repositoryProductLink{}
 	}
 
+	// Container registry repositories live in the router UI itself, so the
+	// link is a root-relative deep link into the /registry page rather than
+	// an absolute URL of a separate product UI.
+	if kind == "registry" {
+		return repositoryProductLink{
+			Kind:  kind,
+			Label: repositoryProductLabel(kind),
+			URL:   registryUIURL(displayPath),
+		}
+	}
+
 	base := strings.TrimSpace(storedURL)
 	if !isHTTPURL(base) {
 		switch kind {
@@ -130,6 +141,8 @@ func repositoryProductKind(displayPath string) string {
 		return "guardian"
 	case strings.HasPrefix(displayPath, "doctor/"):
 		return "doctor"
+	case displayPath == "docker-registry", strings.HasPrefix(displayPath, "docker-registry/"):
+		return "registry"
 	default:
 		return ""
 	}
@@ -141,9 +154,22 @@ func repositoryProductLabel(kind string) string {
 		return "Guardian UI"
 	case "doctor":
 		return "Doctor UI"
+	case "registry":
+		return "Registry UI"
 	default:
 		return ""
 	}
+}
+
+// registryUIURL builds a root-relative deep link into the router UI's
+// container registry page, filtered to the image backing the repository.
+// The namespace root ("docker-registry") links to the unfiltered page.
+func registryUIURL(displayPath string) string {
+	image := strings.TrimPrefix(displayPath, "docker-registry/")
+	if image == displayPath || strings.TrimSpace(image) == "" {
+		return "/registry"
+	}
+	return "/registry?q=" + url.QueryEscape(image)
 }
 
 func repositoryPartitionName(displayPath string) string {
