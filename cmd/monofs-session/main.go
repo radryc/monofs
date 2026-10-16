@@ -16,6 +16,7 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 const (
@@ -1527,6 +1528,7 @@ func (sc *SessionCommand) searchCode(args []string) error {
 	searchCmd := flag.NewFlagSet("search", flag.ExitOnError)
 	query := searchCmd.String("query", "", "Search query (required)")
 	searchAddr := searchCmd.String("search", "localhost:9100", "MonoFS search service address")
+	token := searchCmd.String("token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Bearer token for the search service (defaults to MONOFS_TOKEN); required on policy-enforcing clusters")
 	storageID := searchCmd.String("storage-id", "", "Limit search to specific repository")
 	maxResults := searchCmd.Int("max-results", 50, "Maximum number of results")
 	caseSensitive := searchCmd.Bool("case-sensitive", false, "Case-sensitive search")
@@ -1550,6 +1552,12 @@ func (sc *SessionCommand) searchCode(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	// Attach the caller identity when configured so the search service can
+	// apply the access policy to results.
+	if *token != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+*token)
+	}
 
 	// Connect to search service
 	conn, err := grpc.DialContext(ctx, *searchAddr,
