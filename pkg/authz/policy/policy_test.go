@@ -230,6 +230,9 @@ func TestAWSBindings(t *testing.T) {
 	if _, ok := p.PartitionForAWS("999999999999", "eu-west-1"); ok {
 		t.Fatal("unbound account/region must not resolve")
 	}
+	if _, ok := p.PartitionForAWS("", ""); ok {
+		t.Fatal("empty account/region lookup must not wildcard-match bindings")
+	}
 	if len(p.AWSBindings()) != 1 {
 		t.Fatalf("expected 1 derived binding, got %d", len(p.AWSBindings()))
 	}

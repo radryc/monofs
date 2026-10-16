@@ -125,9 +125,15 @@ func (p *Policy) AWSBindings() []AWSBinding {
 }
 
 // PartitionForAWS resolves a federated AWS record's account/region to a
-// partition name. It returns ok=false when no binding matches.
+// partition name. It returns ok=false when no binding matches; an empty
+// account and region never matches (that would wildcard every binding).
 func (p *Policy) PartitionForAWS(account, region string) (string, bool) {
 	if p == nil {
+		return "", false
+	}
+	account = strings.TrimSpace(account)
+	region = strings.TrimSpace(region)
+	if account == "" && region == "" {
 		return "", false
 	}
 	for _, b := range p.bundle.AWSBindings {
