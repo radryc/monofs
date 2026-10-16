@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,7 +132,7 @@ func (i *Ingester) flushMetrics(ctx context.Context, chunkID string, metrics []M
 	chunkPrefix := filepath.Join("chunks", string(SignalMetrics), chunkID)
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -141,6 +142,11 @@ func (i *Ingester) flushMetrics(ctx context.Context, chunkID string, metrics []M
 	go func() {
 		defer wg.Done()
 		errCh <- i.writeMetadata(ctx, filepath.Join(chunkPrefix, "metadata.json"), manifest)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errCh <- i.writeMetricSeriesIndex(ctx, filepath.Join(chunkPrefix, "series.index.json"), collectMetricSeries(metrics))
 	}()
 	wg.Wait()
 	close(errCh)
@@ -608,6 +614,88 @@ func (i *Ingester) writeMetadata(ctx context.Context, path string, manifest Chun
 		return err
 	}
 	return i.store.Write(ctx, path, &buf)
+}
+
+// writeMetricSeriesIndex persists the chunk series index: one entry per
+// distinct metric series with its first/last sample time.
+func (i *Ingester) writeMetricSeriesIndex(ctx context.Context, path string, series []MetricSeriesMeta) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(series); err != nil {
+		return err
+	}
+	return i.store.Write(ctx, path, &buf)
+}
+
+// collectMetricSeries builds the per-series index for a chunk. Series identity
+// is the metric name plus the full label set; the first/last sample times
+// bound where the series has data so presence aggregations stay cheap.
+func collectMetricSeries(metrics []MetricRecord) []MetricSeriesMeta {
+	type seriesEntry struct {
+		meta MetricSeriesMeta
+	}
+	byKey := make(map[string]*seriesEntry)
+	for _, metric := range metrics {
+		if metric.MetricName == "" || metric.Timestamp.IsZero() {
+			continue
+		}
+		key := metricSeriesKey(metric)
+		entry := byKey[key]
+		if entry == nil {
+			labels := make(map[string]string, len(metric.Labels))
+			for name, value := range metric.Labels {
+				labels[name] = value
+			}
+			entry = &seriesEntry{meta: MetricSeriesMeta{
+				MetricName: metric.MetricName,
+				Service:    metric.Service,
+				Labels:     labels,
+				MinTime:    metric.Timestamp,
+				MaxTime:    metric.Timestamp,
+			}}
+			byKey[key] = entry
+			continue
+		}
+		if metric.Timestamp.Before(entry.meta.MinTime) {
+			entry.meta.MinTime = metric.Timestamp
+		}
+		if metric.Timestamp.After(entry.meta.MaxTime) {
+			entry.meta.MaxTime = metric.Timestamp
+		}
+	}
+	if len(byKey) == 0 {
+		return nil
+	}
+	out := make([]MetricSeriesMeta, 0, len(byKey))
+	for _, entry := range byKey {
+		out = append(out, entry.meta)
+	}
+	sort.Slice(out, func(a, b int) bool {
+		if out[a].MetricName != out[b].MetricName {
+			return out[a].MetricName < out[b].MetricName
+		}
+		return out[a].Service < out[b].Service
+	})
+	return out
+}
+
+// metricSeriesKey builds the identity key for a metric record.
+func metricSeriesKey(metric MetricRecord) string {
+	names := make([]string, 0, len(metric.Labels))
+	for name := range metric.Labels {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var builder strings.Builder
+	builder.WriteString(metric.MetricName)
+	builder.WriteByte(0)
+	builder.WriteString(metric.Service)
+	for _, name := range names {
+		builder.WriteByte(0)
+		builder.WriteString(name)
+		builder.WriteByte('=')
+		builder.WriteString(metric.Labels[name])
+	}
+	return builder.String()
 }
 
 func collectLogServices(logs []LogRecord) []string {

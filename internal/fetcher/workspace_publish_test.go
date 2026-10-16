@@ -123,6 +123,102 @@ func TestStageAndPublishWorkspaceBundle(t *testing.T) {
 	}
 }
 
+// TestPublishWorkspaceBundleDefaultBranchReviewBranch covers Guardian's repo
+// association path: an empty branch means "remote default HEAD", an empty base
+// commit skips the pre-push conflict check, and per_repo_branch publishes a
+// review branch that MonoFS can open an MR/PR for.
+func TestPublishWorkspaceBundleDefaultBranchReviewBranch(t *testing.T) {
+	remotePath, _ := createPublishRemoteRepo(t)
+	client, cleanup := startRepoSyncWorkerTestClient(t)
+	defer cleanup()
+
+	bundleBytes, err := json.Marshal(workspacebundle.Bundle{
+		WorkspaceID: "guardian-adopt-demo",
+		Repositories: []workspacebundle.RepositoryBundle{{
+			StorageID:   "repo-1",
+			DisplayPath: "github.com/example/demo",
+			RepoURL:     remotePath,
+			Branch:      "",
+			BaseCommit:  "",
+			Operations: []workspacebundle.Operation{{
+				Kind:    workspacebundle.OperationUpsert,
+				Path:    "guardian/partitions/demo/config.yaml",
+				Content: []byte("kind: Partition\n"),
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal workspace bundle: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stage, err := client.StageWorkspaceBundle(ctx)
+	if err != nil {
+		t.Fatalf("open stage stream: %v", err)
+	}
+	if err := stage.Send(&pb.WorkspaceBundleChunk{
+		WorkspaceId: "guardian-adopt-demo",
+		BundleId:    "bundle-adopt",
+		Data:        bundleBytes,
+		IsLast:      true,
+	}); err != nil {
+		t.Fatalf("send stage chunk: %v", err)
+	}
+	if _, err := stage.CloseAndRecv(); err != nil {
+		t.Fatalf("close stage stream: %v", err)
+	}
+
+	publish, err := client.StartWorkspacePublish(ctx, &pb.StartWorkspacePublishRequest{
+		JobId:                   "job-adopt",
+		WorkspaceId:             "guardian-adopt-demo",
+		BundleId:                "bundle-adopt",
+		LogicalCommitMessage:    "Guardian adoption: demo",
+		AuthorName:              "Guardian",
+		AuthorEmail:             "guardian@local",
+		RequestedBranchStrategy: "per_repo_branch",
+	})
+	if err != nil {
+		t.Fatalf("start publish: %v", err)
+	}
+
+	var results []*pb.RepoSyncProgress
+	for {
+		progress, err := publish.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("recv publish progress: %v", err)
+		}
+		results = append(results, progress)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 publish result, got %d", len(results))
+	}
+	result := results[0]
+	if result.GetStatus() != pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED {
+		t.Fatalf("expected published status, got %s (%s)", result.GetStatus().String(), result.GetMessage())
+	}
+	if got := result.GetRepository().GetBranch(); got != "main" {
+		t.Fatalf("resolved base branch = %q, want main", got)
+	}
+	if got := result.GetTargetBranch(); got != "monofs/guardian-adopt-demo/repo-1" {
+		t.Fatalf("target branch = %q", got)
+	}
+
+	content := readRemoteFile(t, remotePath, result.GetTargetBranch(), "guardian/partitions/demo/config.yaml")
+	if string(content) != "kind: Partition\n" {
+		t.Fatalf("review branch content = %q", string(content))
+	}
+	// The base branch must be untouched.
+	baseContent := readRemoteFile(t, remotePath, "main", "README.md")
+	if string(baseContent) != "initial\n" {
+		t.Fatalf("base branch changed: %q", string(baseContent))
+	}
+}
+
 func TestStageAndSourcePushWorkspaceCommitBundle(t *testing.T) {
 	remotePath, baseCommit := createPublishRemoteRepo(t)
 	client, cleanup := startRepoSyncWorkerTestClient(t)

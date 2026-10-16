@@ -200,6 +200,17 @@ func (r *Router) runWorkspacePublishJob(ctx context.Context, entry *workspaceSyn
 		// index tracks the published overlay state.
 		if repoResult.GetStatus() == pb.WorkspaceSyncRepositoryStatus_WORKSPACE_SYNC_REPOSITORY_STATUS_PUBLISHED {
 			r.triggerSearchReindex(repoResult.GetStorageId(), repoResult.GetDisplayPath(), repoResult.GetRepoUrl(), repoResult.GetBranch(), "publish")
+			// Review branches (workspace_branch / per_repo_branch) get a forge
+			// pull request so the change is reviewed before it reaches the base
+			// branch. Best-effort: failures never fail the push.
+			if repo, ok := repositoryBundleByStorageID(bundleEntry.bundle, repoResult.GetStorageId()); ok {
+				r.attachPublishPullRequest(ctx, repoResult, repo, req.GetLogicalCommitMessage(), entry.snapshot().GetJobId())
+				if repoResult.GetPullRequestUrl() != "" {
+					if err := r.updateWorkspaceSyncRepository(entry, repoResult); err != nil {
+						return err
+					}
+				}
+			}
 		}
 
 		if err := send(&pb.WorkspaceSyncEvent{

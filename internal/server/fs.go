@@ -1144,12 +1144,57 @@ func (s *Server) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStr
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
-	if err := backend.StreamLogs(stream.Context(), req.Query, req.Service, from, to, int(req.Limit), func(record logengine.LogRecord) error {
+	yield := func(record logengine.LogRecord) error {
 		return streamQueryResult(record, stream.Send, "stream logs")
-	}); err != nil {
+	}
+	var batcher *queryResultBatcher
+	if req.GetBatchSize() > 0 {
+		batcher = newQueryResultBatcher(stream.Send, int(req.GetBatchSize()))
+		yield = func(record logengine.LogRecord) error { return batcher.add(record) }
+	}
+	if err := backend.StreamLogs(stream.Context(), req.Query, req.Service, from, to, int(req.Limit), yield); err != nil {
 		return status.Errorf(codes.Internal, "query logs failed: %v", err)
 	}
+	if batcher != nil {
+		return batcher.flush()
+	}
 	return nil
+}
+
+// StreamMetricSeries streams per-series metadata from the chunk series index.
+func (s *Server) StreamMetricSeries(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.MetricSeriesItem]) error {
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	from := time.Unix(0, req.FromUnixNano).UTC()
+	to := time.Unix(0, req.ToUnixNano).UTC()
+	if req.FromUnixNano == 0 {
+		from = time.Time{}
+	}
+	if req.ToUnixNano == 0 {
+		to = time.Time{}
+	}
+	if err := backend.StreamMetricSeries(stream.Context(), logengine.MetricQuery{
+		MetricName:    req.MetricName,
+		Service:       req.GetService(),
+		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
+	}, from, to, func(meta logengine.MetricSeriesMeta) error {
+		return stream.Send(metricSeriesItemFromMeta(meta))
+	}); err != nil {
+		return status.Errorf(codes.Internal, "query metric series failed: %v", err)
+	}
+	return nil
+}
+
+func metricSeriesItemFromMeta(meta logengine.MetricSeriesMeta) *pb.MetricSeriesItem {
+	return &pb.MetricSeriesItem{
+		MetricName:      meta.MetricName,
+		Service:         meta.Service,
+		Labels:          meta.Labels,
+		MinTimeUnixNano: meta.MinTime.UnixNano(),
+		MaxTimeUnixNano: meta.MaxTime.UnixNano(),
+	}
 }
 
 func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
@@ -1190,14 +1235,23 @@ func (s *Server) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.Ser
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
+	yield := func(record logengine.MetricRecord) error {
+		return streamQueryResult(record, stream.Send, "stream metrics")
+	}
+	var batcher *queryResultBatcher
+	if req.GetBatchSize() > 0 {
+		batcher = newQueryResultBatcher(stream.Send, int(req.GetBatchSize()))
+		yield = func(record logengine.MetricRecord) error { return batcher.add(record) }
+	}
 	if err := backend.StreamMetrics(stream.Context(), logengine.MetricQuery{
 		MetricName:    req.MetricName,
 		Service:       req.GetService(),
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
-	}, from, to, func(record logengine.MetricRecord) error {
-		return streamQueryResult(record, stream.Send, "stream metrics")
-	}); err != nil {
+	}, from, to, yield); err != nil {
 		return status.Errorf(codes.Internal, "query metrics failed: %v", err)
+	}
+	if batcher != nil {
+		return batcher.flush()
 	}
 	return nil
 }
@@ -1275,10 +1329,19 @@ func (s *Server) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.Serve
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
-	if err := backend.StreamTraces(stream.Context(), req.TraceId, req.Service, from, to, int(req.Limit), func(record logengine.SpanRecord) error {
+	yield := func(record logengine.SpanRecord) error {
 		return streamQueryResult(record, stream.Send, "stream traces")
-	}); err != nil {
+	}
+	var batcher *queryResultBatcher
+	if req.GetBatchSize() > 0 {
+		batcher = newQueryResultBatcher(stream.Send, int(req.GetBatchSize()))
+		yield = func(record logengine.SpanRecord) error { return batcher.add(record) }
+	}
+	if err := backend.StreamTraces(stream.Context(), req.TraceId, req.Service, from, to, int(req.Limit), yield); err != nil {
 		return status.Errorf(codes.Internal, "query traces failed: %v", err)
+	}
+	if batcher != nil {
+		return batcher.flush()
 	}
 	return nil
 }

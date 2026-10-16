@@ -757,6 +757,107 @@ func (q *QueryEngine) metricDiscoveryCandidates(ctx context.Context, query Metri
 	return candidates, observer, nil
 }
 
+// StreamMetricSeries streams per-series metadata (identity plus first/last
+// sample time) from the chunk series index. It never reads sample data, so
+// presence aggregations such as `count by (__name__)` and series discovery are
+// served from manifests and small per-chunk index files only. Series that
+// appear in multiple chunks are merged across the range.
+func (q *QueryEngine) StreamMetricSeries(ctx context.Context, query MetricQuery, from, to time.Time, yield func(MetricSeriesMeta) error) error {
+	observer := beginQueryPathObservation(SignalMetrics)
+	defer observer.finish()
+
+	listStart := time.Now()
+	chunkIDs, err := q.store.ListChunks(ctx, "chunks/metrics/")
+	observer.observeStage("chunk_listing", listStart)
+	if err != nil {
+		return fmt.Errorf("failed to list metric chunks: %w", err)
+	}
+	observer.addChunksListed(len(chunkIDs))
+
+	compiledMatchers, err := compileMetricMatchers(query.LabelMatchers)
+	if err != nil {
+		return err
+	}
+	candidates, err := q.metricCandidates(ctx, chunkIDs, query, compiledMatchers, from, to, observer)
+	if err != nil {
+		return err
+	}
+
+	indexStart := time.Now()
+	merged := make(map[string]*MetricSeriesMeta)
+	order := make([]string, 0)
+	for _, candidate := range candidates {
+		series, err := q.store.ReadSeriesIndex(ctx, candidate.chunkID)
+		if err != nil {
+			if errors.Is(err, ErrGhostChunk) {
+				continue
+			}
+			return err
+		}
+		for _, meta := range series {
+			if !metricSeriesMatches(meta, query, compiledMatchers) {
+				continue
+			}
+			key := metricSeriesMetaKey(meta)
+			existing := merged[key]
+			if existing == nil {
+				copied := meta
+				merged[key] = &copied
+				order = append(order, key)
+				continue
+			}
+			if meta.MinTime.Before(existing.MinTime) {
+				existing.MinTime = meta.MinTime
+			}
+			if meta.MaxTime.After(existing.MaxTime) {
+				existing.MaxTime = meta.MaxTime
+			}
+		}
+	}
+	observer.observeStage("series_index_scan", indexStart)
+
+	sort.Strings(order)
+	for _, key := range order {
+		if err := yield(*merged[key]); err != nil {
+			return err
+		}
+	}
+	observer.addReturnedRecords(len(order))
+	return nil
+}
+
+// metricSeriesMatches applies the query's name, service, and label matchers to
+// one series index entry.
+func metricSeriesMatches(meta MetricSeriesMeta, query MetricQuery, matchers []compiledMetricMatcher) bool {
+	if query.MetricName != "" && meta.MetricName != query.MetricName {
+		return false
+	}
+	if query.Service != "" && meta.Service != query.Service {
+		return false
+	}
+	return metricLabelsMatch(meta.MetricName, meta.Service, meta.Labels, matchers)
+}
+
+// metricSeriesMetaKey builds the cross-chunk identity key for a series entry.
+func metricSeriesMetaKey(meta MetricSeriesMeta) string {
+	names := make([]string, 0, len(meta.Labels))
+	for name := range meta.Labels {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var builder strings.Builder
+	builder.WriteString(meta.MetricName)
+	builder.WriteByte(0)
+	builder.WriteString(meta.Service)
+	for _, name := range names {
+		builder.WriteByte(0)
+		builder.WriteString(name)
+		builder.WriteByte('=')
+		builder.WriteString(meta.Labels[name])
+	}
+	return builder.String()
+}
+
 func (q *QueryEngine) discoverMetricNames(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
 	candidates, observer, err := q.metricDiscoveryCandidates(ctx, query, from, to)
 	if err != nil {

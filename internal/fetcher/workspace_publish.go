@@ -16,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	pb "github.com/radryc/monofs/api/proto"
+	monogit "github.com/radryc/monofs/internal/git"
 	"github.com/radryc/monofs/internal/workspacebundle"
 	"google.golang.org/grpc"
 )
@@ -216,14 +217,23 @@ func (s *Service) publishBundleRepository(ctx context.Context, req *pb.StartWork
 		progress.Message = "no operations to publish"
 		return progress
 	}
+	operations, skippedSensitive := filterSensitiveOperations(repo.Operations)
+	if len(operations) == 0 {
+		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED
+		progress.Message = fmt.Sprintf("%d sensitive path(s) skipped; nothing to publish", skippedSensitive)
+		return progress
+	}
 
-	worktreeRoot, err := s.clonePublishWorktree(ctx, repo)
+	worktreeRoot, resolvedBranch, err := s.clonePublishWorktree(ctx, repo)
 	if err != nil {
 		progress.Status, progress.ConflictReason = mapPublishError(err)
 		progress.Message = err.Error()
 		return progress
 	}
 	defer os.RemoveAll(worktreeRoot)
+	if resolvedBranch != "" {
+		progress.Repository.Branch = resolvedBranch
+	}
 
 	repoHandle, err := gogit.PlainOpen(worktreeRoot)
 	if err != nil {
@@ -238,7 +248,9 @@ func (s *Service) publishBundleRepository(ctx context.Context, req *pb.StartWork
 		return progress
 	}
 	progress.RemoteCommit = headRef.Hash().String()
-	if progress.RemoteCommit != repo.BaseCommit {
+	// An empty base commit means "publish on top of the current remote head";
+	// conflicts are still caught by the push itself (non-fast-forward).
+	if repo.BaseCommit != "" && progress.RemoteCommit != repo.BaseCommit {
 		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_CONFLICT
 		progress.ConflictReason = "base_commit_mismatch"
 		progress.Message = fmt.Sprintf("remote head %s does not match base commit %s", progress.RemoteCommit, repo.BaseCommit)
@@ -258,7 +270,7 @@ func (s *Service) publishBundleRepository(ctx context.Context, req *pb.StartWork
 		progress.Message = fmt.Sprintf("checkout publish branch: %v", err)
 		return progress
 	}
-	if err := applyRepositoryOperations(worktreeRoot, repo.Operations); err != nil {
+	if err := applyRepositoryOperations(worktreeRoot, operations); err != nil {
 		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
 		progress.Message = fmt.Sprintf("apply repository operations: %v", err)
 		return progress
@@ -306,7 +318,7 @@ func (s *Service) publishBundleRepository(ctx context.Context, req *pb.StartWork
 
 	pushRef := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", progress.GetTargetBranch(), progress.GetTargetBranch()))
 	fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_publish", "started").Inc()
-	if err := repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}}); err != nil {
+	if err := repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, Auth: monogit.AuthForRepo(repo.RepoURL)}); err != nil {
 		progress.Status, progress.ConflictReason = mapPublishError(err)
 		progress.Message = fmt.Sprintf("push repository changes: %v", err)
 		fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_publish", "failed").Inc()
@@ -315,28 +327,89 @@ func (s *Service) publishBundleRepository(ctx context.Context, req *pb.StartWork
 	fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_publish", "succeeded").Inc()
 	progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_PUBLISHED
 	progress.Message = "repository published"
+	if skippedSensitive > 0 {
+		progress.Message = fmt.Sprintf("repository published (%d sensitive path(s) skipped)", skippedSensitive)
+		s.logger.Warn("skipped sensitive paths during publish",
+			"display_path", repo.DisplayPath,
+			"skipped", skippedSensitive)
+	}
 	return progress
 }
 
-func (s *Service) clonePublishWorktree(ctx context.Context, repo workspacebundle.RepositoryBundle) (string, error) {
+func (s *Service) clonePublishWorktree(ctx context.Context, repo workspacebundle.RepositoryBundle) (string, string, error) {
 	baseDir := ""
 	if s.config.SyncRepoCacheDir != "" {
 		baseDir = s.config.SyncRepoCacheDir
 	}
 	worktreeRoot, err := os.MkdirTemp(baseDir, "publish-*")
 	if err != nil {
-		return "", fmt.Errorf("create publish worktree: %w", err)
+		return "", "", fmt.Errorf("create publish worktree: %w", err)
 	}
-	_, err = gogit.PlainCloneContext(ctx, worktreeRoot, &gogit.CloneOptions{
-		URL:           repo.RepoURL,
-		ReferenceName: plumbing.NewBranchReferenceName(repo.Branch),
-		SingleBranch:  true,
-	})
+	cloneOptions := &gogit.CloneOptions{
+		URL:          repo.RepoURL,
+		Auth:         monogit.AuthForRepo(repo.RepoURL),
+		SingleBranch: true,
+	}
+	// An empty branch clones the remote default branch (HEAD), resolved from
+	// the remote refs so repositories whose HEAD is unset or points at a
+	// missing branch (common on freshly created bare remotes) still work.
+	if branch := strings.TrimSpace(repo.Branch); branch != "" {
+		cloneOptions.ReferenceName = plumbing.NewBranchReferenceName(branch)
+	} else {
+		resolved, err := resolveRemoteDefaultBranch(ctx, repo.RepoURL)
+		if err != nil {
+			_ = os.RemoveAll(worktreeRoot)
+			return "", "", err
+		}
+		cloneOptions.ReferenceName = plumbing.NewBranchReferenceName(resolved)
+	}
+	_, err = gogit.PlainCloneContext(ctx, worktreeRoot, cloneOptions)
 	if err != nil {
 		_ = os.RemoveAll(worktreeRoot)
-		return "", fmt.Errorf("clone repository for publish: %w", err)
+		return "", "", fmt.Errorf("clone repository for publish: %w", err)
 	}
-	return worktreeRoot, nil
+	resolvedBranch := strings.TrimSpace(repo.Branch)
+	if resolvedBranch == "" {
+		if handle, openErr := gogit.PlainOpen(worktreeRoot); openErr == nil {
+			if head, headErr := handle.Head(); headErr == nil && head != nil {
+				resolvedBranch = head.Name().Short()
+			}
+		}
+	}
+	return worktreeRoot, resolvedBranch, nil
+}
+
+// resolveRemoteDefaultBranch finds the default branch of a remote by listing
+// its refs: the symbolic HEAD target when it exists, then main, then master.
+func resolveRemoteDefaultBranch(ctx context.Context, repoURL string) (string, error) {
+	remote := gogit.NewRemote(nil, &config.RemoteConfig{Name: "origin", URLs: []string{repoURL}})
+	refs, err := remote.ListContext(ctx, &gogit.ListOptions{Auth: monogit.AuthForRepo(repoURL)})
+	if err != nil {
+		return "", fmt.Errorf("list remote refs for %s: %w", repoURL, err)
+	}
+	exists := func(name plumbing.ReferenceName) bool {
+		for _, ref := range refs {
+			if ref.Name() == name {
+				return true
+			}
+		}
+		return false
+	}
+	for _, ref := range refs {
+		if ref.Name() != plumbing.HEAD || ref.Target() == "" {
+			continue
+		}
+		target := ref.Target().String()
+		if strings.HasPrefix(target, "refs/heads/") && exists(plumbing.ReferenceName(target)) {
+			return strings.TrimPrefix(target, "refs/heads/"), nil
+		}
+	}
+	for _, branch := range []string{"main", "master"} {
+		if exists(plumbing.NewBranchReferenceName(branch)) {
+			return branch, nil
+		}
+	}
+	return "", fmt.Errorf("could not determine the default branch of %s", repoURL)
 }
 
 func checkoutPublishBranch(wt *gogit.Worktree, targetBranch string) error {
@@ -548,4 +621,65 @@ func mapPublishError(err error) (pb.RepoSyncStatus, string) {
 	default:
 		return pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED, ""
 	}
+}
+
+// sensitiveSegments are directory names that must never be published upstream.
+var sensitiveSegments = map[string]bool{
+	".registry": true,
+	"secrets":   true,
+}
+
+// sensitiveNames and sensitiveSuffixes catch secret-bearing files. They are
+// deliberately narrow so ordinary source files are never blocked.
+var sensitiveNames = map[string]bool{
+	".env":             true,
+	".netrc":           true,
+	".git-credentials": true,
+	"id_rsa":           true,
+	"id_ed25519":       true,
+}
+
+var sensitiveSuffixes = []string{
+	".env", ".secret.yaml", ".secret.yml", ".secret.json",
+	".pem", ".key", ".p12", ".pfx",
+}
+
+// sensitivePublishPath reports whether a repository-relative path is on the
+// publish deny-list.
+func sensitivePublishPath(p string) bool {
+	clean := strings.Trim(strings.ReplaceAll(p, "\\", "/"), "/")
+	if clean == "" {
+		return false
+	}
+	segments := strings.Split(clean, "/")
+	for _, segment := range segments {
+		if sensitiveSegments[strings.ToLower(segment)] {
+			return true
+		}
+	}
+	base := strings.ToLower(segments[len(segments)-1])
+	if sensitiveNames[base] || strings.HasPrefix(base, ".env.") {
+		return true
+	}
+	for _, suffix := range sensitiveSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// filterSensitiveOperations drops operations that touch deny-listed paths so
+// secrets and local overlays never reach the upstream repository.
+func filterSensitiveOperations(operations []workspacebundle.Operation) ([]workspacebundle.Operation, int) {
+	filtered := make([]workspacebundle.Operation, 0, len(operations))
+	skipped := 0
+	for _, op := range operations {
+		if sensitivePublishPath(op.Path) || sensitivePublishPath(op.Target) {
+			skipped++
+			continue
+		}
+		filtered = append(filtered, op)
+	}
+	return filtered, skipped
 }

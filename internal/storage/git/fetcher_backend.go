@@ -261,6 +261,7 @@ func (gb *GitBackend) getOrCloneRepo(ctx context.Context, repoURL, branch string
 		// Clone new (shallow, no checkout)
 		repo, err = gogit.PlainCloneContext(ctx, repoPath, false, &gogit.CloneOptions{
 			URL:           repoURL,
+			Auth:          authForRepo(repoURL),
 			ReferenceName: plumbing.NewBranchReferenceName(branch),
 			SingleBranch:  true,
 			Depth:         1,
@@ -283,8 +284,15 @@ func (gb *GitBackend) getOrCloneRepo(ctx context.Context, repoURL, branch string
 }
 
 func (gb *GitBackend) fetchLatest(ctx context.Context, cached *cachedRepo, branch string) error {
+	repoURL := ""
+	if remote, remoteErr := cached.repo.Remote("origin"); remoteErr == nil {
+		if urls := remote.Config().URLs; len(urls) > 0 {
+			repoURL = urls[0]
+		}
+	}
 	err := cached.repo.FetchContext(ctx, &gogit.FetchOptions{
 		Depth: 1,
+		Auth:  authForRepo(repoURL),
 		RefSpecs: []config.RefSpec{
 			config.RefSpec(fmt.Sprintf("+refs/heads/%s:refs/heads/%s", branch, branch)),
 		},

@@ -185,3 +185,47 @@ func TestGitLabProviderAlreadyExistsFallsBackToURL(t *testing.T) {
 		t.Fatalf("result = %+v, want Created=false on 409", result)
 	}
 }
+
+func TestTokensForRepoGlobalFallback(t *testing.T) {
+	t.Setenv("MONOFS_GITHUB_TOKEN", "global-gh")
+	t.Setenv("MONOFS_GITLAB_TOKEN", "global-gl")
+	t.Setenv("MONOFS_GITHUB_TOKEN_EXAMPLE_STRATA", "")
+	t.Setenv("MONOFS_GITLAB_TOKEN_EXAMPLE_STRATA", "")
+
+	githubToken, gitlabToken := TokensForRepo("https://github.com/example/strata.git")
+	if githubToken != "global-gh" || gitlabToken != "global-gl" {
+		t.Fatalf("tokens = %q, %q", githubToken, gitlabToken)
+	}
+}
+
+func TestTokensForRepoPerRepoOverride(t *testing.T) {
+	t.Setenv("MONOFS_GITHUB_TOKEN", "global-gh")
+	t.Setenv("MONOFS_GITHUB_TOKEN_EXAMPLE_STRATA", "repo-gh")
+	t.Setenv("MONOFS_GITLAB_TOKEN_EXAMPLE_STRATA", "repo-gl")
+
+	githubToken, gitlabToken := TokensForRepo("git@github.com:example/strata.git")
+	if githubToken != "repo-gh" || gitlabToken != "repo-gl" {
+		t.Fatalf("override tokens = %q, %q", githubToken, gitlabToken)
+	}
+
+	// Other repositories keep the global token.
+	otherGitHub, _ := TokensForRepo("https://github.com/example/other.git")
+	if otherGitHub != "global-gh" {
+		t.Fatalf("other repo token = %q", otherGitHub)
+	}
+}
+
+func TestRepoTokensSlug(t *testing.T) {
+	cases := map[string]string{
+		"https://github.com/example/strata.git":    "EXAMPLE_STRATA",
+		"git@github.com:example/strata.git":        "EXAMPLE_STRATA",
+		"https://gitlab.com/group/sub/project.git": "GROUP_SUB_PROJECT",
+		"https://github.com/my-org/my.repo.git":    "MY_ORG_MY_REPO",
+		"":                                         "",
+	}
+	for input, want := range cases {
+		if got := repoTokensSlug(input); got != want {
+			t.Errorf("repoTokensSlug(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

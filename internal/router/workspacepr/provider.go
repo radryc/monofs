@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/radryc/monofs/internal/gittoken"
 )
 
 type PullRequestProvider interface {
@@ -60,6 +62,24 @@ func DetectProvider(repoCloneURL, gitLabBaseURL, githubToken, gitlabToken string
 	}
 
 	return nil, fmt.Errorf("unknown provider for host: %s", host)
+}
+
+// TokensForRepo resolves forge API tokens for a repository. A per-repo env
+// override wins over the global token:
+//
+//	MONOFS_GITHUB_TOKEN_<OWNER>_<REPO>  (for example EXAMPLE_STRATA)
+//	MONOFS_GITLAB_TOKEN_<OWNER>_<REPO>
+//
+// so credentials for private repositories can be injected per repo without
+// granting one token access to every repository.
+func TokensForRepo(repoCloneURL string) (githubToken, gitlabToken string) {
+	return gittoken.ForgeTokens(repoCloneURL)
+}
+
+// repoTokensSlug derives the env suffix for a repository clone URL:
+// github.com/example/strata -> EXAMPLE_STRATA.
+func repoTokensSlug(repoCloneURL string) string {
+	return gittoken.Slug(repoCloneURL)
 }
 
 func parseHost(cloneURL string) string {

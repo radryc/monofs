@@ -78,12 +78,11 @@ func (b *Bundle) Validate() error {
 		if strings.TrimSpace(repo.RepoURL) == "" {
 			return fmt.Errorf("repository %q repo_url is required", repo.StorageID)
 		}
-		if strings.TrimSpace(repo.Branch) == "" {
-			return fmt.Errorf("repository %q branch is required", repo.StorageID)
-		}
-		if strings.TrimSpace(repo.BaseCommit) == "" {
-			return fmt.Errorf("repository %q base_commit is required", repo.StorageID)
-		}
+		// An empty branch means "the remote default branch (HEAD)" and an
+		// empty base_commit means "publish on top of the current remote head".
+		// Guardian's repo association uses both: it publishes an adoption
+		// branch to a repository whose default branch it does not know yet;
+		// the push itself still guards against non-fast-forward races.
 		for j := range repo.Operations {
 			if err := validateOperation(repo.StorageID, j, repo.Operations[j]); err != nil {
 				return err

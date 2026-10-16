@@ -62,6 +62,9 @@ service MonoFSRouter {
     rpc StreamQueryLogs(QueryLogsRequest) returns (stream QueryResultItem);
     rpc StreamQueryMetrics(QueryMetricsRequest) returns (stream QueryResultItem);
     rpc StreamQueryTraces(QueryTracesRequest) returns (stream QueryResultItem);
+    // StreamMetricSeries streams per-series metadata (name, labels, first/last
+    // sample time) from the chunk series index without scanning sample data.
+    rpc StreamMetricSeries(QueryMetricsRequest) returns (stream MetricSeriesItem);
     rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
     rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
     rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
@@ -162,6 +165,9 @@ service MonoFS {
     rpc StreamQueryLogs(QueryLogsRequest) returns (stream QueryResultItem);
     rpc StreamQueryMetrics(QueryMetricsRequest) returns (stream QueryResultItem);
     rpc StreamQueryTraces(QueryTracesRequest) returns (stream QueryResultItem);
+    // StreamMetricSeries streams per-series metadata (name, labels, first/last
+    // sample time) from the chunk series index without scanning sample data.
+    rpc StreamMetricSeries(QueryMetricsRequest) returns (stream MetricSeriesItem);
     rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
     rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
     rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
@@ -1218,6 +1224,9 @@ message QueryLogsRequest {
     int64 to_unix_nano = 3;
     string service = 4;
     int32 limit = 5;
+    // batch_size requests batched QueryResultItem responses (items_json) of up
+    // to this many records. Zero keeps the legacy one-record-per-message stream.
+    int32 batch_size = 6;
 }
 
 message QueryLogsResponse {
@@ -1244,6 +1253,9 @@ message QueryMetricsRequest {
     int64 to_unix_nano = 3;
     string service = 4;
     repeated MetricLabelMatcher label_matchers = 5;
+    // batch_size requests batched QueryResultItem responses (items_json) of up
+    // to this many records. Zero keeps the legacy one-record-per-message stream.
+    int32 batch_size = 6;
 }
 
 message QueryMetricsResponse {
@@ -1256,6 +1268,9 @@ message QueryTracesRequest {
     int64 from_unix_nano = 3;
     int64 to_unix_nano = 4;
     int32 limit = 5;
+    // batch_size requests batched QueryResultItem responses (items_json) of up
+    // to this many records. Zero keeps the legacy one-record-per-message stream.
+    int32 batch_size = 6;
 }
 
 message QueryTracesResponse {
@@ -1264,6 +1279,19 @@ message QueryTracesResponse {
 
 message QueryResultItem {
     bytes item_json = 1;
+    // items_json carries a batch of marshaled records. When set, item_json is
+    // empty. Batches are requested per query via the request batch_size field.
+    repeated bytes items_json = 2;
+}
+
+// MetricSeriesItem is one distinct metric series inside a chunk: its identity
+// and the first/last sample times. It is served from the chunk series index.
+message MetricSeriesItem {
+    string metric_name = 1;
+    string service = 2;
+    map<string, string> labels = 3;
+    int64 min_time_unix_nano = 4;
+    int64 max_time_unix_nano = 5;
 }
 
 // LogEntry is a single log record for ingest.

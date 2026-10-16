@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAutoRefresh, formatBytes, formatNumber, timeAgoUnix } from '../composables/useAutoRefresh'
 import PageHeader from '../components/PageHeader.vue'
 import DataCard from '../components/DataCard.vue'
@@ -13,6 +14,12 @@ import type {
 
 const PAGE_SIZE = 100
 
+// Deep links from the repositories page land here as /registry?q=<image>,
+// pre-filtering the list to the image backing that repository.
+const route = useRoute()
+const router = useRouter()
+const initialSearch = typeof route.query.q === 'string' ? route.query.q : ''
+
 const stats = ref<RegistryStats | null>(null)
 const repos = ref<RegistryRepoSummary[]>([])
 const totalRepos = ref(0)
@@ -20,8 +27,8 @@ const pageOffset = ref(0)
 const hasMore = ref(false)
 const nextOffset = ref(0)
 
-const searchInput = ref('')
-const searchQuery = ref('')
+const searchInput = ref(initialSearch)
+const searchQuery = ref(initialSearch)
 const dedupRatio = ref(0)
 const lastUpdatedAt = ref<number | null>(null)
 const refreshInFlight = ref(false)
@@ -184,6 +191,7 @@ async function applySearch() {
   searchQuery.value = searchInput.value.trim()
   pageOffset.value = 0
   await refreshData()
+  syncSearchToRoute()
 }
 
 async function clearSearch() {
@@ -191,7 +199,29 @@ async function clearSearch() {
   searchQuery.value = ''
   pageOffset.value = 0
   await refreshData()
+  syncSearchToRoute()
 }
+
+function syncSearchToRoute() {
+  const current = typeof route.query.q === 'string' ? route.query.q : ''
+  if (current === searchQuery.value) return
+  const query = searchQuery.value ? { q: searchQuery.value } : {}
+  void router.replace({ query })
+}
+
+// Follow in-app deep links while the page is already mounted (vue-router
+// reuses the component when only the query changes).
+watch(
+  () => route.query.q,
+  (value) => {
+    const next = typeof value === 'string' ? value : ''
+    if (next === searchQuery.value) return
+    searchInput.value = next
+    searchQuery.value = next
+    pageOffset.value = 0
+    void refreshData()
+  },
+)
 
 async function goNextPage() {
   if (!hasMore.value) return

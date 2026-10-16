@@ -73,6 +73,24 @@ Common commands:
 ./bin/monofs-session discard
 ```
 
+## Local ingestion and secret-safe publish
+
+Routers accept filesystem ingestion by default so development changes can be
+ingested without a repository push:
+
+```bash
+./bin/monofs-admin ingest --ingestion-type file --source /path/to/checkout --source-id my/repo
+# or POST /api/ingest with ingestion_type=file, or POST /api/ingest/file (upload)
+```
+
+Disable it on hardened routers with `--local-ingest=false`.
+
+Source publishes never write deny-listed paths upstream. Local overlays and
+secrets stay in MonoFS even if they appear in a workspace bundle: any
+`secrets/` or `.registry/` path segment, `.env` files, `*.secret.{yaml,yml,json}`,
+`*.pem`/`*.key`/`*.p12`/`*.pfx`, `.netrc`, `.git-credentials`, and SSH private
+keys. Publish results report how many sensitive paths were skipped.
+
 ## Guardian in the Workspace
 
 Guardian content is visible under `guardian/<partition>/...`.

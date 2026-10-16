@@ -65,7 +65,7 @@ func (rm *RepoManager) CloneOrOpenRef(ctx context.Context, repoURL, repoID, ref 
 	if err == nil {
 		// Refresh objects; when a tag/SHA was requested, fetch tags so the
 		// ref can be resolved if it wasn't present before.
-		fetchOpts := &git.FetchOptions{Depth: 1}
+		fetchOpts := &git.FetchOptions{Depth: 1, Auth: AuthForRepo(repoURL)}
 		if fetchTags {
 			fetchOpts.Tags = git.AllTags
 		}
@@ -102,6 +102,7 @@ func (rm *RepoManager) CloneOrOpenRef(ctx context.Context, repoURL, repoID, ref 
 func (rm *RepoManager) cloneBranchRef(ctx context.Context, repoPath, repoURL, branch string) (*git.Repository, error) {
 	repo, err := git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
 		URL:               repoURL,
+		Auth:              AuthForRepo(repoURL),
 		ReferenceName:     plumbing.NewBranchReferenceName(branch),
 		SingleBranch:      true,
 		Depth:             1,
@@ -119,6 +120,7 @@ func (rm *RepoManager) cloneBranchRef(ctx context.Context, repoPath, repoURL, br
 func (rm *RepoManager) cloneTagRef(ctx context.Context, repoPath, repoURL, tag string) (*git.Repository, error) {
 	repo, err := git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
 		URL:               repoURL,
+		Auth:              AuthForRepo(repoURL),
 		ReferenceName:     plumbing.NewTagReferenceName(tag),
 		SingleBranch:      true,
 		Depth:             1,
@@ -142,6 +144,7 @@ func (rm *RepoManager) CloneOrOpenHistory(ctx context.Context, repoURL, repoID, 
 		_ = repo.FetchContext(ctx, &git.FetchOptions{
 			Depth: 0,
 			Tags:  git.AllTags,
+			Auth:  AuthForRepo(repoURL),
 		})
 		return repo, nil
 	}
@@ -161,6 +164,7 @@ func (rm *RepoManager) CloneOrOpenHistory(ctx context.Context, repoURL, repoID, 
 
 	repo, err := git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
 		URL:               repoURL,
+		Auth:              AuthForRepo(repoURL),
 		ReferenceName:     referenceName,
 		SingleBranch:      referenceName != plumbing.HEAD && ClassifyRef(ref) != RefSHA,
 		Depth:             0, // full history
@@ -179,6 +183,7 @@ func (rm *RepoManager) CloneOrOpenHistory(ctx context.Context, repoURL, repoID, 
 func (rm *RepoManager) cloneSHARef(ctx context.Context, repoPath, repoURL, sha string) (*git.Repository, error) {
 	repo, err := git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
 		URL:               repoURL,
+		Auth:              AuthForRepo(repoURL),
 		SingleBranch:      false,
 		Depth:             0, // full history so arbitrary SHAs are reachable
 		Tags:              git.AllTags,
@@ -203,7 +208,7 @@ func (rm *RepoManager) GetDefaultBranch(ctx context.Context, repoURL string) (st
 	})
 
 	// List references to find HEAD
-	refs, err := rem.ListContext(ctx, &git.ListOptions{})
+	refs, err := rem.ListContext(ctx, &git.ListOptions{Auth: AuthForRepo(repoURL)})
 	if err != nil {
 		return "", fmt.Errorf("failed to list remote refs: %w", err)
 	}

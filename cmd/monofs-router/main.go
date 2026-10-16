@@ -121,6 +121,7 @@ func main() {
 		autoRefreshEnabled     = flag.Bool("auto-refresh", false, "Enable automatic re-ingestion of advanced upstreams (Phase 5)")
 		autoRefreshInterval    = flag.Duration("auto-refresh-interval", 5*time.Minute, "Interval between auto-refresh probes (Phase 5)")
 		autoRefreshConcurrency = flag.Int("auto-refresh-concurrency", 4, "Max concurrent auto-refresh probes (Phase 5)")
+		localIngestEnabled     = flag.Bool("local-ingest", true, "Allow ingestion from router-local filesystem paths (file ingestion and uploads)")
 		// Replication and failover configuration
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
 		rebalanceDelay        = flag.Duration("rebalance-delay", 10*time.Minute, "Wait time before permanent rebalancing after node failure")
@@ -245,6 +246,7 @@ func main() {
 		AuthzGrantsPath:        strings.TrimSpace(*authzGrantsPath),
 		AuthzGrantsJSON:        strings.TrimSpace(os.Getenv("MONOFS_AUTHZ_GRANTS_JSON")),
 		OwnershipGateEnabled:   *ownershipGate,
+		AllowLocalIngest:       *localIngestEnabled,
 	}
 	r := router.NewRouter(cfg, logger)
 	r.SetVersion(Version, Commit, BuildTime)
@@ -365,6 +367,15 @@ func main() {
 	if bg := strings.TrimSpace(os.Getenv("MONOFS_TOKEN")); bg != "" {
 		verifiers = append(verifiers, authz.NewBreakGlassVerifier(bg, breakGlassClientID))
 		r.AddBreakGlassAdmin(breakGlassClientID)
+		// Seed the guardian principal that Guardian's registry, reconciler,
+		// results processor and observed collector claim for their writes
+		// ("guardiand"). The guardian principal store is in-memory per pod, so
+		// without this seed a mutation that lands on a router pod which has
+		// not seen the caller's client registration is rejected with
+		// "invalid guardian token".
+		if err := r.SeedGuardianPrincipal(router.GuardianControlPlanePrincipalID, bg, "control-plane", "Guardian control plane", ""); err != nil {
+			logger.Warn("failed to seed guardian control-plane principal from MONOFS_TOKEN", "error", err)
+		}
 		logger.Warn("break-glass admin token enabled via MONOFS_TOKEN; all usage is audited")
 	}
 
@@ -507,7 +518,7 @@ func main() {
 		if p := strings.Index(routerRedirect, "://"); p >= 0 {
 			if s := strings.Index(routerRedirect[p+3:], "/"); s >= 0 {
 				if i := strings.LastIndex(routerRedirect[p+3+s:], "/auth/"); i >= 0 {
-					waCfg.PostLoginRedirect = routerRedirect[p+3+s : p+3+s+i] + "/"
+					waCfg.PostLoginRedirect = routerRedirect[p+3+s:p+3+s+i] + "/"
 				}
 			}
 		}

@@ -82,3 +82,15 @@ type ChunkManifest struct {
 	MetricLabelValues map[string][]string `json:"metric_label_values,omitempty"`
 	TraceBloom        []byte              `json:"trace_bloom,omitempty"` // Serialized bloom filter for trace_id
 }
+
+// MetricSeriesMeta describes one distinct metric series inside a chunk: the
+// series identity plus the first and last sample times. Chunks written by the
+// ingester carry one of these per series in series.index.json so aggregations
+// like `count by (__name__)` and series discovery never scan sample data.
+type MetricSeriesMeta struct {
+	MetricName string            `json:"metric_name"`
+	Service    string            `json:"service,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	MinTime    time.Time         `json:"min_time"`
+	MaxTime    time.Time         `json:"max_time"`
+}

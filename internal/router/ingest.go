@@ -204,6 +204,9 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 		// Guardian uses standard git backend for ingestion
 		ingestionType = storage.IngestionTypeGit
 	}
+	if ingestionType == storage.IngestionTypeFile && !r.config.AllowLocalIngest {
+		return fmt.Errorf("local filesystem ingestion is disabled on this router (--local-ingest=false)")
+	}
 
 	// All ingestion now produces blob archives by default
 	fetchType := storage.FetchTypeBlob
