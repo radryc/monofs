@@ -142,9 +142,23 @@ func (s *Service) Search(ctx context.Context, req *pb.SearchRequest) (*pb.Search
 		})
 	}
 
+	// Apply the access policy to the hits. This is a no-op when no policy is
+	// configured; in enforce mode denied hits are dropped and anonymous
+	// callers are rejected, in observe mode decisions are only logged.
+	filtered, denied, err := s.applyReadPolicy(ctx, pbResults)
+	if err != nil {
+		return nil, err
+	}
+	totalMatches := results.TotalMatches
+	if denied > 0 {
+		// Keep the reported match count consistent with the hits actually
+		// returned (enforce mode drops hits; observe mode keeps them all).
+		totalMatches = int64(len(filtered))
+	}
+
 	return &pb.SearchResponse{
-		Results:       pbResults,
-		TotalMatches:  results.TotalMatches,
+		Results:       filtered,
+		TotalMatches:  totalMatches,
 		FilesSearched: results.FilesSearched,
 		DurationMs:    time.Since(start).Milliseconds(),
 		Truncated:     results.Truncated,
