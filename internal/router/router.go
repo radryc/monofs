@@ -87,6 +87,17 @@ type RouterConfig struct {
 	// not own are rejected, requiring a non-direct (PR) strategy. Defaults
 	// off so existing deployments are unchanged.
 	OwnershipGateEnabled bool
+
+	// Access policy (repo-managed ACL): when AccessPolicyURL or
+	// AccessPolicyFile is set, the router loads a compiled access policy and
+	// filters UI/API reads for partitions and MonoFS display paths. Enforcement
+	// is opt-in via AccessEnforce (default observe-only).
+	AccessPolicyURL        string
+	AccessPolicyFile       string
+	AccessPolicyToken      string
+	AccessPolicyInterval   time.Duration
+	AccessEnforce          bool
+	AccessPolicyServeToken string
 }
 
 // RouterPeer identifies another router instance to aggregate UI data from.
@@ -246,6 +257,10 @@ type Router struct {
 	authzEnforceIngest bool
 	breakGlassAdmins   map[string]bool
 	serviceIdentity    authz.Identity
+
+	// Access policy (repo-managed ACL) for UI/API read filtering.
+	accessPolicyMu sync.RWMutex
+	accessPolicy   *accessPolicyState
 
 	// Ownership gate (Phase 3 VCS governance)
 	ownershipResolverFull *authz.OwnershipResolver // concrete resolver (OwnersOf, Governed)
