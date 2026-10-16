@@ -167,6 +167,7 @@ func main() {
 		Logger:        logger,
 		AccessPolicy:  policyLoader,
 		EnforceRead:   *authzEnforceRead,
+		InternalToken: strings.TrimSpace(*token),
 	}
 
 	svc, err := search.NewService(cfg)
