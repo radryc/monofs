@@ -37,6 +37,12 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		"name", req.Name,
 		"resolved_path", path)
 
+	if s.access != nil {
+		if err := s.access.AuthorizeRead(ctx, path); err != nil {
+			return nil, err
+		}
+	}
+
 	// Handle root directory
 	if path == "" {
 		return &pb.LookupResponse{
@@ -247,6 +253,12 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 	serverOpsTotal.WithLabelValues("getattr").Inc()
 	path := req.Path
 	s.logger.Debug("getattr request", "path", path)
+
+	if s.access != nil {
+		if err := s.access.AuthorizeRead(ctx, path); err != nil {
+			return nil, err
+		}
+	}
 
 	// Handle root directory
 	if path == "" {
@@ -514,6 +526,11 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	serverOpsTotal.WithLabelValues("read").Inc()
 	ctx := stream.Context()
 	path := req.Path
+	if s.access != nil {
+		if err := s.access.AuthorizeRead(ctx, path); err != nil {
+			return err
+		}
+	}
 	span := oteltrace.SpanFromContext(ctx)
 	span.SetAttributes(attribute.String("monofs.read.path", path))
 	// Resolve path to (storageID, filePath)

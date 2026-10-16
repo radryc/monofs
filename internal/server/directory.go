@@ -289,6 +289,12 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 	path := req.Path
 	s.logger.Debug("readdir started", "path", path)
 
+	if s.access != nil {
+		if err := s.access.AuthorizeRead(stream.Context(), path); err != nil {
+			return err
+		}
+	}
+
 	// Handle root directory - list all top-level directories (e.g., "github.com")
 	if path == "" {
 		topLevelDirs := make(map[string]bool)

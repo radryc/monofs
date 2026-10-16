@@ -58,6 +58,7 @@ type ShardedClient struct {
 	writable          bool
 	version           string
 	registered        bool
+	token             string
 	heartbeatInterval time.Duration
 	stopHeartbeat     chan struct{}
 	operationsCount   int64 // atomic counter
@@ -86,6 +87,10 @@ type ShardedClientConfig struct {
 	MountPoint string // FUSE mount path
 	Writable   bool   // Whether write mode is enabled
 	Version    string // Client version
+
+	// Token is the bearer token presented to cluster services (storage
+	// nodes verify it and enforce the repo-managed access policy).
+	Token string
 }
 
 // NewShardedClient creates a new sharded client connected to the router.
@@ -120,14 +125,16 @@ func NewShardedClient(ctx context.Context, cfg ShardedClientConfig) (*ShardedCli
 		hostname:             cfg.Hostname,
 		mountPoint:           cfg.MountPoint,
 		writable:             cfg.Writable,
+		token:                cfg.Token,
 		version:              cfg.Version,
 		heartbeatInterval:    30 * time.Second, // Default, may be overridden by router
 	}
 
 	// Connect to router
-	routerConn, err := grpc.NewClient(cfg.RouterAddr,
+	routerDialOpts := append([]grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	}, bearerDialOptions(cfg.Token)...)
+	routerConn, err := grpc.NewClient(cfg.RouterAddr, routerDialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("connect to router: %w", err)
 	}
@@ -196,6 +203,7 @@ func NewDisconnectedClient(cfg ShardedClientConfig) *ShardedClient {
 		hostname:             cfg.Hostname,
 		mountPoint:           cfg.MountPoint,
 		writable:             cfg.Writable,
+		token:                cfg.Token,
 		version:              cfg.Version,
 		heartbeatInterval:    30 * time.Second,
 	}
@@ -434,9 +442,10 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 					"address", node.Address,
 					"healthy", node.Healthy)
 			}
-			conn, err := grpc.NewClient(node.Address,
+			nodeDialOpts := append([]grpc.DialOption{
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
-			)
+			}, bearerDialOptions(sc.token)...)
+			conn, err := grpc.NewClient(node.Address, nodeDialOpts...)
 			if err != nil {
 				// Log error but continue with other nodes
 				if sc.logger != nil {
