@@ -46,6 +46,12 @@ func TestGuardianPathMappingRoundTrip(t *testing.T) {
 			relative:    ".scans/aws-975049940689/.results/scan-1.json",
 		},
 		{
+			name:        "access policy file",
+			logicalPath: "/.access/envs/dev.yaml",
+			displayPath: "guardian-system",
+			relative:    ".access/envs/dev.yaml",
+		},
+		{
 			name:        "doctor catalog file",
 			logicalPath: "/doctor/v1/catalog/manifests/traces/default/2026-04-09/15/trace-1.json",
 			displayPath: "doctor/v1",

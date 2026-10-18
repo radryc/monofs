@@ -70,7 +70,7 @@ func mapGuardianLogicalPath(logicalPath string) (guardianPhysicalPath, error) {
 			RelativePath: relativePath,
 			StorageID:    sharding.GenerateStorageID(displayPath),
 		}, nil
-	case ".queues", ".archive", ".scans", ".pipelines", ".registry":
+	case ".queues", ".archive", ".scans", ".pipelines", ".registry", ".access":
 		displayPath := "guardian-system"
 		relativePath := cleanGuardianRelativePath(trimmed)
 		return guardianPhysicalPath{
@@ -93,7 +93,7 @@ func guardianLogicalPathFromPhysical(displayPath, relativePath string) (string, 
 		if relativePath == "" {
 			return "", fmt.Errorf("guardian-system root cannot be converted without a relative path")
 		}
-		if strings.HasPrefix(relativePath, ".queues/") || strings.HasPrefix(relativePath, ".archive/") || strings.HasPrefix(relativePath, ".scans/") || strings.HasPrefix(relativePath, ".pipelines/") || strings.HasPrefix(relativePath, ".registry/") {
+		if strings.HasPrefix(relativePath, ".queues/") || strings.HasPrefix(relativePath, ".archive/") || strings.HasPrefix(relativePath, ".scans/") || strings.HasPrefix(relativePath, ".pipelines/") || strings.HasPrefix(relativePath, ".registry/") || strings.HasPrefix(relativePath, ".access/") {
 			return "/" + relativePath, nil
 		}
 	case strings.HasPrefix(displayPath, "doctor/"):
