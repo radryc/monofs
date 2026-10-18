@@ -881,6 +881,15 @@ func authorizeGuardianMutation(principal *guardianPrincipal, logicalPath string,
 			}
 			return nil
 		}
+		if strings.HasPrefix(logicalPath, "/.registry/probes/") {
+			trimmed := strings.TrimPrefix(logicalPath, "/.registry/probes/")
+			parts := strings.Split(trimmed, "/")
+			pusherName, ok := strings.CutPrefix(principal.PrincipalID, "guardian-pusher-")
+			if !ok || pusherName == "" || len(parts) < 2 || parts[0] != pusherName {
+				return fmt.Errorf("pusher principal %q may only mutate its own probe snapshots", principal.PrincipalID)
+			}
+			return nil
+		}
 		if strings.HasPrefix(logicalPath, "/.scans/") {
 			trimmed := strings.TrimPrefix(logicalPath, "/.scans/")
 			parts := strings.Split(trimmed, "/")
