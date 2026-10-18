@@ -47,8 +47,11 @@ RUN set -eu; \
 # Copy source code from the local Monofs context.
 COPY . .
 
+ARG OTELC_VERSION=v1.0.0
+RUN GOBIN=/usr/local/bin go install go.opentelemetry.io/otelc/tool/cmd/otelc@${OTELC_VERSION}
+
 # Build the search binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o /monofs-search ./cmd/monofs-search
+RUN CGO_ENABLED=0 GOOS=linux otelc go build -o /monofs-search ./cmd/monofs-search
 
 # Runtime stage
 FROM alpine:3.21
