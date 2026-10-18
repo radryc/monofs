@@ -44,6 +44,12 @@ func TestAuthorizeGuardianMutationPusherRequiresNamespacePrefix(t *testing.T) {
 	if err := authorizeGuardianMutation(scoped, "/.queues/acme/.state/x", false); err != nil {
 		t.Fatalf("scoped pusher denied own state: %v", err)
 	}
+	if err := authorizeGuardianMutation(scoped, "/.registry/probes/acme/doctor.json", false); err != nil {
+		t.Fatalf("scoped pusher denied own probe snapshot: %v", err)
+	}
+	if err := authorizeGuardianMutation(scoped, "/.registry/probes/other/doctor.json", false); err == nil {
+		t.Fatal("scoped pusher must not touch another pusher's probes")
+	}
 	if err := authorizeGuardianMutation(scoped, "/.scans/other/.claims/t.json", false); err == nil {
 		t.Fatal("scoped pusher must not touch another namespace")
 	}
