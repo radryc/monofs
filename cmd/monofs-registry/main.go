@@ -69,15 +69,28 @@ func main() {
 	}
 
 	ctx := context.Background()
-	client, err := registry.NewClient(ctx, registry.ClientConfig{
-		RouterAddr: *routerAddr,
-		Token:      *token,
-		DataNS:     *dataNS,
-		Logger:     logger,
-	})
-	if err != nil {
-		logger.Error("failed to connect to monofs router", "error", err)
-		os.Exit(1)
+	// The registry is deployed together with the router during bootstrap, so
+	// the first GetClusterInfo can race router startup. Retry instead of
+	// exiting (a crash loop would leave image pushes with EOF).
+	var client *registry.Client
+	var err error
+	deadline := time.Now().Add(5 * time.Minute)
+	for attempt := 1; ; attempt++ {
+		client, err = registry.NewClient(ctx, registry.ClientConfig{
+			RouterAddr: *routerAddr,
+			Token:      *token,
+			DataNS:     *dataNS,
+			Logger:     logger,
+		})
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			logger.Error("failed to connect to monofs router", "error", err, "attempts", attempt)
+			os.Exit(1)
+		}
+		logger.Warn("monofs router not ready; retrying", "error", err, "attempt", attempt)
+		time.Sleep(5 * time.Second)
 	}
 	defer client.Close()
 
