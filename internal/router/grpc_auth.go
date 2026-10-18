@@ -11,10 +11,11 @@ import (
 // token on router -> node calls. Storage nodes treat it as a policy bypass so
 // control-plane reads (file viewer, failover sync, rebalance) keep working on
 // clusters with read enforcement. Nil when no token is configured.
+//
+// Callers frequently hold r.mu's write lock here (health checks and ingestion
+// dial nodes while mutating topology), so this must NOT lock r.mu.
 func (r *Router) internalDialOptions() []grpc.DialOption {
-	r.mu.RLock()
-	token := r.internalToken
-	r.mu.RUnlock()
+	token, _ := r.internalTokenValue.Load().(string)
 	if token == "" {
 		return nil
 	}

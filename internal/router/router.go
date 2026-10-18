@@ -262,8 +262,9 @@ type Router struct {
 	breakGlassAdmins   map[string]bool
 	serviceIdentity    authz.Identity
 
-	// internalToken is presented on router -> node calls (policy bypass).
-	internalToken string
+	// internalTokenValue is presented on router -> node calls (policy bypass).
+	// Stored atomically because dial paths run while r.mu is write-locked.
+	internalTokenValue atomic.Value
 
 	// Access policy (repo-managed ACL) for UI/API read filtering.
 	accessPolicyMu sync.RWMutex
@@ -481,8 +482,8 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		stopUI:                    make(chan struct{}),
 		logger:                    logger,
 		whitelist:                 newWhitelistStore(),
-		internalToken:             strings.TrimSpace(cfg.InternalToken),
 	}
+	r.internalTokenValue.Store(strings.TrimSpace(cfg.InternalToken))
 	r.version.Store(1)
 	r.namespaceGeneration.Store(1)
 
