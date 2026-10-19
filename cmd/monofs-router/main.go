@@ -522,13 +522,14 @@ func main() {
 			clientID = "monofs"
 		}
 		waCfg := authz.WebAuthConfig{
-			Issuer:       strings.TrimSpace(*oidcIssuer),
-			ClientID:     clientID,
-			ClientSecret: routerSecret,
-			RedirectURL:  routerRedirect,
-			Verifier:     verifier,
-			RequireLogin: !*devDisableAuth,
-			ExemptPaths:  webAuthExemptPaths,
+			Issuer:        strings.TrimSpace(*oidcIssuer),
+			ClientID:      clientID,
+			ClientSecret:  routerSecret,
+			RedirectURL:   routerRedirect,
+			EndSessionURL: strings.TrimSpace(os.Getenv("MONOFS_ROUTER_OIDC_END_SESSION_URL")),
+			Verifier:      verifier,
+			RequireLogin:  !*devDisableAuth,
+			ExemptPaths:   webAuthExemptPaths,
 		}
 		if routerAuthURL != "" {
 			waCfg.Endpoints.AuthURL = routerAuthURL

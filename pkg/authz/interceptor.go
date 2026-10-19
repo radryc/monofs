@@ -121,7 +121,17 @@ func (a *Authenticator) StreamServerInterceptor() grpc.StreamServerInterceptor {
 // request context.
 func (a *Authenticator) HTTPMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, err := a.authenticate(r.Context(), bearerFromHeader(r.Header.Get("Authorization")), "http:"+r.URL.Path)
+		bearer := bearerFromHeader(r.Header.Get("Authorization"))
+		// Browser sessions are resolved by the outer WebAuthenticator and
+		// placed in the context. Do not overwrite that identity with an
+		// anonymous one when the request has no Authorization header.
+		if bearer == "" {
+			if existing, ok := IdentityFromContext(r.Context()); ok && !existing.IsAnonymous() {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		ctx, err := a.authenticate(r.Context(), bearer, "http:"+r.URL.Path)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

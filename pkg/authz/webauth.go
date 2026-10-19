@@ -38,6 +38,7 @@ func DiscoverEndpoints(ctx context.Context, issuer string, client *http.Client) 
 		AuthorizationEndpoint       string   `json:"authorization_endpoint"`
 		TokenEndpoint               string   `json:"token_endpoint"`
 		DeviceAuthorizationEndpoint string   `json:"device_authorization_endpoint"`
+		EndSessionEndpoint          string   `json:"end_session_endpoint"`
 		ScopesSupported             []string `json:"scopes_supported"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
@@ -47,6 +48,7 @@ func DiscoverEndpoints(ctx context.Context, issuer string, client *http.Client) 
 		AuthURL:         doc.AuthorizationEndpoint,
 		TokenURL:        doc.TokenEndpoint,
 		DeviceAuthURL:   doc.DeviceAuthorizationEndpoint,
+		EndSessionURL:   doc.EndSessionEndpoint,
 		ScopesSupported: doc.ScopesSupported,
 	}, nil
 }
@@ -115,11 +117,12 @@ type sessionStore interface {
 
 // WebAuthConfig configures the browser Authorization Code + PKCE login flow.
 type WebAuthConfig struct {
-	Issuer       string
-	ClientID     string
-	ClientSecret string
-	RedirectURL  string
-	Scopes       []string
+	Issuer        string
+	ClientID      string
+	ClientSecret  string
+	RedirectURL   string
+	EndSessionURL string
+	Scopes        []string
 	// Endpoints may be provided explicitly (tests) or discovered from Issuer.
 	Endpoints OAuthEndpoints
 	// Verifier validates the returned id_token; its audience must be ClientID.
@@ -230,6 +233,9 @@ func NewWebAuthenticator(ctx context.Context, cfg WebAuthConfig) (*WebAuthentica
 		}
 		if len(supportedScopes) == 0 {
 			supportedScopes = eps.ScopesSupported
+		}
+		if cfg.EndSessionURL == "" {
+			cfg.EndSessionURL = eps.EndSessionURL
 		}
 	}
 	cfg.Scopes = filterSupportedScopes(cfg.Scopes, supportedScopes)
@@ -342,13 +348,48 @@ func (w *WebAuthenticator) CallbackHandler(rw http.ResponseWriter, r *http.Reque
 	http.Redirect(rw, r, w.cfg.PostLoginRedirect, http.StatusFound)
 }
 
-// LogoutHandler clears the session.
+// LogoutHandler clears the local session and, when configured, performs
+// RP-initiated logout against the IdP so the browser SSO session is also
+// terminated. Without this, the next /auth/login is silently re-authenticated.
 func (w *WebAuthenticator) LogoutHandler(rw http.ResponseWriter, r *http.Request) {
+	cookieValue := ""
 	if c, err := r.Cookie(w.cfg.CookieName); err == nil {
+		cookieValue = c.Value
 		w.cfg.Sessions.Delete(c.Value)
 	}
 	http.SetCookie(rw, &http.Cookie{Name: w.cfg.CookieName, Path: "/", MaxAge: -1})
+	if endpoint := strings.TrimSpace(w.cfg.EndSessionURL); endpoint != "" {
+		if target, err := url.Parse(endpoint); err == nil {
+			q := target.Query()
+			if cookieValue != "" {
+				q.Set("id_token_hint", cookieValue)
+			}
+			if post := w.postLogoutRedirectURL(); post != "" {
+				q.Set("post_logout_redirect_uri", post)
+			}
+			target.RawQuery = q.Encode()
+			http.Redirect(rw, r, target.String(), http.StatusFound)
+			return
+		}
+	}
 	http.Redirect(rw, r, w.cfg.PostLoginRedirect, http.StatusFound)
+}
+
+// postLogoutRedirectURL returns an absolute post-logout URL derived from the
+// login redirect origin and PostLoginRedirect.
+func (w *WebAuthenticator) postLogoutRedirectURL() string {
+	post := strings.TrimSpace(w.cfg.PostLoginRedirect)
+	if post == "" {
+		post = "/"
+	}
+	if strings.HasPrefix(post, "http://") || strings.HasPrefix(post, "https://") {
+		return post
+	}
+	base, err := url.Parse(w.cfg.RedirectURL)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return ""
+	}
+	return base.Scheme + "://" + base.Host + "/" + strings.TrimPrefix(post, "/")
 }
 
 // identityFromRequest resolves the caller identity from the session cookie, then

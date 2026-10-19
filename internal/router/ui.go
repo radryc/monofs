@@ -145,6 +145,7 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/workspace-sync/jobs", r.handleWorkspaceSyncJobsAPI)
 	mux.HandleFunc("/api/workspace-sync/jobs/", r.handleWorkspaceSyncJobsAPI)
 	mux.HandleFunc("/api/status", r.handleStatus)
+	mux.HandleFunc("/api/auth/me", r.handleAuthMe)
 	mux.HandleFunc("/api/repositories", r.handleRepositoriesList)
 	mux.HandleFunc("/api/routers", r.handleRouters)
 	mux.HandleFunc("/api/rebalance", r.handleRebalance)
@@ -513,6 +514,27 @@ func parseFetchTypeString(s string) pb.SourceType {
 	default:
 		return pb.SourceType_SOURCE_TYPE_BLOB
 	}
+}
+
+// handleAuthMe reports the signed-in caller for the MonoFS UI header.
+func (r *Router) handleAuthMe(w http.ResponseWriter, req *http.Request) {
+	identity, _ := authz.IdentityFromContext(req.Context())
+	display := identity.Email
+	if display == "" {
+		display = identity.Subject
+	}
+	if display == "" {
+		display = identity.ClientID
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"authenticated": !identity.IsAnonymous(),
+		"subject":       identity.Subject,
+		"email":         identity.Email,
+		"groups":        identity.Groups,
+		"client_id":     identity.ClientID,
+		"display":       display,
+	})
 }
 
 func (r *Router) handleStatus(w http.ResponseWriter, req *http.Request) {
