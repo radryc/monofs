@@ -1,25 +1,613 @@
 @import "tailwindcss";
 
-@layer base {
-  :root {
-    --gradient: radial-gradient(1200px circle at 20% -10%, rgba(109, 94, 252, 0.3), transparent 40%),
-                radial-gradient(1200px circle at 90% 10%, rgba(20, 184, 166, 0.25), transparent 45%),
-                linear-gradient(180deg, #0b1120 0%, #0f172a 100%);
-  }
+/* ════════════════════════════════════════════════════════════════════
+   Strata UI themes — shared with Guardian and MonoFS.
+   The five palettes below are the canonical product themes. Keep the
+   token names and values in sync across the three UIs.
+   ════════════════════════════════════════════════════════════════════ */
+:root,
+[data-theme="midnight"] {
+  color-scheme: dark;
+  --ui-bg: #060a14;
+  --ui-panel: #0d1220;
+  --ui-card: #0d1220;
+  --ui-elevated: #151b2b;
+  --ui-input: #0a0f1c;
+  --ui-border: rgba(255, 255, 255, 0.09);
+  --ui-border-strong: rgba(255, 255, 255, 0.14);
+  --ui-text: #e5ecf4;
+  --ui-muted: #9bb0cf;
+  --ui-faint: #566778;
+  --ui-accent: #00ade4;
+  --ui-accent-strong: #0091bf;
+  --ui-accent-contrast: #04121c;
+  --ui-green: #00c369;
+  --ui-amber: #fcb519;
+  --ui-red: #ee5f54;
+  --ui-secondary: #8b7cf6;
+  --ui-secondary-soft: rgba(139, 124, 246, 0.14);
+  --ui-overlay: rgba(0, 173, 228, 0.14);
+  --ui-overlay-border: rgba(0, 173, 228, 0.28);
+  --ui-grid: rgba(148, 163, 184, 0.10);
+  --ui-hover: rgba(255, 255, 255, 0.05);
+  --ui-hover-strong: rgba(255, 255, 255, 0.09);
+  --ui-scrim: rgba(6, 10, 20, 0.72);
+  --ui-scrim-deep: rgba(5, 11, 20, 0.92);
+  --ui-shadow: 0 24px 70px rgba(1, 7, 19, 0.48);
+  --chart-1: #00ade4;
+  --chart-2: #8b7cf6;
+  --chart-3: #00c369;
+  --chart-4: #fcb519;
+  --chart-5: #ee5f54;
+  --chart-6: #22d3ee;
+  --chart-7: #f97316;
+  --chart-8: #a855f7;
+  --chart-grid: rgba(148, 163, 184, 0.10);
+  --chart-text: #95a6c6;
 
+  --color-slate-50: #f8fafc;
+  --color-slate-100: #f1f5f9;
+  --color-slate-200: #e5ecf4;
+  --color-slate-300: #c3d0e0;
+  --color-slate-400: #9bb0cf;
+  --color-slate-500: #566778;
+  --color-slate-600: #2f3a4d;
+  --color-slate-700: #1c2438;
+  --color-slate-800: #151b2b;
+  --color-slate-900: #0d1220;
+  --color-slate-950: #060a14;
+
+  --color-gray-50: #f8fafc;
+  --color-gray-100: #f1f5f9;
+  --color-gray-200: #e5ecf4;
+  --color-gray-300: #c3d0e0;
+  --color-gray-400: #9bb0cf;
+  --color-gray-500: #566778;
+  --color-gray-600: #44505f;
+  --color-gray-700: #2f3a4d;
+  --color-gray-800: #151b2b;
+  --color-gray-900: #0a0f1c;
+  --color-gray-950: #060a14;
+
+  --color-dark-900: #060a14;
+  --color-dark-800: #0d1220;
+  --color-dark-700: #151b2b;
+  --color-dark-600: #1c2438;
+  --color-dark-500: #2a3448;
+
+  --color-violet-200: #bfe9f8;
+  --color-violet-300: #7dd3f0;
+  --color-violet-400: #38bdf8;
+  --color-violet-500: #00ade4;
+  --color-violet-600: #0091bf;
+  --color-violet-700: #00779e;
+
+  --color-sky-200: #bae6fd;
+  --color-sky-300: #7dd3f0;
+  --color-sky-400: #38bdf8;
+  --color-sky-500: #00ade4;
+  --color-sky-600: #0091bf;
+  --color-sky-700: #00779e;
+
+  --color-cyan-300: #67e8f9;
+  --color-cyan-400: #22d3ee;
+  --color-cyan-500: #06b6d4;
+  --color-cyan-600: #0891b2;
+
+  --color-blue-300: #7dd3f0;
+  --color-blue-400: #38bdf8;
+  --color-blue-500: #00ade4;
+  --color-blue-600: #0091bf;
+
+  --color-accent-blue: #00ade4;
+  --color-accent-purple: #8b7cf6;
+  --color-accent-cyan: #14b8a6;
+}
+
+[data-theme="graphite"] {
+  color-scheme: dark;
+  --ui-bg: #0a0b0d;
+  --ui-panel: #131519;
+  --ui-card: #171a1f;
+  --ui-elevated: #1e2229;
+  --ui-input: #0f1115;
+  --ui-border: rgba(255, 255, 255, 0.10);
+  --ui-border-strong: rgba(255, 255, 255, 0.16);
+  --ui-text: #eceff3;
+  --ui-muted: #a5adb8;
+  --ui-faint: #6b7480;
+  --ui-accent: #f59e0b;
+  --ui-accent-strong: #d97706;
+  --ui-accent-contrast: #1a1205;
+  --ui-green: #00c369;
+  --ui-amber: #fcb519;
+  --ui-red: #ee5f54;
+  --ui-secondary: #fbbf24;
+  --ui-secondary-soft: rgba(251, 191, 36, 0.14);
+  --ui-overlay: rgba(245, 158, 11, 0.14);
+  --ui-overlay-border: rgba(245, 158, 11, 0.30);
+  --ui-grid: rgba(255, 255, 255, 0.08);
+  --ui-hover: rgba(255, 255, 255, 0.05);
+  --ui-hover-strong: rgba(255, 255, 255, 0.09);
+  --ui-scrim: rgba(10, 11, 13, 0.72);
+  --ui-scrim-deep: rgba(10, 11, 13, 0.94);
+  --ui-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  --chart-1: #f59e0b;
+  --chart-2: #fbbf24;
+  --chart-3: #00c369;
+  --chart-4: #fcb519;
+  --chart-5: #ee5f54;
+  --chart-6: #c9d0d8;
+  --chart-7: #f97316;
+  --chart-8: #a78bfa;
+  --chart-grid: rgba(255, 255, 255, 0.08);
+  --chart-text: #a5adb8;
+
+  --color-slate-50: #fafafa;
+  --color-slate-100: #f5f6f8;
+  --color-slate-200: #eceff3;
+  --color-slate-300: #c9d0d8;
+  --color-slate-400: #a5adb8;
+  --color-slate-500: #6b7480;
+  --color-slate-600: #3a404a;
+  --color-slate-700: #2b3038;
+  --color-slate-800: #1e2229;
+  --color-slate-900: #131519;
+  --color-slate-950: #0a0b0d;
+
+  --color-gray-50: #fafafa;
+  --color-gray-100: #f5f6f8;
+  --color-gray-200: #eceff3;
+  --color-gray-300: #c9d0d8;
+  --color-gray-400: #a5adb8;
+  --color-gray-500: #6b7480;
+  --color-gray-600: #505863;
+  --color-gray-700: #3a404a;
+  --color-gray-800: #1e2229;
+  --color-gray-900: #0f1115;
+  --color-gray-950: #0a0b0d;
+
+  --color-dark-900: #0a0b0d;
+  --color-dark-800: #131519;
+  --color-dark-700: #1e2229;
+  --color-dark-600: #2b3038;
+  --color-dark-500: #3a404a;
+
+  --color-violet-200: #fde68a;
+  --color-violet-300: #fcd34d;
+  --color-violet-400: #fbbf24;
+  --color-violet-500: #f59e0b;
+  --color-violet-600: #d97706;
+  --color-violet-700: #b45309;
+
+  --color-sky-200: #fde68a;
+  --color-sky-300: #fcd34d;
+  --color-sky-400: #fbbf24;
+  --color-sky-500: #f59e0b;
+  --color-sky-600: #d97706;
+  --color-sky-700: #b45309;
+
+  --color-cyan-300: #fcd34d;
+  --color-cyan-400: #fbbf24;
+  --color-cyan-500: #f59e0b;
+  --color-cyan-600: #d97706;
+
+  --color-blue-300: #fcd34d;
+  --color-blue-400: #fbbf24;
+  --color-blue-500: #f59e0b;
+  --color-blue-600: #d97706;
+
+  --color-accent-blue: #f59e0b;
+  --color-accent-purple: #fbbf24;
+  --color-accent-cyan: #fcd34d;
+}
+
+[data-theme="ocean"] {
+  color-scheme: dark;
+  --ui-bg: #031019;
+  --ui-panel: #06202b;
+  --ui-card: #082835;
+  --ui-elevated: #0b3242;
+  --ui-input: #04161f;
+  --ui-border: rgba(148, 226, 255, 0.12);
+  --ui-border-strong: rgba(148, 226, 255, 0.20);
+  --ui-text: #e6f7ff;
+  --ui-muted: #9cc7d9;
+  --ui-faint: #5f8ea3;
+  --ui-accent: #22d3ee;
+  --ui-accent-strong: #0891b2;
+  --ui-accent-contrast: #02141b;
+  --ui-green: #34d399;
+  --ui-amber: #fbbf24;
+  --ui-red: #fb7185;
+  --ui-secondary: #38bdf8;
+  --ui-secondary-soft: rgba(56, 189, 248, 0.14);
+  --ui-overlay: rgba(34, 211, 238, 0.14);
+  --ui-overlay-border: rgba(34, 211, 238, 0.30);
+  --ui-grid: rgba(148, 226, 255, 0.08);
+  --ui-hover: rgba(148, 226, 255, 0.06);
+  --ui-hover-strong: rgba(148, 226, 255, 0.10);
+  --ui-scrim: rgba(3, 16, 25, 0.72);
+  --ui-scrim-deep: rgba(3, 16, 25, 0.94);
+  --ui-shadow: 0 24px 70px rgba(0, 8, 14, 0.55);
+  --chart-1: #22d3ee;
+  --chart-2: #38bdf8;
+  --chart-3: #34d399;
+  --chart-4: #fbbf24;
+  --chart-5: #fb7185;
+  --chart-6: #2dd4bf;
+  --chart-7: #818cf8;
+  --chart-8: #a78bfa;
+  --chart-grid: rgba(148, 226, 255, 0.10);
+  --chart-text: #9cc7d9;
+
+  --color-slate-50: #f8feff;
+  --color-slate-100: #f0fbff;
+  --color-slate-200: #e6f7ff;
+  --color-slate-300: #c2e5f1;
+  --color-slate-400: #9cc7d9;
+  --color-slate-500: #5f8ea3;
+  --color-slate-600: #185a72;
+  --color-slate-700: #11455a;
+  --color-slate-800: #0b3242;
+  --color-slate-900: #06202b;
+  --color-slate-950: #031019;
+
+  --color-gray-50: #f8feff;
+  --color-gray-100: #f0fbff;
+  --color-gray-200: #e6f7ff;
+  --color-gray-300: #c2e5f1;
+  --color-gray-400: #9cc7d9;
+  --color-gray-500: #5f8ea3;
+  --color-gray-600: #467a91;
+  --color-gray-700: #185a72;
+  --color-gray-800: #0b3242;
+  --color-gray-900: #04161f;
+  --color-gray-950: #031019;
+
+  --color-dark-900: #031019;
+  --color-dark-800: #06202b;
+  --color-dark-700: #082835;
+  --color-dark-600: #0b3242;
+  --color-dark-500: #11455a;
+
+  --color-violet-200: #bae6fd;
+  --color-violet-300: #7dd3fc;
+  --color-violet-400: #38bdf8;
+  --color-violet-500: #22d3ee;
+  --color-violet-600: #0891b2;
+  --color-violet-700: #0e7490;
+
+  --color-sky-200: #bae6fd;
+  --color-sky-300: #7dd3fc;
+  --color-sky-400: #38bdf8;
+  --color-sky-500: #22d3ee;
+  --color-sky-600: #0891b2;
+  --color-sky-700: #0e7490;
+
+  --color-cyan-300: #67e8f9;
+  --color-cyan-400: #22d3ee;
+  --color-cyan-500: #06b6d4;
+  --color-cyan-600: #0891b2;
+
+  --color-blue-300: #7dd3fc;
+  --color-blue-400: #38bdf8;
+  --color-blue-500: #22d3ee;
+  --color-blue-600: #0891b2;
+
+  --color-accent-blue: #22d3ee;
+  --color-accent-purple: #38bdf8;
+  --color-accent-cyan: #2dd4bf;
+}
+
+[data-theme="forest"] {
+  color-scheme: dark;
+  --ui-bg: #07120c;
+  --ui-panel: #0b1d13;
+  --ui-card: #10281a;
+  --ui-elevated: #153524;
+  --ui-input: #08170e;
+  --ui-border: rgba(160, 230, 190, 0.12);
+  --ui-border-strong: rgba(160, 230, 190, 0.20);
+  --ui-text: #e8f5ec;
+  --ui-muted: #9bc7ad;
+  --ui-faint: #5f8a6f;
+  --ui-accent: #34d399;
+  --ui-accent-strong: #059669;
+  --ui-accent-contrast: #04140b;
+  --ui-green: #4ade80;
+  --ui-amber: #fbbf24;
+  --ui-red: #fb7185;
+  --ui-secondary: #6ee7b7;
+  --ui-secondary-soft: rgba(110, 231, 183, 0.14);
+  --ui-overlay: rgba(52, 211, 153, 0.14);
+  --ui-overlay-border: rgba(52, 211, 153, 0.30);
+  --ui-grid: rgba(160, 230, 190, 0.08);
+  --ui-hover: rgba(160, 230, 190, 0.06);
+  --ui-hover-strong: rgba(160, 230, 190, 0.10);
+  --ui-scrim: rgba(7, 18, 12, 0.72);
+  --ui-scrim-deep: rgba(7, 18, 12, 0.94);
+  --ui-shadow: 0 24px 70px rgba(0, 12, 5, 0.55);
+  --chart-1: #34d399;
+  --chart-2: #6ee7b7;
+  --chart-3: #4ade80;
+  --chart-4: #fbbf24;
+  --chart-5: #fb7185;
+  --chart-6: #2dd4bf;
+  --chart-7: #a3e635;
+  --chart-8: #a78bfa;
+  --chart-grid: rgba(160, 230, 190, 0.10);
+  --chart-text: #9bc7ad;
+
+  --color-slate-50: #f8fdfa;
+  --color-slate-100: #f2fbf6;
+  --color-slate-200: #e8f5ec;
+  --color-slate-300: #c2e5cf;
+  --color-slate-400: #9bc7ad;
+  --color-slate-500: #5f8a6f;
+  --color-slate-600: #275c3e;
+  --color-slate-700: #1d4730;
+  --color-slate-800: #153524;
+  --color-slate-900: #0b1d13;
+  --color-slate-950: #07120c;
+
+  --color-gray-50: #f8fdfa;
+  --color-gray-100: #f2fbf6;
+  --color-gray-200: #e8f5ec;
+  --color-gray-300: #c2e5cf;
+  --color-gray-400: #9bc7ad;
+  --color-gray-500: #5f8a6f;
+  --color-gray-600: #467a57;
+  --color-gray-700: #275c3e;
+  --color-gray-800: #153524;
+  --color-gray-900: #08170e;
+  --color-gray-950: #07120c;
+
+  --color-dark-900: #07120c;
+  --color-dark-800: #0b1d13;
+  --color-dark-700: #10281a;
+  --color-dark-600: #153524;
+  --color-dark-500: #1d4730;
+
+  --color-violet-200: #a7f3d0;
+  --color-violet-300: #6ee7b7;
+  --color-violet-400: #34d399;
+  --color-violet-500: #10b981;
+  --color-violet-600: #059669;
+  --color-violet-700: #047857;
+
+  --color-sky-200: #a7f3d0;
+  --color-sky-300: #6ee7b7;
+  --color-sky-400: #34d399;
+  --color-sky-500: #10b981;
+  --color-sky-600: #059669;
+  --color-sky-700: #047857;
+
+  --color-cyan-300: #6ee7b7;
+  --color-cyan-400: #34d399;
+  --color-cyan-500: #10b981;
+  --color-cyan-600: #059669;
+
+  --color-blue-300: #6ee7b7;
+  --color-blue-400: #34d399;
+  --color-blue-500: #10b981;
+  --color-blue-600: #059669;
+
+  --color-accent-blue: #34d399;
+  --color-accent-purple: #6ee7b7;
+  --color-accent-cyan: #2dd4bf;
+}
+
+[data-theme="daylight"] {
+  color-scheme: light;
+  --ui-bg: #f4f6fa;
+  --ui-panel: #ffffff;
+  --ui-card: #ffffff;
+  --ui-elevated: #eef1f6;
+  --ui-input: #ffffff;
+  --ui-border: rgba(15, 23, 42, 0.12);
+  --ui-border-strong: rgba(15, 23, 42, 0.20);
+  --ui-text: #111827;
+  --ui-muted: #4b5563;
+  --ui-faint: #6b7280;
+  --ui-accent: #0284c7;
+  --ui-accent-strong: #0369a1;
+  --ui-accent-contrast: #ffffff;
+  --ui-green: #059669;
+  --ui-amber: #d97706;
+  --ui-red: #dc2626;
+  --ui-secondary: #7c3aed;
+  --ui-secondary-soft: rgba(124, 58, 237, 0.10);
+  --ui-overlay: rgba(2, 132, 199, 0.10);
+  --ui-overlay-border: rgba(2, 132, 199, 0.28);
+  --ui-grid: rgba(15, 23, 42, 0.10);
+  --ui-hover: rgba(15, 23, 42, 0.05);
+  --ui-hover-strong: rgba(15, 23, 42, 0.09);
+  --ui-scrim: rgba(244, 246, 250, 0.82);
+  --ui-scrim-deep: rgba(244, 246, 250, 0.94);
+  --ui-shadow: 0 20px 50px rgba(15, 23, 42, 0.12);
+  --chart-1: #0284c7;
+  --chart-2: #7c3aed;
+  --chart-3: #059669;
+  --chart-4: #d97706;
+  --chart-5: #dc2626;
+  --chart-6: #0e7490;
+  --chart-7: #ea580c;
+  --chart-8: #9333ea;
+  --chart-grid: rgba(15, 23, 42, 0.10);
+  --chart-text: #4b5563;
+
+  --color-slate-50: #000000;
+  --color-slate-100: #0b1220;
+  --color-slate-200: #111827;
+  --color-slate-300: #374151;
+  --color-slate-400: #4b5563;
+  --color-slate-500: #6b7280;
+  --color-slate-600: #c3cbd8;
+  --color-slate-700: #dbe1ea;
+  --color-slate-800: #eef1f6;
+  --color-slate-900: #ffffff;
+  --color-slate-950: #f4f6fa;
+
+  --color-gray-50: #000000;
+  --color-gray-100: #0b1220;
+  --color-gray-200: #111827;
+  --color-gray-300: #374151;
+  --color-gray-400: #4b5563;
+  --color-gray-500: #6b7280;
+  --color-gray-600: #9ca3af;
+  --color-gray-700: #dbe1ea;
+  --color-gray-800: #eef1f6;
+  --color-gray-900: #ffffff;
+  --color-gray-950: #f4f6fa;
+
+  --color-dark-900: #f4f6fa;
+  --color-dark-800: #ffffff;
+  --color-dark-700: #eef1f6;
+  --color-dark-600: #dbe1ea;
+  --color-dark-500: #c3cbd8;
+
+  --color-violet-200: #bfdbfe;
+  --color-violet-300: #0369a1;
+  --color-violet-400: #0284c7;
+  --color-violet-500: #0369a1;
+  --color-violet-600: #075985;
+  --color-violet-700: #075985;
+
+  --color-sky-200: #bfdbfe;
+  --color-sky-300: #0369a1;
+  --color-sky-400: #0284c7;
+  --color-sky-500: #0369a1;
+  --color-sky-600: #075985;
+  --color-sky-700: #075985;
+
+  --color-cyan-300: #0e7490;
+  --color-cyan-400: #0891b2;
+  --color-cyan-500: #0e7490;
+  --color-cyan-600: #0e7490;
+
+  --color-blue-300: #1d4ed8;
+  --color-blue-400: #2563eb;
+  --color-blue-500: #1d4ed8;
+  --color-blue-600: #1d4ed8;
+
+  --color-accent-blue: #0284c7;
+  --color-accent-purple: #7c3aed;
+  --color-accent-cyan: #0e7490;
+}
+
+/* Semantic aliases consumed by the existing Doctor stylesheet. */
+:root,
+[data-theme] {
+  --bg: var(--ui-bg);
+  --bg-deep: var(--ui-bg);
+  --bg-elevated: var(--ui-card);
+  --panel: var(--ui-panel);
+  --panel-border: var(--ui-border);
+  --text: var(--ui-text);
+  --muted: var(--ui-muted);
+  --muted-strong: var(--ui-text);
+  --accent: var(--ui-accent);
+  --accent-strong: var(--ui-accent-strong);
+  --accent-soft: var(--ui-overlay);
+  --violet: var(--ui-secondary);
+  --violet-soft: var(--ui-secondary-soft);
+  --teal: var(--ui-green);
+  --teal-soft: rgba(20, 184, 166, 0.14);
+  --ok: var(--ui-green);
+  --warn: var(--ui-amber);
+  --err: var(--ui-red);
+  --info: var(--ui-accent);
+  --grid: var(--ui-grid);
+  --border: var(--ui-border);
+  --shadow: var(--ui-shadow);
+}
+
+:root {
+  --gradient: radial-gradient(1100px circle at 12% -10%, color-mix(in oklab, var(--ui-accent) 16%, transparent), transparent 42%),
+              radial-gradient(900px circle at 95% 5%, color-mix(in oklab, var(--ui-secondary) 12%, transparent), transparent 48%);
+}
+
+@layer base {
   html, body, #app {
     height: 100%;
   }
 
   body {
-    background: var(--gradient);
+    background-color: var(--ui-bg);
+    background-image: var(--gradient);
+    background-attachment: fixed;
     min-height: 100vh;
-    color: rgb(226 232 240);
+    color: var(--ui-text);
     font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    transition: background-color 0.15s ease, color 0.15s ease;
   }
 
   ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-track { background: rgba(15,23,42,0.5); }
-  ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.3); border-radius: 4px; }
-  ::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,0.5); }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--ui-border-strong); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--ui-muted); }
+  ::selection { background: var(--ui-overlay-border); color: var(--ui-text); }
 }
+
+/* ── Theme picker (shared with Guardian / Doctor) ──── */
+.app-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 48px;
+  padding: 0 24px;
+  background: color-mix(in oklab, var(--ui-panel) 92%, transparent);
+  border-bottom: 1px solid var(--ui-border);
+  backdrop-filter: blur(12px);
+}
+
+.app-topbar__crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ui-muted);
+}
+
+.app-topbar__sep { color: var(--ui-faint); }
+.app-topbar__title { color: var(--ui-text); font-weight: 600; }
+
+.theme-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 4px 0 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 999px;
+  color: var(--ui-muted);
+  background: var(--ui-elevated);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.theme-picker:hover { border-color: var(--ui-border-strong); }
+.theme-picker-swatch {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--ui-accent);
+  box-shadow: 0 0 0 1px var(--ui-border-strong) inset;
+}
+.theme-picker select {
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ui-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  width: auto;
+  padding: 0 2px;
+}
+.theme-picker select option { background: var(--ui-panel); color: var(--ui-text); }

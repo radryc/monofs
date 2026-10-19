@@ -62,7 +62,12 @@ RUN set -eu; \
 # Copy source after dependency download for better layer caching.
 COPY . .
 
-ARG OTELC_VERSION=v1.0.0
+# otelc v1.0.0 pins the pre-rename module path
+# (github.com/open-telemetry/opentelemetry-go-compile-instrumentation),
+# which fails go mod tidy because that tag declares go.opentelemetry.io/otelc.
+# v1.0.1 fixes the pinned path and keeps the instrumentation deps compatible
+# with this module's OpenTelemetry log API.
+ARG OTELC_VERSION=v1.0.1
 RUN GOBIN=/usr/local/bin go install go.opentelemetry.io/otelc/tool/cmd/otelc@${OTELC_VERSION}
 COPY --from=router-ui-builder /ui/dist ./internal/router/ui/dist
 

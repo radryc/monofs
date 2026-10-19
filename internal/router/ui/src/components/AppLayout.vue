@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterView, RouterLink, useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import ToastContainer from './ToastContainer.vue'
+import ThemePicker from './ThemePicker.vue'
 import {
   LayoutDashboard, Server, Users, Zap, GitBranch,
   BookOpen, Upload, Search, Layers, Download, Package, Container, SlidersHorizontal,
@@ -11,13 +12,24 @@ import {
 
 const route = useRoute()
 const store = useAppStore()
+const pageTitle = computed(() => (route.meta.title as string | undefined) ?? 'Dashboard')
 const logoSrc = import.meta.env.BASE_URL + 'static/static/monofs.png'
+const currentUser = ref('')
 
 onMounted(async () => {
   if (store.version) return
   try {
     const data = await fetch('/api/status').then(r => r.json())
     if (data?.version?.version) store.setVersion(data.version.version)
+  } catch {}
+})
+
+onMounted(async () => {
+  try {
+    const res = await fetch('/api/auth/me')
+    if (!res.ok) return
+    const user = await res.json()
+    currentUser.value = user.display || user.email || user.subject || user.client_id || ''
   } catch {}
 })
 
@@ -72,7 +84,7 @@ const navItems = [
       </nav>
 
       <!-- Footer -->
-      <div class="px-5 py-4 border-t border-slate-700/40">
+      <div class="shrink-0 px-5 py-4 border-t border-slate-700/40 space-y-3">
         <div class="text-xs text-slate-500">
           <div>MonoFS Router</div>
         </div>
@@ -81,6 +93,18 @@ const navItems = [
 
     <!-- Main content -->
     <main class="flex-1 ml-64 min-h-screen">
+      <header class="app-topbar">
+        <div class="app-topbar__crumb">
+          <span>MonoFS</span>
+          <span class="app-topbar__sep">/</span>
+          <strong class="app-topbar__title">{{ pageTitle }}</strong>
+        </div>
+        <div class="flex items-center gap-3">
+          <span v-if="currentUser" class="text-xs text-slate-400" title="Signed in">{{ currentUser }}</span>
+          <ThemePicker />
+          <a href="/auth/logout" class="text-xs font-medium text-slate-400 hover:text-slate-200 no-underline" title="Sign out">Sign out</a>
+        </div>
+      </header>
       <div class="p-6 lg:p-8 max-w-[1600px]">
         <RouterView />
       </div>

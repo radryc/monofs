@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -66,7 +67,8 @@ func ShouldInstrumentGRPCServerRPC(info *stats.RPCTagInfo) bool {
 }
 
 func Setup(ctx context.Context, cfg Config) (*Handle, error) {
-	if strings.TrimSpace(cfg.Endpoint) == "" {
+	endpoint := normalizeEndpoint(cfg.Endpoint)
+	if endpoint == "" {
 		return &Handle{}, nil
 	}
 	res, err := resource.New(ctx,
@@ -78,9 +80,9 @@ func Setup(ctx context.Context, cfg Config) (*Handle, error) {
 		return nil, fmt.Errorf("build telemetry resource: %w", err)
 	}
 
-	traceOpts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(cfg.Endpoint)}
-	metricOpts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(cfg.Endpoint)}
-	logOpts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(cfg.Endpoint)}
+	traceOpts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(endpoint)}
+	metricOpts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(endpoint)}
+	logOpts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(endpoint)}
 	if cfg.Insecure {
 		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
 		metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())
@@ -260,6 +262,17 @@ func slogValueToLogValue(value slog.Value) apilog.Value {
 	default:
 		return apilog.StringValue(fmt.Sprint(value.Any()))
 	}
+}
+
+// normalizeEndpoint converts the standard OTLP URL form
+// (http://collector:4317) into the host:port form expected by the gRPC
+// exporter options.
+func normalizeEndpoint(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if parsed, err := url.Parse(endpoint); err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		return parsed.Host
+	}
+	return endpoint
 }
 
 func buildResourceAttributes(cfg Config) []attribute.KeyValue {

@@ -1,10 +1,18 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="midnight">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="%BASE_URL%static/static/monofs.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ui</title>
+    <title>MonoFS</title>
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem("monofs.theme");
+          if (theme) document.documentElement.setAttribute("data-theme", theme);
+        } catch (e) { /* localStorage unavailable */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>
