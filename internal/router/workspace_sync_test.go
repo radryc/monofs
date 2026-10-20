@@ -24,6 +24,8 @@ type workspaceSyncTestFetcherServer struct {
 	pb.UnimplementedBlobFetcherServer
 	pb.UnimplementedRepoSyncWorkerServer
 
+	mu                      sync.Mutex
+	probeRequests           []*pb.ProbeWorkspaceRefreshRequest
 	responses               []*pb.RepoSyncProgress
 	publishResponses        []*pb.RepoSyncProgress
 	commitPushResponses     []*pb.RepoSyncProgress
@@ -81,6 +83,9 @@ func startWorkspaceSyncLedgerNode(t *testing.T) (pb.MonoFSClient, *workspaceSync
 }
 
 func (s *workspaceSyncTestFetcherServer) ProbeWorkspaceRefresh(req *pb.ProbeWorkspaceRefreshRequest, stream grpc.ServerStreamingServer[pb.RepoSyncProgress]) error {
+	s.mu.Lock()
+	s.probeRequests = append(s.probeRequests, req)
+	s.mu.Unlock()
 	for _, resp := range s.responses {
 		if err := stream.Send(resp); err != nil {
 			return err

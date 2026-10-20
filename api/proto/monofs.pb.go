@@ -4382,12 +4382,15 @@ func (x *BuildDirectoryIndexesResponse) GetMessage() string {
 }
 
 type WorkspaceRepositoryRef struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	StorageId     string                 `protobuf:"bytes,1,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
-	DisplayPath   string                 `protobuf:"bytes,2,opt,name=display_path,json=displayPath,proto3" json:"display_path,omitempty"`
-	RepoUrl       string                 `protobuf:"bytes,3,opt,name=repo_url,json=repoUrl,proto3" json:"repo_url,omitempty"`
-	Branch        string                 `protobuf:"bytes,4,opt,name=branch,proto3" json:"branch,omitempty"`
-	BaseCommit    string                 `protobuf:"bytes,5,opt,name=base_commit,json=baseCommit,proto3" json:"base_commit,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	StorageId   string                 `protobuf:"bytes,1,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
+	DisplayPath string                 `protobuf:"bytes,2,opt,name=display_path,json=displayPath,proto3" json:"display_path,omitempty"`
+	RepoUrl     string                 `protobuf:"bytes,3,opt,name=repo_url,json=repoUrl,proto3" json:"repo_url,omitempty"`
+	Branch      string                 `protobuf:"bytes,4,opt,name=branch,proto3" json:"branch,omitempty"`
+	BaseCommit  string                 `protobuf:"bytes,5,opt,name=base_commit,json=baseCommit,proto3" json:"base_commit,omitempty"`
+	// metadata_only asks the fetcher to resolve the remote branch head without
+	// cloning or fetching objects. Used by the repository watcher.
+	MetadataOnly  bool `protobuf:"varint,6,opt,name=metadata_only,json=metadataOnly,proto3" json:"metadata_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4455,6 +4458,13 @@ func (x *WorkspaceRepositoryRef) GetBaseCommit() string {
 		return x.BaseCommit
 	}
 	return ""
+}
+
+func (x *WorkspaceRepositoryRef) GetMetadataOnly() bool {
+	if x != nil {
+		return x.MetadataOnly
+	}
+	return false
 }
 
 type WorkspaceBundleChunk struct {
@@ -12320,7 +12330,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x1dBuildDirectoryIndexesResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12/\n" +
 	"\x13directories_indexed\x18\x02 \x01(\x03R\x12directoriesIndexed\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage\"\xae\x01\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"\xd3\x01\n" +
 	"\x16WorkspaceRepositoryRef\x12\x1d\n" +
 	"\n" +
 	"storage_id\x18\x01 \x01(\tR\tstorageId\x12!\n" +
@@ -12328,7 +12338,8 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\brepo_url\x18\x03 \x01(\tR\arepoUrl\x12\x16\n" +
 	"\x06branch\x18\x04 \x01(\tR\x06branch\x12\x1f\n" +
 	"\vbase_commit\x18\x05 \x01(\tR\n" +
-	"baseCommit\"\x83\x01\n" +
+	"baseCommit\x12#\n" +
+	"\rmetadata_only\x18\x06 \x01(\bR\fmetadataOnly\"\x83\x01\n" +
 	"\x14WorkspaceBundleChunk\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x17\n" +

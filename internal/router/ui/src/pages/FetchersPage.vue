@@ -320,12 +320,15 @@ const storageObjectsHealthy = computed(() => storageObjects.value?.healthy ?? fa
           <div class="text-lg font-semibold" :class="autoRefreshWorker.enabled ? 'text-emerald-400' : 'text-slate-500'">
             {{ autoRefreshWorker.enabled ? 'Watching' : 'Disabled' }}
           </div>
-          <div class="text-slate-500">owner {{ autoRefreshWorker.owner || 'all routers' }}</div>
+          <div class="text-slate-500">
+            shard {{ autoRefreshWorker.shard ?? 0 }}/{{ autoRefreshWorker.shards ?? 1 }}
+            · {{ autoRefreshWorker.lease_held ? 'lease held' : 'no lease' }}
+          </div>
         </div>
         <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5">
           <div class="text-slate-400">Tracked</div>
           <div class="text-lg font-semibold text-slate-200">{{ formatNumber(autoRefreshWorker.tracked ?? 0) }}</div>
-          <div class="text-slate-500">{{ autoRefreshWorker.active ?? 0 }} probing</div>
+          <div class="text-slate-500">{{ autoRefreshWorker.active ?? 0 }} probing · {{ autoRefreshWorker.scheduled ?? 0 }} scheduled</div>
         </div>
         <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5">
           <div class="text-slate-400">Interval</div>
