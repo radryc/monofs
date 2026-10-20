@@ -177,3 +177,20 @@ func TestAutoRefreshStatsIncludesRepositoryTrace(t *testing.T) {
 		t.Fatalf("repository trace = %#v", repos[0])
 	}
 }
+
+func TestAutoRefreshOwnerMatches(t *testing.T) {
+	cases := []struct {
+		owner, router string
+		want          bool
+	}{
+		{"", "router-a", true},
+		{"router-a", "router-a", true},
+		{" router-a ", "router-a", true},
+		{"router-a", "router-b", false},
+	}
+	for _, c := range cases {
+		if got := autoRefreshOwnerMatches(c.owner, c.router); got != c.want {
+			t.Errorf("autoRefreshOwnerMatches(%q,%q) = %v, want %v", c.owner, c.router, got, c.want)
+		}
+	}
+}
