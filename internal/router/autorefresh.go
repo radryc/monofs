@@ -79,7 +79,7 @@ func (r *ingestedRepo) markProbeError(errText string, at time.Time, next time.Ti
 	r.refreshMu.Unlock()
 }
 
-func (r *ingestedRepo) markAdvance(at time.Time, next time.Time, reingested bool) {
+func (r *ingestedRepo) markAdvance(at time.Time, next time.Time) {
 	if r == nil {
 		return
 	}
@@ -90,9 +90,15 @@ func (r *ingestedRepo) markAdvance(at time.Time, next time.Time, reingested bool
 	r.refreshState.lastChangeAt = at
 	r.refreshState.nextProbeAt = next
 	r.refreshState.changesTotal++
-	if reingested {
-		r.refreshState.reingestsTotal++
+	r.refreshMu.Unlock()
+}
+
+func (r *ingestedRepo) markReingest() {
+	if r == nil {
+		return
 	}
+	r.refreshMu.Lock()
+	r.refreshState.reingestsTotal++
 	r.refreshMu.Unlock()
 }
 
@@ -666,6 +672,12 @@ func (w *autoRefreshWorker) applyResult(storageID string, repo *ingestedRepo, st
 		w.incProbe("advanced")
 		routerAutoRefreshProbesTotal.WithLabelValues("advanced").Inc()
 		w.resetBackoff(storageID)
+		next := w.nextInterval(repo, now, true)
+		// Record the advance before starting the asynchronous re-ingest: the
+		// re-ingest replaces the tracked repo and copies the current trace.
+		if repo != nil {
+			repo.markAdvance(now, now.Add(next))
+		}
 		// Fencing is best effort: a probe may have started while this worker
 		// held the shard lease and finish after it was lost. Do not enqueue a
 		// new write unless the lease is still held (manual checks are explicit
@@ -679,10 +691,11 @@ func (w *autoRefreshWorker) applyResult(storageID string, repo *ingestedRepo, st
 		if reingested {
 			routerAutoRefreshReingestsTotal.Inc()
 			w.incReingest()
-		}
-		next := w.nextInterval(repo, now, true)
-		if repo != nil {
-			repo.markAdvance(now, now.Add(next), reingested)
+			if current := w.repoFor(storageID); current != nil {
+				current.markReingest()
+			} else if repo != nil {
+				repo.markReingest()
+			}
 		}
 		w.scheduleAt(storageID, now.Add(next))
 	case pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED:
