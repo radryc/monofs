@@ -18,6 +18,7 @@ type fakeLeaseAPI struct {
 	update    int
 	lastPath  string
 	lastToken string
+	paths     []string
 }
 
 func (f *fakeLeaseAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -25,6 +26,7 @@ func (f *fakeLeaseAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	f.lastPath = r.URL.Path
 	f.lastToken = r.Header.Get("Authorization")
+	f.paths = append(f.paths, r.Method+" "+r.URL.Path)
 	switch r.Method {
 	case http.MethodGet:
 		if f.lease == nil {
@@ -106,6 +108,15 @@ func TestElectorAcquireAndRenew(t *testing.T) {
 	if api.lastPath != "/apis/coordination.k8s.io/v1/namespaces/default/leases/test-lease" {
 		t.Fatalf("last path = %q", api.lastPath)
 	}
+	foundCollectionPost := false
+	for _, path := range api.paths {
+		if path == "POST /apis/coordination.k8s.io/v1/namespaces/default/leases" {
+			foundCollectionPost = true
+		}
+	}
+	if !foundCollectionPost {
+		t.Fatalf("paths = %q, want a collection POST", api.paths)
+	}
 }
 
 func TestElectorRespectsActiveLease(t *testing.T) {
@@ -176,5 +187,33 @@ func TestShardFor(t *testing.T) {
 		if got < 0 || got >= 8 {
 			t.Fatalf("shard = %d, want 0..7", got)
 		}
+	}
+}
+
+func TestElectorTakeoverAfterExpiry(t *testing.T) {
+	api := &fakeLeaseAPI{}
+	server := httptest.NewServer(api)
+	defer server.Close()
+
+	a := newTestElector(t, server, "router-a", time.Second)
+	b := newTestElector(t, server, "router-b", time.Second)
+	if ok, err := a.tryAcquire(context.Background()); err != nil || !ok {
+		t.Fatalf("a acquire = %v, %v", ok, err)
+	}
+	if ok, err := b.tryAcquire(context.Background()); err != nil || ok {
+		t.Fatalf("b acquired an active lease: %v, %v", ok, err)
+	}
+
+	api.mu.Lock()
+	api.lease.Spec.RenewTime = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	api.mu.Unlock()
+	if ok, err := b.tryAcquire(context.Background()); err != nil || !ok {
+		t.Fatalf("b takeover = %v, %v", ok, err)
+	}
+	api.mu.Lock()
+	holder := api.lease.Spec.HolderIdentity
+	api.mu.Unlock()
+	if holder != "router-b" {
+		t.Fatalf("holder = %q, want router-b", holder)
 	}
 }

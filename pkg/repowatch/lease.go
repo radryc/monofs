@@ -39,6 +39,9 @@ type LeaseConfig struct {
 	CAFile    string
 	Insecure  bool
 	Client    *http.Client
+	// OnError is called when acquisition fails. It is intended for logging;
+	// callers should keep it cheap and non-blocking.
+	OnError func(error)
 }
 
 // Enabled reports whether enough configuration is present to attempt the
@@ -135,8 +138,15 @@ func NewElector(cfg LeaseConfig) (*Elector, error) {
 				}
 			}
 		}
+		timeout := cfg.Renew / 2
+		if timeout < time.Second {
+			timeout = time.Second
+		}
+		if timeout > cfg.Duration/2 {
+			timeout = cfg.Duration / 2
+		}
 		client = &http.Client{
-			Timeout:   cfg.Duration,
+			Timeout:   timeout,
 			Transport: &http.Transport{TLSClientConfig: tlsConfig},
 		}
 	}
@@ -155,6 +165,9 @@ func (e *Elector) Run(ctx context.Context, onLeader func(context.Context), onLos
 			return err
 		}
 		acquired, err := e.tryAcquire(ctx)
+		if err != nil && e.cfg.OnError != nil {
+			e.cfg.OnError(err)
+		}
 		if err == nil && acquired {
 			leaderCtx, cancel := context.WithCancel(ctx)
 			go onLeader(leaderCtx)
@@ -271,10 +284,14 @@ func (e *Elector) leaseObject(acquire, renew time.Time) *leaseObject {
 	}
 }
 
-func (e *Elector) leaseURL() string {
+func (e *Elector) leaseCollectionURL() string {
 	return strings.TrimRight(e.cfg.APIServer, "/") +
 		"/apis/coordination.k8s.io/v1/namespaces/" + url.PathEscape(e.cfg.Namespace) +
-		"/leases/" + url.PathEscape(e.cfg.Name)
+		"/leases"
+}
+
+func (e *Elector) leaseURL() string {
+	return e.leaseCollectionURL() + "/" + url.PathEscape(e.cfg.Name)
 }
 
 func (e *Elector) getLease(ctx context.Context) (*leaseObject, int, error) {
@@ -310,7 +327,11 @@ func (e *Elector) writeLease(ctx context.Context, method string, obj *leaseObjec
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, e.leaseURL(), bytes.NewReader(payload))
+	target := e.leaseURL()
+	if method == http.MethodPost {
+		target = e.leaseCollectionURL()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}

@@ -6,14 +6,20 @@ MonoFS watcher, its Kubernetes Lease, and the Guardian repo-import loop.
 ## 1. Build and load images
 
 - [ ] Build `monofs-router` from the current tree.
+- [ ] Build `monofs-fetcher` from the current tree. The metadata-only probe
+      lives in the fetcher; an old fetcher will silently fall back to a clone.
 - [ ] Build `guardiand` from the current tree.
-- [ ] Load both images into the target cluster / registry.
+- [ ] Load all three images into the target cluster / registry.
 - [ ] Confirm the pods use the new image digests, not a cached tag.
+- [ ] If your image pipeline keys off `partitions/_bootstrap/intents/images.yaml`
+      versions, bump the router/fetcher/guardian versions or force the build.
 
 Commands (adjust for your image pipeline):
 
 ```bash
-cd ~/strata/monofs && make image
+cd ~/strata/monofs
+docker build --target router  -t monofs-router:latest  .
+docker build --target fetcher -t monofs-fetcher:latest .
 cd ~/strata/guardian && go build ./cmd/guardiand
 ```
 
@@ -22,13 +28,18 @@ cd ~/strata/guardian && go build ./cmd/guardiand
 - [ ] `monofs` default ServiceAccount can get/list/watch/create/update/patch
       `leases` in the monofs namespace.
 - [ ] The guardian ServiceAccount can do the same in the guardian namespace.
-      The bootstrap guardian SA currently has `cluster-admin`, which covers it.
+      The bootstrap manifest now includes an explicit lease Role/RoleBinding;
+      the guardian SA also has `cluster-admin` today.
 
 The bootstrap manifest is:
 
 ```text
 stratatools/deploy/bootstrap/storage/rbac-repowatch.yaml
 ```
+
+It binds the `default` ServiceAccount. If you set `serviceAccountName` on the
+router pod, update the RoleBinding subject or create an equivalent RoleBinding
+for that account.
 
 ## 3. Deployment environment
 
@@ -57,12 +68,16 @@ Guardian:
 | `GUARDIAN_REPO_IMPORT_INTERVAL` | `30s` |
 | `GUARDIAN_REPO_IMPORT_SHARDS` | `2` (or more) |
 | `GUARDIAN_REPO_IMPORT_LEASE` | `true` |
-| `GUARDIAN_REPO_IMPORT_LEASE_NAME` | `guardian-repo-import` |
+| `GUARDIAN_REPO_IMPORT_LEASE_NAME` | `guardian-repo-import` (leases become `...-0`, `...-1` when shards > 1) |
 
 - [ ] The router has the `repowatch` emptyDir mounted at
       `/var/lib/monofs/repowatch`.
-- [ ] The router deployment has at least 2 replicas if you want lease
-      failover.
+- [ ] At least two router pods are running (`router-a` + `router-b`). Each
+      router competes for every shard lease; a dead router's shards are taken
+      over by the survivor.
+- [ ] `guardiand` keeps its normal replica count. The shipped deployment uses
+      one replica; Kubernetes restarts it and the lease is reacquired. Scale
+      Guardian replicas only if the rest of `guardiand` is HA-safe.
 
 ## 4. Deploy
 
@@ -112,6 +127,16 @@ kubectl -n monofs get lease monofs-repowatch-1 -o yaml
       one overlap.
 
 Repeat for shard 1.
+
+Guardian leases (when shards > 1):
+
+```bash
+kubectl -n guardian get lease guardian-repo-import-0 -o yaml
+kubectl -n guardian get lease guardian-repo-import-1 -o yaml
+```
+
+- [ ] Kill the guardiand pod holding a shard; the restarted pod (or another
+      replica, if configured) acquires it after the lease TTL.
 
 ## 7. Per-repo tracking
 
@@ -188,8 +213,14 @@ Targets to agree before rollout:
 ## 12. Known gaps / next checks
 
 - Repo bundle **deletions** are not pruned by the importer yet.
-- Guardian still reads bundles for repos that have them; a repo-index/event
-  queue is the next scaling step.
+- Guardian still lists all repos and content-compares bundles per shard; a
+  repo-index/event queue is the next scaling step.
+- Per-host probe rate limits are not implemented; tune concurrency and watch
+  for upstream 429/403 responses.
+- Re-ingest fencing is a best-effort lease check; a strict fencing token on the
+  MonoFS write path is a follow-up.
+- The watcher still runs inside the router; a dedicated watcher deployment is
+  an optional follow-up.
 - Production audit/history is not implemented.
 - Webhook automation at org scale (GitHub App / org webhook) is not included.
 - Non-Kubernetes deployments fall back to static shard ownership.

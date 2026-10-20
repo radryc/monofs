@@ -232,4 +232,32 @@ var (
 		Name:      "auto_refresh_backoff_total",
 		Help:      "auto-refresh failures that triggered backoff.",
 	})
+
+	routerAutoRefreshTrackedRepos = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "auto_refresh_tracked_repositories",
+		Help:      "Repositories assigned to this auto-refresh shard.",
+	}, []string{"shard"})
+
+	routerAutoRefreshScheduledRepos = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "auto_refresh_scheduled_repositories",
+		Help:      "Repositories currently in the due-time scheduler heap for this shard.",
+	}, []string{"shard"})
+
+	routerAutoRefreshLeaseHeld = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "auto_refresh_lease_held",
+		Help:      "Whether this shard worker currently holds its Kubernetes Lease (1/0).",
+	}, []string{"shard"})
+
+	routerAutoRefreshNextProbeTimestamp = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "auto_refresh_next_probe_timestamp_seconds",
+		Help:      "Unix timestamp of the next due probe for this shard (0 when idle).",
+	}, []string{"shard"})
 )

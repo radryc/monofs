@@ -1066,6 +1066,7 @@ initComplete:
 		guardianURL:       guardianURL,
 		branch:            ref,
 		commitHash:        commitHash,
+		commitTime:        unixTimeOrZero(commitTime),
 		filesCount:        filesIngested,
 		ingestedAt:        time.Now(),
 		topologyVersion:   r.version.Load(), // Current topology version

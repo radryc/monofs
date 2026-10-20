@@ -89,6 +89,8 @@ export interface AutoRefreshWorkerStats {
   owner?: string
   router?: string
   tracked: number
+  trace_limit?: number
+  trace_truncated?: boolean
   scheduled?: number
   active: number
   last_scan: number

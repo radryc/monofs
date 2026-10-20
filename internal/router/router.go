@@ -396,7 +396,8 @@ type ingestedRepo struct {
 	repoURL     string
 	guardianURL string
 	branch      string
-	commitHash  string // resolved commit at ingest time (base for refresh probes)
+	commitHash  string    // resolved commit at ingest time (base for refresh probes)
+	commitTime  time.Time // upstream commit timestamp, used for adaptive probes
 	filesCount  int64
 	ingestedAt  time.Time
 
@@ -428,6 +429,7 @@ func discoveredIngestedRepo(info *pb.GetRepositoryInfoResponse, topologyVersion 
 		guardianURL:       info.GuardianUrl,
 		branch:            info.Ref,
 		commitHash:        info.CommitHash,
+		commitTime:        unixTimeOrZero(info.CommitTime),
 		filesCount:        0, // Will be updated by health checks
 		ingestedAt:        time.Now(),
 		topologyVersion:   topologyVersion,
@@ -553,7 +555,10 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		r.autoPushWorker.Start()
 	}
 
-	if cfg.AutoRefreshEnabled && autoRefreshOwnerMatches(cfg.AutoRefreshOwner, cfg.RouterName) {
+	// Lease mode must start the workers on every router: the lease, not the
+	// static owner flag, decides who actually probes each shard.
+	ownerMatches := autoRefreshOwnerMatches(cfg.AutoRefreshOwner, cfg.RouterName) || cfg.AutoRefreshLease
+	if cfg.AutoRefreshEnabled && ownerMatches {
 		interval := cfg.AutoRefreshInterval
 		if interval <= 0 {
 			interval = defaultAutoRefreshInterval
