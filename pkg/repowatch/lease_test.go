@@ -40,6 +40,10 @@ func (f *fakeLeaseAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if err := validateLeaseTimes(obj); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		f.create++
 		obj.Metadata.ResourceVersion = fmt.Sprintf("%d", f.create+f.update)
 		f.lease = &obj
@@ -51,6 +55,10 @@ func (f *fakeLeaseAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var obj leaseObject
 		if err := json.NewDecoder(r.Body).Decode(&obj); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := validateLeaseTimes(obj); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -175,6 +183,31 @@ func TestElectorTakesExpiredLease(t *testing.T) {
 	}
 	if api.lease.Spec.LeaseTransitions != 3 {
 		t.Fatalf("transitions = %d, want 3", api.lease.Spec.LeaseTransitions)
+	}
+}
+
+func validateLeaseTimes(obj leaseObject) error {
+	for name, value := range map[string]string{
+		"acquireTime": obj.Spec.AcquireTime,
+		"renewTime":   obj.Spec.RenewTime,
+	} {
+		if value == "" {
+			continue
+		}
+		if _, err := time.Parse(leaseTimeLayout, value); err != nil {
+			return fmt.Errorf("%s %q is not a Kubernetes MicroTime: %w", name, value, err)
+		}
+	}
+	return nil
+}
+
+func TestLeaseTimeUsesMicroseconds(t *testing.T) {
+	got := formatLeaseTime(time.Date(2026, 10, 20, 12, 0, 0, 338123456, time.UTC))
+	if _, err := time.Parse(leaseTimeLayout, got); err != nil {
+		t.Fatalf("formatLeaseTime = %q, not a MicroTime: %v", got, err)
+	}
+	if got != "2026-10-20T12:00:00.338123Z" {
+		t.Fatalf("formatLeaseTime = %q", got)
 	}
 }
 

@@ -432,7 +432,7 @@ func (w *autoRefreshWorker) syncRepos() {
 
 	present := make(map[string]struct{}, len(snapshot))
 	for storageID, repo := range snapshot {
-		if repo == nil || strings.TrimSpace(repo.repoURL) == "" {
+		if !watchableRepo(repo) {
 			continue
 		}
 		if repowatch.ShardFor(storageID, w.shards) != w.shard {
@@ -592,7 +592,7 @@ func (w *autoRefreshWorker) processBatch(ctx context.Context, batch []*watchEntr
 	refIDs := make([]string, 0, len(batch))
 	for _, entry := range batch {
 		repo := w.repoFor(entry.storageID)
-		if repo == nil || strings.TrimSpace(repo.repoURL) == "" {
+		if !watchableRepo(repo) {
 			continue
 		}
 		branch := repo.branch
@@ -863,7 +863,7 @@ func (w *autoRefreshWorker) clearActive(storageID string) {
 // probeRepo probes one repository directly. It is used by tests and by the
 // webhook path, where an immediate probe is preferable to waiting for the heap.
 func (w *autoRefreshWorker) probeRepo(storageID string, repo *ingestedRepo, reason string) {
-	if repo == nil || repo.repoURL == "" {
+	if !watchableRepo(repo) {
 		return
 	}
 	probeStarted := time.Now()
@@ -946,7 +946,7 @@ func (w *autoRefreshWorker) resetBackoff(storageID string) {
 
 func (w *autoRefreshWorker) probeStorageID(storageID string) bool {
 	repo := w.repoFor(storageID)
-	if repo == nil || strings.TrimSpace(repo.repoURL) == "" {
+	if !watchableRepo(repo) {
 		return false
 	}
 	w.mu.Lock()
@@ -979,7 +979,7 @@ func (w *autoRefreshWorker) probeNow(repoURL string) {
 	w.router.mu.RLock()
 	candidates := make([]candidate, 0)
 	for storageID, repo := range w.router.ingestedRepos {
-		if repo != nil && repo.repoURL != "" && sameRepoURL(repo.repoURL, repoURL) {
+		if watchableRepo(repo) && sameRepoURL(repo.repoURL, repoURL) {
 			if repowatch.ShardFor(storageID, w.shards) != w.shard {
 				continue
 			}
@@ -1037,7 +1037,7 @@ func (w *autoRefreshWorker) Stats() map[string]any {
 	snapshot := w.router.ingestedRepoSnapshot()
 	ids := make([]string, 0, len(snapshot))
 	for storageID, repo := range snapshot {
-		if repo == nil || strings.TrimSpace(repo.repoURL) == "" {
+		if !watchableRepo(repo) {
 			continue
 		}
 		if repowatch.ShardFor(storageID, w.shards) != w.shard {
@@ -1216,6 +1216,27 @@ func (w *autoRefreshWorker) record(storageID string) (watchRecord, bool) {
 	return record, ok
 }
 
+// watchableRepo reports whether an ingested repository has a real Git upstream
+// and a resolved base commit. Guardian-path repositories (guardian-path-api,
+// doctor/v1, ...) have no upstream and must not be polled by the watcher.
+func watchableRepo(repo *ingestedRepo) bool {
+	if repo == nil || strings.TrimSpace(repo.commitHash) == "" {
+		return false
+	}
+	url := strings.TrimSpace(repo.repoURL)
+	switch {
+	case strings.HasPrefix(url, "http://"),
+		strings.HasPrefix(url, "https://"),
+		strings.HasPrefix(url, "git@"),
+		strings.HasPrefix(url, "ssh://"),
+		strings.HasPrefix(url, "git://"),
+		strings.HasPrefix(url, "file://"):
+		return true
+	default:
+		return false
+	}
+}
+
 // sameRepoURL compares two repository URLs, normalizing a trailing ".git".
 func sameRepoURL(a, b string) bool {
 	a = strings.TrimSuffix(strings.TrimSpace(a), ".git")
@@ -1253,7 +1274,7 @@ func (r *Router) reingestRepoAsync(storageID, reason, branch string) bool {
 	repo := r.ingestedRepos[storageID]
 	_, inFlight := r.inProgressIngestions[storageID]
 	r.mu.RUnlock()
-	if repo == nil || repo.repoURL == "" || inFlight {
+	if !watchableRepo(repo) || inFlight {
 		return false
 	}
 	if branch == "" {
