@@ -19,6 +19,7 @@ func TestNewShardedClientConfig(t *testing.T) {
 		15*time.Second,
 		logger,
 		true,
+		"test-token",
 	)
 
 	if cfg.RouterAddr != "router.example:9090" {
@@ -38,6 +39,9 @@ func TestNewShardedClientConfig(t *testing.T) {
 	}
 	if !cfg.UseExternalAddresses {
 		t.Fatal("UseExternalAddresses = false, want true")
+	}
+	if cfg.Token != "test-token" {
+		t.Fatalf("Token = %q, want test-token", cfg.Token)
 	}
 	if cfg.RefreshInterval != 30*time.Second {
 		t.Fatalf("RefreshInterval = %s, want %s", cfg.RefreshInterval, 30*time.Second)
