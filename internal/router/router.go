@@ -24,6 +24,7 @@ import (
 	"github.com/radryc/monofs/internal/storage/workspacestore"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/grpcx"
+	"github.com/radryc/monofs/pkg/repowatch"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -555,9 +556,21 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		r.autoPushWorker.Start()
 	}
 
+	leaseMode := cfg.AutoRefreshLease
+	if cfg.AutoRefreshEnabled && leaseMode {
+		leaseCfg := repowatch.DefaultLeaseConfig(cfg.AutoRefreshLeaseName)
+		if cfg.AutoRefreshLeaseNS != "" {
+			leaseCfg.Namespace = cfg.AutoRefreshLeaseNS
+		}
+		if !leaseCfg.Enabled() {
+			leaseMode = false
+			logger.Warn("auto-refresh lease requested but Kubernetes is not configured; using static shard ownership (set --auto-refresh-shard per router)")
+		}
+	}
+
 	// Lease mode must start the workers on every router: the lease, not the
 	// static owner flag, decides who actually probes each shard.
-	ownerMatches := autoRefreshOwnerMatches(cfg.AutoRefreshOwner, cfg.RouterName) || cfg.AutoRefreshLease
+	ownerMatches := autoRefreshOwnerMatches(cfg.AutoRefreshOwner, cfg.RouterName) || leaseMode
 	if cfg.AutoRefreshEnabled && ownerMatches {
 		interval := cfg.AutoRefreshInterval
 		if interval <= 0 {
@@ -567,7 +580,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		if shards <= 0 {
 			shards = 1
 		}
-		if cfg.AutoRefreshLease {
+		if leaseMode {
 			// Every router competes for every shard lease. This gives both
 			// horizontal scaling and automatic takeover when a router dies.
 			for shard := 0; shard < shards; shard++ {

@@ -59,7 +59,8 @@ Periodic fallback ──────┘
                     │ Guardian repo importer     │
                     │ sharded + leases           │
                     └─────────────┬─────────────┘
-                                  │ changed bundles only
+                                  │ changed authored bundles
+                                  │ (content compare per shard)
                                   ▼
                          Guardian reconcile/apply
 ```

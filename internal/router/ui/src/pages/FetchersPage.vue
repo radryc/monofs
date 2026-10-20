@@ -323,7 +323,7 @@ const storageObjectsHealthy = computed(() => storageObjects.value?.healthy ?? fa
           <div class="text-slate-500">
             <template v-if="(autoRefreshWorker.shard ?? 0) >= 0">shard {{ autoRefreshWorker.shard }}/{{ autoRefreshWorker.shards ?? 1 }}</template>
             <template v-else>all shards ({{ autoRefreshWorker.shards ?? 1 }})</template>
-            · {{ autoRefreshWorker.lease_held ? 'lease held' : 'no lease' }}
+            · {{ autoRefreshWorker.lease_bypass ? 'static fallback' : (autoRefreshWorker.lease_held ? 'lease held' : 'no lease') }}
           </div>
         </div>
         <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5">
