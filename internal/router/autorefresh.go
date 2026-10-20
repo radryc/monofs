@@ -818,6 +818,9 @@ func (w *autoRefreshWorker) probeNow(repoURL string) {
 	ids := make([]string, 0)
 	for storageID, repo := range w.router.ingestedRepos {
 		if repo != nil && repo.repoURL != "" && sameRepoURL(repo.repoURL, repoURL) {
+			if repowatch.ShardFor(storageID, w.shards) != w.shard {
+				continue
+			}
 			if !w.eligible(storageID) {
 				continue
 			}
