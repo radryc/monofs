@@ -539,3 +539,23 @@ func TestAutoRefreshStaticFallbackWhenLeaseUnavailable(t *testing.T) {
 		t.Fatal("static fallback worker still has lease mode enabled")
 	}
 }
+
+func TestWatchableRepo(t *testing.T) {
+	cases := []struct {
+		name string
+		repo *ingestedRepo
+		want bool
+	}{
+		{"git https", &ingestedRepo{repoURL: "https://github.com/acme/repo.git", commitHash: "abc"}, true},
+		{"git ssh", &ingestedRepo{repoURL: "git@github.com:acme/repo.git", commitHash: "abc"}, true},
+		{"guardian path", &ingestedRepo{repoURL: "guardian-path-api"}, false},
+		{"guardian ui url", &ingestedRepo{repoURL: "http://localhost:8090"}, false},
+		{"no commit", &ingestedRepo{repoURL: "https://github.com/acme/repo.git"}, false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		if got := watchableRepo(tc.repo); got != tc.want {
+			t.Errorf("%s: watchableRepo = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

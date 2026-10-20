@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // handleAutoRefreshWorker serves the repository watcher status used by the
@@ -20,7 +21,7 @@ func (r *Router) handleAutoRefreshWorker(w http.ResponseWriter, req *http.Reques
 		workers = []*autoRefreshWorker{r.autoRefreshWorker}
 	}
 	if len(workers) == 0 {
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		empty := map[string]any{
 			"enabled":     false,
 			"interval":    "",
 			"concurrency": 0,
@@ -33,13 +34,16 @@ func (r *Router) handleAutoRefreshWorker(w http.ResponseWriter, req *http.Reques
 			"probes":      map[string]int64{},
 			"reingests":   0,
 			"backoffs":    0,
-		})
+		}
+		empty = r.proxyAutoRefreshStats(empty)
+		_ = json.NewEncoder(w).Encode(empty)
 		return
 	}
 	if len(workers) == 1 {
 		stats := workers[0].Stats()
 		stats["owner"] = strings.TrimSpace(r.config.AutoRefreshOwner)
 		stats["router"] = r.config.RouterName
+		stats = r.proxyAutoRefreshStats(stats)
 		_ = json.NewEncoder(w).Encode(stats)
 		return
 	}
@@ -115,7 +119,56 @@ func (r *Router) handleAutoRefreshWorker(w http.ResponseWriter, req *http.Reques
 	}
 	aggregate["probes"] = probes
 	aggregate["repositories"] = repos
+	aggregate = r.proxyAutoRefreshStats(aggregate)
 	_ = json.NewEncoder(w).Encode(aggregate)
+}
+
+// proxyAutoRefreshStats returns the local watcher stats when this router owns
+// a shard. A standby router proxies the active peer's stats so the UI does not
+// show "not checked" just because the request landed on the standby.
+func (r *Router) proxyAutoRefreshStats(local map[string]any) map[string]any {
+	if held, _ := local["lease_held"].(bool); held {
+		return local
+	}
+	if len(r.config.PeerRouters) == 0 {
+		return local
+	}
+	r.mu.RLock()
+	token := strings.TrimSpace(r.peerRouterToken)
+	r.mu.RUnlock()
+	client := &http.Client{Timeout: 2 * time.Second}
+	for _, peer := range r.config.PeerRouters {
+		baseURL, err := normalizeRouterURL(peer.URL)
+		if err != nil {
+			continue
+		}
+		req, err := http.NewRequest(http.MethodGet, baseURL+"/api/workers/auto-refresh", nil)
+		if err != nil {
+			continue
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		var stats map[string]any
+		decodeErr := json.NewDecoder(resp.Body).Decode(&stats)
+		resp.Body.Close()
+		if decodeErr != nil {
+			continue
+		}
+		held, _ := stats["lease_held"].(bool)
+		scheduled, _ := stats["scheduled"].(float64)
+		probes, _ := stats["probes"].(map[string]any)
+		if held || scheduled > 0 || len(probes) > 0 {
+			stats["router"] = peer.Name
+			stats["proxied_from"] = peer.Name
+			return stats
+		}
+	}
+	return local
 }
 
 func intValue(value any) int {

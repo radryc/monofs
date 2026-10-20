@@ -624,6 +624,21 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 					existing.StorageBackend = storageBackend
 					updated = true
 				}
+				// Re-ingestion must refresh the Git commit metadata. Otherwise the
+				// UI and watcher keep reporting the commit from the first ingest
+				// even though the files on the node are new.
+				if req.CommitHash != "" && existing.CommitHash != req.CommitHash {
+					existing.CommitHash = req.CommitHash
+					updated = true
+				}
+				if req.CommitTime != 0 && existing.CommitTime != req.CommitTime {
+					existing.CommitTime = req.CommitTime
+					updated = true
+				}
+				if req.CommitMessage != "" && existing.CommitMessage != req.CommitMessage {
+					existing.CommitMessage = req.CommitMessage
+					updated = true
+				}
 				if updated {
 					updatedValue, err := json.Marshal(existing)
 					if err != nil {

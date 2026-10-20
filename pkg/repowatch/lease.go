@@ -24,6 +24,10 @@ const (
 	defaultLeaseRenew    = 5 * time.Second
 	leaseAPIVersion      = "coordination.k8s.io/v1"
 	leaseKind            = "Lease"
+	// Kubernetes Lease acquireTime/renewTime are metav1.MicroTime values.
+	// The API rejects RFC3339Nano timestamps that are not exactly six
+	// fractional digits, so always format with microseconds.
+	leaseTimeLayout = "2006-01-02T15:04:05.000000Z07:00"
 )
 
 // LeaseConfig configures a Kubernetes Lease based elector. The zero value is
@@ -237,11 +241,11 @@ func (e *Elector) tryAcquire(ctx context.Context) (bool, error) {
 	acquireTime := lease.Spec.AcquireTime
 	transitions := lease.Spec.LeaseTransitions
 	if holder != e.cfg.Identity {
-		acquireTime = now.Format(time.RFC3339Nano)
+		acquireTime = formatLeaseTime(now)
 		transitions++
 	}
 	obj := e.leaseObject(now, now)
-	obj.Spec.AcquireTime = acquireTime
+	obj.Spec.AcquireTime = normalizeLeaseTime(acquireTime, now)
 	obj.Spec.LeaseTransitions = transitions
 	obj.Metadata.ResourceVersion = lease.Metadata.ResourceVersion
 	if _, err := e.writeLease(ctx, http.MethodPut, obj); err != nil {
@@ -260,7 +264,7 @@ func (e *Elector) renew(ctx context.Context) error {
 		return fmt.Errorf("repowatch: lease is no longer held by %s", e.cfg.Identity)
 	}
 	obj := e.leaseObject(now, now)
-	obj.Spec.AcquireTime = lease.Spec.AcquireTime
+	obj.Spec.AcquireTime = normalizeLeaseTime(lease.Spec.AcquireTime, now)
 	obj.Spec.LeaseTransitions = lease.Spec.LeaseTransitions
 	obj.Metadata.ResourceVersion = lease.Metadata.ResourceVersion
 	_, err = e.writeLease(ctx, http.MethodPut, obj)
@@ -278,8 +282,8 @@ func (e *Elector) leaseObject(acquire, renew time.Time) *leaseObject {
 		Spec: leaseSpec{
 			HolderIdentity:       e.cfg.Identity,
 			LeaseDurationSeconds: int(e.cfg.Duration.Seconds()),
-			AcquireTime:          acquire.Format(time.RFC3339Nano),
-			RenewTime:            renew.Format(time.RFC3339Nano),
+			AcquireTime:          formatLeaseTime(acquire),
+			RenewTime:            formatLeaseTime(renew),
 		},
 	}
 }
@@ -368,11 +372,30 @@ func (e *Elector) authorize(req *http.Request) {
 	}
 }
 
+func formatLeaseTime(t time.Time) string {
+	return t.UTC().Format(leaseTimeLayout)
+}
+
+func parseLeaseTime(value string) (time.Time, error) {
+	if t, err := time.Parse(leaseTimeLayout, value); err == nil {
+		return t, nil
+	}
+	// Tolerate leases written by earlier versions with nanosecond precision.
+	return time.Parse(time.RFC3339Nano, value)
+}
+
+func normalizeLeaseTime(value string, fallback time.Time) string {
+	if t, err := parseLeaseTime(value); err == nil {
+		return formatLeaseTime(t)
+	}
+	return formatLeaseTime(fallback)
+}
+
 func leaseExpired(lease *leaseObject, now time.Time) bool {
 	if lease == nil || strings.TrimSpace(lease.Spec.HolderIdentity) == "" {
 		return true
 	}
-	renew, err := time.Parse(time.RFC3339Nano, lease.Spec.RenewTime)
+	renew, err := parseLeaseTime(lease.Spec.RenewTime)
 	if err != nil {
 		return true
 	}
