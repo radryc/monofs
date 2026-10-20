@@ -223,6 +223,8 @@ Targets to agree before rollout:
   for upstream 429/403 responses.
 - Re-ingest fencing is a best-effort lease check; a strict fencing token on the
   MonoFS write path is a follow-up.
+- Re-ingest failures are logged but are not yet fed back into the probe
+  backoff; the next probe retries the upstream check.
 - The watcher still runs inside the router; a dedicated watcher deployment is
   an optional follow-up.
 - Guardian shards are per repo. If two repos in different shards feed the same
