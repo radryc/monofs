@@ -50,7 +50,9 @@ Enable it on the router:
 - `--auto-refresh-concurrency` — max concurrent probes (default 4)
 - `--auto-refresh-owner` — only this router name runs the worker
   (empty = every router). The Strata bootstrap sets `router-a` so two routers
-  do not duplicate probes/re-ingests.
+  do not duplicate probes/re-ingests. If the owner router is unavailable,
+  change the owner or leave it empty; a cluster-wide leader lease is a future
+  improvement.
 
 The worker probes each ingested repository's upstream head against the commit
 recorded at ingest. `ADVANCED` re-ingests via the normal ingest path (bumping
