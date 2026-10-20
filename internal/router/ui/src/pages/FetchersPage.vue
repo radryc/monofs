@@ -5,13 +5,14 @@ import PageHeader from '../components/PageHeader.vue'
 import StatCard from '../components/StatCard.vue'
 import DataCard from '../components/DataCard.vue'
 import NodeBadge from '../components/NodeBadge.vue'
-import type { FetcherStats, FetcherKeyStatus, LogEngineData, RegistryStats, FetcherStorageObjectsResponse, StorageObject } from '../types/api'
+import type { AutoRefreshWorkerStats, FetcherStats, FetcherKeyStatus, LogEngineData, RegistryStats, FetcherStorageObjectsResponse, StorageObject } from '../types/api'
 
 const fetchers = ref<FetcherStats | null>(null)
 const keyStatus = ref<FetcherKeyStatus | null>(null)
 const logEngine = ref<LogEngineData | null>(null)
 const registryStats = ref<RegistryStats | null>(null)
 const storageObjects = ref<FetcherStorageObjectsResponse | null>(null)
+const autoRefreshWorker = ref<AutoRefreshWorkerStats | null>(null)
 const detailed = ref(false)
 const confirming = ref(false)
 const confirmMessage = ref('')
@@ -62,8 +63,14 @@ async function loadStorageObjects() {
   } catch {}
 }
 
+async function loadAutoRefreshWorker() {
+  try {
+    autoRefreshWorker.value = await fetch('/api/workers/auto-refresh').then(r => r.json())
+  } catch {}
+}
+
 const { loading: fetchersLoading } = useAutoRefresh(async () => {
-  await Promise.allSettled([loadFetchers(), loadKeyStatus(), loadLogEngine(), loadRegistryStats(), loadStorageObjects()])
+  await Promise.allSettled([loadFetchers(), loadKeyStatus(), loadLogEngine(), loadRegistryStats(), loadStorageObjects(), loadAutoRefreshWorker()])
 }, 10_000)
 
 function hitColor(rate: number): string {
@@ -295,6 +302,101 @@ const storageObjectsHealthy = computed(() => storageObjects.value?.healthy ?? fa
           <div class="text-lg font-semibold text-slate-200">{{ formatNumber(fetchers.sync_worker?.git_cache_entries ?? 0) }}</div>
           <div class="text-slate-500">{{ formatNumber(fetchers.sync_worker?.bundle_stage_failures ?? 0) }} stage failures</div>
         </div>
+      </div>
+    </DataCard>
+
+    <DataCard v-if="autoRefreshWorker" class="mb-6" :loading="fetchersLoading">
+      <template #header>
+        <div>
+          <h2 class="text-sm font-semibold text-slate-200">Repository Watcher</h2>
+          <p class="text-xs text-slate-400 mt-0.5">
+            Polls ingested Git repositories and re-ingests when their upstream branch advances.
+          </p>
+        </div>
+      </template>
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 p-5 text-xs">
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5">
+          <div class="text-slate-400">State</div>
+          <div class="text-lg font-semibold" :class="autoRefreshWorker.enabled ? 'text-emerald-400' : 'text-slate-500'">
+            {{ autoRefreshWorker.enabled ? 'Watching' : 'Disabled' }}
+          </div>
+          <div class="text-slate-500">owner {{ autoRefreshWorker.owner || 'all routers' }}</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5">
+          <div class="text-slate-400">Tracked</div>
+          <div class="text-lg font-semibold text-slate-200">{{ formatNumber(autoRefreshWorker.tracked ?? 0) }}</div>
+          <div class="text-slate-500">{{ autoRefreshWorker.active ?? 0 }} probing</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5">
+          <div class="text-slate-400">Interval</div>
+          <div class="text-lg font-semibold text-slate-200">{{ autoRefreshWorker.interval || '-' }}</div>
+          <div class="text-slate-500">{{ autoRefreshWorker.concurrency ?? 0 }} concurrent</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5">
+          <div class="text-slate-400">Last Scan</div>
+          <div class="text-lg font-semibold text-slate-200">
+            {{ autoRefreshWorker.last_scan ? new Date(autoRefreshWorker.last_scan * 1000).toLocaleTimeString() : '-' }}
+          </div>
+          <div class="text-slate-500">
+            next {{ autoRefreshWorker.next_scan ? new Date(autoRefreshWorker.next_scan * 1000).toLocaleTimeString() : '-' }}
+          </div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5">
+          <div class="text-slate-400">Re-ingests</div>
+          <div class="text-lg font-semibold text-emerald-400">{{ formatNumber(autoRefreshWorker.reingests ?? 0) }}</div>
+          <div class="text-slate-500">{{ formatNumber(autoRefreshWorker.backoffs ?? 0) }} backoffs</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5">
+          <div class="text-slate-400">Probe Results</div>
+          <div class="text-sm font-semibold text-slate-200">
+            {{ formatNumber(autoRefreshWorker.probes?.advanced ?? 0) }} changed ·
+            {{ formatNumber(autoRefreshWorker.probes?.unchanged ?? 0) }} same
+          </div>
+          <div class="text-slate-500">
+            {{ formatNumber(autoRefreshWorker.probes?.diverged ?? 0) }} diverged ·
+            {{ formatNumber(autoRefreshWorker.probes?.error ?? 0) }} errors
+          </div>
+        </div>
+      </div>
+      <div v-if="autoRefreshWorker.repositories?.length" class="border-t border-slate-700/40 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead>
+            <tr class="text-slate-400 uppercase tracking-wider border-b border-slate-700/40">
+              <th class="text-left px-6 py-2 font-medium">Repository</th>
+              <th class="text-left px-6 py-2 font-medium">Branch</th>
+              <th class="text-left px-6 py-2 font-medium">Last Probe</th>
+              <th class="text-left px-6 py-2 font-medium">Status</th>
+              <th class="text-right px-6 py-2 font-medium">Changes</th>
+              <th class="text-left px-6 py-2 font-medium">Last Change</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-700/20">
+            <tr v-for="repo in autoRefreshWorker.repositories" :key="repo.storage_id" class="hover:bg-slate-800/30">
+              <td class="px-6 py-2 font-mono text-slate-300 truncate max-w-[280px]" :title="repo.repo_url">
+                {{ repo.repo_id || repo.repo_url }}
+              </td>
+              <td class="px-6 py-2 text-slate-400">{{ repo.branch || 'main' }}</td>
+              <td class="px-6 py-2 text-slate-400">
+                {{ repo.last_probed_at ? new Date(repo.last_probed_at * 1000).toLocaleTimeString() : 'not yet' }}
+              </td>
+              <td class="px-6 py-2">
+                <span class="px-2 py-0.5 rounded-full border"
+                  :class="repo.last_probe_status === 'advanced' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/20'
+                    : repo.last_probe_status === 'error' ? 'bg-rose-500/15 text-rose-300 border-rose-500/20'
+                    : 'bg-slate-700/30 text-slate-400 border-slate-600/20'">
+                  {{ repo.last_probe_status || 'not checked' }}
+                </span>
+                <div v-if="repo.last_probe_error" class="text-rose-400 mt-1 truncate max-w-[260px]" :title="repo.last_probe_error">
+                  {{ repo.last_probe_error }}
+                </div>
+              </td>
+              <td class="px-6 py-2 text-right text-slate-300">{{ formatNumber(repo.changes_total ?? 0) }}</td>
+              <td class="px-6 py-2 text-slate-400">
+                {{ repo.last_change_at ? new Date(repo.last_change_at * 1000).toLocaleTimeString() : '-' }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </DataCard>
 

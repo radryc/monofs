@@ -27,6 +27,7 @@ type UIResponse struct {
 type RepositoriesData struct {
 	Repositories           []map[string]interface{} `json:"repositories"`
 	CurrentTopologyVersion int64                    `json:"current_topology_version"`
+	AutoRefreshEnabled     bool                     `json:"auto_refresh_enabled"`
 }
 
 // StatusData contains cluster status response.

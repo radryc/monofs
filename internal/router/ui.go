@@ -147,6 +147,8 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/status", r.handleStatus)
 	mux.HandleFunc("/api/auth/me", r.handleAuthMe)
 	mux.HandleFunc("/api/repositories", r.handleRepositoriesList)
+	mux.HandleFunc("/api/repositories/refresh", r.handleRepositoryRefresh)
+	mux.HandleFunc("/api/workers/auto-refresh", r.handleAutoRefreshWorker)
 	mux.HandleFunc("/api/routers", r.handleRouters)
 	mux.HandleFunc("/api/rebalance", r.handleRebalance)
 	mux.HandleFunc("/api/clients", r.handleClientsAPI)

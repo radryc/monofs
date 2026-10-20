@@ -133,6 +133,15 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 				var ingestedAt time.Time
 				var rebalanceState string = "Stable"
 				var rebalanceProgress float64 = 1.0
+				refreshInfo := map[string]any{
+					"last_probed_at":    0,
+					"last_probe_status": "",
+					"last_probe_error":  "",
+					"last_change_at":    0,
+					"changes_total":     0,
+					"reingests_total":   0,
+					"next_probe_at":     0,
+				}
 				guardianURL := repoInfo.GuardianUrl
 				if tracked, ok := ingestedSnapshot[storageID]; ok {
 					tracked.mu.RLock()
@@ -141,6 +150,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 					rebalanceState = tracked.rebalanceState.String()
 					rebalanceProgress = tracked.rebalanceProgress
 					tracked.mu.RUnlock()
+					refreshInfo = tracked.refreshJSON()
 				}
 				if ingestedAt.IsZero() {
 					ingestedAt = time.Now()
@@ -162,6 +172,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 					"commit_message":     repoInfo.CommitMessage,
 					"files_count":        filesCount,
 					"ingested_at":        ingestedAt.Unix(),
+					"refresh":            refreshInfo,
 					"topology_version":   currentVersion,
 					"rebalance_state":    rebalanceState,
 					"rebalance_progress": rebalanceProgress,
@@ -221,6 +232,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 	return &RepositoriesData{
 		Repositories:           repos,
 		CurrentTopologyVersion: currentVersion,
+		AutoRefreshEnabled:     r.autoRefreshWorker != nil,
 	}
 }
 
