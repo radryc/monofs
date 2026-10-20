@@ -80,13 +80,20 @@ export interface RepoRefreshState {
 export interface AutoRefreshWorkerStats {
   enabled: boolean
   interval: string
+  max_interval?: string
   concurrency: number
+  batch_size?: number
+  shard?: number
+  shards?: number
+  lease_held?: boolean
   owner?: string
   router?: string
   tracked: number
+  scheduled?: number
   active: number
   last_scan: number
   next_scan: number
+  next_probe?: number
   probes: Record<string, number>
   reingests: number
   backoffs: number

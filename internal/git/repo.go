@@ -13,6 +13,7 @@ import (
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/storage/memory"
 )
 
 // RepoManager handles Git repository operations.
@@ -43,6 +44,32 @@ func (rm *RepoManager) OpenOnly(repoID string) (*git.Repository, error) {
 		return nil, ErrRepoNotCloned
 	}
 	return repo, nil
+}
+
+// RemoteHead resolves a branch head without cloning or fetching objects. It is
+// the metadata-only probe used by the repository watcher at scale.
+func (rm *RepoManager) RemoteHead(ctx context.Context, repoURL, branch string) (string, error) {
+	if strings.TrimSpace(repoURL) == "" {
+		return "", fmt.Errorf("repository URL is required")
+	}
+	if branch == "" {
+		branch = "main"
+	}
+	remote := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{repoURL},
+	})
+	refs, err := remote.ListContext(ctx, &git.ListOptions{Auth: AuthForRepo(repoURL)})
+	if err != nil {
+		return "", fmt.Errorf("list remote %s: %w", repoURL, err)
+	}
+	want := plumbing.NewBranchReferenceName(branch).String()
+	for _, ref := range refs {
+		if ref.Name().String() == want || ref.Name().Short() == branch {
+			return ref.Hash().String(), nil
+		}
+	}
+	return "", fmt.Errorf("branch %q not found on %s", branch, repoURL)
 }
 
 // CloneOrOpen clones a repository or opens existing one.

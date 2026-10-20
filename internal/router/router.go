@@ -58,7 +58,15 @@ type RouterConfig struct {
 	// Auto-refresh (Phase 5): polling re-ingestion of advanced upstreams.
 	AutoRefreshEnabled     bool
 	AutoRefreshInterval    time.Duration
+	AutoRefreshMaxInterval time.Duration
 	AutoRefreshConcurrency int
+	AutoRefreshBatchSize   int
+	AutoRefreshShards      int
+	AutoRefreshShard       int
+	AutoRefreshStateDir    string
+	AutoRefreshLease       bool
+	AutoRefreshLeaseName   string
+	AutoRefreshLeaseNS     string
 	AutoRefreshOwner       string // only this router name runs the worker; empty = all
 
 	// AllowLocalIngest permits ingestion from router-local filesystem paths
@@ -114,16 +122,23 @@ type RouterPeer struct {
 // DefaultRouterConfig returns default router configuration.
 func DefaultRouterConfig() RouterConfig {
 	return RouterConfig{
-		ClusterID:             "monofs-cluster",
-		HealthCheckInterval:   5 * time.Second,  // Check every 5 seconds (reduced frequency to avoid lock contention)
-		UnhealthyThreshold:    15 * time.Second, // Mark unhealthy after 15 seconds (3 missed checks)
-		PeerRouters:           nil,
-		GuardianStateDir:      "",
-		ReplicationFactor:     2,                // Primary + 1 backup (protects against 1 node failure)
-		RebalanceDelay:        10 * time.Minute, // Wait 10 minutes before permanent rebalancing
-		GracefulFailoverDelay: 60 * time.Second, // 60 seconds for planned restarts
-		GuardianIngestTimeout: 5 * time.Minute,  // 5 minutes for large guardian file batches
-		AllowLocalIngest:      true,             // Local filesystem ingestion is on unless explicitly disabled
+		ClusterID:              "monofs-cluster",
+		HealthCheckInterval:    5 * time.Second,  // Check every 5 seconds (reduced frequency to avoid lock contention)
+		UnhealthyThreshold:     15 * time.Second, // Mark unhealthy after 15 seconds (3 missed checks)
+		PeerRouters:            nil,
+		GuardianStateDir:       "",
+		ReplicationFactor:      2,                // Primary + 1 backup (protects against 1 node failure)
+		RebalanceDelay:         10 * time.Minute, // Wait 10 minutes before permanent rebalancing
+		GracefulFailoverDelay:  60 * time.Second, // 60 seconds for planned restarts
+		GuardianIngestTimeout:  5 * time.Minute,  // 5 minutes for large guardian file batches
+		AllowLocalIngest:       true,             // Local filesystem ingestion is on unless explicitly disabled
+		AutoRefreshInterval:    1 * time.Minute,
+		AutoRefreshMaxInterval: 1 * time.Hour,
+		AutoRefreshConcurrency: 4,
+		AutoRefreshBatchSize:   32,
+		AutoRefreshShards:      1,
+		AutoRefreshStateDir:    ".monofs-repowatch",
+		AutoRefreshLeaseName:   "monofs-repowatch",
 	}
 }
 
@@ -207,7 +222,8 @@ type Router struct {
 	autoPushWorker *autoPushWorker
 
 	// Phase 5: Auto-refresh worker (nil when disabled)
-	autoRefreshWorker *autoRefreshWorker
+	autoRefreshWorker  *autoRefreshWorker
+	autoRefreshWorkers []*autoRefreshWorker
 
 	// Auto-refresh re-ingest dedup (shared by poll + webhook paths)
 	reingestDedupMu sync.Mutex
@@ -542,8 +558,37 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		if interval <= 0 {
 			interval = defaultAutoRefreshInterval
 		}
-		r.autoRefreshWorker = newAutoRefreshWorker(r, interval, cfg.AutoRefreshConcurrency, logger)
-		r.autoRefreshWorker.Start()
+		shards := cfg.AutoRefreshShards
+		if shards <= 0 {
+			shards = 1
+		}
+		if cfg.AutoRefreshLease {
+			// Every router competes for every shard lease. This gives both
+			// horizontal scaling and automatic takeover when a router dies.
+			for shard := 0; shard < shards; shard++ {
+				worker := newAutoRefreshWorker(r, interval, cfg.AutoRefreshConcurrency, logger)
+				worker.configure(
+					shard, shards, cfg.AutoRefreshBatchSize,
+					cfg.AutoRefreshMaxInterval, cfg.AutoRefreshStateDir,
+					cfg.AutoRefreshLease, cfg.AutoRefreshLeaseName, cfg.AutoRefreshLeaseNS,
+				)
+				worker.Start()
+				r.autoRefreshWorkers = append(r.autoRefreshWorkers, worker)
+			}
+			if len(r.autoRefreshWorkers) > 0 {
+				r.autoRefreshWorker = r.autoRefreshWorkers[0]
+			}
+		} else {
+			worker := newAutoRefreshWorker(r, interval, cfg.AutoRefreshConcurrency, logger)
+			worker.configure(
+				cfg.AutoRefreshShard, shards, cfg.AutoRefreshBatchSize,
+				cfg.AutoRefreshMaxInterval, cfg.AutoRefreshStateDir,
+				false, cfg.AutoRefreshLeaseName, cfg.AutoRefreshLeaseNS,
+			)
+			worker.Start()
+			r.autoRefreshWorker = worker
+			r.autoRefreshWorkers = []*autoRefreshWorker{worker}
+		}
 	} else if cfg.AutoRefreshEnabled {
 		logger.Info("auto-refresh worker skipped on this router", "owner", cfg.AutoRefreshOwner, "router", cfg.RouterName)
 	}
@@ -2118,7 +2163,10 @@ func (r *Router) Close() error {
 			r.autoPushWorker.Stop()
 		}
 
-		if r.autoRefreshWorker != nil {
+		for _, worker := range r.autoRefreshWorkers {
+			worker.Stop()
+		}
+		if r.autoRefreshWorker != nil && len(r.autoRefreshWorkers) == 0 {
 			r.autoRefreshWorker.Stop()
 		}
 

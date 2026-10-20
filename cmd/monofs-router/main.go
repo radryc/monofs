@@ -122,6 +122,14 @@ func main() {
 		autoRefreshInterval    = flag.Duration("auto-refresh-interval", 5*time.Minute, "Interval between auto-refresh probes (Phase 5)")
 		autoRefreshConcurrency = flag.Int("auto-refresh-concurrency", 4, "Max concurrent auto-refresh probes (Phase 5)")
 		autoRefreshOwner       = flag.String("auto-refresh-owner", "", "Only this router name runs the auto-refresh worker (empty = every router)")
+		autoRefreshMaxInterval = flag.Duration("auto-refresh-max-interval", time.Hour, "Maximum adaptive probe interval")
+		autoRefreshBatchSize   = flag.Int("auto-refresh-batch-size", 32, "Repositories per probe RPC")
+		autoRefreshShards      = flag.Int("auto-refresh-shards", 1, "Number of auto-refresh shards")
+		autoRefreshShard       = flag.Int("auto-refresh-shard", 0, "Shard owned by this router (0-based)")
+		autoRefreshStateDir    = flag.String("auto-refresh-state-dir", ".monofs-repowatch", "Directory for persisted auto-refresh schedule")
+		autoRefreshLease       = flag.Bool("auto-refresh-lease", false, "Use Kubernetes Lease leader election for the auto-refresh worker")
+		autoRefreshLeaseName   = flag.String("auto-refresh-lease-name", "monofs-repowatch", "Kubernetes Lease name prefix")
+		autoRefreshLeaseNS     = flag.String("auto-refresh-lease-namespace", os.Getenv("POD_NAMESPACE"), "Kubernetes Lease namespace")
 		localIngestEnabled     = flag.Bool("local-ingest", true, "Allow ingestion from router-local filesystem paths (file ingestion and uploads)")
 		// Replication and failover configuration
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
@@ -245,7 +253,15 @@ func main() {
 		AutoPushInterval:       *autoPushInterval,
 		AutoRefreshEnabled:     *autoRefreshEnabled,
 		AutoRefreshInterval:    *autoRefreshInterval,
+		AutoRefreshMaxInterval: *autoRefreshMaxInterval,
 		AutoRefreshConcurrency: *autoRefreshConcurrency,
+		AutoRefreshBatchSize:   *autoRefreshBatchSize,
+		AutoRefreshShards:      *autoRefreshShards,
+		AutoRefreshShard:       *autoRefreshShard,
+		AutoRefreshStateDir:    strings.TrimSpace(*autoRefreshStateDir),
+		AutoRefreshLease:       *autoRefreshLease,
+		AutoRefreshLeaseName:   strings.TrimSpace(*autoRefreshLeaseName),
+		AutoRefreshLeaseNS:     strings.TrimSpace(*autoRefreshLeaseNS),
 		AutoRefreshOwner:       strings.TrimSpace(*autoRefreshOwner),
 		EncryptionKey:          encryptionKey,
 		ReplicationFactor:      *replicationFactor,

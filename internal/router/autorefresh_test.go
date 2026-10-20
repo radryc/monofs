@@ -1,11 +1,16 @@
 package router
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/pkg/repowatch"
 )
 
 // invalidRepoURL uses the reserved .invalid TLD so any background ingest
@@ -191,6 +196,180 @@ func TestAutoRefreshOwnerMatches(t *testing.T) {
 	for _, c := range cases {
 		if got := autoRefreshOwnerMatches(c.owner, c.router); got != c.want {
 			t.Errorf("autoRefreshOwnerMatches(%q,%q) = %v, want %v", c.owner, c.router, got, c.want)
+		}
+	}
+}
+
+func TestAutoRefreshShardFilter(t *testing.T) {
+	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
+	for _, id := range []string{"repo-0", "repo-1", "repo-2", "repo-3"} {
+		r.mu.Lock()
+		r.ingestedRepos[id] = &ingestedRepo{repoID: "src/" + id, repoURL: invalidRepoURL, branch: "main", commitHash: "abc123"}
+		r.mu.Unlock()
+	}
+	w := newAutoRefreshWorker(r, time.Minute, 2, slog.New(slog.DiscardHandler))
+	w.configure(0, 2, 8, time.Hour, t.TempDir(), false, "", "")
+	w.syncRepos()
+
+	w.scheduleMu.Lock()
+	defer w.scheduleMu.Unlock()
+	for id := range w.entries {
+		if repowatch.ShardFor(id, 2) != 0 {
+			t.Fatalf("shard 0 owns repo %s in the wrong shard", id)
+		}
+	}
+	if len(w.entries) == 0 || len(w.entries) == 4 {
+		t.Fatalf("unexpected shard entry count: %d", len(w.entries))
+	}
+}
+
+func TestAutoRefreshStateRoundTrip(t *testing.T) {
+	stateDir := t.TempDir()
+	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
+	r.mu.Lock()
+	r.ingestedRepos["repo-1"] = &ingestedRepo{
+		repoID: "src/repo", repoURL: invalidRepoURL, branch: "main", commitHash: "abc123",
+		refreshState: repoRefreshState{
+			lastProbeStatus: "advanced",
+			changesTotal:    3,
+		},
+	}
+	r.mu.Unlock()
+
+	w := newAutoRefreshWorker(r, time.Minute, 2, slog.New(slog.DiscardHandler))
+	w.configure(0, 1, 8, time.Hour, stateDir, false, "", "")
+	w.syncRepos()
+	due := time.Now().Add(45 * time.Minute).Truncate(time.Second)
+	w.scheduleMu.Lock()
+	w.entries["repo-1"].due = due
+	w.scheduleMu.Unlock()
+	w.saveState()
+
+	if _, err := os.Stat(filepath.Join(stateDir, "repowatch-0.json")); err != nil {
+		t.Fatalf("state file: %v", err)
+	}
+	w2 := newAutoRefreshWorker(r, time.Minute, 2, slog.New(slog.DiscardHandler))
+	w2.configure(0, 1, 8, time.Hour, stateDir, false, "", "")
+	w2.loadState()
+	w2.syncRepos()
+	w2.scheduleMu.Lock()
+	entry := w2.entries["repo-1"]
+	w2.scheduleMu.Unlock()
+	if entry == nil {
+		t.Fatal("state did not restore the scheduled repo")
+	}
+	if entry.due.Sub(due).Abs() > time.Second {
+		t.Fatalf("restored due = %v, want %v", entry.due, due)
+	}
+	state := r.ingestedRepos["repo-1"].refreshSnapshot()
+	if state.changesTotal != 3 || state.lastProbeStatus != "advanced" {
+		t.Fatalf("restored refresh state = %+v", state)
+	}
+}
+
+func TestAutoRefreshProcessDueUsesMetadataOnly(t *testing.T) {
+	responses := []*pb.RepoSyncProgress{{
+		Repository: &pb.WorkspaceRepositoryRef{
+			StorageId:   "repo-1",
+			DisplayPath: "src/repo",
+			RepoUrl:     invalidRepoURL,
+			Branch:      "main",
+			BaseCommit:  "abc123",
+		},
+		Status:       pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED,
+		RemoteCommit: "abc123",
+	}}
+	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
+	fetcherAddr, impl, cleanup := startWorkspaceSyncTestFetcher(t, responses, nil, nil)
+	defer cleanup()
+	if err := r.SetFetcherClient([]string{fetcherAddr}); err != nil {
+		t.Fatalf("set fetcher: %v", err)
+	}
+	r.mu.Lock()
+	r.ingestedRepos["repo-1"] = &ingestedRepo{repoID: "src/repo", repoURL: invalidRepoURL, branch: "main", commitHash: "abc123"}
+	r.mu.Unlock()
+
+	w := newAutoRefreshWorker(r, time.Minute, 2, slog.New(slog.DiscardHandler))
+	w.configure(0, 1, 8, time.Hour, t.TempDir(), false, "", "")
+	w.batchSem = make(chan struct{}, 1)
+	w.syncRepos()
+	w.scheduleMu.Lock()
+	w.entries["repo-1"].due = time.Now().Add(-time.Second)
+	w.scheduleMu.Unlock()
+	w.processDue(context.Background())
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		impl.mu.Lock()
+		count := len(impl.probeRequests)
+		var request *pb.ProbeWorkspaceRefreshRequest
+		if count > 0 {
+			request = impl.probeRequests[count-1]
+		}
+		impl.mu.Unlock()
+		if request != nil {
+			if len(request.Repositories) != 1 || !request.Repositories[0].GetMetadataOnly() {
+				t.Fatalf("probe request = %+v, want metadata_only", request)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("probe request was not sent")
+}
+
+func TestAutoRefreshSchedulesTenThousandRepos(t *testing.T) {
+	if testing.Short() {
+		t.Skip("10k scheduler test skipped in -short mode")
+	}
+	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
+	r.mu.Lock()
+	for i := 0; i < 10000; i++ {
+		id := fmt.Sprintf("repo-%05d", i)
+		r.ingestedRepos[id] = &ingestedRepo{
+			repoID:     "src/" + id,
+			repoURL:    invalidRepoURL,
+			branch:     "main",
+			commitHash: "abc123",
+		}
+	}
+	r.mu.Unlock()
+
+	w := newAutoRefreshWorker(r, time.Minute, 8, slog.New(slog.DiscardHandler))
+	w.configure(0, 4, 32, time.Hour, t.TempDir(), false, "", "")
+	start := time.Now()
+	w.syncRepos()
+	elapsed := time.Since(start)
+	w.scheduleMu.Lock()
+	scheduled := len(w.entries)
+	w.scheduleMu.Unlock()
+	if scheduled < 2000 || scheduled > 3000 {
+		t.Fatalf("shard 0 scheduled %d of 10k repos, want ~2500", scheduled)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("syncRepos took %s for 10k repos", elapsed)
+	}
+}
+
+func TestAutoRefreshNextIntervalAdaptive(t *testing.T) {
+	w := newAutoRefreshWorker(NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler)), time.Minute, 2, slog.New(slog.DiscardHandler))
+	w.configure(0, 1, 8, time.Hour, t.TempDir(), false, "", "")
+	now := time.Now()
+	cases := []struct {
+		age  time.Duration
+		want time.Duration
+	}{
+		{10 * time.Minute, time.Minute},
+		{2 * time.Hour, 5 * time.Minute},
+		{2 * 24 * time.Hour, 15 * time.Minute},
+		{8 * 24 * time.Hour, time.Hour},
+	}
+	for _, c := range cases {
+		repo := &ingestedRepo{ingestedAt: now.Add(-c.age)}
+		repo.refreshState.lastChangeAt = now.Add(-c.age)
+		got := w.nextInterval(repo, now, false)
+		if got < c.want*4/5 || got > c.want*6/5 {
+			t.Errorf("age %s: interval = %s, want ~%s", c.age, got, c.want)
 		}
 	}
 }

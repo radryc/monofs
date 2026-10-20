@@ -661,6 +661,9 @@ message WorkspaceRepositoryRef {
     string repo_url = 3;
     string branch = 4;
     string base_commit = 5;
+    // metadata_only asks the fetcher to resolve the remote branch head without
+    // cloning or fetching objects. Used by the repository watcher.
+    bool metadata_only = 6;
 }
 
 message WorkspaceBundleChunk {

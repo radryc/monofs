@@ -7,15 +7,19 @@ import (
 )
 
 // handleAutoRefreshWorker serves the repository watcher status used by the
-// MonoFS worker UI.
+// MonoFS worker UI. When the router runs one worker per shard, the response is
+// aggregated across all shards.
 func (r *Router) handleAutoRefreshWorker(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	worker := r.autoRefreshWorker
-	if worker == nil {
+	workers := r.autoRefreshWorkers
+	if len(workers) == 0 && r.autoRefreshWorker != nil {
+		workers = []*autoRefreshWorker{r.autoRefreshWorker}
+	}
+	if len(workers) == 0 {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"enabled":     false,
 			"interval":    "",
@@ -32,10 +36,95 @@ func (r *Router) handleAutoRefreshWorker(w http.ResponseWriter, req *http.Reques
 		})
 		return
 	}
-	stats := worker.Stats()
-	stats["owner"] = strings.TrimSpace(r.config.AutoRefreshOwner)
-	stats["router"] = r.config.RouterName
-	_ = json.NewEncoder(w).Encode(stats)
+	if len(workers) == 1 {
+		stats := workers[0].Stats()
+		stats["owner"] = strings.TrimSpace(r.config.AutoRefreshOwner)
+		stats["router"] = r.config.RouterName
+		_ = json.NewEncoder(w).Encode(stats)
+		return
+	}
+
+	aggregate := map[string]any{
+		"enabled":      true,
+		"owner":        strings.TrimSpace(r.config.AutoRefreshOwner),
+		"router":       r.config.RouterName,
+		"shard":        -1,
+		"probes":       map[string]int64{},
+		"reingests":    int64(0),
+		"backoffs":     int64(0),
+		"tracked":      0,
+		"active":       0,
+		"scheduled":    0,
+		"lease_held":   false,
+		"repositories": []map[string]any{},
+	}
+	probes := map[string]int64{}
+	repos := make([]map[string]any, 0)
+	for _, worker := range workers {
+		stats := worker.Stats()
+		if aggregate["interval"] == nil {
+			aggregate["interval"] = stats["interval"]
+			aggregate["max_interval"] = stats["max_interval"]
+			aggregate["concurrency"] = stats["concurrency"]
+			aggregate["batch_size"] = stats["batch_size"]
+			aggregate["shards"] = stats["shards"]
+		}
+		aggregate["tracked"] = aggregate["tracked"].(int) + intValue(stats["tracked"])
+		aggregate["active"] = aggregate["active"].(int) + intValue(stats["active"])
+		aggregate["scheduled"] = aggregate["scheduled"].(int) + intValue(stats["scheduled"])
+		aggregate["reingests"] = aggregate["reingests"].(int64) + int64Value(stats["reingests"])
+		aggregate["backoffs"] = aggregate["backoffs"].(int64) + int64Value(stats["backoffs"])
+		if held, _ := stats["lease_held"].(bool); held {
+			aggregate["lease_held"] = true
+		}
+		if stats["last_scan"] != nil {
+			if aggregate["last_scan"] == nil || int64Value(stats["last_scan"]) > int64Value(aggregate["last_scan"]) {
+				aggregate["last_scan"] = stats["last_scan"]
+			}
+		}
+		if stats["next_scan"] != nil {
+			if aggregate["next_scan"] == nil || (int64Value(stats["next_scan"]) > 0 && int64Value(stats["next_scan"]) < int64Value(aggregate["next_scan"])) {
+				aggregate["next_scan"] = stats["next_scan"]
+			}
+		}
+		if values, ok := stats["probes"].(map[string]int64); ok {
+			for key, value := range values {
+				probes[key] += value
+			}
+		}
+		if values, ok := stats["repositories"].([]map[string]any); ok {
+			repos = append(repos, values...)
+		}
+	}
+	aggregate["probes"] = probes
+	aggregate["repositories"] = repos
+	_ = json.NewEncoder(w).Encode(aggregate)
+}
+
+func intValue(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
+	}
+}
+
+func int64Value(value any) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case float64:
+		return int64(typed)
+	default:
+		return 0
+	}
 }
 
 // handleRepositoryRefresh queues an immediate auto-refresh probe for one
@@ -55,6 +144,9 @@ func (r *Router) handleRepositoryRefresh(w http.ResponseWriter, req *http.Reques
 		return
 	}
 	worker := r.autoRefreshWorker
+	if worker == nil && len(r.autoRefreshWorkers) > 0 {
+		worker = r.autoRefreshWorkers[0]
+	}
 	if worker == nil {
 		http.Error(w, "auto-refresh is disabled on this router", http.StatusServiceUnavailable)
 		return
