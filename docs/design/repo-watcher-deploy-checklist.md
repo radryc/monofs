@@ -20,6 +20,8 @@ Commands (adjust for your image pipeline):
 cd ~/strata/monofs
 docker build --target router  -t monofs-router:latest  .
 docker build --target fetcher -t monofs-fetcher:latest .
+# The router embeds the UI; build it before a local Go build.
+cd ~/strata/monofs/internal/router/ui && npm ci && npm run build
 cd ~/strata/guardian && go build ./cmd/guardiand
 ```
 
