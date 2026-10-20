@@ -83,8 +83,10 @@ func (r *Router) handleAutoRefreshWorker(w http.ResponseWriter, req *http.Reques
 			}
 		}
 		if stats["next_scan"] != nil {
-			if aggregate["next_scan"] == nil || (int64Value(stats["next_scan"]) > 0 && int64Value(stats["next_scan"]) < int64Value(aggregate["next_scan"])) {
-				aggregate["next_scan"] = stats["next_scan"]
+			current := int64Value(aggregate["next_scan"])
+			next := int64Value(stats["next_scan"])
+			if next > 0 && (current == 0 || next < current) {
+				aggregate["next_scan"] = next
 			}
 		}
 		if values, ok := stats["probes"].(map[string]int64); ok {
