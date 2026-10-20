@@ -562,6 +562,11 @@ func (s *Service) probeWorkspaceRepository(ctx context.Context, repo *pb.Workspa
 	}
 
 	if repo.GetMetadataOnly() {
+		if repo.GetBaseCommit() == "" {
+			progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_TRANSIENT_ERROR
+			progress.Message = "base_commit is required"
+			return progress
+		}
 		remoteCommit, err := s.repoMgr.RemoteHead(ctx, repo.GetRepoUrl(), branch)
 		if err != nil {
 			progress.Status = mapRepoSyncError(err)
@@ -569,11 +574,6 @@ func (s *Service) probeWorkspaceRepository(ctx context.Context, repo *pb.Workspa
 			return progress
 		}
 		progress.RemoteCommit = remoteCommit
-		if repo.GetBaseCommit() == "" {
-			progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_TRANSIENT_ERROR
-			progress.Message = "base_commit is required"
-			return progress
-		}
 		if remoteCommit == repo.GetBaseCommit() {
 			progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED
 			progress.Message = "upstream branch unchanged"

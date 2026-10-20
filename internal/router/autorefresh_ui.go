@@ -45,18 +45,22 @@ func (r *Router) handleAutoRefreshWorker(w http.ResponseWriter, req *http.Reques
 	}
 
 	aggregate := map[string]any{
-		"enabled":      true,
-		"owner":        strings.TrimSpace(r.config.AutoRefreshOwner),
-		"router":       r.config.RouterName,
-		"shard":        -1,
-		"probes":       map[string]int64{},
-		"reingests":    int64(0),
-		"backoffs":     int64(0),
-		"tracked":      0,
-		"active":       0,
-		"scheduled":    0,
-		"lease_held":   false,
-		"repositories": []map[string]any{},
+		"enabled":         true,
+		"owner":           strings.TrimSpace(r.config.AutoRefreshOwner),
+		"router":          r.config.RouterName,
+		"shard":           -1,
+		"probes":          map[string]int64{},
+		"reingests":       int64(0),
+		"backoffs":        int64(0),
+		"tracked":         0,
+		"active":          0,
+		"scheduled":       0,
+		"last_scan":       int64(0),
+		"next_scan":       int64(0),
+		"lease_held":      false,
+		"trace_limit":     autoRefreshTraceLimit,
+		"trace_truncated": false,
+		"repositories":    []map[string]any{},
 	}
 	probes := map[string]int64{}
 	repos := make([]map[string]any, 0)
@@ -97,6 +101,13 @@ func (r *Router) handleAutoRefreshWorker(w http.ResponseWriter, req *http.Reques
 		if values, ok := stats["repositories"].([]map[string]any); ok {
 			repos = append(repos, values...)
 		}
+		if truncated, _ := stats["trace_truncated"].(bool); truncated {
+			aggregate["trace_truncated"] = true
+		}
+	}
+	if len(repos) > autoRefreshTraceLimit {
+		repos = repos[:autoRefreshTraceLimit]
+		aggregate["trace_truncated"] = true
 	}
 	aggregate["probes"] = probes
 	aggregate["repositories"] = repos

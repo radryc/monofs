@@ -321,7 +321,8 @@ const storageObjectsHealthy = computed(() => storageObjects.value?.healthy ?? fa
             {{ autoRefreshWorker.enabled ? 'Watching' : 'Disabled' }}
           </div>
           <div class="text-slate-500">
-            shard {{ autoRefreshWorker.shard ?? 0 }}/{{ autoRefreshWorker.shards ?? 1 }}
+            <template v-if="(autoRefreshWorker.shard ?? 0) >= 0">shard {{ autoRefreshWorker.shard }}/{{ autoRefreshWorker.shards ?? 1 }}</template>
+            <template v-else>all shards ({{ autoRefreshWorker.shards ?? 1 }})</template>
             · {{ autoRefreshWorker.lease_held ? 'lease held' : 'no lease' }}
           </div>
         </div>
@@ -400,6 +401,10 @@ const storageObjectsHealthy = computed(() => storageObjects.value?.healthy ?? fa
             </tr>
           </tbody>
         </table>
+        <div v-if="autoRefreshWorker.trace_truncated" class="px-6 py-2 text-[11px] text-slate-500 border-t border-slate-700/40">
+          Showing the first {{ autoRefreshWorker.trace_limit ?? 200 }} tracked repositories. Per-repository status is also
+          available on the Repositories page.
+        </div>
       </div>
     </DataCard>
 

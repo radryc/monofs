@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +28,8 @@ const (
 	defaultAutoRefreshStateDir    = ".monofs-repowatch"
 	autoRefreshBackoffMax         = 1 * time.Hour
 	autoRefreshSyncInterval       = 30 * time.Second
-	autoRefreshSaveInterval       = 15 * time.Second
+	autoRefreshSaveInterval       = 30 * time.Second
+	autoRefreshTraceLimit         = 200
 	reingestDedupWindow           = 60 * time.Second
 )
 
@@ -127,6 +129,13 @@ func (r *ingestedRepo) refreshJSON() map[string]any {
 	}
 }
 
+func unixTimeOrZero(seconds int64) time.Time {
+	if seconds <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(seconds, 0)
+}
+
 func unixOrZero(t time.Time) int64 {
 	if t.IsZero() {
 		return 0
@@ -209,6 +218,7 @@ type autoRefreshWorker struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	stopOnce sync.Once
+	done     chan struct{}
 	batchSem chan struct{}
 
 	mu           sync.Mutex
@@ -216,6 +226,7 @@ type autoRefreshWorker struct {
 	failureCount map[string]int
 	backoffUntil map[string]time.Time
 	lastScan     time.Time
+	trackedCount int
 	probes       map[string]int64
 	reingests    int64
 	backoffs     int64
@@ -284,8 +295,12 @@ func (w *autoRefreshWorker) configure(shard, shards, batchSize int, maxInterval 
 func (w *autoRefreshWorker) Start() {
 	w.stopOnce = sync.Once{}
 	w.batchSem = make(chan struct{}, maxInt(1, w.concurrency))
+	w.done = make(chan struct{})
 	w.ctx, w.cancel = context.WithCancel(context.Background())
-	go w.run(w.ctx)
+	go func() {
+		defer close(w.done)
+		w.run(w.ctx)
+	}()
 }
 
 func (w *autoRefreshWorker) Stop() {
@@ -294,6 +309,13 @@ func (w *autoRefreshWorker) Stop() {
 			w.cancel()
 		}
 	})
+	if w.done != nil {
+		select {
+		case <-w.done:
+		case <-time.After(10 * time.Second):
+			w.logger.Warn("auto-refresh worker did not stop within timeout")
+		}
+	}
 	w.logger.Info("auto-refresh worker stopped")
 }
 
@@ -305,6 +327,9 @@ func (w *autoRefreshWorker) run(ctx context.Context) {
 		}
 		if w.shards > 1 {
 			cfg.Name = fmt.Sprintf("%s-%d", w.leaseName, w.shard)
+		}
+		cfg.OnError = func(err error) {
+			w.logger.Warn("auto-refresh lease acquisition failed", "lease", cfg.Name, "error", err)
 		}
 		if cfg.Enabled() {
 			elector, err := repowatch.NewElector(cfg)
@@ -329,6 +354,7 @@ func (w *autoRefreshWorker) run(ctx context.Context) {
 func (w *autoRefreshWorker) runScheduler(ctx context.Context) {
 	w.loadState()
 	w.syncRepos()
+	w.updateMetrics()
 	w.logger.Info("auto-refresh scheduler started",
 		"interval", w.interval, "max_interval", w.maxInterval,
 		"concurrency", w.concurrency, "batch", w.batchSize,
@@ -341,6 +367,7 @@ func (w *autoRefreshWorker) runScheduler(ctx context.Context) {
 	defer syncTick.Stop()
 	defer saveTick.Stop()
 	defer w.saveState()
+	defer w.waitForBatches(5 * time.Second)
 
 	for {
 		select {
@@ -348,11 +375,32 @@ func (w *autoRefreshWorker) runScheduler(ctx context.Context) {
 			return
 		case <-tick.C:
 			w.processDue(ctx)
+			w.updateMetrics()
 		case <-syncTick.C:
 			w.syncRepos()
+			w.updateMetrics()
 		case <-saveTick.C:
 			w.saveState()
+			w.updateMetrics()
 		}
+	}
+}
+
+func (w *autoRefreshWorker) waitForBatches(timeout time.Duration) {
+	if w.batchSem == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for i := 0; i < cap(w.batchSem); i++ {
+		select {
+		case w.batchSem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+	}
+	for i := 0; i < cap(w.batchSem); i++ {
+		<-w.batchSem
 	}
 }
 
@@ -360,6 +408,7 @@ func (w *autoRefreshWorker) setLeaseHeld(held bool) {
 	w.mu.Lock()
 	w.leaseHeld = held
 	w.mu.Unlock()
+	w.updateMetrics()
 }
 
 func (w *autoRefreshWorker) syncRepos() {
@@ -404,14 +453,18 @@ func (w *autoRefreshWorker) syncRepos() {
 			}
 			w.mu.Unlock()
 		}
-		due := now.Add(jitter(w.interval))
-		if hasRecord && !record.NextProbeAt.IsZero() {
+		initial := w.initialInterval(repo, now)
+		due := now.Add(initial + jitter(initial))
+		commitChanged := hasRecord && record.CommitHash != "" && repo.commitHash != "" && record.CommitHash != repo.commitHash
+		if commitChanged {
+			// The repository was re-ingested while this watcher was down.
+			// Probe promptly instead of trusting the old long interval.
+			due = now
+		} else if hasRecord && !record.NextProbeAt.IsZero() {
 			due = record.NextProbeAt
 			if due.Before(now) {
 				due = now
 			}
-		} else {
-			due = due.Add(jitter(w.interval))
 		}
 		entry := &watchEntry{storageID: storageID, due: due}
 		w.entries[storageID] = entry
@@ -426,8 +479,16 @@ func (w *autoRefreshWorker) syncRepos() {
 		}
 		delete(w.entries, storageID)
 	}
+	w.stateMu.Lock()
+	for storageID := range w.records {
+		if _, ok := present[storageID]; !ok {
+			delete(w.records, storageID)
+		}
+	}
+	w.stateMu.Unlock()
 	w.mu.Lock()
 	w.lastScan = now
+	w.trackedCount = len(present)
 	w.mu.Unlock()
 }
 
@@ -461,8 +522,17 @@ func (w *autoRefreshWorker) processDue(ctx context.Context) {
 		}
 		batch := append([]*watchEntry(nil), ready[:n]...)
 		ready = ready[n:]
+		activeBatch := batch[:0]
 		for _, entry := range batch {
-			w.markActive(entry.storageID)
+			if w.tryMarkActive(entry.storageID) {
+				activeBatch = append(activeBatch, entry)
+				continue
+			}
+			w.scheduleAt(entry.storageID, w.nextEligible(entry.storageID))
+		}
+		batch = activeBatch
+		if len(batch) == 0 {
+			continue
 		}
 		select {
 		case w.batchSem <- struct{}{}:
@@ -481,6 +551,19 @@ func (w *autoRefreshWorker) processDue(ctx context.Context) {
 				w.scheduleAt(entry.storageID, time.Now().Add(w.interval))
 			}
 			return
+		default:
+			// All probe slots are busy. Put the batch (and anything still
+			// ready) back without blocking the scheduler loop, so repo sync
+			// and state saves keep running.
+			retryAt := time.Now().Add(time.Second)
+			for _, entry := range batch {
+				w.clearActive(entry.storageID)
+				w.scheduleAt(entry.storageID, retryAt)
+			}
+			for _, entry := range ready {
+				w.scheduleAt(entry.storageID, retryAt)
+			}
+			return
 		}
 	}
 }
@@ -494,6 +577,7 @@ func (w *autoRefreshWorker) processBatch(ctx context.Context, batch []*watchEntr
 		return
 	}
 	refs := make([]*pb.WorkspaceRepositoryRef, 0, len(batch))
+	refIDs := make([]string, 0, len(batch))
 	for _, entry := range batch {
 		repo := w.repoFor(entry.storageID)
 		if repo == nil || strings.TrimSpace(repo.repoURL) == "" {
@@ -504,6 +588,7 @@ func (w *autoRefreshWorker) processBatch(ctx context.Context, batch []*watchEntr
 			branch = "main"
 		}
 		repo.markProbeStart(time.Now())
+		refIDs = append(refIDs, entry.storageID)
 		refs = append(refs, &pb.WorkspaceRepositoryRef{
 			StorageId:    entry.storageID,
 			DisplayPath:  repo.repoID,
@@ -533,8 +618,8 @@ func (w *autoRefreshWorker) processBatch(ctx context.Context, batch []*watchEntr
 	byID := make(map[string]*pb.RepoSyncProgress, len(results))
 	for i, progress := range results {
 		id := progress.GetRepository().GetStorageId()
-		if id == "" && i < len(batch) {
-			id = batch[i].storageID
+		if id == "" && i < len(refIDs) {
+			id = refIDs[i]
 		}
 		if id != "" {
 			byID[id] = progress
@@ -575,23 +660,34 @@ func (w *autoRefreshWorker) applyResult(storageID string, repo *ingestedRepo, st
 		w.incProbe("advanced")
 		routerAutoRefreshProbesTotal.WithLabelValues("advanced").Inc()
 		w.resetBackoff(storageID)
-		reingested := w.router.reingestRepoAsync(storageID, reason, branch)
+		// Fencing is best effort: a probe may have started while this worker
+		// held the shard lease and finish after it was lost. Do not enqueue a
+		// new write unless the lease is still held (manual checks are explicit
+		// operator actions and are allowed to bypass this guard).
+		reingested := false
+		if w.holdsLease() || reason == "manual" {
+			reingested = w.router.reingestRepoAsync(storageID, reason, branch)
+		} else {
+			w.logger.Warn("auto-refresh skipped re-ingest: shard lease is no longer held", "storage_id", storageID)
+		}
 		if reingested {
 			routerAutoRefreshReingestsTotal.Inc()
 			w.incReingest()
 		}
+		next := w.nextInterval(repo, now, true)
 		if repo != nil {
-			repo.markAdvance(now, now.Add(w.nextInterval(repo, now, true)), reingested)
+			repo.markAdvance(now, now.Add(next), reingested)
 		}
-		w.scheduleAt(storageID, now.Add(w.nextInterval(repo, now, true)))
+		w.scheduleAt(storageID, now.Add(next))
 	case pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED:
 		w.incProbe("unchanged")
 		routerAutoRefreshProbesTotal.WithLabelValues("unchanged").Inc()
 		w.resetBackoff(storageID)
+		next := w.nextInterval(repo, now, false)
 		if repo != nil {
-			repo.markProbeResult("unchanged", now, now.Add(w.nextInterval(repo, now, false)))
+			repo.markProbeResult("unchanged", now, now.Add(next))
 		}
-		w.scheduleAt(storageID, now.Add(w.nextInterval(repo, now, false)))
+		w.scheduleAt(storageID, now.Add(next))
 	case pb.RepoSyncStatus_REPO_SYNC_STATUS_DIVERGED, pb.RepoSyncStatus_REPO_SYNC_STATUS_MISSING_BRANCH:
 		backoff := w.recordFailure(storageID)
 		if repo != nil {
@@ -615,15 +711,44 @@ func (w *autoRefreshWorker) applyResult(storageID string, repo *ingestedRepo, st
 
 func (w *autoRefreshWorker) nextInterval(repo *ingestedRepo, now time.Time, changed bool) time.Duration {
 	if changed || repo == nil {
-		return w.interval + jitter(w.interval/5)
+		return w.interval + jitter(w.interval)
 	}
 	state := repo.refreshSnapshot()
 	lastChange := state.lastChangeAt
 	if lastChange.IsZero() {
+		lastChange = repo.commitTime
+	}
+	if lastChange.IsZero() {
 		lastChange = repo.ingestedAt
 	}
-	age := now.Sub(lastChange)
+	interval := w.adaptiveInterval(lastChange, now)
+	return interval + jitter(interval)
+}
+
+// initialInterval spreads the first probe after a watcher restart/failover.
+// Repositories with old commits wait longer; the cap keeps the cold-start
+// drain bounded (about 15 minutes for a fully stale 10k-repo fleet).
+func (w *autoRefreshWorker) initialInterval(repo *ingestedRepo, now time.Time) time.Duration {
+	lastChange := time.Time{}
+	if repo != nil {
+		lastChange = repo.commitTime
+		if lastChange.IsZero() {
+			lastChange = repo.ingestedAt
+		}
+	}
+	interval := w.adaptiveInterval(lastChange, now)
+	if interval > 15*time.Minute {
+		interval = 15 * time.Minute
+	}
+	return interval
+}
+
+func (w *autoRefreshWorker) adaptiveInterval(lastChange, now time.Time) time.Duration {
 	interval := w.interval
+	if lastChange.IsZero() {
+		return interval
+	}
+	age := now.Sub(lastChange)
 	switch {
 	case age >= 7*24*time.Hour:
 		interval = w.maxInterval
@@ -638,7 +763,7 @@ func (w *autoRefreshWorker) nextInterval(repo *ingestedRepo, now time.Time, chan
 	if interval > w.maxInterval {
 		interval = w.maxInterval
 	}
-	return interval + jitter(interval/5)
+	return interval
 }
 
 func jitter(d time.Duration) time.Duration {
@@ -697,10 +822,17 @@ func (w *autoRefreshWorker) eligible(storageID string) bool {
 	return true
 }
 
-func (w *autoRefreshWorker) markActive(storageID string) {
+func (w *autoRefreshWorker) tryMarkActive(storageID string) bool {
 	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.active[storageID] {
+		return false
+	}
+	if until, ok := w.backoffUntil[storageID]; ok && time.Now().Before(until) {
+		return false
+	}
 	w.active[storageID] = true
-	w.mu.Unlock()
+	return true
 }
 
 func (w *autoRefreshWorker) clearActive(storageID string) {
@@ -727,7 +859,11 @@ func (w *autoRefreshWorker) probeRepo(storageID string, repo *ingestedRepo, reas
 	if branch == "" {
 		branch = "main"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	baseCtx := w.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, 5*time.Minute)
 	defer cancel()
 	results, err := fetcherClient.ProbeWorkspaceRefresh(ctx, &pb.ProbeWorkspaceRefreshRequest{
 		JobId:       fmt.Sprintf("autorefresh-%d", time.Now().UnixNano()),
@@ -813,30 +949,44 @@ func (w *autoRefreshWorker) probeStorageID(storageID string) bool {
 // webhook URL. It bypasses the regular interval but still uses the normal
 // active/dedup guards.
 func (w *autoRefreshWorker) probeNow(repoURL string) {
+	if w.lease && !w.holdsLease() {
+		return
+	}
+
+	type candidate struct {
+		id   string
+		repo *ingestedRepo
+	}
 	w.router.mu.RLock()
-	repos := make([]*ingestedRepo, 0)
-	ids := make([]string, 0)
+	candidates := make([]candidate, 0)
 	for storageID, repo := range w.router.ingestedRepos {
 		if repo != nil && repo.repoURL != "" && sameRepoURL(repo.repoURL, repoURL) {
 			if repowatch.ShardFor(storageID, w.shards) != w.shard {
 				continue
 			}
-			if !w.eligible(storageID) {
-				continue
-			}
-			repos = append(repos, repo)
-			ids = append(ids, storageID)
+			candidates = append(candidates, candidate{id: storageID, repo: repo})
 		}
 	}
 	w.router.mu.RUnlock()
 
-	for i, repo := range repos {
-		w.markActive(ids[i])
+	for _, candidate := range candidates {
+		if !w.tryMarkActive(candidate.id) {
+			continue
+		}
 		go func(id string, rp *ingestedRepo) {
 			defer w.clearActive(id)
 			w.probeRepo(id, rp, "webhook")
-		}(ids[i], repo)
+		}(candidate.id, candidate.repo)
 	}
+}
+
+func (w *autoRefreshWorker) holdsLease() bool {
+	if !w.lease {
+		return true
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.leaseHeld
 }
 
 func (w *autoRefreshWorker) Stats() map[string]any {
@@ -865,7 +1015,7 @@ func (w *autoRefreshWorker) Stats() map[string]any {
 		nextScan = lastScan.Add(autoRefreshSyncInterval)
 	}
 	snapshot := w.router.ingestedRepoSnapshot()
-	repositories := make([]map[string]any, 0, len(snapshot))
+	ids := make([]string, 0, len(snapshot))
 	for storageID, repo := range snapshot {
 		if repo == nil || strings.TrimSpace(repo.repoURL) == "" {
 			continue
@@ -873,6 +1023,20 @@ func (w *autoRefreshWorker) Stats() map[string]any {
 		if repowatch.ShardFor(storageID, w.shards) != w.shard {
 			continue
 		}
+		ids = append(ids, storageID)
+	}
+	tracked := len(ids)
+	sort.Slice(ids, func(i, j int) bool {
+		return snapshot[ids[i]].repoID < snapshot[ids[j]].repoID
+	})
+	truncated := false
+	if len(ids) > autoRefreshTraceLimit {
+		ids = ids[:autoRefreshTraceLimit]
+		truncated = true
+	}
+	repositories := make([]map[string]any, 0, len(ids))
+	for _, storageID := range ids {
+		repo := snapshot[storageID]
 		entry := repo.refreshJSON()
 		entry["storage_id"] = storageID
 		entry["repo_id"] = repo.repoID
@@ -881,29 +1045,52 @@ func (w *autoRefreshWorker) Stats() map[string]any {
 		entry["commit_hash"] = repo.commitHash
 		repositories = append(repositories, entry)
 	}
-	sort.Slice(repositories, func(i, j int) bool {
-		return fmt.Sprint(repositories[i]["repo_id"]) < fmt.Sprint(repositories[j]["repo_id"])
-	})
 
 	return map[string]any{
-		"enabled":      true,
-		"interval":     w.interval.String(),
-		"max_interval": w.maxInterval.String(),
-		"concurrency":  w.concurrency,
-		"batch_size":   w.batchSize,
-		"shard":        w.shard,
-		"shards":       w.shards,
-		"lease_held":   leaseHeld,
-		"tracked":      len(repositories),
-		"scheduled":    scheduled,
-		"active":       active,
-		"last_scan":    unixOrZero(lastScan),
-		"next_scan":    unixOrZero(nextScan),
-		"next_probe":   unixOrZero(nextProbe),
-		"probes":       probes,
-		"reingests":    reingests,
-		"backoffs":     backoffs,
-		"repositories": repositories,
+		"enabled":         true,
+		"interval":        w.interval.String(),
+		"max_interval":    w.maxInterval.String(),
+		"concurrency":     w.concurrency,
+		"batch_size":      w.batchSize,
+		"shard":           w.shard,
+		"shards":          w.shards,
+		"lease_held":      leaseHeld,
+		"tracked":         tracked,
+		"trace_limit":     autoRefreshTraceLimit,
+		"trace_truncated": truncated,
+		"scheduled":       scheduled,
+		"active":          active,
+		"last_scan":       unixOrZero(lastScan),
+		"next_scan":       unixOrZero(nextScan),
+		"next_probe":      unixOrZero(nextProbe),
+		"probes":          probes,
+		"reingests":       reingests,
+		"backoffs":        backoffs,
+		"repositories":    repositories,
+	}
+}
+
+func (w *autoRefreshWorker) updateMetrics() {
+	w.mu.Lock()
+	tracked := w.trackedCount
+	held := w.leaseHeld
+	w.mu.Unlock()
+	w.scheduleMu.Lock()
+	scheduled := len(w.entries)
+	next := time.Time{}
+	if len(w.queue) > 0 {
+		next = w.queue[0].due
+	}
+	w.scheduleMu.Unlock()
+
+	shard := strconv.Itoa(w.shard)
+	routerAutoRefreshTrackedRepos.WithLabelValues(shard).Set(float64(tracked))
+	routerAutoRefreshScheduledRepos.WithLabelValues(shard).Set(float64(scheduled))
+	routerAutoRefreshNextProbeTimestamp.WithLabelValues(shard).Set(float64(unixOrZero(next)))
+	if held {
+		routerAutoRefreshLeaseHeld.WithLabelValues(shard).Set(1)
+	} else {
+		routerAutoRefreshLeaseHeld.WithLabelValues(shard).Set(0)
 	}
 }
 
@@ -926,6 +1113,10 @@ func (w *autoRefreshWorker) loadState() {
 	var state watchStateFile
 	if err := json.Unmarshal(raw, &state); err != nil {
 		w.logger.Warn("auto-refresh state is invalid; ignoring", "path", path, "error", err)
+		return
+	}
+	if state.Shards != 0 && state.Shards != w.shards {
+		w.logger.Warn("auto-refresh state shard count changed; ignoring", "path", path, "state_shards", state.Shards, "shards", w.shards)
 		return
 	}
 	w.stateMu.Lock()

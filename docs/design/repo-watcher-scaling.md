@@ -1,6 +1,8 @@
 # Repository watcher: failover and scaling
 
-Status: implemented in this tree; deployment verification pending.
+Status: core failover, due-time scheduler, metadata-only probe and Guardian
+sharding/leases are implemented in this tree. Deployment verification and the
+event-driven Guardian repo index remain pending.
 
 See [repo-watcher-deploy-checklist.md](repo-watcher-deploy-checklist.md) for the
 post-deployment checks.
@@ -23,13 +25,17 @@ and a Guardian deployment.
 - Production-grade audit/history (separate follow-up).
 - Replacing the existing Git webhook receiver.
 
-## Current limits
+## Limits addressed by this change
+
+The following were true before this implementation:
 
 - One static `--auto-refresh-owner`; no automatic failover.
-- Every interval scans all ingested repositories.
-- The fetcher probe can clone/open a repository; too expensive at scale.
-- State is in memory; a restart loses the schedule/backoff.
-- Guardian's repo-import loop scans every repository every 30s.
+- Every interval scanned all ingested repositories.
+- The fetcher probe could clone/open a repository; too expensive at scale.
+- State was in memory; a restart lost the schedule/backoff.
+- Guardian's repo-import loop scanned every repository every 30s. It is now
+  sharded and leased, but still lists and content-compares authored bundles
+  per shard until the repo-index/event queue follow-up lands.
 
 ## Architecture
 
@@ -115,8 +121,9 @@ A ±20% jitter is applied to every next-probe time.
 ### Batching and rate limits
 
 - `--auto-refresh-batch-size` groups probes into one fetcher RPC.
-- Per-host token buckets limit concurrency (for example GitHub 8, GitLab 4).
-- 429/403 responses back off the host and the repository.
+- `--auto-refresh-concurrency` bounds the number of in-flight probe RPCs.
+- Per-host token buckets are a follow-up; until then, tune concurrency and use
+  repo-level exponential backoff on 429/403/auth failures.
 
 ## Metadata-only probe
 
@@ -137,8 +144,9 @@ clones.
 - Lease duration 15s, renew 5s.
 - The leader renews; on renewal failure it stops scheduling new probes and a
   standby takes over.
-- In-flight probes may finish; enqueueing a re-ingest checks the lease token
-  and the per-repo dedup window.
+- In-flight probes may finish; enqueueing a re-ingest checks the worker's
+  lease state and the per-repo dedup window. A strict fencing token on the
+  MonoFS write path is a follow-up; duplicate re-ingests are idempotent.
 - Non-Kubernetes deployments fall back to the static shard/owner flags.
 
 ### Sharding
@@ -162,11 +170,12 @@ Add/keep:
 - `monofs_router_auto_refresh_probes_total{result}`
 - `monofs_router_auto_refresh_reingests_total`
 - `monofs_router_auto_refresh_backoff_total`
-- scheduler lag (`next_probe_at` vs now)
-- due queue depth
-- lease owner/age
-- per-shard tracked repo count
-- Guardian repo-import duration and failures
+- `monofs_router_auto_refresh_tracked_repositories{shard}`
+- `monofs_router_auto_refresh_scheduled_repositories{shard}`
+- `monofs_router_auto_refresh_lease_held{shard}`
+- `monofs_router_auto_refresh_next_probe_timestamp_seconds{shard}`
+- scheduler lag can be derived from `next_probe_timestamp_seconds` vs `time()`
+- Guardian shard import/failure logs; Prometheus counters are a follow-up
 
 The MonoFS UI exposes:
 
@@ -179,9 +188,13 @@ The MonoFS UI exposes:
 
 1. **Failover** — Lease package, shard ownership, static fallback.
 2. **Scheduler** — due-time heap, adaptive intervals, jitter, persisted snapshots.
-3. **Probe** — metadata-only `ls-remote`, batching, per-host limits.
+3. **Probe** — metadata-only `ls-remote`, batching. Per-host limits remain a
+   follow-up.
 4. **Guardian** — sharded importers with leases.
-5. **Load test** — 10k/50k synthetic repos, leader kill, restart, rate-limit tests.
+5. **Load test** — automated coverage includes a 10k-repo scheduler sync test,
+   lease acquire/takeover tests, shard-filter tests and a metadata-probe test.
+   Cluster-level 10k/50k load, leader-kill and rate-limit tests remain manual
+   (see the deployment checklist).
 
 ## Deployment checklist
 
@@ -205,5 +218,6 @@ The MonoFS UI exposes:
 
 - Webhook automation at org scale (GitHub App / org webhook).
 - Event-driven Guardian import (currently sharded content compare).
+- Strict fencing tokens for re-ingest (best-effort lease check today).
 - Bundle deletion/pruning.
 - Production audit/history.

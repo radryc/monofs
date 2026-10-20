@@ -373,3 +373,143 @@ func TestAutoRefreshNextIntervalAdaptive(t *testing.T) {
 		}
 	}
 }
+
+func TestAutoRefreshStatsTraceIsBounded(t *testing.T) {
+	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
+	r.mu.Lock()
+	for i := 0; i < autoRefreshTraceLimit+50; i++ {
+		id := fmt.Sprintf("repo-%04d", i)
+		r.ingestedRepos[id] = &ingestedRepo{repoID: "src/" + id, repoURL: invalidRepoURL, branch: "main", commitHash: "abc123"}
+	}
+	r.mu.Unlock()
+	w := newAutoRefreshWorker(r, time.Minute, 2, slog.New(slog.DiscardHandler))
+	w.configure(0, 1, 8, time.Hour, t.TempDir(), false, "", "")
+	w.syncRepos()
+	stats := w.Stats()
+	if got := stats["tracked"].(int); got != autoRefreshTraceLimit+50 {
+		t.Fatalf("tracked = %d", got)
+	}
+	repos := stats["repositories"].([]map[string]any)
+	if len(repos) != autoRefreshTraceLimit {
+		t.Fatalf("trace rows = %d, want %d", len(repos), autoRefreshTraceLimit)
+	}
+	if truncated, _ := stats["trace_truncated"].(bool); !truncated {
+		t.Fatal("trace_truncated = false")
+	}
+}
+
+func TestAutoRefreshNextIntervalUsesCommitTimeAfterRestart(t *testing.T) {
+	w := newAutoRefreshWorker(NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler)), time.Minute, 2, slog.New(slog.DiscardHandler))
+	w.configure(0, 1, 8, time.Hour, t.TempDir(), false, "", "")
+	now := time.Now()
+	repo := &ingestedRepo{ingestedAt: now, commitTime: now.Add(-8 * 24 * time.Hour)}
+	got := w.nextInterval(repo, now, false)
+	if got < 48*time.Minute || got > 72*time.Minute {
+		t.Fatalf("interval = %s, want near max interval", got)
+	}
+}
+
+func TestAutoRefreshSchedulerRunAndStop(t *testing.T) {
+	responses := make([]*pb.RepoSyncProgress, 0, 20)
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprintf("repo-%02d", i)
+		responses = append(responses, &pb.RepoSyncProgress{
+			Repository: &pb.WorkspaceRepositoryRef{
+				StorageId:   id,
+				DisplayPath: "src/" + id,
+				RepoUrl:     invalidRepoURL,
+				Branch:      "main",
+				BaseCommit:  "abc123",
+			},
+			Status:       pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED,
+			RemoteCommit: "abc123",
+		})
+	}
+	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
+	fetcherAddr, impl, cleanup := startWorkspaceSyncTestFetcher(t, responses, nil, nil)
+	defer cleanup()
+	if err := r.SetFetcherClient([]string{fetcherAddr}); err != nil {
+		t.Fatalf("set fetcher: %v", err)
+	}
+	r.mu.Lock()
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprintf("repo-%02d", i)
+		r.ingestedRepos[id] = &ingestedRepo{
+			repoID: "src/" + id, repoURL: invalidRepoURL, branch: "main", commitHash: "abc123",
+		}
+	}
+	r.mu.Unlock()
+
+	w := newAutoRefreshWorker(r, 50*time.Millisecond, 2, slog.New(slog.DiscardHandler))
+	w.configure(0, 1, 5, time.Second, t.TempDir(), false, "", "")
+	w.Start()
+	defer w.Stop()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		impl.mu.Lock()
+		count := len(impl.probeRequests)
+		impl.mu.Unlock()
+		if count > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("scheduler did not send a probe")
+}
+
+func TestAutoRefreshStateDetectsCommitChange(t *testing.T) {
+	stateDir := t.TempDir()
+	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
+	repo := &ingestedRepo{repoID: "src/repo", repoURL: invalidRepoURL, branch: "main", commitHash: "old"}
+	r.mu.Lock()
+	r.ingestedRepos["repo-1"] = repo
+	r.mu.Unlock()
+
+	w := newAutoRefreshWorker(r, time.Minute, 2, slog.New(slog.DiscardHandler))
+	w.configure(0, 1, 8, time.Hour, stateDir, false, "", "")
+	w.syncRepos()
+	w.saveState()
+
+	r.mu.Lock()
+	r.ingestedRepos["repo-1"] = &ingestedRepo{repoID: "src/repo", repoURL: invalidRepoURL, branch: "main", commitHash: "new"}
+	r.mu.Unlock()
+
+	w2 := newAutoRefreshWorker(r, time.Minute, 2, slog.New(slog.DiscardHandler))
+	w2.configure(0, 1, 8, time.Hour, stateDir, false, "", "")
+	w2.loadState()
+	w2.syncRepos()
+	w2.scheduleMu.Lock()
+	due := w2.entries["repo-1"].due
+	w2.scheduleMu.Unlock()
+	if time.Until(due) > time.Second {
+		t.Fatalf("due = %v, want an immediate probe after commit change", due)
+	}
+}
+
+func TestAutoRefreshReingestRequiresLease(t *testing.T) {
+	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
+	repo := &ingestedRepo{repoID: "src/repo", repoURL: invalidRepoURL, branch: "main", commitHash: "abc123"}
+	r.mu.Lock()
+	r.ingestedRepos["repo-1"] = repo
+	r.mu.Unlock()
+	w := newAutoRefreshWorker(r, time.Minute, 2, slog.New(slog.DiscardHandler))
+	w.configure(0, 1, 8, time.Hour, t.TempDir(), true, "test-lease", "default")
+	w.leaseHeld = false
+	w.applyResult("repo-1", repo, pb.RepoSyncStatus_REPO_SYNC_STATUS_ADVANCED, "", "poll", "main")
+	r.reingestDedupMu.Lock()
+	_, reingested := r.reingestSeen["repo-1"]
+	r.reingestDedupMu.Unlock()
+	if reingested {
+		t.Fatal("standby worker enqueued a re-ingest")
+	}
+
+	w.leaseHeld = true
+	w.applyResult("repo-1", repo, pb.RepoSyncStatus_REPO_SYNC_STATUS_ADVANCED, "", "poll", "main")
+	r.reingestDedupMu.Lock()
+	_, reingested = r.reingestSeen["repo-1"]
+	r.reingestDedupMu.Unlock()
+	if !reingested {
+		t.Fatal("lease holder did not enqueue a re-ingest")
+	}
+}

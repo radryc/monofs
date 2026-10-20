@@ -69,7 +69,7 @@ func (rm *RepoManager) RemoteHead(ctx context.Context, repoURL, branch string) (
 			return ref.Hash().String(), nil
 		}
 	}
-	return "", fmt.Errorf("branch %q not found on %s", branch, repoURL)
+	return "", fmt.Errorf("%w: branch %q not found on %s", plumbing.ErrReferenceNotFound, branch, repoURL)
 }
 
 // CloneOrOpen clones a repository or opens existing one.
