@@ -274,6 +274,13 @@ func (w *autoRefreshWorker) probeRepo(storageID string, repo *ingestedRepo, reas
 		w.logger.Warn("auto-refresh probe failed", "storage_id", storageID, "error", err)
 		return
 	}
+	if len(results) == 0 {
+		backoff := w.recordFailure(storageID)
+		repo.markProbeError("probe returned no result", time.Now(), time.Now().Add(backoff))
+		w.incProbe("error")
+		routerAutoRefreshProbesTotal.WithLabelValues("error").Inc()
+		return
+	}
 
 	for _, progress := range results {
 		now := time.Now()
