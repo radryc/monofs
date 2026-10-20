@@ -466,6 +466,26 @@ partitions/pipeline-workers/
 | Docker | `docker build`, `docker push` | 2 | 2 CPU / 4Gi |
 | Deployer | `guardianctl deploy` | 1 | 1 CPU / 2Gi |
 
+### Repository watcher (router worker)
+
+The router also runs the repository watcher described in
+[Auto-Refresh](production-operations.md#auto-refresh). It is configured on the
+router deployment, not as a separate Guardian partition:
+
+```text
+--auto-refresh=true
+--auto-refresh-interval=1m
+--auto-refresh-concurrency=2
+--auto-refresh-owner=router-a
+```
+
+The Strata bootstrap wires these from `storage.router.*` /
+`MONOFS_AUTO_REFRESH*`. The watcher status is exposed at
+`GET /api/workers/auto-refresh`, per-repo trace data at
+`GET /api/repositories`, and a manual check at
+`POST /api/repositories/refresh`. The MonoFS UI shows it under
+**Fetchers → Repository Watcher** and **Repositories → Watcher**.
+
 ## Task Queue Lifecycle
 
 ```
