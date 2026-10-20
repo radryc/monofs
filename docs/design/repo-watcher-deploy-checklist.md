@@ -73,7 +73,8 @@ Guardian:
 | `GUARDIAN_REPO_IMPORT_LEASE_NAME` | `guardian-repo-import` (leases become `...-0`, `...-1` when shards > 1) |
 
 - [ ] The router has the `repowatch` emptyDir mounted at
-      `/var/lib/monofs/repowatch`.
+      `/var/lib/monofs/repowatch`. If you manage the router from the partition
+      intent instead of the bootstrap template, add the same volume there.
 - [ ] Outside Kubernetes, set `MONOFS_AUTO_REFRESH_LEASE=false` and give each
       router a distinct `MONOFS_AUTO_REFRESH_SHARD` (static ownership).
 - [ ] At least two router pods are running (`router-a` + `router-b`). Each
