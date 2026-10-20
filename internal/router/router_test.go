@@ -236,6 +236,32 @@ func TestTrackedRepoRegisterRequestPreservesGuardianURL(t *testing.T) {
 	}
 }
 
+func TestDiscoveredIngestedRepoRestoresCommitHash(t *testing.T) {
+	repo := discoveredIngestedRepo(&pb.GetRepositoryInfoResponse{
+		StorageId:   "storage-1",
+		DisplayPath: "github.com/acme/demo",
+		Source:      "https://github.com/acme/demo.git",
+		Ref:         "main",
+		CommitHash:  "abc123",
+		GuardianUrl: "http://guardian",
+	}, 7)
+	if repo == nil {
+		t.Fatal("discoveredIngestedRepo() = nil")
+	}
+	if repo.commitHash != "abc123" {
+		t.Fatalf("commitHash = %q, want abc123", repo.commitHash)
+	}
+	if repo.repoURL != "https://github.com/acme/demo.git" {
+		t.Fatalf("repoURL = %q", repo.repoURL)
+	}
+	if repo.branch != "main" {
+		t.Fatalf("branch = %q", repo.branch)
+	}
+	if repo.topologyVersion != 7 {
+		t.Fatalf("topologyVersion = %d, want 7", repo.topologyVersion)
+	}
+}
+
 func TestVersionIncrement(t *testing.T) {
 	cfg := DefaultRouterConfig()
 	router := NewRouter(cfg, nil)

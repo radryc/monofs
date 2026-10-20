@@ -121,6 +121,7 @@ func main() {
 		autoRefreshEnabled     = flag.Bool("auto-refresh", false, "Enable automatic re-ingestion of advanced upstreams (Phase 5)")
 		autoRefreshInterval    = flag.Duration("auto-refresh-interval", 5*time.Minute, "Interval between auto-refresh probes (Phase 5)")
 		autoRefreshConcurrency = flag.Int("auto-refresh-concurrency", 4, "Max concurrent auto-refresh probes (Phase 5)")
+		autoRefreshOwner       = flag.String("auto-refresh-owner", "", "Only this router name runs the auto-refresh worker (empty = every router)")
 		localIngestEnabled     = flag.Bool("local-ingest", true, "Allow ingestion from router-local filesystem paths (file ingestion and uploads)")
 		// Replication and failover configuration
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
@@ -245,6 +246,7 @@ func main() {
 		AutoRefreshEnabled:     *autoRefreshEnabled,
 		AutoRefreshInterval:    *autoRefreshInterval,
 		AutoRefreshConcurrency: *autoRefreshConcurrency,
+		AutoRefreshOwner:       strings.TrimSpace(*autoRefreshOwner),
 		EncryptionKey:          encryptionKey,
 		ReplicationFactor:      *replicationFactor,
 		RebalanceDelay:         *rebalanceDelay,

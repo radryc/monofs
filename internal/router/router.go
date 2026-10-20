@@ -59,6 +59,7 @@ type RouterConfig struct {
 	AutoRefreshEnabled     bool
 	AutoRefreshInterval    time.Duration
 	AutoRefreshConcurrency int
+	AutoRefreshOwner       string // only this router name runs the worker; empty = all
 
 	// AllowLocalIngest permits ingestion from router-local filesystem paths
 	// (ingestion_type=file, including multipart uploads). Enabled by default so
@@ -391,6 +392,34 @@ type ingestedRepo struct {
 	mu                sync.RWMutex   // Protects rebalance state
 }
 
+// discoveredIngestedRepo rebuilds the router's in-memory tracking record from
+// the durable repository metadata on a node. CommitHash matters: the
+// auto-refresh worker uses it as the base commit for upstream probes, so
+// dropping it after a restart would make every probe fail with an empty
+// base_commit.
+func discoveredIngestedRepo(info *pb.GetRepositoryInfoResponse, topologyVersion int64) *ingestedRepo {
+	if info == nil {
+		return nil
+	}
+	return &ingestedRepo{
+		repoID:            info.DisplayPath,
+		repoURL:           info.Source,
+		guardianURL:       info.GuardianUrl,
+		branch:            info.Ref,
+		commitHash:        info.CommitHash,
+		filesCount:        0, // Will be updated by health checks
+		ingestedAt:        time.Now(),
+		topologyVersion:   topologyVersion,
+		rebalanceState:    RebalanceStateStable,
+		rebalanceProgress: 1.0,
+	}
+}
+
+func autoRefreshOwnerMatches(owner, routerName string) bool {
+	owner = strings.TrimSpace(owner)
+	return owner == "" || owner == strings.TrimSpace(routerName)
+}
+
 func trackedRepoRegisterRequest(storageID string, repo *ingestedRepo) *pb.RegisterRepositoryRequest {
 	req := &pb.RegisterRepositoryRequest{StorageId: storageID}
 	if repo == nil {
@@ -503,13 +532,15 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		r.autoPushWorker.Start()
 	}
 
-	if cfg.AutoRefreshEnabled {
+	if cfg.AutoRefreshEnabled && autoRefreshOwnerMatches(cfg.AutoRefreshOwner, cfg.RouterName) {
 		interval := cfg.AutoRefreshInterval
 		if interval <= 0 {
 			interval = defaultAutoRefreshInterval
 		}
 		r.autoRefreshWorker = newAutoRefreshWorker(r, interval, cfg.AutoRefreshConcurrency, logger)
 		r.autoRefreshWorker.Start()
+	} else if cfg.AutoRefreshEnabled {
+		logger.Info("auto-refresh worker skipped on this router", "owner", cfg.AutoRefreshOwner, "router", cfg.RouterName)
 	}
 
 	// Boot the pipeline orchestrator: registers the internal principal,
@@ -1797,17 +1828,7 @@ func (r *Router) discoverClusterRepositories() {
 
 				mu.Lock()
 				if _, exists := discoveredRepos[storageID]; !exists {
-					discoveredRepos[storageID] = &ingestedRepo{
-						repoID:            infoResp.DisplayPath,
-						repoURL:           infoResp.Source,
-						guardianURL:       infoResp.GuardianUrl,
-						branch:            infoResp.Ref,
-						filesCount:        0, // Will be updated by health checks
-						ingestedAt:        time.Now(),
-						topologyVersion:   r.version.Load(),
-						rebalanceState:    RebalanceStateStable,
-						rebalanceProgress: 1.0,
-					}
+					discoveredRepos[storageID] = discoveredIngestedRepo(infoResp, r.version.Load())
 					r.logger.Debug("discovered repository",
 						"storage_id", storageID,
 						"display_path", infoResp.DisplayPath,
