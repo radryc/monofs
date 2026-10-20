@@ -513,3 +513,29 @@ func TestAutoRefreshReingestRequiresLease(t *testing.T) {
 		t.Fatal("lease holder did not enqueue a re-ingest")
 	}
 }
+
+func TestAutoRefreshStaticFallbackWhenLeaseUnavailable(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	cfg := DefaultRouterConfig()
+	cfg.AutoRefreshEnabled = true
+	cfg.AutoRefreshLease = true
+	cfg.AutoRefreshShards = 2
+	cfg.AutoRefreshShard = 1
+	cfg.AutoRefreshOwner = ""
+	cfg.AutoRefreshInterval = time.Hour
+	cfg.AutoRefreshConcurrency = 1
+	cfg.AutoRefreshStateDir = t.TempDir()
+	r := NewRouter(cfg, slog.New(slog.DiscardHandler))
+	defer r.Close()
+
+	if len(r.autoRefreshWorkers) != 1 {
+		t.Fatalf("workers = %d, want one static fallback worker", len(r.autoRefreshWorkers))
+	}
+	if got := r.autoRefreshWorkers[0].shard; got != 1 {
+		t.Fatalf("shard = %d, want static shard 1", got)
+	}
+	if r.autoRefreshWorkers[0].lease {
+		t.Fatal("static fallback worker still has lease mode enabled")
+	}
+}

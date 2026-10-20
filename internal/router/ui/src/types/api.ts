@@ -86,6 +86,7 @@ export interface AutoRefreshWorkerStats {
   shard?: number
   shards?: number
   lease_held?: boolean
+  lease_bypass?: boolean
   owner?: string
   router?: string
   tracked: number

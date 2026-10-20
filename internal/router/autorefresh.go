@@ -231,6 +231,7 @@ type autoRefreshWorker struct {
 	reingests    int64
 	backoffs     int64
 	leaseHeld    bool
+	leaseBypass  bool
 
 	scheduleMu sync.Mutex
 	entries    map[string]*watchEntry
@@ -348,6 +349,11 @@ func (w *autoRefreshWorker) run(ctx context.Context) {
 			w.logger.Warn("auto-refresh lease requested but Kubernetes API is not configured; using static shard ownership")
 		}
 	}
+	// Fallback path: probes must be allowed to enqueue re-ingests even though
+	// no lease is held.
+	w.mu.Lock()
+	w.leaseBypass = true
+	w.mu.Unlock()
 	w.runScheduler(ctx)
 }
 
@@ -981,12 +987,12 @@ func (w *autoRefreshWorker) probeNow(repoURL string) {
 }
 
 func (w *autoRefreshWorker) holdsLease() bool {
-	if !w.lease {
-		return true
-	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.leaseHeld
+	if w.leaseBypass {
+		return true
+	}
+	return !w.lease || w.leaseHeld
 }
 
 func (w *autoRefreshWorker) Stats() map[string]any {
@@ -1000,6 +1006,7 @@ func (w *autoRefreshWorker) Stats() map[string]any {
 	reingests := w.reingests
 	backoffs := w.backoffs
 	leaseHeld := w.leaseHeld
+	leaseBypass := w.leaseBypass
 	w.mu.Unlock()
 
 	w.scheduleMu.Lock()
@@ -1055,6 +1062,7 @@ func (w *autoRefreshWorker) Stats() map[string]any {
 		"shard":           w.shard,
 		"shards":          w.shards,
 		"lease_held":      leaseHeld,
+		"lease_bypass":    leaseBypass,
 		"tracked":         tracked,
 		"trace_limit":     autoRefreshTraceLimit,
 		"trace_truncated": truncated,

@@ -58,6 +58,7 @@ func (r *Router) handleAutoRefreshWorker(w http.ResponseWriter, req *http.Reques
 		"last_scan":       int64(0),
 		"next_scan":       int64(0),
 		"lease_held":      false,
+		"lease_bypass":    false,
 		"trace_limit":     autoRefreshTraceLimit,
 		"trace_truncated": false,
 		"repositories":    []map[string]any{},
@@ -80,6 +81,9 @@ func (r *Router) handleAutoRefreshWorker(w http.ResponseWriter, req *http.Reques
 		aggregate["backoffs"] = aggregate["backoffs"].(int64) + int64Value(stats["backoffs"])
 		if held, _ := stats["lease_held"].(bool); held {
 			aggregate["lease_held"] = true
+		}
+		if bypass, _ := stats["lease_bypass"].(bool); bypass {
+			aggregate["lease_bypass"] = true
 		}
 		if stats["last_scan"] != nil {
 			if aggregate["last_scan"] == nil || int64Value(stats["last_scan"]) > int64Value(aggregate["last_scan"]) {

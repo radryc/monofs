@@ -74,6 +74,8 @@ Guardian:
 
 - [ ] The router has the `repowatch` emptyDir mounted at
       `/var/lib/monofs/repowatch`.
+- [ ] Outside Kubernetes, set `MONOFS_AUTO_REFRESH_LEASE=false` and give each
+      router a distinct `MONOFS_AUTO_REFRESH_SHARD` (static ownership).
 - [ ] At least two router pods are running (`router-a` + `router-b`). Each
       router competes for every shard lease; a dead router's shards are taken
       over by the survivor.
