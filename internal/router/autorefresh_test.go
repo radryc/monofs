@@ -69,6 +69,10 @@ func TestAutoRefreshProbeAdvancedSchedulesReingest(t *testing.T) {
 	if backedOff {
 		t.Fatal("ADVANCED should not trigger backoff")
 	}
+	state := repo.refreshSnapshot()
+	if state.lastProbeStatus != "advanced" || state.changesTotal != 1 || state.lastChangeAt.IsZero() {
+		t.Fatalf("refresh state = %+v, want advanced change", state)
+	}
 }
 
 func TestAutoRefreshProbeUnchangedDoesNothing(t *testing.T) {
@@ -83,6 +87,9 @@ func TestAutoRefreshProbeUnchangedDoesNothing(t *testing.T) {
 	r.reingestDedupMu.Unlock()
 	if scheduled {
 		t.Fatal("UNCHANGED should not schedule a re-ingest")
+	}
+	if state := repo.refreshSnapshot(); state.lastProbeStatus != "unchanged" {
+		t.Fatalf("refresh status = %q, want unchanged", state.lastProbeStatus)
 	}
 }
 
@@ -109,6 +116,9 @@ func TestAutoRefreshProbeDivergedBacksOff(t *testing.T) {
 	}
 	if !until.After(time.Now()) {
 		t.Fatal("backoff until should be in the future")
+	}
+	if state := repo.refreshSnapshot(); state.lastProbeStatus != "error" || state.lastProbeError == "" {
+		t.Fatalf("refresh state = %+v, want error", state)
 	}
 }
 
@@ -143,5 +153,27 @@ func TestSameRepoURL(t *testing.T) {
 		if got := sameRepoURL(c.a, c.b); got != c.want {
 			t.Errorf("sameRepoURL(%q,%q) = %v, want %v", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+func TestAutoRefreshStatsIncludesRepositoryTrace(t *testing.T) {
+	r, w := setupAutoRefreshRouter(t, probeResponse(pb.RepoSyncStatus_REPO_SYNC_STATUS_UNCHANGED))
+	registerAutoRefreshRepo(t, r, "repo-1")
+
+	r.mu.RLock()
+	repo := r.ingestedRepos["repo-1"]
+	r.mu.RUnlock()
+	w.probeRepo("repo-1", repo, "test")
+
+	stats := w.Stats()
+	if stats["tracked"] != 1 {
+		t.Fatalf("tracked = %v, want 1", stats["tracked"])
+	}
+	repos, ok := stats["repositories"].([]map[string]any)
+	if !ok || len(repos) != 1 {
+		t.Fatalf("repositories = %#v, want one entry", stats["repositories"])
+	}
+	if repos[0]["repo_id"] != "src/repo" || repos[0]["last_probe_status"] != "unchanged" {
+		t.Fatalf("repository trace = %#v", repos[0])
 	}
 }

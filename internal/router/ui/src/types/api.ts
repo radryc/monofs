@@ -67,12 +67,45 @@ export interface FeatureInfo {
   help_hint?: string
 }
 
+export interface RepoRefreshState {
+  last_probed_at: number
+  last_probe_status: string
+  last_probe_error: string
+  last_change_at: number
+  changes_total: number
+  reingests_total: number
+  next_probe_at: number
+}
+
+export interface AutoRefreshWorkerStats {
+  enabled: boolean
+  interval: string
+  concurrency: number
+  owner?: string
+  router?: string
+  tracked: number
+  active: number
+  last_scan: number
+  next_scan: number
+  probes: Record<string, number>
+  reingests: number
+  backoffs: number
+  repositories?: Array<RepoRefreshState & {
+    storage_id: string
+    repo_id: string
+    repo_url: string
+    branch: string
+    commit_hash: string
+  }>
+}
+
 export interface Repository {
   storage_id: string
   repo_id: string
   repo_url: string
   branch: string
   commit_hash: string
+  refresh?: RepoRefreshState
   commit_time?: number        // Unix timestamp (seconds)
   commit_message?: string
   files_count: number
@@ -96,6 +129,7 @@ export interface Repository {
 export interface RepositoriesData {
   repositories: Repository[]
   current_topology_version: number
+  auto_refresh_enabled?: boolean
   in_progress?: Repository[]
 }
 

@@ -13,6 +13,7 @@ const data = ref<RepositoriesData | null>(null)
 const searchQuery = ref('')
 const expandedRows = ref<Set<string>>(new Set())
 const rebalancing = ref<Set<string>>(new Set())
+const checking = ref<Set<string>>(new Set())
 
 const { loading } = useAutoRefresh(async () => {
   const controller = new AbortController()
@@ -80,6 +81,48 @@ async function triggerRebalance(storageId: string) {
   }
 }
 
+async function checkNow(storageId: string) {
+  checking.value = new Set([...checking.value, storageId])
+  try {
+    const body = new URLSearchParams({ storage_id: storageId })
+    const res = await fetch('/api/repositories/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    })
+    const result = await res.json().catch(() => ({}))
+    if (res.ok) {
+      store.addToast('success', result.status === 'already_running' ? 'Check already running' : 'Repository check queued')
+    } else {
+      store.addToast('error', result.error || `Failed to queue check (${res.status})`)
+    }
+  } catch (err: any) {
+    store.addToast('error', `Error: ${err.message}`)
+  } finally {
+    const next = new Set(checking.value)
+    next.delete(storageId)
+    checking.value = next
+  }
+}
+
+function probeBadgeClass(repo: Repository): string {
+  const status = repo.refresh?.last_probe_status
+  if (status === 'advanced') return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/20'
+  if (status === 'error') return 'bg-rose-500/15 text-rose-300 border-rose-500/20'
+  if (status === 'unchanged') return 'bg-sky-500/15 text-sky-300 border-sky-500/20'
+  if (status === 'diverged') return 'bg-amber-500/15 text-amber-300 border-amber-500/20'
+  return 'bg-slate-700/30 text-slate-400 border-slate-600/20'
+}
+
+function probeLabel(repo: Repository): string {
+  const status = repo.refresh?.last_probe_status
+  if (!status) return 'not checked'
+  if (status === 'advanced') return 'changed'
+  return status
+}
+
+const watchedRepos = computed(() => (data.value?.repositories ?? []).filter(r => r.refresh?.last_probed_at))
+
 function statusBadgeClass(repo: Repository): string {
   if (repo.in_progress && repo.stage === 'FAILED') return 'bg-rose-500/15 text-rose-300 border-rose-500/20'
   if (repo.in_progress) return 'bg-amber-500/15 text-amber-300 border-amber-500/20'
@@ -110,11 +153,14 @@ const inProgressRepos = computed(() => (data.value?.repositories ?? []).filter(r
   <div>
     <PageHeader title="Repositories" subtitle="Browse ingested repositories across all routers" />
 
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+    <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-6">
       <StatCard icon="📦" label="Total Repos" :value="data?.repositories?.filter(r => !r.in_progress)?.length ?? '-'" />
       <StatCard icon="🔄" label="In Progress" :value="inProgressRepos.length" />
       <StatCard icon="📄" label="Total Files"
         :value="formatNumber(data?.repositories?.reduce((s, r) => s + (r.files_count || 0), 0) ?? 0)" />
+      <StatCard icon="👁️" label="Watched" :value="watchedRepos.length"
+        :sub="data?.auto_refresh_enabled ? 'auto-refresh on' : 'auto-refresh off'"
+        tooltip="Repositories probed by the auto-refresh worker. Watched repos are re-ingested when their upstream branch advances." />
       <StatCard icon="🗂️" label="Topology Version" :value="data?.current_topology_version ?? '-'" />
     </div>
 
@@ -169,6 +215,7 @@ const inProgressRepos = computed(() => (data.value?.repositories ?? []).filter(r
               <th class="text-left px-6 py-3 font-medium">Repository ID</th>
               <th class="text-left px-6 py-3 font-medium">Source</th>
               <th class="text-left px-6 py-3 font-medium">Status</th>
+              <th class="text-left px-6 py-3 font-medium">Watcher</th>
               <th class="text-right px-6 py-3 font-medium">Files</th>
               <th class="text-left px-6 py-3 font-medium">Ingested At</th>
             </tr>
@@ -230,6 +277,16 @@ const inProgressRepos = computed(() => (data.value?.repositories ?? []).filter(r
                     {{ statusLabel(repo) }}
                   </span>
                 </td>
+                <td class="px-6 py-3">
+                  <div class="flex flex-col gap-0.5">
+                    <span class="text-xs px-2 py-0.5 rounded-full border w-fit" :class="probeBadgeClass(repo)">
+                      {{ probeLabel(repo) }}
+                    </span>
+                    <span v-if="repo.refresh?.last_probed_at" class="text-xs text-slate-500">
+                      {{ timeAgoUnix(repo.refresh.last_probed_at) }}
+                    </span>
+                  </div>
+                </td>
                 <td class="px-6 py-3 text-right text-slate-300">
                   {{ repo.in_progress && repo.total_files
                     ? `${formatNumber(repo.files_count)} / ${formatNumber(repo.total_files)}`
@@ -243,8 +300,8 @@ const inProgressRepos = computed(() => (data.value?.repositories ?? []).filter(r
               <!-- Expanded details row -->
               <tr v-if="expandedRows.has(repo.storage_id)" :key="`${repo.storage_id}-details`"
                 class="border-b border-slate-700/20">
-                <td colspan="5" class="px-8 py-4 bg-slate-800/30 border-l-2 border-violet-500/40">
-                  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 text-xs mb-4">
+                <td colspan="6" class="px-8 py-4 bg-slate-800/30 border-l-2 border-violet-500/40">
+                  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 text-xs mb-4">
                     <div>
                       <div class="text-slate-500 uppercase tracking-wider mb-1">REF / VERSION</div>
                       <span class="px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/20 text-xs">
@@ -270,6 +327,25 @@ const inProgressRepos = computed(() => (data.value?.repositories ?? []).filter(r
                         {{ repo.storage_id ? repo.storage_id.slice(0, 12) + '...' : 'N/A' }}
                       </div>
                     </div>
+                    <div>
+                      <div class="text-slate-500 uppercase tracking-wider mb-1">WATCHER</div>
+                      <div class="text-slate-300">
+                        {{ repo.refresh?.last_probe_status || 'not checked' }}
+                        <span v-if="repo.refresh?.last_probed_at" class="text-slate-500">
+                          · {{ timeAgoUnix(repo.refresh.last_probed_at) }}
+                        </span>
+                      </div>
+                      <div class="text-slate-500 mt-0.5">
+                        {{ repo.refresh?.changes_total || 0 }} changes ·
+                        {{ repo.refresh?.reingests_total || 0 }} re-ingests
+                      </div>
+                      <div v-if="repo.refresh?.last_change_at" class="text-slate-500 mt-0.5">
+                        last change {{ timeAgoUnix(repo.refresh.last_change_at) }}
+                      </div>
+                      <div v-if="repo.refresh?.last_probe_error" class="text-rose-400 mt-0.5 break-all">
+                        {{ repo.refresh.last_probe_error }}
+                      </div>
+                    </div>
                     <div v-if="repo.product_ui_url">
                       <div class="text-slate-500 uppercase tracking-wider mb-1">PRODUCT UI</div>
                       <a :href="repo.product_ui_url" target="_blank"
@@ -279,6 +355,14 @@ const inProgressRepos = computed(() => (data.value?.repositories ?? []).filter(r
                     </div>
                   </div>
                   <div class="flex items-center gap-3">
+                    <button
+                      v-if="data?.auto_refresh_enabled"
+                      :disabled="checking.has(repo.storage_id)"
+                      @click.stop="checkNow(repo.storage_id)"
+                      class="text-xs px-3 py-1.5 rounded-lg bg-sky-600/20 text-sky-300 border border-sky-500/30 hover:bg-sky-600/30 disabled:opacity-40 transition-all"
+                    >
+                      {{ checking.has(repo.storage_id) ? '⟳ Checking...' : '👁 Check now' }}
+                    </button>
                     <button
                       v-if="!repo.in_progress && repo.rebalance_state !== 'Rebalancing' && repo.rebalance_state !== 'DualActive'"
                       :disabled="rebalancing.has(repo.storage_id)"

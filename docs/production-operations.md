@@ -44,9 +44,13 @@ so mounted sessions see fresh content without a manual pull.
 
 Enable it on the router:
 
-- `--auto-refresh` — enable the polling worker (default off)
-- `--auto-refresh-interval` — probe interval (default 5m, min 30s)
+- `--auto-refresh` — enable the polling worker (default off on the binary,
+  enabled by the Strata bootstrap with `MONOFS_AUTO_REFRESH=true`)
+- `--auto-refresh-interval` — probe interval (default 1m, min 30s)
 - `--auto-refresh-concurrency` — max concurrent probes (default 4)
+- `--auto-refresh-owner` — only this router name runs the worker
+  (empty = every router). The Strata bootstrap sets `router-a` so two routers
+  do not duplicate probes/re-ingests.
 
 The worker probes each ingested repository's upstream head against the commit
 recorded at ingest. `ADVANCED` re-ingests via the normal ingest path (bumping
@@ -57,3 +61,11 @@ are not hammered.
 
 Webhook pushes also trigger immediate re-ingestion of matching repositories
 (deduplicated within 60s), independent of the poll interval.
+
+The repository payload (`/api/repositories`) includes a `refresh` object per
+repository: last probe time/status/error, last change time, changes and
+re-ingests, and the next scheduled probe. `GET /api/workers/auto-refresh`
+returns worker-level counters plus the per-repository list, and
+`POST /api/repositories/refresh` with `storage_id=<id>` queues an immediate
+check. The MonoFS UI shows this in **Repositories → Watcher** and
+**Fetchers → Repository Watcher**.

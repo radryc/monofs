@@ -390,6 +390,11 @@ type ingestedRepo struct {
 	rebalanceState    RebalanceState // Current rebalancing state
 	rebalanceProgress float64        // 0.0 - 1.0
 	mu                sync.RWMutex   // Protects rebalance state
+
+	// Auto-refresh tracing. Kept separate from the rebalance mutex so UI reads
+	// never wait on rebalance work.
+	refreshMu    sync.RWMutex
+	refreshState repoRefreshState
 }
 
 // discoveredIngestedRepo rebuilds the router's in-memory tracking record from
