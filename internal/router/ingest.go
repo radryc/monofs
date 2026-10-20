@@ -1060,7 +1060,7 @@ initComplete:
 	// Track ingested repository and detect re-ingestion
 	r.mu.Lock()
 	existingRepo, isReingestion := r.ingestedRepos[storageID]
-	r.ingestedRepos[storageID] = &ingestedRepo{
+	trackedRepo := &ingestedRepo{
 		repoID:            displayPath, // Store display path for UI
 		repoURL:           sourceURL,
 		guardianURL:       guardianURL,
@@ -1073,6 +1073,12 @@ initComplete:
 		rebalanceState:    RebalanceStateStable,
 		rebalanceProgress: 1.0,
 	}
+	if existingRepo != nil {
+		// Re-ingestion replaces the tracking record; keep the watcher's
+		// last-probe/change history so the UI does not reset on every refresh.
+		trackedRepo.refreshState = existingRepo.refreshSnapshot()
+	}
+	r.ingestedRepos[storageID] = trackedRepo
 	r.mu.Unlock()
 	r.bumpNativeNamespaceGeneration("repository ingest")
 
