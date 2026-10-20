@@ -117,7 +117,9 @@ The worker keeps a min-heap ordered by `next_probe_at`:
 | stable >7d | `auto-refresh-max-interval` (default 1h) |
 | failures | exponential backoff, capped at 1h |
 
-A ±20% jitter is applied to every next-probe time.
+A ±20% jitter is applied to every next-probe time. After a watcher restart or
+failover, the first probe for repos without persisted state uses the commit
+age but is capped at 15 minutes, bounding the cold-start drain.
 
 ### Batching and rate limits
 
@@ -199,7 +201,7 @@ The MonoFS UI exposes:
 
 ## Deployment checklist
 
-- [ ] Rebuild `monofs-router` and `guardiand` images from this tree.
+- [ ] Rebuild `monofs-router`, `monofs-fetcher` and `guardiand` images from this tree.
 - [ ] Confirm `POD_NAME`/`POD_NAMESPACE` are exposed via the downward API.
 - [ ] Create/confirm Lease RBAC (`coordination.k8s.io/leases`) for the router
       and guardiand service accounts.
@@ -210,7 +212,8 @@ The MonoFS UI exposes:
 - [ ] Kill the leader; confirm another replica acquires the lease within ~20s.
 - [ ] Push a commit; confirm the MonoFS commit hash changes and Guardian
       deploys without a manual `repo import`.
-- [ ] Confirm no duplicate re-ingests in the dedup window.
+- [ ] Confirm no sustained duplicate re-ingests (a brief handoff overlap is
+      possible and idempotent).
 - [ ] Confirm 10k-repo load test meets the probe-lag target.
 - [ ] Check rate limits/backoff on a 429 or auth failure.
 - [ ] Check restart: schedule reloads and probes are jittered.
@@ -219,6 +222,8 @@ The MonoFS UI exposes:
 
 - Webhook automation at org scale (GitHub App / org webhook).
 - Event-driven Guardian import (currently sharded content compare).
+- Per-host probe rate limits.
+- Dedicated watcher deployment (currently sharded router workers).
 - Strict fencing tokens for re-ingest (best-effort lease check today).
 - Bundle deletion/pruning.
 - Production audit/history.

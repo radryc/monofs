@@ -225,6 +225,9 @@ Targets to agree before rollout:
   MonoFS write path is a follow-up.
 - The watcher still runs inside the router; a dedicated watcher deployment is
   an optional follow-up.
+- Guardian shards are per repo. If two repos in different shards feed the same
+  partition, their applies are serialized within one guardiand but not across
+  replicas. Avoid overlapping bindings for now.
 - Production audit/history is not implemented.
 - Webhook automation at org scale (GitHub App / org webhook) is not included.
 - Non-Kubernetes deployments fall back to static shard ownership.
