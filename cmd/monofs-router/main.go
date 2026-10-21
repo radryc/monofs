@@ -198,12 +198,12 @@ func main() {
 		Level: level,
 	})
 	if telemetryHandle.Enabled() {
-		handler = telemetry.WrapSlogHandler(handler, "monofs/router")
+		handler = telemetry.WrapSlogHandler(handler, "monofs.router")
 	}
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 	if telemetryHandle.Enabled() {
-		telemetry.EmitInfo(context.Background(), "monofs/router", "monofs router telemetry enabled")
+		telemetry.EmitInfo(context.Background(), "monofs.router", "monofs router telemetry enabled")
 	}
 
 	logger.Info("starting monofs-router",

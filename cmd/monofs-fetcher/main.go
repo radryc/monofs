@@ -262,12 +262,12 @@ func main() {
 	}
 	var handler slog.Handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
 	if telemetryHandle.Enabled() {
-		handler = telemetry.WrapSlogHandler(handler, "monofs/fetcher")
+		handler = telemetry.WrapSlogHandler(handler, "monofs.fetcher")
 	}
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 	if telemetryHandle.Enabled() {
-		telemetry.EmitInfo(context.Background(), "monofs/fetcher", "monofs fetcher telemetry enabled")
+		telemetry.EmitInfo(context.Background(), "monofs.fetcher", "monofs fetcher telemetry enabled")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

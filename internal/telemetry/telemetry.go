@@ -278,10 +278,7 @@ func normalizeEndpoint(endpoint string) string {
 func buildResourceAttributes(cfg Config) []attribute.KeyValue {
 	attrs := []attribute.KeyValue{
 		attribute.String("service.name", cfg.ServiceName),
-		attribute.String("monofs.component", cfg.Component),
-	}
-	if cfg.Component != "" {
-		attrs = append(attrs, attribute.String("service.version", cfg.Component))
+		attribute.String("guardian.component", cfg.Component),
 	}
 	if cfg.InstanceID != "" {
 		attrs = append(attrs, attribute.String("service.instance.id", cfg.InstanceID))
