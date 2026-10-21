@@ -55,6 +55,7 @@ type guardianVersionStore struct {
 	records     map[string][]*storedGuardianFileVersion // asset paths: full history, persisted
 	current     map[string]string                       // asset paths: logicalPath → versionID
 	ephemeral   map[string]*storedGuardianFileVersion   // machinery paths: current version only, never persisted
+	seq         uint64
 	persistPath string
 	dirty       bool
 	stopFlush   context.CancelFunc
@@ -251,11 +252,12 @@ func (s *guardianVersionStore) commit(change guardianVersionCommit) (*pb.Guardia
 		contentSHA = hex.EncodeToString(sum[:])
 	}
 
+	s.seq++
 	record := &storedGuardianFileVersion{
 		LogicalPath:     change.LogicalPath,
 		DisplayPath:     change.DisplayPath,
 		StorageID:       change.StorageID,
-		VersionID:       guardianVersionID(change.LogicalPath, contentSHA, change.CommittedAt, change.Tombstone),
+		VersionID:       guardianVersionID(change.LogicalPath, contentSHA, change.BatchRevisionID, change.CommittedAt, s.seq, change.Tombstone),
 		BatchRevisionID: change.BatchRevisionID,
 		ContentSHA256:   contentSHA,
 		CommittedAt:     change.CommittedAt,
@@ -269,6 +271,12 @@ func (s *guardianVersionStore) commit(change guardianVersionCommit) (*pb.Guardia
 	if !isGuardianAssetPath(change.LogicalPath) {
 		// Machinery path: track only the current version in memory for optimistic-
 		// locking checks (expected_version_id). No history, no persistence.
+		// Evict deleted machinery paths immediately so queue/claim/result
+		// tombstones do not accumulate in router memory over time.
+		if change.Tombstone {
+			delete(s.ephemeral, change.LogicalPath)
+			return record.toProto(), nil
+		}
 		s.ephemeral[change.LogicalPath] = record
 		return record.toProto(), nil
 	}
@@ -350,8 +358,8 @@ func (s *guardianVersionStore) get(logicalPath, versionID string) (*pb.GuardianF
 	return nil, nil, false
 }
 
-func guardianVersionID(logicalPath, contentSHA string, committedAt int64, tombstone bool) string {
-	sum := sha256.Sum256([]byte(logicalPath + "|" + contentSHA + "|" + strconv.FormatInt(committedAt, 10) + "|" + strconv.FormatBool(tombstone)))
+func guardianVersionID(logicalPath, contentSHA, batchRevisionID string, committedAt int64, seq uint64, tombstone bool) string {
+	sum := sha256.Sum256([]byte(logicalPath + "|" + contentSHA + "|" + batchRevisionID + "|" + strconv.FormatInt(committedAt, 10) + "|" + strconv.FormatUint(seq, 10) + "|" + strconv.FormatBool(tombstone)))
 	return fmt.Sprintf("ver_%d_%s", committedAt, hex.EncodeToString(sum[:])[:12])
 }
 

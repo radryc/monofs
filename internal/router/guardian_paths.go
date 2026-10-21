@@ -341,7 +341,7 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 			if attrErr == nil && attr != nil && attr.Found {
 				plan.needsDelete = true
 				plan.isDir = attr.Mode&uint32(syscall.S_IFDIR) != 0
-				if !plan.isDir {
+				if !plan.isDir && isGuardianAssetPath(mapped.LogicalPath) && (plan.existing == nil || len(plan.existing.Content) == 0) {
 					plan.content, _ = readGuardianFileContent(ctx, attrClient, plan.physicalPath)
 				}
 			}
@@ -360,6 +360,7 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 		}
 		switch {
 		case plan.deleteRepo:
+			r.evictGuardianRegisteredRepo(plan.mapped.StorageID)
 			if _, err := r.deleteRepositoryInternal(ctx, plan.mapped.StorageID); err != nil {
 				return nil, status.Errorf(codes.Internal, "delete guardian repository %q: %v", plan.mapped.LogicalPath, err)
 			}
@@ -613,22 +614,27 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 			}
 			defer closeConn()
 
-			regCtx, regCancel := context.WithTimeout(ctx, 10*time.Second)
 			regSource := repoURL
 			if regSource == "" {
 				regSource = "guardian-path-api"
 			}
-			_, regErr := nodeClient.RegisterRepository(regCtx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
-				StorageId:     group.storageID,
-				DisplayPath:   group.displayPath,
-				Source:        regSource,
-				IngestionType: pb.IngestionType_INGESTION_GUARDIAN,
-				FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
-				GuardianUrl:   repoURL,
-			}))
-			regCancel()
-			if regErr != nil {
-				r.logger.Warn("RegisterRepository failed for guardian upsert", "node", node.id, "display_path", group.displayPath, "error", regErr)
+			regKey := node.id + "|" + node.address + "|" + group.storageID + "|" + group.displayPath + "|" + regSource
+			if _, alreadyRegistered := r.guardianRegisteredNodeRepos.Load(regKey); !alreadyRegistered {
+				regCtx, regCancel := context.WithTimeout(ctx, 10*time.Second)
+				regResp, regErr := nodeClient.RegisterRepository(regCtx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
+					StorageId:     group.storageID,
+					DisplayPath:   group.displayPath,
+					Source:        regSource,
+					IngestionType: pb.IngestionType_INGESTION_GUARDIAN,
+					FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
+					GuardianUrl:   repoURL,
+				}))
+				regCancel()
+				if regErr != nil {
+					r.logger.Warn("RegisterRepository failed for guardian upsert", "node", node.id, "display_path", group.displayPath, "error", regErr)
+				} else if regResp != nil && regResp.GetSuccess() {
+					r.guardianRegisteredNodeRepos.Store(regKey, true)
+				}
 			}
 
 			batchCtx, batchCancel := context.WithTimeout(ctx, r.config.GuardianIngestTimeout)
@@ -644,12 +650,14 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 			})
 			batchCancel()
 			if err != nil {
+				r.guardianRegisteredNodeRepos.Delete(regKey)
 				errMu.Lock()
 				errs = append(errs, fmt.Errorf("node %s ingest %s: %w", node.id, group.displayPath, err))
 				errMu.Unlock()
 				return
 			}
 			if resp == nil || !resp.Success {
+				r.guardianRegisteredNodeRepos.Delete(regKey)
 				message := ""
 				if resp != nil {
 					message = resp.GetErrorMessage()
@@ -681,6 +689,19 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 	r.bumpNativeNamespaceGeneration("guardian upsert")
 
 	return nil
+}
+
+func (r *Router) evictGuardianRegisteredRepo(storageID string) {
+	if storageID == "" {
+		return
+	}
+	needle := "|" + storageID + "|"
+	r.guardianRegisteredNodeRepos.Range(func(key, _ any) bool {
+		if k, ok := key.(string); ok && strings.Contains(k, needle) {
+			r.guardianRegisteredNodeRepos.Delete(key)
+		}
+		return true
+	})
 }
 
 func appendGuardianDirHints(files []*pb.FileMetadata) []*pb.FileMetadata {

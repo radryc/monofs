@@ -89,8 +89,37 @@ func (r *Router) collectHealthyGuardianNodes() []guardianNodeTarget {
 }
 
 func (r *Router) guardianMutationTargets(nodes []guardianNodeTarget, displayPath string) []guardianNodeTarget {
-	if len(nodes) <= 1 || guardianRepoStorageBackend(displayPath) != "kvs" {
+	if len(nodes) <= 1 {
 		return nodes
+	}
+	if guardianRepoStorageBackend(displayPath) != "kvs" {
+		rf := r.config.GuardianReplicationFactor
+		if rf <= 0 || len(nodes) <= rf {
+			return nodes
+		}
+		shardNodes := make([]sharding.Node, 0, len(nodes))
+		byID := make(map[string]guardianNodeTarget, len(nodes))
+		for _, n := range nodes {
+			byID[n.id] = n
+			shardNodes = append(shardNodes, sharding.Node{
+				ID:      n.id,
+				Address: n.address,
+				Weight:  100,
+				Healthy: true,
+			})
+		}
+		storageID := sharding.GenerateStorageID(displayPath)
+		ranked := sharding.NewHRW(shardNodes).GetNodes(storageID, rf)
+		if len(ranked) == 0 {
+			return nodes
+		}
+		out := make([]guardianNodeTarget, 0, len(ranked))
+		for _, rn := range ranked {
+			if target, ok := byID[rn.ID]; ok {
+				out = append(out, target)
+			}
+		}
+		return out
 	}
 
 	if leader, ok := pickGuardianKVSLeader(nodes); ok {
