@@ -118,7 +118,7 @@ Private struct implementing `slog.Handler`. Wraps a base handler (e.g. JSON or t
 | Field | Purpose |
 |---|---|
 | `base` | The underlying slog handler to which records are also forwarded. |
-| `scope` | OTel logger scope name (e.g. `"monofs/server"`). |
+| `scope` | OTel logger scope name (e.g. `"monofs.server"`). |
 
 ---
 
@@ -461,7 +461,7 @@ func WrapSlogHandler(base slog.Handler, scope string) slog.Handler
 
 **Parameters:**
 - `base` — The underlying slog handler (e.g. a JSON handler writing to stderr).
-- `scope` — OTel logger scope name (e.g. `"monofs/server"`).
+- `scope` — OTel logger scope name (e.g. `"monofs.server"`).
 
 **Returns:** A new `slog.Handler` that forwards to `base` and emits OTel logs under the given scope.
 
@@ -602,9 +602,10 @@ func buildResourceAttributes(cfg Config) []attribute.KeyValue
 - `cfg` — The telemetry configuration.
 
 **Returns:** A slice of OTel `attribute.KeyValue` containing:
-- `service.name` — always set (to `cfg.ServiceName`).
-- `monofs.component` — always set (to `cfg.Component`).
-- `service.version` — set to `cfg.Component` if non-empty.
+- `service.name` — always set (to `cfg.ServiceName`; Guardian supplies `<partition>.<intent>.<asset>`).
+- `guardian.component` — always set (to `cfg.Component`).
+- `service.alias` — set from `OTEL_RESOURCE_ATTRIBUTES` when a legacy name is present.
+- `service.version` — omitted; it is not the component name.
 - `service.instance.id` — set to `cfg.InstanceID` if non-empty.
 
 ---

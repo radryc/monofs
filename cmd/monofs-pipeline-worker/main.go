@@ -70,7 +70,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "shutdown telemetry: %v\n", err)
 			}
 		}()
-		handler := telemetry.WrapSlogHandler(h, "worker/"+comp)
+		handler := telemetry.WrapSlogHandler(h, "monofs.worker."+*workerType)
 		logger = slog.New(handler).With("worker_type", *workerType)
 	}
 

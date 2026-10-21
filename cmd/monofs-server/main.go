@@ -205,12 +205,12 @@ func main() {
 		Level: level,
 	})
 	if telemetryHandle.Enabled() {
-		handler = telemetry.WrapSlogHandler(handler, "monofs/server")
+		handler = telemetry.WrapSlogHandler(handler, "monofs.server")
 	}
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 	if telemetryHandle.Enabled() {
-		telemetry.EmitInfo(context.Background(), "monofs/server", "monofs server telemetry enabled")
+		telemetry.EmitInfo(context.Background(), "monofs.server", "monofs server telemetry enabled")
 	}
 
 	logger.Info("starting monofs-server",

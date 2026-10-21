@@ -94,11 +94,11 @@ func main() {
 		Level: logLevel,
 	})
 	if telemetryHandle.Enabled() {
-		handler = telemetry.WrapSlogHandler(handler, "monofs/search")
+		handler = telemetry.WrapSlogHandler(handler, "monofs.search")
 	}
 	logger := slog.New(handler)
 	if telemetryHandle.Enabled() {
-		telemetry.EmitInfo(context.Background(), "monofs/search", "monofs search telemetry enabled")
+		telemetry.EmitInfo(context.Background(), "monofs.search", "monofs search telemetry enabled")
 	}
 
 	logger.Info("starting monofs-search",
