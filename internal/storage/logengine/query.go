@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/RoaringBitmap/roaring"
@@ -309,7 +310,7 @@ func (q *QueryEngine) logValidRows(ctx context.Context, chunkID string, textFilt
 	defer reader.Close()
 
 	blugeQuery := buildBlugeLineFilterQuery(textFilters)
-	searchReq := bluge.NewTopNSearch(10000, blugeQuery)
+	searchReq := bluge.NewAllMatches(blugeQuery)
 	documentMatchIterator, err := reader.Search(ctx, searchReq)
 	if err != nil {
 		return nil, err
@@ -407,7 +408,8 @@ func (q *QueryEngine) scanLogParquet(ctx context.Context, path string, validRows
 			continue
 		}
 
-		// col 0: timestamp (int64 UnixNano)
+		// Phase 1: Read filter column col 0 (timestamp) and intersect with validRows.
+		// Only decode payload columns if at least one row in the row group passes.
 		tsCol, err := rg.Column(0)
 		if err != nil {
 			return err
@@ -415,6 +417,25 @@ func (q *QueryEngine) scanLogParquet(ctx context.Context, path string, validRows
 		tsBuf := make([]int64, n)
 		tsCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), tsBuf, nil, nil) //nolint:errcheck
 
+		candidateIdxs := make([]int, 0, 64)
+		for i := 0; i < n; i++ {
+			if validRows != nil && !validRows.ContainsInt(i) {
+				continue
+			}
+			ts := time.Unix(0, tsBuf[i])
+			if !from.IsZero() && ts.Before(from) {
+				continue
+			}
+			if !to.IsZero() && ts.After(to) {
+				continue
+			}
+			candidateIdxs = append(candidateIdxs, i)
+		}
+		if len(candidateIdxs) == 0 {
+			continue
+		}
+
+		// Phase 2: Materialize payload columns only for row groups with matching rows.
 		// col 1: level (ByteArray)
 		lvlCol, err := rg.Column(1)
 		if err != nil {
@@ -468,17 +489,8 @@ func (q *QueryEngine) scanLogParquet(ctx context.Context, path string, validRows
 			lblCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), lblBuf, nil, nil) //nolint:errcheck
 		}
 
-		for i := 0; i < n; i++ {
-			if validRows != nil && !validRows.ContainsInt(i) {
-				continue
-			}
+		for _, i := range candidateIdxs {
 			ts := time.Unix(0, tsBuf[i])
-			if !from.IsZero() && ts.Before(from) {
-				continue
-			}
-			if !to.IsZero() && ts.After(to) {
-				continue
-			}
 			record := LogRecord{
 				Timestamp:  ts,
 				Level:      string(lvlBuf[i]),
@@ -625,12 +637,46 @@ func buildBlugeLineFilterQuery(filters []string) bluge.Query {
 	return query
 }
 
+func (q *QueryEngine) prefetchManifests(ctx context.Context, signal Signal, chunkIDs []string) {
+	if len(chunkIDs) <= 16 {
+		return
+	}
+	sem := make(chan struct{}, 16)
+	var wg sync.WaitGroup
+	for _, chunkID := range chunkIDs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(id string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			_, _ = q.store.ReadManifest(ctx, signal, id)
+		}(chunkID)
+	}
+	wg.Wait()
+}
+
 func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, service string, from, to time.Time, observer *queryPathObserver) ([]candidateChunk, error) {
 	pruneStart := time.Now()
 	defer observer.observeStage("manifest_pruning", pruneStart)
 
-	candidates := make([]candidateChunk, 0, len(chunkIDs))
+	remaining := make([]string, 0, len(chunkIDs))
 	for _, chunkID := range chunkIDs {
+		if minT, maxT, ok := ParseChunkTimeRangeFromID(chunkID); ok {
+			if !to.IsZero() && minT.After(to) {
+				observer.addChunksPruned("after_range", 1)
+				continue
+			}
+			if !from.IsZero() && maxT.Before(from) {
+				observer.addChunksPruned("before_range", 1)
+				continue
+			}
+		}
+		remaining = append(remaining, chunkID)
+	}
+	q.prefetchManifests(ctx, SignalLogs, remaining)
+
+	candidates := make([]candidateChunk, 0, len(remaining))
+	for _, chunkID := range remaining {
 		manifest, err := q.store.ReadManifest(ctx, SignalLogs, chunkID)
 		if err != nil {
 			if errors.Is(err, ErrGhostChunk) {
@@ -967,8 +1013,24 @@ func (q *QueryEngine) metricCandidates(ctx context.Context, chunkIDs []string, q
 	pruneStart := time.Now()
 	defer observer.observeStage("manifest_pruning", pruneStart)
 
-	candidates := make([]candidateChunk, 0, len(chunkIDs))
+	remaining := make([]string, 0, len(chunkIDs))
 	for _, chunkID := range chunkIDs {
+		if minT, maxT, ok := ParseChunkTimeRangeFromID(chunkID); ok {
+			if !to.IsZero() && minT.After(to) {
+				observer.addChunksPruned("after_range", 1)
+				continue
+			}
+			if !from.IsZero() && maxT.Before(from) {
+				observer.addChunksPruned("before_range", 1)
+				continue
+			}
+		}
+		remaining = append(remaining, chunkID)
+	}
+	q.prefetchManifests(ctx, SignalMetrics, remaining)
+
+	candidates := make([]candidateChunk, 0, len(remaining))
+	for _, chunkID := range remaining {
 		manifest, err := q.store.ReadManifest(ctx, SignalMetrics, chunkID)
 		if err != nil {
 			if errors.Is(err, ErrGhostChunk) {
@@ -1018,7 +1080,7 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 			continue
 		}
 
-		// col 0: timestamp (int64 UnixNano)
+		// Phase 1: Read filter columns (timestamp, service, metric_name) first.
 		tsCol, err := rg.Column(0)
 		if err != nil {
 			return err
@@ -1026,7 +1088,6 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 		tsBuf := make([]int64, n)
 		tsCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), tsBuf, nil, nil) //nolint:errcheck
 
-		// col 1: service (ByteArray)
 		svcCol, err := rg.Column(1)
 		if err != nil {
 			return err
@@ -1034,7 +1095,6 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 		svcBuf := make([]parquet.ByteArray, n)
 		svcCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), svcBuf, nil, nil) //nolint:errcheck
 
-		// col 2: metric_name (ByteArray)
 		nameCol, err := rg.Column(2)
 		if err != nil {
 			return err
@@ -1042,22 +1102,7 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 		nameBuf := make([]parquet.ByteArray, n)
 		nameCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), nameBuf, nil, nil) //nolint:errcheck
 
-		// col 3: value (float64)
-		valCol, err := rg.Column(3)
-		if err != nil {
-			return err
-		}
-		valBuf := make([]float64, n)
-		valCol.(*file.Float64ColumnChunkReader).ReadBatch(int64(n), valBuf, nil, nil) //nolint:errcheck
-
-		// col 4: labels_json (ByteArray)
-		lblCol, err := rg.Column(4)
-		if err != nil {
-			return err
-		}
-		lblBuf := make([]parquet.ByteArray, n)
-		lblCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), lblBuf, nil, nil) //nolint:errcheck
-
+		candidateIdxs := make([]int, 0, 64)
 		for i := 0; i < n; i++ {
 			ts := time.Unix(0, tsBuf[i])
 			if !from.IsZero() && ts.Before(from) {
@@ -1066,14 +1111,37 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 			if !to.IsZero() && ts.After(to) {
 				continue
 			}
+			if query.Service != "" && string(svcBuf[i]) != query.Service {
+				continue
+			}
+			if query.MetricName != "" && string(nameBuf[i]) != query.MetricName {
+				continue
+			}
+			candidateIdxs = append(candidateIdxs, i)
+		}
+		if len(candidateIdxs) == 0 {
+			continue
+		}
+
+		// Phase 2: Materialize value & labels_json only when candidate rows exist.
+		valCol, err := rg.Column(3)
+		if err != nil {
+			return err
+		}
+		valBuf := make([]float64, n)
+		valCol.(*file.Float64ColumnChunkReader).ReadBatch(int64(n), valBuf, nil, nil) //nolint:errcheck
+
+		lblCol, err := rg.Column(4)
+		if err != nil {
+			return err
+		}
+		lblBuf := make([]parquet.ByteArray, n)
+		lblCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), lblBuf, nil, nil) //nolint:errcheck
+
+		for _, i := range candidateIdxs {
+			ts := time.Unix(0, tsBuf[i])
 			svc := string(svcBuf[i])
-			if query.Service != "" && svc != query.Service {
-				continue
-			}
 			name := string(nameBuf[i])
-			if query.MetricName != "" && name != query.MetricName {
-				continue
-			}
 			var labels map[string]string
 			if len(lblBuf[i]) > 0 || len(matchers) > 0 {
 				json.Unmarshal(lblBuf[i], &labels) //nolint:errcheck
@@ -1165,8 +1233,24 @@ func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, tr
 	pruneStart := time.Now()
 	defer observer.observeStage("manifest_pruning", pruneStart)
 
-	candidates := make([]candidateChunk, 0, len(chunkIDs))
+	remaining := make([]string, 0, len(chunkIDs))
 	for _, chunkID := range chunkIDs {
+		if minT, maxT, ok := ParseChunkTimeRangeFromID(chunkID); ok {
+			if !to.IsZero() && minT.After(to) {
+				observer.addChunksPruned("after_range", 1)
+				continue
+			}
+			if !from.IsZero() && maxT.Before(from) {
+				observer.addChunksPruned("before_range", 1)
+				continue
+			}
+		}
+		remaining = append(remaining, chunkID)
+	}
+	q.prefetchManifests(ctx, SignalTraces, remaining)
+
+	candidates := make([]candidateChunk, 0, len(remaining))
+	for _, chunkID := range remaining {
 		manifest, err := q.store.ReadManifest(ctx, SignalTraces, chunkID)
 		if err != nil {
 			if errors.Is(err, ErrGhostChunk) {
@@ -1270,21 +1354,13 @@ func (q *QueryEngine) scanTraceParquet(ctx context.Context, path, traceID, servi
 			continue
 		}
 
-		// col 0: timestamp (int64 UnixNano)
+		// Phase 1: Read filter columns (timestamp, trace_id, service) first.
 		tsCol, err := rg.Column(0)
 		if err != nil {
 			return err
 		}
 		tsBuf := make([]int64, n)
 		tsCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), tsBuf, nil, nil) //nolint:errcheck
-
-		// col 1: end_time (int64 UnixNano)
-		etCol, err := rg.Column(1)
-		if err != nil {
-			return err
-		}
-		etBuf := make([]int64, n)
-		etCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), etBuf, nil, nil) //nolint:errcheck
 
 		readBytes := func(colIdx int) ([]parquet.ByteArray, error) {
 			col, err := rg.Column(colIdx)
@@ -1300,15 +1376,45 @@ func (q *QueryEngine) scanTraceParquet(ctx context.Context, path, traceID, servi
 		if err != nil {
 			return err
 		}
+		services, err := readBytes(5)
+		if err != nil {
+			return err
+		}
+
+		candidateIdxs := make([]int, 0, 64)
+		for i := 0; i < n; i++ {
+			ts := time.Unix(0, tsBuf[i])
+			if !from.IsZero() && ts.Before(from) {
+				continue
+			}
+			if !to.IsZero() && ts.After(to) {
+				continue
+			}
+			if traceID != "" && string(traceIDs[i]) != traceID {
+				continue
+			}
+			if service != "" && string(services[i]) != service {
+				continue
+			}
+			candidateIdxs = append(candidateIdxs, i)
+		}
+		if len(candidateIdxs) == 0 {
+			continue
+		}
+
+		// Phase 2: Materialize payload columns only when candidate rows exist.
+		etCol, err := rg.Column(1)
+		if err != nil {
+			return err
+		}
+		etBuf := make([]int64, n)
+		etCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), etBuf, nil, nil) //nolint:errcheck
+
 		spanIDs, err := readBytes(3)
 		if err != nil {
 			return err
 		}
 		parentSpanIDs, err := readBytes(4)
-		if err != nil {
-			return err
-		}
-		services, err := readBytes(5)
 		if err != nil {
 			return err
 		}
@@ -1325,22 +1431,10 @@ func (q *QueryEngine) scanTraceParquet(ctx context.Context, path, traceID, servi
 			return err
 		}
 
-		for i := 0; i < n; i++ {
+		for _, i := range candidateIdxs {
 			ts := time.Unix(0, tsBuf[i])
-			if !from.IsZero() && ts.Before(from) {
-				continue
-			}
-			if !to.IsZero() && ts.After(to) {
-				continue
-			}
 			tid := string(traceIDs[i])
-			if traceID != "" && tid != traceID {
-				continue
-			}
 			svc := string(services[i])
-			if service != "" && svc != service {
-				continue
-			}
 			var attrs map[string]string
 			if len(attrJSONs[i]) > 0 {
 				json.Unmarshal(attrJSONs[i], &attrs) //nolint:errcheck

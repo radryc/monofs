@@ -29,14 +29,20 @@ type guardianPrincipal struct {
 type guardianPrincipalStore struct {
 	mu          sync.RWMutex
 	principals  map[string]*guardianPrincipal
+	byTokenHash map[string][]*guardianPrincipal
 	grants      map[string][]authz.Grant
 	persistPath string
+	dirty       bool
+	lastSave    time.Time
+	flushTimer  *time.Timer
+	closed      bool
 }
 
 func newGuardianPrincipalStore(stateDir string) (*guardianPrincipalStore, error) {
 	store := &guardianPrincipalStore{
-		principals: make(map[string]*guardianPrincipal),
-		grants:     make(map[string][]authz.Grant),
+		principals:  make(map[string]*guardianPrincipal),
+		byTokenHash: make(map[string][]*guardianPrincipal),
+		grants:      make(map[string][]authz.Grant),
 	}
 	if strings.TrimSpace(stateDir) == "" {
 		return store, nil
@@ -49,6 +55,51 @@ func newGuardianPrincipalStore(stateDir string) (*guardianPrincipalStore, error)
 		return nil, err
 	}
 	return store, nil
+}
+
+func (s *guardianPrincipalStore) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+	if s.dirty {
+		_ = s.saveLocked()
+		s.dirty = false
+	}
+}
+
+func (s *guardianPrincipalStore) indexPrincipalLocked(principal *guardianPrincipal, oldTokenHash string) {
+	if principal == nil || principal.PrincipalID == "" {
+		return
+	}
+	if oldTokenHash != "" && oldTokenHash != principal.TokenHash {
+		list := s.byTokenHash[oldTokenHash]
+		filtered := list[:0]
+		for _, p := range list {
+			if p != nil && p.PrincipalID != principal.PrincipalID {
+				filtered = append(filtered, p)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(s.byTokenHash, oldTokenHash)
+		} else {
+			s.byTokenHash[oldTokenHash] = filtered
+		}
+	}
+	if principal.TokenHash == "" {
+		return
+	}
+	list := s.byTokenHash[principal.TokenHash]
+	for i, p := range list {
+		if p != nil && p.PrincipalID == principal.PrincipalID {
+			list[i] = principal
+			return
+		}
+	}
+	s.byTokenHash[principal.TokenHash] = append(list, principal)
 }
 
 func (s *guardianPrincipalStore) load() error {
@@ -77,6 +128,7 @@ func (s *guardianPrincipalStore) load() error {
 		}
 		cloned := *principal
 		s.principals[principal.PrincipalID] = &cloned
+		s.indexPrincipalLocked(&cloned, "")
 		if len(principal.Grants) > 0 {
 			grantsCopy := make([]authz.Grant, len(principal.Grants))
 			copy(grantsCopy, principal.Grants)
@@ -119,6 +171,30 @@ func (s *guardianPrincipalStore) saveLocked() error {
 	if err := os.Rename(tmpPath, s.persistPath); err != nil {
 		return fmt.Errorf("replace guardian principals: %w", err)
 	}
+	s.lastSave = time.Now()
+	s.dirty = false
+	return nil
+}
+
+func (s *guardianPrincipalStore) saveCoalescedLocked() error {
+	if s.persistPath == "" {
+		return nil
+	}
+	const minSaveInterval = 2 * time.Second
+	if s.lastSave.IsZero() || time.Since(s.lastSave) >= minSaveInterval {
+		return s.saveLocked()
+	}
+	s.dirty = true
+	if s.flushTimer == nil && !s.closed {
+		s.flushTimer = time.AfterFunc(minSaveInterval, func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.flushTimer = nil
+			if s.dirty && !s.closed {
+				_ = s.saveLocked()
+			}
+		})
+	}
 	return nil
 }
 
@@ -131,20 +207,36 @@ func (s *guardianPrincipalStore) upsertConnectedClient(principalID, token, role,
 	defer s.mu.Unlock()
 
 	now := time.Now().Unix()
-	principal := s.principals[principalID]
-	if principal == nil {
-		principal = &guardianPrincipal{
-			PrincipalID: principalID,
-			CreatedAt:   now,
-		}
-	}
-	principal.TokenHash = guardianTokenHash(token)
+	tokenHash := guardianTokenHash(token)
 	if strings.TrimSpace(role) == "" {
 		role = inferGuardianPrincipalRole(principalID)
 	}
 	if strings.TrimSpace(displayName) == "" {
 		displayName = principalID
 	}
+
+	principal := s.principals[principalID]
+	if principal != nil &&
+		principal.TokenHash == tokenHash &&
+		principal.Role == role &&
+		principal.DisplayName == displayName &&
+		principal.BaseURL == baseURL &&
+		!principal.Disabled &&
+		principal.CreatedAt != 0 {
+		cloned := *principal
+		return &cloned, nil
+	}
+
+	oldTokenHash := ""
+	if principal == nil {
+		principal = &guardianPrincipal{
+			PrincipalID: principalID,
+			CreatedAt:   now,
+		}
+	} else {
+		oldTokenHash = principal.TokenHash
+	}
+	principal.TokenHash = tokenHash
 	principal.Role = role
 	principal.DisplayName = displayName
 	principal.BaseURL = baseURL
@@ -153,8 +245,9 @@ func (s *guardianPrincipalStore) upsertConnectedClient(principalID, token, role,
 		principal.CreatedAt = now
 	}
 	s.principals[principalID] = principal
+	s.indexPrincipalLocked(principal, oldTokenHash)
 
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveCoalescedLocked(); err != nil {
 		return nil, err
 	}
 	cloned := *principal
@@ -170,7 +263,7 @@ func (s *guardianPrincipalStore) validateToken(token string) (*guardianPrincipal
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, principal := range s.principals {
+	for _, principal := range s.byTokenHash[tokenHash] {
 		if principal == nil || principal.Disabled {
 			continue
 		}

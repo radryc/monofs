@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,14 +20,19 @@ import (
 )
 
 const (
-	chunkListCacheTTL  = 10 * time.Second
-	manifestCacheTTL   = time.Minute
+	chunkListCacheTTL   = 10 * time.Second
+	manifestCacheTTL    = 30 * time.Minute
 	seriesIndexCacheTTL = 5 * time.Minute
-	cacheSweepInterval = 30 * time.Second
+	cacheSweepInterval  = 30 * time.Second
+	// maxManifestCacheEntries bounds the in-memory chunk manifest cache.
+	maxManifestCacheEntries = 32768
 	// maxSeriesIndexCacheEntries bounds the in-memory series index cache. Each
 	// entry is a small per-chunk slice (tens of KB); the cap keeps a large
 	// store from pinning hundreds of megabytes.
 	maxSeriesIndexCacheEntries = 512
+	// maxLocalIndexDirs bounds the number of extracted Bluge index directories
+	// kept on local disk under CachedStore.localDir.
+	maxLocalIndexDirs = 256
 )
 
 type chunkListCacheEntry struct {
@@ -59,25 +65,27 @@ type ObjectStoreBackend interface {
 // It caches index files to a local NVMe drive and uses singleflight to
 // prevent cache stampedes.
 type CachedStore struct {
-	remote    ObjectStoreBackend
-	localDir  string
-	sf        singleflight.Group
-	mu        sync.RWMutex
-	chunks    map[string]chunkListCacheEntry
-	manifests map[string]manifestCacheEntry
-	series    map[string]seriesIndexCacheEntry
-	nextSweep time.Time
+	remote       ObjectStoreBackend
+	localDir     string
+	sf           singleflight.Group
+	mu           sync.RWMutex
+	chunks       map[string]chunkListCacheEntry
+	manifests    map[string]manifestCacheEntry
+	series       map[string]seriesIndexCacheEntry
+	localIndexes map[string]time.Time
+	nextSweep    time.Time
 }
 
 // NewCachedStore creates a new CachedStore.
 func NewCachedStore(remote ObjectStoreBackend, localDir string) *CachedStore {
 	return &CachedStore{
-		remote:    remote,
-		localDir:  localDir,
-		chunks:    make(map[string]chunkListCacheEntry),
-		manifests: make(map[string]manifestCacheEntry),
-		series:    make(map[string]seriesIndexCacheEntry),
-		nextSweep: time.Now().Add(cacheSweepInterval),
+		remote:       remote,
+		localDir:     localDir,
+		chunks:       make(map[string]chunkListCacheEntry),
+		manifests:    make(map[string]manifestCacheEntry),
+		series:       make(map[string]seriesIndexCacheEntry),
+		localIndexes: make(map[string]time.Time),
+		nextSweep:    time.Now().Add(cacheSweepInterval),
 	}
 }
 
@@ -101,6 +109,24 @@ func (c *CachedStore) pruneExpiredLocked(now time.Time) {
 		}
 	}
 	c.nextSweep = now.Add(cacheSweepInterval)
+}
+
+// trimManifestsLocked enforces the manifest cache size cap by dropping
+// entries with the earliest expiry.
+func (c *CachedStore) trimManifestsLocked() {
+	for len(c.manifests) > maxManifestCacheEntries {
+		var (
+			oldestPath string
+			oldestTime time.Time
+		)
+		for path, entry := range c.manifests {
+			if oldestPath == "" || entry.expiresAt.Before(oldestTime) {
+				oldestPath = path
+				oldestTime = entry.expiresAt
+			}
+		}
+		delete(c.manifests, oldestPath)
+	}
 }
 
 // trimSeriesIndexLocked enforces the series index cache size cap by dropping
@@ -171,7 +197,7 @@ func (c *CachedStore) ListChunks(ctx context.Context, prefix string) ([]string, 
 
 // ReadManifest returns a cached chunk manifest when available.
 func (c *CachedStore) ReadManifest(ctx context.Context, signal Signal, chunkID string) (ChunkManifest, error) {
-	manifestPath := filepath.Join("chunks", string(signal), chunkID, "metadata.json")
+	manifestPath := filepath.ToSlash(filepath.Join("chunks", string(signal), chunkID, "metadata.json"))
 	now := time.Now()
 
 	c.mu.RLock()
@@ -205,19 +231,20 @@ func (c *CachedStore) ReadManifest(ctx context.Context, signal Signal, chunkID s
 		manifest:  manifest,
 		expiresAt: now.Add(manifestCacheTTL),
 	}
+	c.trimManifestsLocked()
 	c.mu.Unlock()
 
 	return manifest, nil
 }
 
 func normalizeChunkPrefix(prefix string) string {
-	cleaned := strings.Trim(strings.TrimSpace(prefix), "/")
+	cleaned := strings.Trim(strings.TrimSpace(filepath.ToSlash(prefix)), "/")
 	if cleaned == "" {
 		return ""
 	}
 	parts := strings.Split(cleaned, "/")
 	if len(parts) >= 2 && parts[0] == "chunks" {
-		return filepath.Join(parts[0], parts[1])
+		return parts[0] + "/" + parts[1]
 	}
 	return cleaned
 }
@@ -226,7 +253,7 @@ func normalizeChunkPrefix(prefix string) string {
 // immutable once written, so entries stay cached until the TTL sweeps them.
 // Chunks written before the series index existed return ErrGhostChunk.
 func (c *CachedStore) ReadSeriesIndex(ctx context.Context, chunkID string) ([]MetricSeriesMeta, error) {
-	path := filepath.Join("chunks", string(SignalMetrics), chunkID, "series.index.json")
+	path := filepath.ToSlash(filepath.Join("chunks", string(SignalMetrics), chunkID, "series.index.json"))
 	now := time.Now()
 
 	c.mu.RLock()
@@ -351,7 +378,81 @@ func (c *CachedStore) GetLocalIndexPath(ctx context.Context, path string) (strin
 		return "", err
 	}
 
+	c.touchLocalIndex(localPath, time.Now())
 	return localPath, nil
+}
+
+func (c *CachedStore) touchLocalIndex(localPath string, now time.Time) {
+	var evicted []string
+	c.mu.Lock()
+	if c.localIndexes == nil {
+		c.localIndexes = make(map[string]time.Time)
+	}
+	c.localIndexes[localPath] = now
+	for len(c.localIndexes) > maxLocalIndexDirs {
+		var (
+			oldestPath string
+			oldestTime time.Time
+		)
+		for p, t := range c.localIndexes {
+			if p == localPath {
+				continue
+			}
+			if oldestPath == "" || t.Before(oldestTime) {
+				oldestPath = p
+				oldestTime = t
+			}
+		}
+		if oldestPath == "" {
+			break
+		}
+		delete(c.localIndexes, oldestPath)
+		evicted = append(evicted, oldestPath)
+	}
+	c.mu.Unlock()
+
+	for _, p := range evicted {
+		_ = os.RemoveAll(p)
+	}
+}
+
+// FormatTimePrefixedChunkID encodes a chunk's [minTime, maxTime] bounds into its
+// chunk ID prefix ("ts_<minUnixNano>_<maxUnixNano>_<chunkID>") so query planning
+// can time-prune chunks directly from ListChunks before reading metadata.json.
+func FormatTimePrefixedChunkID(minTime, maxTime time.Time, chunkID string) string {
+	if minTime.IsZero() || maxTime.IsZero() || strings.HasPrefix(chunkID, "ts_") {
+		return chunkID
+	}
+	return fmt.Sprintf("ts_%d_%d_%s", minTime.UTC().UnixNano(), maxTime.UTC().UnixNano(), chunkID)
+}
+
+// ParseChunkTimeRangeFromID extracts the [minTime, maxTime] range from a
+// time-prefixed chunk ID created by FormatTimePrefixedChunkID.
+func ParseChunkTimeRangeFromID(chunkID string) (time.Time, time.Time, bool) {
+	if !strings.HasPrefix(chunkID, "ts_") {
+		return time.Time{}, time.Time{}, false
+	}
+	rest := strings.TrimPrefix(chunkID, "ts_")
+	firstSep := strings.IndexByte(rest, '_')
+	if firstSep <= 0 {
+		return time.Time{}, time.Time{}, false
+	}
+	minStr := rest[:firstSep]
+	rest = rest[firstSep+1:]
+	secondSep := strings.IndexByte(rest, '_')
+	if secondSep <= 0 {
+		return time.Time{}, time.Time{}, false
+	}
+	maxStr := rest[:secondSep]
+	minNano, err := strconv.ParseInt(minStr, 10, 64)
+	if err != nil {
+		return time.Time{}, time.Time{}, false
+	}
+	maxNano, err := strconv.ParseInt(maxStr, 10, 64)
+	if err != nil || maxNano < minNano {
+		return time.Time{}, time.Time{}, false
+	}
+	return time.Unix(0, minNano).UTC(), time.Unix(0, maxNano).UTC(), true
 }
 
 // extractTarGz extracts a gzipped tarball to a destination directory.

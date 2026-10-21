@@ -4,6 +4,7 @@ package router
 import (
 	"bufio"
 	"bytes"
+	"container/heap"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -77,10 +78,11 @@ type RouterConfig struct {
 	AllowLocalIngest bool
 
 	// Replication and failover configuration
-	ReplicationFactor     int           // Number of copies (primary + backups), default: 2
-	RebalanceDelay        time.Duration // Wait before triggering permanent rebalance after failure, default: 10m
-	GracefulFailoverDelay time.Duration // Wait for planned restarts/upgrades, default: 60s
-	GuardianIngestTimeout time.Duration // Timeout for guardian batch ingestion to nodes, default: 5m
+	ReplicationFactor         int           // Number of copies (primary + backups), default: 2
+	GuardianReplicationFactor int           // HRW replica count for non-KVS Guardian partitions (0 = all healthy nodes)
+	RebalanceDelay            time.Duration // Wait before triggering permanent rebalance after failure, default: 10m
+	GracefulFailoverDelay     time.Duration // Wait for planned restarts/upgrades, default: 60s
+	GuardianIngestTimeout     time.Duration // Timeout for guardian batch ingestion to nodes, default: 5m
 
 	// SearchIndexGuardian indexes Guardian-managed partitions in the search
 	// service. Default false: they have no clonable upstream git remote, so
@@ -241,8 +243,9 @@ type Router struct {
 	guardianClientsMu sync.RWMutex
 
 	// Guardian persistence
-	guardianPrincipals *guardianPrincipalStore
-	guardianVersions   *guardianVersionStore
+	guardianPrincipals          *guardianPrincipalStore
+	guardianVersions            *guardianVersionStore
+	guardianRegisteredNodeRepos sync.Map // "nodeID|addr|storageID|displayPath|repoURL" -> bool
 
 	// Guardian change subscriptions
 	guardianChangeSubs   map[uint64]*guardianChangeSubscriber
@@ -1492,6 +1495,75 @@ func queryResultItemValid(item *pb.QueryResultItem) bool {
 	return json.Valid(item.GetItemJson())
 }
 
+type kwayNodeRecord struct {
+	raw     []byte
+	ts      int64
+	nodeIdx int
+	seq     int64
+}
+
+type kwayNodeStreamCursor struct {
+	nodeIdx int
+	current kwayNodeRecord
+	ch      <-chan kwayNodeEvent
+}
+
+type kwayNodeEvent struct {
+	rec     kwayNodeRecord
+	err     error
+	started bool
+}
+
+type kwayCursorMaxHeap []*kwayNodeStreamCursor
+
+func (h kwayCursorMaxHeap) Len() int { return len(h) }
+
+func (h kwayCursorMaxHeap) Less(i, j int) bool {
+	if h[i].current.ts != h[j].current.ts {
+		return h[i].current.ts > h[j].current.ts
+	}
+	if h[i].current.nodeIdx != h[j].current.nodeIdx {
+		return h[i].current.nodeIdx < h[j].current.nodeIdx
+	}
+	return h[i].current.seq < h[j].current.seq
+}
+
+func (h kwayCursorMaxHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *kwayCursorMaxHeap) Push(x any) { *h = append(*h, x.(*kwayNodeStreamCursor)) }
+
+func (h *kwayCursorMaxHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
+func extractTelemetryRecordTimestamp(raw []byte) int64 {
+	var probe struct {
+		Timestamp any `json:"timestamp"`
+		StartTime any `json:"start_time"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return 0
+	}
+	for _, val := range []any{probe.Timestamp, probe.StartTime} {
+		switch v := val.(type) {
+		case string:
+			if v == "" {
+				continue
+			}
+			if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+				return t.UnixNano()
+			}
+		case float64:
+			return int64(v)
+		}
+	}
+	return 0
+}
+
 func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix string, query func(context.Context, pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error), handle func(*pb.QueryResultItem) error) error {
 	clients := r.allHealthyNodeClients()
 	if len(clients) == 0 {
@@ -1500,6 +1572,134 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// When limit > 0 and multiple nodes are queried, merge per-node streams via
+	// a k-way max-heap ordered by record timestamp so that a faster node with
+	// older records never truncates newer records from other nodes.
+	if limit > 0 && len(clients) > 1 {
+		nodeChs := make([]chan kwayNodeEvent, len(clients))
+		for i, c := range clients {
+			ch := make(chan kwayNodeEvent, 8)
+			nodeChs[i] = ch
+			go func(nodeIdx int, cl pb.MonoFSClient, out chan<- kwayNodeEvent) {
+				defer close(out)
+				stream, err := query(ctx, cl)
+				if err != nil {
+					out <- kwayNodeEvent{err: err}
+					return
+				}
+				out <- kwayNodeEvent{started: true}
+				var seq int64
+				for {
+					item, err := stream.Recv()
+					if err == io.EOF {
+						return
+					}
+					if err != nil {
+						select {
+						case out <- kwayNodeEvent{err: err}:
+						case <-ctx.Done():
+						}
+						return
+					}
+					if item == nil {
+						continue
+					}
+					records := item.GetItemsJson()
+					if len(records) == 0 && len(item.GetItemJson()) > 0 {
+						records = [][]byte{item.GetItemJson()}
+					}
+					for _, rec := range records {
+						if len(rec) == 0 {
+							continue
+						}
+						seq++
+						ev := kwayNodeEvent{
+							rec: kwayNodeRecord{
+								raw:     append([]byte(nil), rec...),
+								ts:      extractTelemetryRecordTimestamp(rec),
+								nodeIdx: nodeIdx,
+								seq:     seq,
+							},
+						}
+						select {
+						case out <- ev:
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
+			}(i, c, ch)
+		}
+
+		var (
+			firstErr error
+			success  bool
+			emitted  int
+			pq       = make(kwayCursorMaxHeap, 0, len(clients))
+		)
+		advanceCursor := func(nodeIdx int, ch <-chan kwayNodeEvent) (*kwayNodeStreamCursor, bool) {
+			for ev := range ch {
+				if ev.started {
+					success = true
+					continue
+				}
+				if ev.err != nil {
+					if ctx.Err() != nil && emitted >= limit {
+						return nil, false
+					}
+					if firstErr == nil {
+						firstErr = ev.err
+					}
+					return nil, false
+				}
+				if !json.Valid(ev.rec.raw) {
+					if firstErr == nil {
+						firstErr = fmt.Errorf("%s: invalid streamed json item", mergeErrPrefix)
+					}
+					continue
+				}
+				return &kwayNodeStreamCursor{
+					nodeIdx: nodeIdx,
+					current: ev.rec,
+					ch:      ch,
+				}, true
+			}
+			return nil, false
+		}
+
+		for i, ch := range nodeChs {
+			if cur, ok := advanceCursor(i, ch); ok {
+				pq = append(pq, cur)
+			}
+		}
+		heap.Init(&pq)
+
+		for pq.Len() > 0 && emitted < limit {
+			cur := heap.Pop(&pq).(*kwayNodeStreamCursor)
+			outItem := &pb.QueryResultItem{
+				ItemJson:  cur.current.raw,
+				ItemsJson: [][]byte{cur.current.raw},
+			}
+			if err := handle(outItem); err != nil {
+				cancel()
+				return err
+			}
+			emitted++
+			if emitted >= limit {
+				cancel()
+				break
+			}
+			if nextCur, ok := advanceCursor(cur.nodeIdx, cur.ch); ok {
+				heap.Push(&pq, nextCur)
+			}
+		}
+
+		if !success && firstErr != nil {
+			return firstErr
+		}
+		return nil
+	}
 
 	type streamEvent struct {
 		item    *pb.QueryResultItem
@@ -2174,8 +2374,11 @@ func (r *Router) Close() error {
 		close(r.stopClients)
 		r.stopFetcherReconnectLoop()
 
-		// Flush and stop the guardian version store background ticker.
+		// Flush and stop the guardian version and principal stores.
 		r.guardianVersions.close()
+		if r.guardianPrincipals != nil {
+			r.guardianPrincipals.close()
+		}
 
 		if r.autoPushWorker != nil {
 			r.autoPushWorker.Stop()
