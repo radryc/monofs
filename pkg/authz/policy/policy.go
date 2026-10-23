@@ -92,10 +92,58 @@ type Bundle struct {
 // Policy is a parsed bundle with evaluation helpers. It is immutable.
 type Policy struct {
 	bundle Bundle
+
+	// AWSBindings are indexed at construction time so federated record
+	// attribution stays O(1) at 50k bindings instead of scanning every binding
+	// for every log/trace record.
+	awsExact    map[string]string
+	awsAccount  map[string]string
+	awsRegion   map[string]string
+	awsWildcard string
 }
 
-// New wraps a bundle.
-func New(bundle Bundle) *Policy { return &Policy{bundle: bundle} }
+// New wraps a bundle and builds lookup indexes for AWS bindings.
+func New(bundle Bundle) *Policy {
+	p := &Policy{bundle: bundle}
+	p.indexAWSBindings()
+	return p
+}
+
+func (p *Policy) indexAWSBindings() {
+	if p == nil || len(p.bundle.AWSBindings) == 0 {
+		return
+	}
+	p.awsExact = make(map[string]string)
+	p.awsAccount = make(map[string]string)
+	p.awsRegion = make(map[string]string)
+	for _, binding := range p.bundle.AWSBindings {
+		partition := strings.TrimSpace(binding.Partition)
+		if partition == "" {
+			continue
+		}
+		account := strings.TrimSpace(binding.Account)
+		region := strings.TrimSpace(binding.Region)
+		switch {
+		case account != "" && region != "":
+			key := account + "\x00" + region
+			if _, exists := p.awsExact[key]; !exists {
+				p.awsExact[key] = partition
+			}
+		case account != "":
+			if _, exists := p.awsAccount[account]; !exists {
+				p.awsAccount[account] = partition
+			}
+		case region != "":
+			if _, exists := p.awsRegion[region]; !exists {
+				p.awsRegion[region] = partition
+			}
+		default:
+			if p.awsWildcard == "" {
+				p.awsWildcard = partition
+			}
+		}
+	}
+}
 
 // Bundle returns the underlying bundle.
 func (p *Policy) Bundle() Bundle { return p.bundle }
@@ -136,16 +184,26 @@ func (p *Policy) PartitionForAWS(account, region string) (string, bool) {
 	if account == "" && region == "" {
 		return "", false
 	}
-	for _, b := range p.bundle.AWSBindings {
-		if b.Account != "" && account != "" && b.Account != account {
-			continue
+	// Precedence is exact account+region, then account-only, then
+	// region-only, then a partition-wide binding. This is deterministic and
+	// matches the intended specificity order.
+	if account != "" && region != "" {
+		if partition, ok := p.awsExact[account+"\x00"+region]; ok {
+			return partition, true
 		}
-		if b.Region != "" && region != "" && b.Region != region {
-			continue
+	}
+	if account != "" {
+		if partition, ok := p.awsAccount[account]; ok {
+			return partition, true
 		}
-		if b.Partition != "" {
-			return b.Partition, true
+	}
+	if region != "" {
+		if partition, ok := p.awsRegion[region]; ok {
+			return partition, true
 		}
+	}
+	if p.awsWildcard != "" {
+		return p.awsWildcard, true
 	}
 	return "", false
 }
