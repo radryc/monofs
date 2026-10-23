@@ -96,10 +96,11 @@ type Policy struct {
 	// AWSBindings are indexed at construction time so federated record
 	// attribution stays O(1) at 50k bindings instead of scanning every binding
 	// for every log/trace record.
-	awsExact    map[string]string
-	awsAccount  map[string]string
-	awsRegion   map[string]string
-	awsWildcard string
+	awsExact          map[string]string
+	awsAccount        map[string]string
+	awsRegion         map[string]string
+	awsRegionFallback map[string]string
+	awsWildcard       string
 }
 
 // New wraps a bundle and builds lookup indexes for AWS bindings.
@@ -116,6 +117,7 @@ func (p *Policy) indexAWSBindings() {
 	p.awsExact = make(map[string]string)
 	p.awsAccount = make(map[string]string)
 	p.awsRegion = make(map[string]string)
+	p.awsRegionFallback = make(map[string]string)
 	for _, binding := range p.bundle.AWSBindings {
 		partition := strings.TrimSpace(binding.Partition)
 		if partition == "" {
@@ -129,6 +131,9 @@ func (p *Policy) indexAWSBindings() {
 			if _, exists := p.awsExact[key]; !exists {
 				p.awsExact[key] = partition
 			}
+			if _, exists := p.awsRegionFallback[region]; !exists {
+				p.awsRegionFallback[region] = partition
+			}
 		case account != "":
 			if _, exists := p.awsAccount[account]; !exists {
 				p.awsAccount[account] = partition
@@ -136,6 +141,9 @@ func (p *Policy) indexAWSBindings() {
 		case region != "":
 			if _, exists := p.awsRegion[region]; !exists {
 				p.awsRegion[region] = partition
+			}
+			if _, exists := p.awsRegionFallback[region]; !exists {
+				p.awsRegionFallback[region] = partition
 			}
 		default:
 			if p.awsWildcard == "" {
@@ -187,18 +195,24 @@ func (p *Policy) PartitionForAWS(account, region string) (string, bool) {
 	// Precedence is exact account+region, then account-only, then
 	// region-only, then a partition-wide binding. This is deterministic and
 	// matches the intended specificity order.
-	if account != "" && region != "" {
-		if partition, ok := p.awsExact[account+"\x00"+region]; ok {
-			return partition, true
-		}
-	}
 	if account != "" {
+		if region != "" {
+			if partition, ok := p.awsExact[account+"\x00"+region]; ok {
+				return partition, true
+			}
+		}
 		if partition, ok := p.awsAccount[account]; ok {
 			return partition, true
 		}
-	}
-	if region != "" {
-		if partition, ok := p.awsRegion[region]; ok {
+		if region != "" {
+			if partition, ok := p.awsRegion[region]; ok {
+				return partition, true
+			}
+		}
+	} else if region != "" {
+		// Region-only lookups preserve the pre-binding behavior: a record
+		// with only guardian_partition=us-east-1 can still resolve.
+		if partition, ok := p.awsRegionFallback[region]; ok {
 			return partition, true
 		}
 	}
