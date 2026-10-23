@@ -9975,7 +9975,11 @@ type QueryTracesRequest struct {
 	Limit        int32                  `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
 	// batch_size requests batched QueryResultItem responses (items_json) of up
 	// to this many records. Zero keeps the legacy one-record-per-message stream.
-	BatchSize     int32 `protobuf:"varint,6,opt,name=batch_size,json=batchSize,proto3" json:"batch_size,omitempty"`
+	BatchSize int32 `protobuf:"varint,6,opt,name=batch_size,json=batchSize,proto3" json:"batch_size,omitempty"`
+	// discovery selects trace discovery metadata instead of trace spans.
+	// Supported values: services, tags, tag_values.
+	Discovery     string `protobuf:"bytes,7,opt,name=discovery,proto3" json:"discovery,omitempty"`
+	DiscoveryTag  string `protobuf:"bytes,8,opt,name=discovery_tag,json=discoveryTag,proto3" json:"discovery_tag,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -10050,6 +10054,20 @@ func (x *QueryTracesRequest) GetBatchSize() int32 {
 		return x.BatchSize
 	}
 	return 0
+}
+
+func (x *QueryTracesRequest) GetDiscovery() string {
+	if x != nil {
+		return x.Discovery
+	}
+	return ""
+}
+
+func (x *QueryTracesRequest) GetDiscoveryTag() string {
+	if x != nil {
+		return x.DiscoveryTag
+	}
+	return ""
 }
 
 type QueryTracesResponse struct {
@@ -12776,7 +12794,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\n" +
 	"batch_size\x18\x06 \x01(\x05R\tbatchSize\"9\n" +
 	"\x14QueryMetricsResponse\x12!\n" +
-	"\fresults_json\x18\x01 \x01(\fR\vresultsJson\"\xc6\x01\n" +
+	"\fresults_json\x18\x01 \x01(\fR\vresultsJson\"\x89\x02\n" +
 	"\x12QueryTracesRequest\x12\x19\n" +
 	"\btrace_id\x18\x01 \x01(\tR\atraceId\x12\x18\n" +
 	"\aservice\x18\x02 \x01(\tR\aservice\x12$\n" +
@@ -12785,7 +12803,9 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"toUnixNano\x12\x14\n" +
 	"\x05limit\x18\x05 \x01(\x05R\x05limit\x12\x1d\n" +
 	"\n" +
-	"batch_size\x18\x06 \x01(\x05R\tbatchSize\"8\n" +
+	"batch_size\x18\x06 \x01(\x05R\tbatchSize\x12\x1c\n" +
+	"\tdiscovery\x18\a \x01(\tR\tdiscovery\x12#\n" +
+	"\rdiscovery_tag\x18\b \x01(\tR\fdiscoveryTag\"8\n" +
 	"\x13QueryTracesResponse\x12!\n" +
 	"\fresults_json\x18\x01 \x01(\fR\vresultsJson\"M\n" +
 	"\x0fQueryResultItem\x12\x1b\n" +

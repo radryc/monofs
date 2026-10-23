@@ -1346,6 +1346,9 @@ func (s *Server) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.Serve
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
+	if discovery := strings.TrimSpace(req.GetDiscovery()); discovery != "" {
+		return s.streamTraceDiscovery(backend, discovery, req.GetDiscoveryTag(), from, to, stream)
+	}
 	yield := func(record logengine.SpanRecord) error {
 		return streamQueryResult(record, stream.Send, "stream traces")
 	}
@@ -1359,6 +1362,46 @@ func (s *Server) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.Serve
 	}
 	if batcher != nil {
 		return batcher.flush()
+	}
+	return nil
+}
+
+type traceDiscoveryBackend interface {
+	DiscoverTraceServices(context.Context, time.Time, time.Time) ([]string, error)
+	DiscoverTraceTags(context.Context, time.Time, time.Time) ([]string, error)
+	DiscoverTraceTagValues(context.Context, time.Time, time.Time, string) ([]string, error)
+}
+
+func (s *Server) streamTraceDiscovery(backend DoctorBackend, discovery, tag string, from, to time.Time, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	provider, ok := backend.(traceDiscoveryBackend)
+	if !ok {
+		return status.Errorf(codes.Unimplemented, "trace discovery is not supported by this backend")
+	}
+	var (
+		values []string
+		err    error
+	)
+	switch discovery {
+	case "services":
+		values, err = provider.DiscoverTraceServices(stream.Context(), from, to)
+	case "tags":
+		values, err = provider.DiscoverTraceTags(stream.Context(), from, to)
+	case "tag_values":
+		values, err = provider.DiscoverTraceTagValues(stream.Context(), from, to, tag)
+	default:
+		return status.Errorf(codes.InvalidArgument, "unknown trace discovery mode %q", discovery)
+	}
+	if err != nil {
+		return status.Errorf(codes.Internal, "trace discovery failed: %v", err)
+	}
+	for _, value := range values {
+		b, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			return status.Errorf(codes.Internal, "marshal trace discovery value: %v", marshalErr)
+		}
+		if sendErr := stream.Send(&pb.QueryResultItem{ItemJson: b}); sendErr != nil {
+			return sendErr
+		}
 	}
 	return nil
 }
