@@ -91,6 +91,24 @@ func TestTimePrefixedChunkIDRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParseNativeChunkTimeRange(t *testing.T) {
+	minT := time.Date(2026, 10, 23, 12, 0, 0, 123, time.UTC)
+	maxT := minT.Add(5 * time.Minute)
+	id := fmt.Sprintf("chunk-%d-%d", minT.UnixNano(), maxT.UnixNano())
+	gotMin, gotMax, ok := ParseChunkTimeRangeFromID(id)
+	if !ok {
+		t.Fatalf("expected ParseChunkTimeRangeFromID(%q) to succeed", id)
+	}
+	if !gotMin.Equal(minT) || !gotMax.Equal(maxT) {
+		t.Fatalf("parsed range = [%v, %v], want [%v, %v]", gotMin, gotMax, minT, maxT)
+	}
+	for _, invalid := range []string{"chunk-abc", "chunk-1", "chunk-2-1", "chunk-1-2-3"} {
+		if _, _, ok := ParseChunkTimeRangeFromID(invalid); ok {
+			t.Fatalf("expected ParseChunkTimeRangeFromID(%q) to fail", invalid)
+		}
+	}
+}
+
 func TestCachedStoreEvictsOldestLocalIndexDirs(t *testing.T) {
 	localDir := t.TempDir()
 	store := NewCachedStore(&stubObjectStore{}, localDir)

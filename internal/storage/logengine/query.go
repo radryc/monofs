@@ -641,7 +641,10 @@ func (q *QueryEngine) prefetchManifests(ctx context.Context, signal Signal, chun
 	if len(chunkIDs) <= 16 {
 		return
 	}
-	sem := make(chan struct{}, 16)
+	// Maintain enough parallelism to keep remote manifest reads overlapped, but
+	// bound it so a large historical chunk list cannot create a goroutine
+	// stampede.
+	sem := make(chan struct{}, 64)
 	var wg sync.WaitGroup
 	for _, chunkID := range chunkIDs {
 		wg.Add(1)

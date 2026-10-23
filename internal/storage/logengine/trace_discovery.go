@@ -130,6 +130,12 @@ func (q *QueryEngine) DiscoverTraceTagValues(ctx context.Context, from, to time.
 	if tag == "" {
 		return nil, fmt.Errorf("trace discovery tag is required")
 	}
+	// Service names are already maintained as a first-class manifest field.
+	// Avoid the tag-value path (and any legacy chunk fallback) for the most
+	// common picker query.
+	if tag == "service.name" || tag == "service" {
+		return q.DiscoverTraceServices(ctx, from, to)
+	}
 	manifests, err := q.traceDiscoveryManifests(ctx, from, to)
 	if err != nil {
 		return nil, err
@@ -164,7 +170,7 @@ func (q *QueryEngine) traceDiscoveryManifests(ctx context.Context, from, to time
 	if err != nil {
 		return nil, fmt.Errorf("failed to list trace chunks: %w", err)
 	}
-	candidates := make([]candidateChunk, 0, len(chunkIDs))
+	remaining := make([]string, 0, len(chunkIDs))
 	for _, chunkID := range chunkIDs {
 		if minT, maxT, ok := ParseChunkTimeRangeFromID(chunkID); ok {
 			if !to.IsZero() && minT.After(to) {
@@ -174,6 +180,11 @@ func (q *QueryEngine) traceDiscoveryManifests(ctx context.Context, from, to time
 				continue
 			}
 		}
+		remaining = append(remaining, chunkID)
+	}
+	q.prefetchManifests(ctx, SignalTraces, remaining)
+	candidates := make([]candidateChunk, 0, len(remaining))
+	for _, chunkID := range remaining {
 		manifest, err := q.store.ReadManifest(ctx, SignalTraces, chunkID)
 		if err != nil {
 			if err == ErrGhostChunk {
