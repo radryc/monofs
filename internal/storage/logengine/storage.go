@@ -427,23 +427,35 @@ func FormatTimePrefixedChunkID(minTime, maxTime time.Time, chunkID string) strin
 }
 
 // ParseChunkTimeRangeFromID extracts the [minTime, maxTime] range from a
-// time-prefixed chunk ID created by FormatTimePrefixedChunkID.
+// time-prefixed chunk ID. It accepts both the legacy ts_<min>_<max>_<id>
+// format and the native chunk-<min>_<max> IDs written by the ingester.
 func ParseChunkTimeRangeFromID(chunkID string) (time.Time, time.Time, bool) {
-	if !strings.HasPrefix(chunkID, "ts_") {
+	var minStr, maxStr string
+	switch {
+	case strings.HasPrefix(chunkID, "ts_"):
+		rest := strings.TrimPrefix(chunkID, "ts_")
+		firstSep := strings.IndexByte(rest, '_')
+		if firstSep <= 0 {
+			return time.Time{}, time.Time{}, false
+		}
+		minStr = rest[:firstSep]
+		rest = rest[firstSep+1:]
+		secondSep := strings.IndexByte(rest, '_')
+		if secondSep <= 0 {
+			return time.Time{}, time.Time{}, false
+		}
+		maxStr = rest[:secondSep]
+	case strings.HasPrefix(chunkID, "chunk-"):
+		rest := strings.TrimPrefix(chunkID, "chunk-")
+		sep := strings.LastIndexByte(rest, '-')
+		if sep <= 0 || sep == len(rest)-1 {
+			return time.Time{}, time.Time{}, false
+		}
+		minStr = rest[:sep]
+		maxStr = rest[sep+1:]
+	default:
 		return time.Time{}, time.Time{}, false
 	}
-	rest := strings.TrimPrefix(chunkID, "ts_")
-	firstSep := strings.IndexByte(rest, '_')
-	if firstSep <= 0 {
-		return time.Time{}, time.Time{}, false
-	}
-	minStr := rest[:firstSep]
-	rest = rest[firstSep+1:]
-	secondSep := strings.IndexByte(rest, '_')
-	if secondSep <= 0 {
-		return time.Time{}, time.Time{}, false
-	}
-	maxStr := rest[:secondSep]
 	minNano, err := strconv.ParseInt(minStr, 10, 64)
 	if err != nil {
 		return time.Time{}, time.Time{}, false
