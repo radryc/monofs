@@ -173,13 +173,16 @@ func (i *Ingester) flushTraces(ctx context.Context, chunkID string, spans []Span
 		}
 	}
 
+	traceTagKeys, traceTagValues := collectTraceDiscovery(spans)
 	manifest := ChunkManifest{
-		ChunkID:    chunkID,
-		Signal:     SignalTraces,
-		MinTime:    minTime,
-		MaxTime:    maxTime,
-		Services:   collectTraceServices(spans),
-		TraceBloom: buildTraceBloom(spans),
+		ChunkID:        chunkID,
+		Signal:         SignalTraces,
+		MinTime:        minTime,
+		MaxTime:        maxTime,
+		Services:       collectTraceServices(spans),
+		TraceBloom:     buildTraceBloom(spans),
+		TraceTagKeys:   traceTagKeys,
+		TraceTagValues: traceTagValues,
 	}
 	chunkPrefix := filepath.Join("chunks", string(SignalTraces), chunkID)
 

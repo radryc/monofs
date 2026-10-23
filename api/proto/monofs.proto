@@ -1274,6 +1274,10 @@ message QueryTracesRequest {
     // batch_size requests batched QueryResultItem responses (items_json) of up
     // to this many records. Zero keeps the legacy one-record-per-message stream.
     int32 batch_size = 6;
+    // discovery selects trace discovery metadata instead of trace spans.
+    // Supported values: services, tags, tag_values.
+    string discovery = 7;
+    string discovery_tag = 8;
 }
 
 message QueryTracesResponse {

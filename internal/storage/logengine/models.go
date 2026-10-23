@@ -81,6 +81,11 @@ type ChunkManifest struct {
 	MetricNames       []string            `json:"metric_names,omitempty"`
 	MetricLabelValues map[string][]string `json:"metric_label_values,omitempty"`
 	TraceBloom        []byte              `json:"trace_bloom,omitempty"` // Serialized bloom filter for trace_id
+	// TraceTagKeys and TraceTagValues form the trace discovery index. They
+	// contain bounded, deduplicated tag metadata so service/tag pickers do not
+	// need to scan span payloads.
+	TraceTagKeys   []string            `json:"trace_tag_keys,omitempty"`
+	TraceTagValues map[string][]string `json:"trace_tag_values,omitempty"`
 }
 
 // MetricSeriesMeta describes one distinct metric series inside a chunk: the

@@ -100,6 +100,21 @@ func (e *LogEngine) StreamTraces(ctx context.Context, traceID, service string, f
 	return e.query.StreamTraces(ctx, traceID, service, from, to, limit, yield)
 }
 
+// DiscoverTraceServices returns trace services from chunk manifests.
+func (e *LogEngine) DiscoverTraceServices(ctx context.Context, from, to time.Time) ([]string, error) {
+	return e.query.DiscoverTraceServices(ctx, from, to)
+}
+
+// DiscoverTraceTags returns discoverable trace tag names from chunk manifests.
+func (e *LogEngine) DiscoverTraceTags(ctx context.Context, from, to time.Time) ([]string, error) {
+	return e.query.DiscoverTraceTags(ctx, from, to)
+}
+
+// DiscoverTraceTagValues returns values for one trace tag from chunk manifests.
+func (e *LogEngine) DiscoverTraceTagValues(ctx context.Context, from, to time.Time, tag string) ([]string, error) {
+	return e.query.DiscoverTraceTagValues(ctx, from, to, tag)
+}
+
 // Query executes a MonoFS log query and returns the result as raw JSON bytes (for gRPC compat).
 func (e *LogEngine) Query(ctx context.Context, queryStr string) ([]byte, error) {
 	logs, err := e.query.QueryLogs(ctx, queryStr, "", time.Time{}, time.Time{}, 0)
