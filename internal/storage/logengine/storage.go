@@ -24,6 +24,15 @@ const (
 	manifestCacheTTL    = 30 * time.Minute
 	seriesIndexCacheTTL = 5 * time.Minute
 	cacheSweepInterval  = 30 * time.Second
+	// chunkTimeBucketDuration is the directory bucket used for newly written
+	// chunks. Queries list only the buckets overlapping their time range instead
+	// of the flat chunks/<signal>/ directory, which grows with retention.
+	chunkTimeBucketDuration = time.Hour
+	chunkTimeBucketLayout   = "2006/01/02/15"
+	// maxBucketedRangeScan bounds how many hourly buckets a single query will
+	// enumerate before falling back to a recursive bucket walk. This keeps an
+	// accidentally unbounded from/to from turning into thousands of listings.
+	maxBucketedRangeScan = 90 * 24 * time.Hour
 	// maxManifestCacheEntries bounds the in-memory chunk manifest cache.
 	maxManifestCacheEntries = 32768
 	// maxSeriesIndexCacheEntries bounds the in-memory series index cache. Each
@@ -195,7 +204,149 @@ func (c *CachedStore) ListChunks(ctx context.Context, prefix string) ([]string, 
 	return chunkIDs, nil
 }
 
-// ReadManifest returns a cached chunk manifest when available.
+// ListChunkPaths returns chunk paths relative to chunks/<signal>/ for chunks
+// that overlap [from, to]. New chunks are written under hourly time buckets
+// (YYYY/MM/DD/HH/<chunkID>); legacy flat chunks are still returned. The result
+// is suitable for filepath.Join("chunks", signal, path, ...).
+func (c *CachedStore) ListChunkPaths(ctx context.Context, signal Signal, from, to time.Time) ([]string, error) {
+	root := filepath.ToSlash(filepath.Join("chunks", string(signal)))
+	entries, err := c.ListChunks(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+
+	paths := make([]string, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+
+	years := make([]string, 0)
+	for _, entry := range entries {
+		if isTimeBucketName(entry, 4) {
+			years = append(years, entry)
+			continue
+		}
+		if looksLikeChunkID(entry) {
+			add(entry)
+		}
+	}
+
+	if !from.IsZero() && !to.IsZero() && to.Sub(from) <= maxBucketedRangeScan {
+		start := chunkBucketStart(from).Add(-chunkTimeBucketDuration)
+		end := chunkBucketStart(to)
+		for bucket := start; !bucket.After(end); bucket = bucket.Add(chunkTimeBucketDuration) {
+			relativeBucket := bucket.Format(chunkTimeBucketLayout)
+			bucketPrefix := filepath.ToSlash(filepath.Join(root, relativeBucket))
+			chunkIDs, listErr := c.ListChunks(ctx, bucketPrefix)
+			if listErr != nil {
+				return nil, listErr
+			}
+			for _, chunkID := range chunkIDs {
+				add(filepath.ToSlash(filepath.Join(relativeBucket, chunkID)))
+			}
+		}
+	} else {
+		for _, year := range years {
+			if err := c.walkTimeBuckets(ctx, root, year, 1, add); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if !from.IsZero() || !to.IsZero() {
+		filtered := paths[:0]
+		for _, path := range paths {
+			if chunkPathOverlaps(path, from, to) {
+				filtered = append(filtered, path)
+			}
+		}
+		paths = filtered
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func (c *CachedStore) walkTimeBuckets(ctx context.Context, root, relative string, depth int, add func(string)) error {
+	prefix := filepath.ToSlash(filepath.Join(root, relative))
+	entries, err := c.ListChunks(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	if depth >= 4 {
+		for _, chunkID := range entries {
+			if looksLikeChunkID(chunkID) {
+				add(filepath.ToSlash(filepath.Join(relative, chunkID)))
+			}
+		}
+		return nil
+	}
+	width := 2
+	for _, entry := range entries {
+		if !isTimeBucketName(entry, width) {
+			continue
+		}
+		if err := c.walkTimeBuckets(ctx, root, filepath.ToSlash(filepath.Join(relative, entry)), depth+1, add); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func chunkBucketStart(t time.Time) time.Time {
+	return t.UTC().Truncate(chunkTimeBucketDuration)
+}
+
+// relativeChunkPath returns the path of a new chunk relative to
+// chunks/<signal>/. Buckets are selected by the data's min timestamp, not by
+// the ingestion wall clock.
+func relativeChunkPath(chunkID string, minTime time.Time) string {
+	if minTime.IsZero() {
+		return chunkID
+	}
+	return filepath.ToSlash(filepath.Join(minTime.UTC().Format(chunkTimeBucketLayout), chunkID))
+}
+
+func isTimeBucketName(name string, width int) bool {
+	if len(name) != width {
+		return false
+	}
+	for _, ch := range name {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func looksLikeChunkID(name string) bool {
+	return strings.HasPrefix(name, "chunk-") ||
+		strings.HasPrefix(name, "compact-") ||
+		strings.HasPrefix(name, "ts_")
+}
+
+func chunkPathOverlaps(path string, from, to time.Time) bool {
+	minTime, maxTime, ok := ParseChunkTimeRangeFromID(path)
+	if !ok {
+		// Legacy or malformed IDs are kept; the manifest remains authoritative.
+		return true
+	}
+	if !to.IsZero() && minTime.After(to) {
+		return false
+	}
+	if !from.IsZero() && maxTime.Before(from) {
+		return false
+	}
+	return true
+}
+
 func (c *CachedStore) ReadManifest(ctx context.Context, signal Signal, chunkID string) (ChunkManifest, error) {
 	manifestPath := filepath.ToSlash(filepath.Join("chunks", string(signal), chunkID, "metadata.json"))
 	now := time.Now()
@@ -239,13 +390,6 @@ func (c *CachedStore) ReadManifest(ctx context.Context, signal Signal, chunkID s
 
 func normalizeChunkPrefix(prefix string) string {
 	cleaned := strings.Trim(strings.TrimSpace(filepath.ToSlash(prefix)), "/")
-	if cleaned == "" {
-		return ""
-	}
-	parts := strings.Split(cleaned, "/")
-	if len(parts) >= 2 && parts[0] == "chunks" {
-		return parts[0] + "/" + parts[1]
-	}
 	return cleaned
 }
 
@@ -294,9 +438,22 @@ func (c *CachedStore) invalidatePath(path string) {
 		return
 	}
 
-	prefix := filepath.Join(parts[0], parts[1])
+	// Invalidate the signal root and every time-bucket ancestor of the written
+	// path. Recursive bucket walks cache each level, so deleting only the leaf
+	// would let a query miss a newly created hour bucket until the 10s TTL.
+	signalPrefix := filepath.ToSlash(filepath.Join(parts[0], parts[1]))
+	ancestors := []string{signalPrefix}
+	if len(parts) >= 5 {
+		ancestors = append(ancestors,
+			strings.Join(parts[:3], "/"),
+			strings.Join(parts[:4], "/"),
+			strings.Join(parts[:5], "/"),
+		)
+	}
 	c.mu.Lock()
-	delete(c.chunks, prefix)
+	for _, prefix := range ancestors {
+		delete(c.chunks, prefix)
+	}
 	if strings.HasSuffix(cleaned, "/metadata.json") {
 		delete(c.manifests, cleaned)
 	}
@@ -430,6 +587,7 @@ func FormatTimePrefixedChunkID(minTime, maxTime time.Time, chunkID string) strin
 // time-prefixed chunk ID. It accepts both the legacy ts_<min>_<max>_<id>
 // format and the native chunk-<min>_<max> IDs written by the ingester.
 func ParseChunkTimeRangeFromID(chunkID string) (time.Time, time.Time, bool) {
+	chunkID = filepath.Base(strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(chunkID)), "/"))
 	var minStr, maxStr string
 	switch {
 	case strings.HasPrefix(chunkID, "ts_"):
@@ -445,9 +603,22 @@ func ParseChunkTimeRangeFromID(chunkID string) (time.Time, time.Time, bool) {
 			return time.Time{}, time.Time{}, false
 		}
 		maxStr = rest[:secondSep]
+	case strings.HasPrefix(chunkID, "compact-"):
+		// compact-<minNano>-<maxNano>-<sequence>
+		rest := strings.TrimPrefix(chunkID, "compact-")
+		parts := strings.SplitN(rest, "-", 3)
+		if len(parts) < 3 {
+			return time.Time{}, time.Time{}, false
+		}
+		minStr, maxStr = parts[0], parts[1]
 	case strings.HasPrefix(chunkID, "chunk-"):
+		// Native chunk-<minNano>-<maxNano>. Keep this strict so malformed IDs
+		// with extra fields are not silently accepted.
 		rest := strings.TrimPrefix(chunkID, "chunk-")
-		sep := strings.LastIndexByte(rest, '-')
+		if strings.Count(rest, "-") != 1 {
+			return time.Time{}, time.Time{}, false
+		}
+		sep := strings.IndexByte(rest, '-')
 		if sep <= 0 || sep == len(rest)-1 {
 			return time.Time{}, time.Time{}, false
 		}

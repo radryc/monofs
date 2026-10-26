@@ -78,7 +78,7 @@ func (i *Ingester) flushLogs(ctx context.Context, chunkID string, logs []LogReco
 		MaxTime:  maxTime,
 		Services: collectLogServices(logs),
 	}
-	chunkPrefix := filepath.Join("chunks", string(SignalLogs), chunkID)
+	chunkPrefix := filepath.Join("chunks", string(SignalLogs), relativeChunkPath(chunkID, minTime))
 
 	wg.Add(1)
 	go func() {
@@ -129,7 +129,7 @@ func (i *Ingester) flushMetrics(ctx context.Context, chunkID string, metrics []M
 		MetricNames:       collectMetricNames(metrics),
 		MetricLabelValues: collectMetricLabelValues(metrics),
 	}
-	chunkPrefix := filepath.Join("chunks", string(SignalMetrics), chunkID)
+	chunkPrefix := filepath.Join("chunks", string(SignalMetrics), relativeChunkPath(chunkID, minTime))
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
@@ -184,7 +184,7 @@ func (i *Ingester) flushTraces(ctx context.Context, chunkID string, spans []Span
 		TraceTagKeys:   traceTagKeys,
 		TraceTagValues: traceTagValues,
 	}
-	chunkPrefix := filepath.Join("chunks", string(SignalTraces), chunkID)
+	chunkPrefix := filepath.Join("chunks", string(SignalTraces), relativeChunkPath(chunkID, minTime))
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)

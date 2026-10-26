@@ -138,9 +138,9 @@ type LogEngineStats struct {
 
 // Stats returns per-signal chunk counts for this engine's backing store.
 func (e *LogEngine) Stats(ctx context.Context) (LogEngineStats, error) {
-	logChunks, _ := e.store.ListChunks(ctx, filepath.Join("chunks", string(SignalLogs)))
-	metricChunks, _ := e.store.ListChunks(ctx, filepath.Join("chunks", string(SignalMetrics)))
-	traceChunks, _ := e.store.ListChunks(ctx, filepath.Join("chunks", string(SignalTraces)))
+	logChunks, _ := e.store.ListChunkPaths(ctx, SignalLogs, time.Time{}, time.Time{})
+	metricChunks, _ := e.store.ListChunkPaths(ctx, SignalMetrics, time.Time{}, time.Time{})
+	traceChunks, _ := e.store.ListChunkPaths(ctx, SignalTraces, time.Time{}, time.Time{})
 	return LogEngineStats{
 		LogChunks:    int64(len(logChunks)),
 		MetricChunks: int64(len(metricChunks)),
