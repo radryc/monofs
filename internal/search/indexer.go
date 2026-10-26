@@ -3,6 +3,7 @@ package search
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/client"
+	"github.com/radryc/monofs/internal/gittoken"
 )
 
 // Indexer manages Zoekt indexing and searching
@@ -452,10 +454,10 @@ func (i *Indexer) indexFromExternal(ctx context.Context, req IndexRequest, start
 		req.RepoURL,
 		repoDir,
 	)
-	cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cloneCmd.Env = gitCloneEnv(req.RepoURL)
 
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("git clone failed: %w: %s", err, string(output))
+		return nil, fmt.Errorf("git clone failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 
 	defer func() {
@@ -587,6 +589,40 @@ func (i *Indexer) indexFromExternal(ctx context.Context, req IndexRequest, start
 		IndexSizeBytes: indexSize,
 		Duration:       time.Since(start),
 	}, nil
+}
+
+// gitCloneEnv builds the environment for git clone/fetch. Interactive prompts
+// are always disabled so a missing credential fails fast instead of hanging.
+// When a token is configured for the repository (see package gittoken), it is
+// applied as an HTTP Basic Authorization header via GIT_CONFIG_* variables so
+// private repositories can be cloned without exposing the token in argv.
+func gitCloneEnv(repoURL string) []string {
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		switch name {
+		case "GIT_TERMINAL_PROMPT",
+			"GIT_CONFIG_COUNT",
+			"GIT_CONFIG_KEY_0",
+			"GIT_CONFIG_VALUE_0":
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "GIT_TERMINAL_PROMPT=0")
+
+	if gittoken.IsHTTPS(repoURL) {
+		if token := gittoken.TokenForRepo(repoURL); token != "" {
+			credentials := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+			env = append(env,
+				"GIT_CONFIG_COUNT=1",
+				"GIT_CONFIG_KEY_0=http.extraHeader",
+				"GIT_CONFIG_VALUE_0=Authorization: Basic "+credentials,
+			)
+		}
+	}
+
+	return env
 }
 
 // Search performs a code search
