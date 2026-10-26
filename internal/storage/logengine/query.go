@@ -232,7 +232,7 @@ func (q *QueryEngine) StreamLogs(ctx context.Context, queryStr, service string, 
 	}
 	observer.addChunksListed(len(chunkIDs))
 
-	candidates, err := q.logCandidates(ctx, chunkIDs, serviceFilter, from, to, observer)
+	candidates, err := q.logCandidates(ctx, chunkIDs, serviceFilter, compiled, from, to, observer)
 	if err != nil {
 		return err
 	}
@@ -658,7 +658,7 @@ func (q *QueryEngine) prefetchManifests(ctx context.Context, signal Signal, chun
 	wg.Wait()
 }
 
-func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, service string, from, to time.Time, observer *queryPathObserver) ([]candidateChunk, error) {
+func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, service string, compiled compiledLogQuery, from, to time.Time, observer *queryPathObserver) ([]candidateChunk, error) {
 	pruneStart := time.Now()
 	defer observer.observeStage("manifest_pruning", pruneStart)
 
@@ -700,12 +700,76 @@ func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, serv
 			observer.addChunksPruned("service_mismatch", 1)
 			continue
 		}
+		if !manifestMatchesLogQuery(manifest, compiled) {
+			observer.addChunksPruned("label_mismatch", 1)
+			continue
+		}
 		candidates = append(candidates, candidateChunk{chunkID: chunkID, manifest: manifest, cutoffMax: manifest.MaxTime})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].manifest.MaxTime.After(candidates[j].manifest.MaxTime)
 	})
 	return candidates, nil
+}
+
+// manifestMatchesLogQuery prunes chunks using the bounded dictionaries written
+// into new manifests. Only positive equality/regex matchers are used: a missing
+// or truncated dictionary must never become a false negative.
+func manifestMatchesLogQuery(manifest ChunkManifest, compiled compiledLogQuery) bool {
+	for _, compiledMatcher := range compiled.matchers {
+		matcher := compiledMatcher.matcher
+		switch matcher.Name {
+		case "service", "service_name":
+			continue // handled by the exact service pushdown
+		case "trace_id":
+			if matcher.Op == "=" && !traceBloomMayContain(manifest.TraceBloom, matcher.Value) {
+				return false
+			}
+			continue
+		case "body", "raw_message", "span_id":
+			continue
+		case "level", "severity_text":
+			if !manifestValuesMayMatch(manifest.Levels, compiledMatcher) {
+				return false
+			}
+		default:
+			values := manifest.LabelValues[matcher.Name]
+			if len(values) == 0 {
+				values = manifest.LabelValues[strings.ReplaceAll(matcher.Name, "_", ".")]
+			}
+			if !manifestValuesMayMatch(values, compiledMatcher) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func manifestValuesMayMatch(values []string, matcher compiledLogMatcher) bool {
+	if len(values) == 0 {
+		return true
+	}
+	switch matcher.matcher.Op {
+	case "=":
+		for _, value := range values {
+			if value == matcher.matcher.Value {
+				return true
+			}
+		}
+		return false
+	case "=~":
+		if matcher.regex == nil {
+			return true
+		}
+		for _, value := range values {
+			if matcher.regex.MatchString(value) {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
 }
 
 // QueryMetrics returns metric data points matching the given query in the time range.
