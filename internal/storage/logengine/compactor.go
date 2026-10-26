@@ -57,8 +57,24 @@ func newCompactor(store *CachedStore, ingester *Ingester, query *QueryEngine) *C
 // already compacted are left alone. The whole contents of each input chunk are
 // read, so a chunk that straddles the range boundary is not truncated before
 // the source chunk is deleted.
-func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to time.Time, opts CompactionOptions) (CompactionResult, error) {
-	result := CompactionResult{Signal: signal, From: from, To: to}
+func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to time.Time, opts CompactionOptions) (result CompactionResult, err error) {
+	started := time.Now()
+	result = CompactionResult{Signal: signal, From: from, To: to}
+	defer func() {
+		label := "ok"
+		if err != nil {
+			label = "error"
+		}
+		signalLabel := string(signal)
+		logengineCompactionRunsTotal.WithLabelValues(signalLabel, label).Inc()
+		logengineCompactionDurationSeconds.WithLabelValues(signalLabel).Observe(time.Since(started).Seconds())
+		if err == nil {
+			logengineCompactionInputChunksTotal.WithLabelValues(signalLabel).Add(float64(result.InputChunks))
+			logengineCompactionOutputChunksTotal.WithLabelValues(signalLabel).Add(float64(result.OutputChunks))
+			logengineCompactionRecordsTotal.WithLabelValues(signalLabel).Add(float64(result.Records))
+			logengineCompactionDeletedChunksTotal.WithLabelValues(signalLabel).Add(float64(result.DeletedChunks))
+		}
+	}()
 	if from.IsZero() || to.IsZero() || !to.After(from) {
 		return result, fmt.Errorf("compaction range must be a non-empty [from, to]")
 	}

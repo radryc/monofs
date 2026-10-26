@@ -58,6 +58,49 @@ var (
 		Name:      "query_returned_records_total",
 		Help:      "Total query records returned after filtering and limits, by signal.",
 	}, []string{"signal"})
+
+	logengineCompactionRunsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "logengine",
+		Name:      "compaction_runs_total",
+		Help:      "Total telemetry compaction runs, by signal and result.",
+	}, []string{"signal", "result"})
+
+	logengineCompactionDurationSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "monofs",
+		Subsystem: "logengine",
+		Name:      "compaction_duration_seconds",
+		Help:      "Duration of telemetry compaction runs, by signal.",
+		Buckets:   prometheus.DefBuckets,
+	}, []string{"signal"})
+
+	logengineCompactionInputChunksTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "logengine",
+		Name:      "compaction_input_chunks_total",
+		Help:      "Total source chunks considered by telemetry compaction, by signal.",
+	}, []string{"signal"})
+
+	logengineCompactionOutputChunksTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "logengine",
+		Name:      "compaction_output_chunks_total",
+		Help:      "Total compacted chunks written, by signal.",
+	}, []string{"signal"})
+
+	logengineCompactionRecordsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "logengine",
+		Name:      "compaction_records_total",
+		Help:      "Total records read by telemetry compaction, by signal.",
+	}, []string{"signal"})
+
+	logengineCompactionDeletedChunksTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "logengine",
+		Name:      "compaction_deleted_chunks_total",
+		Help:      "Total source chunks deleted after telemetry compaction, by signal.",
+	}, []string{"signal"})
 )
 
 type queryPathObserver struct {
