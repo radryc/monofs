@@ -68,6 +68,8 @@ type ObjectStoreBackend interface {
 	// Read should return ErrGhostChunk if the file does not exist (e.g. S3 NoSuchKey).
 	Read(ctx context.Context, path string) (io.ReadSeekCloser, error)
 	ListChunks(ctx context.Context, prefix string) ([]string, error)
+	// Delete removes a path and, for a chunk directory, all of its objects.
+	Delete(ctx context.Context, path string) error
 }
 
 // CachedStore implements a caching decorator around a remote ObjectStoreBackend.
@@ -159,6 +161,16 @@ func (c *CachedStore) trimSeriesIndexLocked() {
 // Write passes through to the remote storage.
 func (c *CachedStore) Write(ctx context.Context, path string, reader io.Reader) error {
 	if err := c.remote.Write(ctx, path, reader); err != nil {
+		return err
+	}
+	c.invalidatePath(path)
+	return nil
+}
+
+// Delete removes a chunk path from the backing store and invalidates the
+// listings that could contain it.
+func (c *CachedStore) Delete(ctx context.Context, path string) error {
+	if err := c.remote.Delete(ctx, path); err != nil {
 		return err
 	}
 	c.invalidatePath(path)
@@ -449,6 +461,9 @@ func (c *CachedStore) invalidatePath(path string) {
 			strings.Join(parts[:4], "/"),
 			strings.Join(parts[:5], "/"),
 		)
+	}
+	if len(parts) >= 6 {
+		ancestors = append(ancestors, strings.Join(parts[:6], "/"))
 	}
 	c.mu.Lock()
 	for _, prefix := range ancestors {

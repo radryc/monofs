@@ -144,6 +144,8 @@ func main() {
 
 	// Doctor telemetry log engine
 	logengineDir := flag.String("logengine-dir", "", "Directory for the doctor telemetry log engine (empty disables)")
+	logengineCompactInterval := flag.Duration("logengine-compact-interval", 10*time.Minute, "Interval for background telemetry chunk compaction (0 disables)")
+	logengineCompactAge := flag.Duration("logengine-compact-age", time.Hour, "Only compact telemetry chunks older than this")
 
 	// Metrics
 	metricsAddr := flag.String("metrics-addr", ":9100", "Listen address for Prometheus /metrics endpoint (empty disables)")
@@ -388,6 +390,7 @@ func main() {
 	}
 
 	// Initialize doctor telemetry log engine if configured.
+	var stopLogEngine func()
 	if dir := strings.TrimSpace(*logengineDir); dir != "" {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			logger.Error("failed to create logengine directory", "error", err)
@@ -397,6 +400,14 @@ func main() {
 			LocalCacheDir: dir,
 			ChunkDuration: 5 * time.Minute,
 		})
+		compactCtx, compactCancel := context.WithCancel(context.Background())
+		stopLogEngine = compactCancel
+		if *logengineCompactInterval > 0 {
+			le.RunCompactor(compactCtx, *logengineCompactInterval, *logengineCompactAge)
+			logger.Info("doctor logengine compaction enabled",
+				"interval", logengineCompactInterval.String(),
+				"min_age", logengineCompactAge.String())
+		}
 		srv.SetDoctorBackend(le)
 		logger.Info("doctor logengine enabled", "dir", dir)
 	}
@@ -424,6 +435,10 @@ func main() {
 
 	sig := <-sigCh
 	logger.Info("received signal, initiating graceful shutdown", "signal", sig)
+
+	if stopLogEngine != nil {
+		stopLogEngine()
+	}
 
 	// Attempt graceful failover if router address is configured
 	if *routerAddr != "" {

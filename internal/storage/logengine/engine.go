@@ -13,9 +13,10 @@ import (
 
 // LogEngine is the main interface for the high-compression, searchable log, metric & trace engine.
 type LogEngine struct {
-	store    *CachedStore
-	ingester *Ingester
-	query    *QueryEngine
+	store     *CachedStore
+	ingester  *Ingester
+	query     *QueryEngine
+	compactor *Compactor
 }
 
 // Config holds configuration for the LogEngine.
@@ -27,10 +28,13 @@ type Config struct {
 // New creates a new LogEngine instance with the given storage backend and configuration.
 func New(backend ObjectStoreBackend, cfg Config) *LogEngine {
 	cachedStore := NewCachedStore(backend, cfg.LocalCacheDir)
+	ingester := NewIngester(cachedStore, cfg.ChunkDuration)
+	query := NewQueryEngine(cachedStore)
 	return &LogEngine{
-		store:    cachedStore,
-		ingester: NewIngester(cachedStore, cfg.ChunkDuration),
-		query:    NewQueryEngine(cachedStore),
+		store:     cachedStore,
+		ingester:  ingester,
+		query:     query,
+		compactor: newCompactor(cachedStore, ingester, query),
 	}
 }
 
@@ -206,4 +210,9 @@ func (s *MockS3Store) ListChunks(ctx context.Context, prefix string) ([]string, 
 		}
 	}
 	return chunks, nil
+}
+
+// Delete removes a path (file or directory) from the local store.
+func (s *MockS3Store) Delete(ctx context.Context, path string) error {
+	return os.RemoveAll(filepath.Join(s.baseDir, path))
 }
