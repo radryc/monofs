@@ -225,7 +225,7 @@ func (q *QueryEngine) StreamLogs(ctx context.Context, queryStr, service string, 
 
 	// 2. Fetch all metadata manifests (Time Pruning)
 	listStart := time.Now()
-	chunkIDs, err := q.store.ListChunks(ctx, "chunks/logs/")
+	chunkIDs, err := q.store.ListChunkPaths(ctx, SignalLogs, from, to)
 	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
 		return fmt.Errorf("failed to list chunks: %w", err)
@@ -744,7 +744,7 @@ func (q *QueryEngine) StreamMetrics(ctx context.Context, query MetricQuery, from
 	defer observer.finish()
 
 	listStart := time.Now()
-	chunkIDs, err := q.store.ListChunks(ctx, "chunks/metrics/")
+	chunkIDs, err := q.store.ListChunkPaths(ctx, SignalMetrics, from, to)
 	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
 		return fmt.Errorf("failed to list metric chunks: %w", err)
@@ -785,7 +785,7 @@ func (q *QueryEngine) metricDiscoveryCandidates(ctx context.Context, query Metri
 	observer := beginQueryPathObservation(SignalMetrics)
 
 	listStart := time.Now()
-	chunkIDs, err := q.store.ListChunks(ctx, "chunks/metrics/")
+	chunkIDs, err := q.store.ListChunkPaths(ctx, SignalMetrics, from, to)
 	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
 		observer.finish()
@@ -816,7 +816,7 @@ func (q *QueryEngine) StreamMetricSeries(ctx context.Context, query MetricQuery,
 	defer observer.finish()
 
 	listStart := time.Now()
-	chunkIDs, err := q.store.ListChunks(ctx, "chunks/metrics/")
+	chunkIDs, err := q.store.ListChunkPaths(ctx, SignalMetrics, from, to)
 	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
 		return fmt.Errorf("failed to list metric chunks: %w", err)
@@ -1179,7 +1179,7 @@ func (q *QueryEngine) StreamTraces(ctx context.Context, traceID, service string,
 	defer observer.finish()
 
 	listStart := time.Now()
-	chunkIDs, err := q.store.ListChunks(ctx, "chunks/traces/")
+	chunkIDs, err := q.store.ListChunkPaths(ctx, SignalTraces, from, to)
 	observer.observeStage("chunk_listing", listStart)
 	if err != nil {
 		return fmt.Errorf("failed to list trace chunks: %w", err)

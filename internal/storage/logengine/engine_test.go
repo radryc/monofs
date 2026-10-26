@@ -2,8 +2,10 @@ package logengine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -682,5 +684,54 @@ func TestLogEngine_QueryTracesUnlimitedNewestFirstAcrossOverlappingChunks(t *tes
 		if got[idx] != want[idx] {
 			t.Fatalf("QueryTraces() order = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestLogEngine_WritesChunksUnderTimeBuckets(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_bucket_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+
+	minTime := time.Date(2026, 10, 26, 12, 34, 56, 0, time.UTC)
+	maxTime := minTime.Add(5 * time.Second)
+	chunkID := fmt.Sprintf("chunk-%d-%d", minTime.UnixNano(), maxTime.UnixNano())
+	if err := engine.IngestLogs(ctx, chunkID, []LogRecord{{
+		Timestamp:  minTime,
+		Level:      "error",
+		Service:    "payment",
+		TraceID:    "trace-1",
+		RawMessage: "connection timeout",
+	}}); err != nil {
+		t.Fatalf("IngestLogs() error = %v", err)
+	}
+
+	paths, err := engine.store.ListChunkPaths(ctx, SignalLogs, minTime.Add(-time.Hour), maxTime.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListChunkPaths() error = %v", err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("ListChunkPaths() = %v, want one path", paths)
+	}
+	if want := "2026/10/26/12/" + chunkID; paths[0] != want {
+		t.Fatalf("chunk path = %q, want %q", paths[0], want)
+	}
+	if !strings.Contains(paths[0], minTime.Format("2006/01/02/15")) {
+		t.Fatalf("chunk path = %q, want hour bucket %q", paths[0], minTime.Format("2006/01/02/15"))
+	}
+
+	records, err := engine.QueryLogs(ctx, `{service="payment"}`, "", minTime.Add(-time.Minute), maxTime.Add(time.Minute), 0)
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("QueryLogs() returned %d records, want 1", len(records))
 	}
 }

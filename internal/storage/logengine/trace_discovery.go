@@ -166,7 +166,7 @@ func (q *QueryEngine) DiscoverTraceTagValues(ctx context.Context, from, to time.
 }
 
 func (q *QueryEngine) traceDiscoveryManifests(ctx context.Context, from, to time.Time) ([]candidateChunk, error) {
-	chunkIDs, err := q.store.ListChunks(ctx, "chunks/traces/")
+	chunkIDs, err := q.store.ListChunkPaths(ctx, SignalTraces, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list trace chunks: %w", err)
 	}
