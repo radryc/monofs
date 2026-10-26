@@ -157,3 +157,53 @@ func TestCompactorMergesMetricChunks(t *testing.T) {
 		t.Fatalf("QueryMetrics() returned %d records, want 2", len(records))
 	}
 }
+
+func TestCompactorGroupsLogsByService(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_compact_services_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+	hour := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	records := [][]LogRecord{
+		{
+			{Timestamp: hour.Add(time.Minute), Service: "alpha", Level: "info", RawMessage: "a"},
+			{Timestamp: hour.Add(2 * time.Minute), Service: "beta", Level: "error", RawMessage: "b"},
+		},
+		{
+			{Timestamp: hour.Add(3 * time.Minute), Service: "alpha", Level: "info", RawMessage: "c"},
+			{Timestamp: hour.Add(4 * time.Minute), Service: "beta", Level: "error", RawMessage: "d"},
+		},
+	}
+	for idx, chunkRecords := range records {
+		chunkID := fmt.Sprintf("chunk-%d-%d", chunkRecords[0].Timestamp.UnixNano(), chunkRecords[len(chunkRecords)-1].Timestamp.UnixNano())
+		if err := engine.IngestLogs(ctx, chunkID, chunkRecords); err != nil {
+			t.Fatalf("IngestLogs(%d) error = %v", idx, err)
+		}
+	}
+	if _, err := engine.CompactRange(ctx, SignalLogs, hour, hour.Add(time.Hour)); err != nil {
+		t.Fatalf("CompactRange() error = %v", err)
+	}
+	paths, err := engine.store.ListChunkPaths(ctx, SignalLogs, hour, hour.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListChunkPaths() error = %v", err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("compacted paths = %v, want one chunk per service", paths)
+	}
+	for _, path := range paths {
+		manifest, err := engine.store.ReadManifest(ctx, SignalLogs, path)
+		if err != nil {
+			t.Fatalf("ReadManifest() error = %v", err)
+		}
+		if len(manifest.Services) != 1 {
+			t.Fatalf("manifest services = %v, want one service", manifest.Services)
+		}
+	}
+}

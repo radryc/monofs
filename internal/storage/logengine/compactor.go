@@ -128,19 +128,14 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 	defer observer.finish()
 
 	outputSeq := 0
-	flushSnapshot := func(records any, minTime, maxTime time.Time) error {
-		if minTime.IsZero() || maxTime.IsZero() {
-			return nil
-		}
-		chunkID := fmt.Sprintf("compact-%d-%d-%d", minTime.UTC().UnixNano(), maxTime.UTC().UnixNano(), outputSeq)
-		outputSeq++
+	writeCompacted := func(records any, _ time.Time, _ time.Time) error {
 		switch typed := records.(type) {
 		case []LogRecord:
-			return c.ingester.FlushChunk(ctx, SignalLogs, chunkID, typed, nil, nil)
+			return c.writeLogCompacted(ctx, typed, opts.MaxRecords, &outputSeq)
 		case []MetricRecord:
-			return c.ingester.FlushChunk(ctx, SignalMetrics, chunkID, nil, typed, nil)
+			return c.writeMetricCompacted(ctx, typed, opts.MaxRecords, &outputSeq)
 		case []SpanRecord:
-			return c.ingester.FlushChunk(ctx, SignalTraces, chunkID, nil, nil, typed)
+			return c.writeSpanCompacted(ctx, typed, opts.MaxRecords, &outputSeq)
 		default:
 			return fmt.Errorf("unsupported compaction record type %T", records)
 		}
@@ -152,7 +147,7 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 			opts,
 			func(record LogRecord) time.Time { return record.Timestamp },
 			estimateLogRecordSize,
-			flushSnapshot,
+			writeCompacted,
 		)
 		for _, path := range raw {
 			if err := ctx.Err(); err != nil {
@@ -176,7 +171,7 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 			opts,
 			func(record MetricRecord) time.Time { return record.Timestamp },
 			estimateMetricRecordSize,
-			flushSnapshot,
+			writeCompacted,
 		)
 		for _, path := range raw {
 			if err := ctx.Err(); err != nil {
@@ -200,7 +195,7 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 			opts,
 			func(record SpanRecord) time.Time { return record.Timestamp },
 			estimateSpanRecordSize,
-			flushSnapshot,
+			writeCompacted,
 		)
 		for _, path := range raw {
 			if err := ctx.Err(); err != nil {
@@ -295,6 +290,179 @@ func (a *compactAccumulator[T]) Flush() error {
 	a.maxTime = time.Time{}
 	a.bucket = time.Time{}
 	return a.flush(records, minTime, maxTime)
+}
+
+const maxCompactionGroupKeys = 128
+
+func nextCompactedChunkID(minTime, maxTime time.Time, seq *int) string {
+	chunkID := fmt.Sprintf("compact-%d-%d-%d", minTime.UTC().UnixNano(), maxTime.UTC().UnixNano(), *seq)
+	*seq++
+	return chunkID
+}
+
+func (c *Compactor) writeLogCompacted(ctx context.Context, records []LogRecord, maxRecords int, seq *int) error {
+	if len(records) == 0 {
+		return nil
+	}
+	if maxRecords <= 0 {
+		maxRecords = defaultCompactionMaxRecords
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].Service != records[j].Service {
+			return records[i].Service < records[j].Service
+		}
+		return records[i].Timestamp.Before(records[j].Timestamp)
+	})
+	groupByService := countLogServiceGroups(records) <= maxCompactionGroupKeys
+	for start := 0; start < len(records); {
+		end := start + 1
+		if groupByService {
+			for end < len(records) && records[end].Service == records[start].Service && end-start < maxRecords {
+				end++
+			}
+		} else {
+			for end < len(records) && end-start < maxRecords {
+				end++
+			}
+		}
+		minTime, maxTime := records[start].Timestamp, records[start].Timestamp
+		for _, record := range records[start:end] {
+			if record.Timestamp.Before(minTime) {
+				minTime = record.Timestamp
+			}
+			if record.Timestamp.After(maxTime) {
+				maxTime = record.Timestamp
+			}
+		}
+		chunkID := nextCompactedChunkID(minTime, maxTime, seq)
+		if err := c.ingester.FlushChunk(ctx, SignalLogs, chunkID, records[start:end], nil, nil); err != nil {
+			return err
+		}
+		start = end
+	}
+	return nil
+}
+
+func (c *Compactor) writeMetricCompacted(ctx context.Context, records []MetricRecord, maxRecords int, seq *int) error {
+	if len(records) == 0 {
+		return nil
+	}
+	if maxRecords <= 0 {
+		maxRecords = defaultCompactionMaxRecords
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].MetricName != records[j].MetricName {
+			return records[i].MetricName < records[j].MetricName
+		}
+		return records[i].Timestamp.Before(records[j].Timestamp)
+	})
+	groupByMetric := countMetricNameGroups(records) <= maxCompactionGroupKeys
+	for start := 0; start < len(records); {
+		end := start + 1
+		if groupByMetric {
+			for end < len(records) && records[end].MetricName == records[start].MetricName && end-start < maxRecords {
+				end++
+			}
+		} else {
+			for end < len(records) && end-start < maxRecords {
+				end++
+			}
+		}
+		minTime, maxTime := records[start].Timestamp, records[start].Timestamp
+		for _, record := range records[start:end] {
+			if record.Timestamp.Before(minTime) {
+				minTime = record.Timestamp
+			}
+			if record.Timestamp.After(maxTime) {
+				maxTime = record.Timestamp
+			}
+		}
+		chunkID := nextCompactedChunkID(minTime, maxTime, seq)
+		if err := c.ingester.FlushChunk(ctx, SignalMetrics, chunkID, nil, records[start:end], nil); err != nil {
+			return err
+		}
+		start = end
+	}
+	return nil
+}
+
+func (c *Compactor) writeSpanCompacted(ctx context.Context, records []SpanRecord, maxRecords int, seq *int) error {
+	if len(records) == 0 {
+		return nil
+	}
+	if maxRecords <= 0 {
+		maxRecords = defaultCompactionMaxRecords
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].Service != records[j].Service {
+			return records[i].Service < records[j].Service
+		}
+		return records[i].Timestamp.Before(records[j].Timestamp)
+	})
+	groupByService := countSpanServiceGroups(records) <= maxCompactionGroupKeys
+	for start := 0; start < len(records); {
+		end := start + 1
+		if groupByService {
+			for end < len(records) && records[end].Service == records[start].Service && end-start < maxRecords {
+				end++
+			}
+		} else {
+			for end < len(records) && end-start < maxRecords {
+				end++
+			}
+		}
+		minTime, maxTime := records[start].Timestamp, records[start].Timestamp
+		for _, record := range records[start:end] {
+			if record.Timestamp.Before(minTime) {
+				minTime = record.Timestamp
+			}
+			if record.Timestamp.After(maxTime) {
+				maxTime = record.Timestamp
+			}
+		}
+		chunkID := nextCompactedChunkID(minTime, maxTime, seq)
+		if err := c.ingester.FlushChunk(ctx, SignalTraces, chunkID, nil, nil, records[start:end]); err != nil {
+			return err
+		}
+		start = end
+	}
+	return nil
+}
+
+func countLogServiceGroups(records []LogRecord) int {
+	count := 0
+	previous := ""
+	for idx, record := range records {
+		if idx == 0 || record.Service != previous {
+			count++
+			previous = record.Service
+		}
+	}
+	return count
+}
+
+func countMetricNameGroups(records []MetricRecord) int {
+	count := 0
+	previous := ""
+	for idx, record := range records {
+		if idx == 0 || record.MetricName != previous {
+			count++
+			previous = record.MetricName
+		}
+	}
+	return count
+}
+
+func countSpanServiceGroups(records []SpanRecord) int {
+	count := 0
+	previous := ""
+	for idx, record := range records {
+		if idx == 0 || record.Service != previous {
+			count++
+			previous = record.Service
+		}
+	}
+	return count
 }
 
 func chunkDataPath(signal Signal, chunkPath string) string {
