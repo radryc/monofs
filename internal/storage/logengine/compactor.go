@@ -106,18 +106,11 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 		return result, nil
 	}
 	if len(compacted) > 0 {
-		// A previous run wrote the compacted output but may have failed before
-		// deleting every source chunk. Remove only sources fully covered by the
-		// compacted outputs so a partially compacted range cannot lose data.
-		for _, path := range raw {
-			if !compactedCovers(compacted, path) {
-				continue
-			}
-			if err := c.store.Delete(ctx, chunkStoragePath(signal, path)); err != nil {
-				return result, err
-			}
-			result.DeletedChunks++
-		}
+		// A range that already contains a compacted chunk is considered
+		// complete. Do not delete leftover sources here: without a durable
+		// compaction manifest we cannot prove every source record was written
+		// into the compacted outputs. Leaving duplicates is safer than losing
+		// data after a partial run.
 		return result, nil
 	}
 	if len(raw) < 2 {
@@ -475,39 +468,6 @@ func chunkStoragePath(signal Signal, chunkPath string) string {
 
 func isCompactedChunkPath(path string) bool {
 	return strings.HasPrefix(filepath.Base(path), "compact-")
-}
-
-func compactedCovers(compacted []string, raw string) bool {
-	rawMin, rawMax, rawOK := ParseChunkTimeRangeFromID(raw)
-	if !rawOK {
-		return false
-	}
-	type interval struct{ min, max time.Time }
-	intervals := make([]interval, 0, len(compacted))
-	for _, path := range compacted {
-		minTime, maxTime, ok := ParseChunkTimeRangeFromID(path)
-		if !ok {
-			continue
-		}
-		intervals = append(intervals, interval{min: minTime, max: maxTime})
-	}
-	sort.Slice(intervals, func(i, j int) bool { return intervals[i].min.Before(intervals[j].min) })
-	cursor := rawMin
-	for _, item := range intervals {
-		if item.max.Before(cursor) {
-			continue
-		}
-		if item.min.After(cursor) {
-			return false
-		}
-		if item.max.After(cursor) {
-			cursor = item.max
-		}
-		if !cursor.Before(rawMax) {
-			return true
-		}
-	}
-	return false
 }
 
 func estimateLogRecordSize(record LogRecord) int {
