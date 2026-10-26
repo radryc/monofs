@@ -39,6 +39,10 @@ func (s *stubObjectStore) ListChunks(_ context.Context, _ string) ([]string, err
 	return nil, nil
 }
 
+func (s *stubObjectStore) Delete(_ context.Context, _ string) error {
+	return nil
+}
+
 func TestCachedStoreReadManifestPrunesExpiredEntries(t *testing.T) {
 	store := NewCachedStore(&stubObjectStore{reads: map[string]string{
 		"chunks/metrics/fresh/metadata.json": "{}",
