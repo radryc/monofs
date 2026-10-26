@@ -286,6 +286,17 @@ When `--logengine-dir` is set, storage nodes host the logengine
 - Ingest writes chunked Parquet files (`data.parquet`) plus a Bluge full-text
   index and a `manifest.json` per signal/chunk; metrics also get a series index
   and traces get bloom filters.
+- New chunks are written under hourly time buckets
+  (`chunks/<signal>/YYYY/MM/DD/HH/<chunkID>/`). Queries list only buckets that
+  overlap their time range, including one bucket of overlap before the start.
+  Legacy flat chunks remain readable during migration.
+- A background compactor merges complete hourly windows into larger chunks
+  (`--logengine-compact-interval`, `--logengine-compact-age`). Compacted chunks
+  are grouped by service (logs/traces) or metric name (metrics) when the group
+  count is bounded, so service/name filters can prune more chunks. Metric
+  compaction uses 15-minute windows, traces 30 minutes, and logs one hour.
+- Log manifests carry bounded level/label dictionaries and a trace-ID bloom;
+  queries use them for safe positive pruning before opening Parquet or Bluge.
 - Query parses the log query syntax and filters by service/time.
 - The router fans telemetry ingest/query to nodes via HRW over
   `telemetry:tenant=...:signal=...:chunk=...` keys
