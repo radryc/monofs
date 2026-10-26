@@ -72,11 +72,14 @@ func (i *Ingester) flushLogs(ctx context.Context, chunkID string, logs []LogReco
 	}
 
 	manifest := ChunkManifest{
-		ChunkID:  chunkID,
-		Signal:   SignalLogs,
-		MinTime:  minTime,
-		MaxTime:  maxTime,
-		Services: collectLogServices(logs),
+		ChunkID:     chunkID,
+		Signal:      SignalLogs,
+		MinTime:     minTime,
+		MaxTime:     maxTime,
+		Services:    collectLogServices(logs),
+		Levels:      collectLogLevels(logs),
+		LabelValues: collectLogLabelValues(logs),
+		TraceBloom:  buildLogTraceBloom(logs),
 	}
 	chunkPrefix := filepath.Join("chunks", string(SignalLogs), relativeChunkPath(chunkID, minTime))
 
@@ -712,6 +715,77 @@ func collectLogServices(logs []LogRecord) []string {
 	return sortedKeys(services)
 }
 
+func collectLogLevels(logs []LogRecord) []string {
+	levels := make(map[string]struct{})
+	for _, log := range logs {
+		if log.Level == "" {
+			continue
+		}
+		levels[log.Level] = struct{}{}
+		if len(levels) > maxManifestLabelValues {
+			return nil
+		}
+	}
+	return sortedKeys(levels)
+}
+
+// Manifest label dictionaries are only used for safe positive pruning. Omit a
+// key when its cardinality exceeds the cap so a missing value never becomes a
+// false negative.
+const (
+	maxManifestLabelKeys   = 64
+	maxManifestLabelValues = 64
+)
+
+func collectLogLabelValues(logs []LogRecord) map[string][]string {
+	valuesByName := make(map[string]map[string]struct{})
+	for _, log := range logs {
+		for name, value := range log.Labels {
+			if name == "" || value == "" {
+				continue
+			}
+			values := valuesByName[name]
+			if values == nil {
+				if len(valuesByName) >= maxManifestLabelKeys {
+					continue
+				}
+				values = make(map[string]struct{})
+				valuesByName[name] = values
+			}
+			if len(values) >= maxManifestLabelValues {
+				continue
+			}
+			values[value] = struct{}{}
+		}
+	}
+	if len(valuesByName) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(valuesByName))
+	for name, values := range valuesByName {
+		// Only retain complete dictionaries. A truncated list could be mistaken
+		// for "all values in this chunk" and prune a real match.
+		if len(values) >= maxManifestLabelValues {
+			continue
+		}
+		out[name] = sortedKeys(values)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func buildLogTraceBloom(logs []LogRecord) []byte {
+	traceIDs := make([]string, 0, len(logs))
+	for _, log := range logs {
+		if log.TraceID != "" {
+			traceIDs = append(traceIDs, log.TraceID)
+		}
+	}
+	return buildTraceBloomFromIDs(traceIDs)
+}
+
 func collectMetricServices(metrics []MetricRecord) []string {
 	services := make(map[string]struct{})
 	for _, metric := range metrics {
@@ -783,18 +857,25 @@ func sortedKeys(values map[string]struct{}) []string {
 }
 
 func buildTraceBloom(spans []SpanRecord) []byte {
-	if len(spans) == 0 {
+	traceIDs := make([]string, 0, len(spans))
+	for _, span := range spans {
+		if span.TraceID != "" {
+			traceIDs = append(traceIDs, span.TraceID)
+		}
+	}
+	return buildTraceBloomFromIDs(traceIDs)
+}
+
+func buildTraceBloomFromIDs(traceIDs []string) []byte {
+	if len(traceIDs) == 0 {
 		return nil
 	}
 	const bloomBytes = 256
 	const bloomHashes = 4
 
 	bloom := make([]byte, bloomBytes)
-	for _, span := range spans {
-		if span.TraceID == "" {
-			continue
-		}
-		indexes := bloomIndexes(span.TraceID, bloomBytes*8, bloomHashes)
+	for _, traceID := range traceIDs {
+		indexes := bloomIndexes(traceID, bloomBytes*8, bloomHashes)
 		for _, idx := range indexes {
 			byteIdx := idx / 8
 			bitIdx := idx % 8

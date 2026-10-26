@@ -735,3 +735,47 @@ func TestLogEngine_WritesChunksUnderTimeBuckets(t *testing.T) {
 		t.Fatalf("QueryLogs() returned %d records, want 1", len(records))
 	}
 }
+
+func TestLogManifestCarriesPruningMetadata(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_manifest_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+	ts := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	chunkID := fmt.Sprintf("chunk-%d-%d", ts.UnixNano(), ts.Add(time.Second).UnixNano())
+	if err := engine.IngestLogs(ctx, chunkID, []LogRecord{{
+		Timestamp:  ts,
+		Level:      "error",
+		Service:    "payment",
+		TraceID:    "trace-manifest",
+		RawMessage: "boom",
+		Labels:     map[string]string{"env": "prod"},
+	}}); err != nil {
+		t.Fatalf("IngestLogs() error = %v", err)
+	}
+
+	paths, err := engine.store.ListChunkPaths(ctx, SignalLogs, ts.Add(-time.Hour), ts.Add(time.Hour))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("ListChunkPaths() = %v, %v", paths, err)
+	}
+	manifest, err := engine.store.ReadManifest(ctx, SignalLogs, paths[0])
+	if err != nil {
+		t.Fatalf("ReadManifest() error = %v", err)
+	}
+	if !manifestContains(manifest.Levels, "error") {
+		t.Fatalf("manifest levels = %v, want error", manifest.Levels)
+	}
+	if values := manifest.LabelValues["env"]; len(values) != 1 || values[0] != "prod" {
+		t.Fatalf("manifest label values = %v, want env=prod", manifest.LabelValues)
+	}
+	if len(manifest.TraceBloom) == 0 {
+		t.Fatal("manifest trace bloom is empty")
+	}
+}

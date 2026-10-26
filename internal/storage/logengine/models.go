@@ -78,9 +78,13 @@ type ChunkManifest struct {
 	MinTime           time.Time           `json:"min_time"`
 	MaxTime           time.Time           `json:"max_time"`
 	Services          []string            `json:"services,omitempty"`
+	Levels            []string            `json:"levels,omitempty"`
+	LabelValues       map[string][]string `json:"label_values,omitempty"`
 	MetricNames       []string            `json:"metric_names,omitempty"`
 	MetricLabelValues map[string][]string `json:"metric_label_values,omitempty"`
-	TraceBloom        []byte              `json:"trace_bloom,omitempty"` // Serialized bloom filter for trace_id
+	// TraceBloom is a serialized bloom filter for trace IDs. Logs also use it
+	// so trace-id lookups can prune chunks without opening Parquet.
+	TraceBloom []byte `json:"trace_bloom,omitempty"`
 	// TraceTagKeys and TraceTagValues form the trace discovery index. They
 	// contain bounded, deduplicated tag metadata so service/tag pickers do not
 	// need to scan span payloads.
