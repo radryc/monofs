@@ -779,3 +779,47 @@ func TestLogManifestCarriesPruningMetadata(t *testing.T) {
 		t.Fatal("manifest trace bloom is empty")
 	}
 }
+
+func TestStreamMetricSeriesFallsBackForChunksWithoutIndex(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_series_fallback_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+	ts := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	chunkID := fmt.Sprintf("chunk-%d-%d", ts.UnixNano(), ts.Add(time.Second).UnixNano())
+	if err := engine.IngestMetrics(ctx, chunkID, []MetricRecord{{
+		Timestamp:  ts,
+		Service:    "guardian",
+		MetricName: "requests_total",
+		Value:      1,
+		Labels:     map[string]string{"env": "prod"},
+	}}); err != nil {
+		t.Fatalf("IngestMetrics() error = %v", err)
+	}
+
+	paths, err := engine.store.ListChunkPaths(ctx, SignalMetrics, ts.Add(-time.Hour), ts.Add(time.Hour))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("ListChunkPaths() = %v, %v", paths, err)
+	}
+	if err := engine.store.Delete(ctx, filepath.Join("chunks", string(SignalMetrics), paths[0], "series.index.json")); err != nil {
+		t.Fatalf("delete series index: %v", err)
+	}
+
+	var metas []MetricSeriesMeta
+	if err := engine.StreamMetricSeries(ctx, MetricQuery{}, ts.Add(-time.Minute), ts.Add(time.Minute), func(meta MetricSeriesMeta) error {
+		metas = append(metas, meta)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamMetricSeries() error = %v", err)
+	}
+	if len(metas) != 1 || metas[0].MetricName != "requests_total" {
+		t.Fatalf("series metadata = %#v, want requests_total", metas)
+	}
+}
