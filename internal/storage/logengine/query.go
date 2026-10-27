@@ -902,29 +902,38 @@ func (q *QueryEngine) StreamMetricSeries(ctx context.Context, query MetricQuery,
 	for _, candidate := range candidates {
 		series, err := q.store.ReadSeriesIndex(ctx, candidate.chunkID)
 		if err != nil {
-			if errors.Is(err, ErrGhostChunk) {
-				continue
+			if !errors.Is(err, ErrGhostChunk) {
+				return err
 			}
-			return err
+			// Chunks written before the series index existed still need to be
+			// discoverable. Fall back to the sample scan for that chunk only;
+			// new chunks continue to use the metadata path.
+			if scanErr := q.scanMetricParquet(ctx, filepath.Join("chunks", string(SignalMetrics), candidate.chunkID, "data.parquet"), query, compiledMatchers, from, to, observer, func(record MetricRecord) error {
+				if record.MetricName == "" || record.Timestamp.IsZero() {
+					return nil
+				}
+				meta := MetricSeriesMeta{
+					MetricName: record.MetricName,
+					Service:    record.Service,
+					Labels:     record.Labels,
+					MinTime:    record.Timestamp,
+					MaxTime:    record.Timestamp,
+				}
+				if !metricSeriesMatches(meta, query, compiledMatchers) {
+					return nil
+				}
+				mergeMetricSeriesMeta(merged, &order, meta)
+				return nil
+			}); scanErr != nil && !errors.Is(scanErr, ErrGhostChunk) {
+				return scanErr
+			}
+			continue
 		}
 		for _, meta := range series {
 			if !metricSeriesMatches(meta, query, compiledMatchers) {
 				continue
 			}
-			key := metricSeriesMetaKey(meta)
-			existing := merged[key]
-			if existing == nil {
-				copied := meta
-				merged[key] = &copied
-				order = append(order, key)
-				continue
-			}
-			if meta.MinTime.Before(existing.MinTime) {
-				existing.MinTime = meta.MinTime
-			}
-			if meta.MaxTime.After(existing.MaxTime) {
-				existing.MaxTime = meta.MaxTime
-			}
+			mergeMetricSeriesMeta(merged, &order, meta)
 		}
 	}
 	observer.observeStage("series_index_scan", indexStart)
@@ -949,6 +958,23 @@ func metricSeriesMatches(meta MetricSeriesMeta, query MetricQuery, matchers []co
 		return false
 	}
 	return metricLabelsMatch(meta.MetricName, meta.Service, meta.Labels, matchers)
+}
+
+func mergeMetricSeriesMeta(merged map[string]*MetricSeriesMeta, order *[]string, meta MetricSeriesMeta) {
+	key := metricSeriesMetaKey(meta)
+	existing := merged[key]
+	if existing == nil {
+		copied := meta
+		merged[key] = &copied
+		*order = append(*order, key)
+		return
+	}
+	if meta.MinTime.Before(existing.MinTime) {
+		existing.MinTime = meta.MinTime
+	}
+	if meta.MaxTime.After(existing.MaxTime) {
+		existing.MaxTime = meta.MaxTime
+	}
 }
 
 // metricSeriesMetaKey builds the cross-chunk identity key for a series entry.
