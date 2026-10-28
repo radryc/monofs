@@ -384,6 +384,7 @@ func (s *Service) pushSourceCommitRepository(ctx context.Context, req *pb.StartW
 	}
 	commitHash, err := wt.Commit(sourcePushCommitMessage(plan), &gogit.CommitOptions{
 		Author: &object.Signature{Name: authorName, Email: authorEmail, When: time.Now()},
+		Signer: unsignedCommit{},
 	})
 	if err != nil {
 		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
@@ -394,7 +395,7 @@ func (s *Service) pushSourceCommitRepository(ctx context.Context, req *pb.StartW
 
 	pushRef := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", targetBranch, targetBranch))
 	fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "started").Inc()
-	if err := repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, Auth: monogit.AuthForRepo(repo.RepoURL)}); err != nil {
+	if err := repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, ClientOptions: monogit.AuthForRepo(repo.RepoURL)}); err != nil {
 		progress.Status, progress.ConflictReason = mapPublishError(err)
 		progress.Message = fmt.Sprintf("push source changes: %v", err)
 		fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "failed").Inc()
@@ -417,7 +418,7 @@ func cloneSourcePushWorktree(ctx context.Context, repo workspacebundle.SourceCom
 	}
 	_, err = gogit.PlainCloneContext(ctx, worktreeRoot, &gogit.CloneOptions{
 		URL:           repo.RepoURL,
-		Auth:          monogit.AuthForRepo(repo.RepoURL),
+		ClientOptions: monogit.AuthForRepo(repo.RepoURL),
 		ReferenceName: plumbing.NewBranchReferenceName(repo.Branch),
 		SingleBranch:  true,
 	})
@@ -536,7 +537,7 @@ func (s *Service) rollbackSourcePushRepository(ctx context.Context, req *pb.Star
 	// Restore the base tree content in the worktree while leaving HEAD
 	// at the pushed commit, so the revert is a normal fast-forward push
 	// (never a force push).
-	if err := restoreBaseTree(wt.Filesystem.Root(), baseCommit); err != nil {
+	if err := restoreBaseTree(wt.Filesystem().Root(), baseCommit); err != nil {
 		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
 		progress.Message = fmt.Sprintf("rollback restore failed: %v", err)
 		return progress
@@ -558,6 +559,7 @@ func (s *Service) rollbackSourcePushRepository(ctx context.Context, req *pb.Star
 		"MonoFS rollback: revert source push of %s after partial failure\n\nMonoFS-Job: %s",
 		record.displayPath, req.GetJobId()), &gogit.CommitOptions{
 		Author: &object.Signature{Name: "MonoFS", Email: "monofs@local", When: time.Now()},
+		Signer: unsignedCommit{},
 	})
 	if err != nil {
 		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
@@ -566,7 +568,7 @@ func (s *Service) rollbackSourcePushRepository(ctx context.Context, req *pb.Star
 	}
 
 	pushRef := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", record.targetBranch, record.targetBranch))
-	if err := handle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, Auth: monogit.AuthForRepo(record.repoURL)}); err != nil {
+	if err := handle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, ClientOptions: monogit.AuthForRepo(record.repoURL)}); err != nil {
 		progress.Status, progress.ConflictReason = mapPublishError(err)
 		progress.Message = fmt.Sprintf("rollback push failed: %v", err)
 		return progress
@@ -587,7 +589,7 @@ func cloneBranchWorktree(ctx context.Context, repoURL, branch string) (string, e
 	}
 	_, err = gogit.PlainCloneContext(ctx, worktreeRoot, &gogit.CloneOptions{
 		URL:           repoURL,
-		Auth:          monogit.AuthForRepo(repoURL),
+		ClientOptions: monogit.AuthForRepo(repoURL),
 		ReferenceName: plumbing.NewBranchReferenceName(branch),
 		SingleBranch:  true,
 	})
@@ -845,6 +847,7 @@ func (s *Service) pushSinglePreserveCommit(ctx context.Context, req *pb.StartWor
 	commitMsg := buildPreserveCommitMessage(commit, req.GetJobId(), workspaceID)
 	commitHash, err := rw.wt.Commit(commitMsg, &gogit.CommitOptions{
 		Author: &object.Signature{Name: authorName, Email: authorEmail, When: time.Now()},
+		Signer: unsignedCommit{},
 	})
 	if err != nil {
 		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
@@ -855,7 +858,7 @@ func (s *Service) pushSinglePreserveCommit(ctx context.Context, req *pb.StartWor
 
 	pushRef := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", targetBranch, targetBranch))
 	fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "started").Inc()
-	if err := rw.repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, Auth: monogit.AuthForRepo(repo.RepoURL)}); err != nil {
+	if err := rw.repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, ClientOptions: monogit.AuthForRepo(repo.RepoURL)}); err != nil {
 		progress.Status, progress.ConflictReason = mapPublishError(err)
 		progress.Message = fmt.Sprintf("push commit %s: %v", commit.ID, err)
 		fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_source_push", "failed").Inc()

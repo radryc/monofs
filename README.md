@@ -47,7 +47,7 @@ MonoFS is a distributed system, not a mount script:
 
 ## Prerequisites
 
-- Go 1.26.4 (see `go.mod`).
+- Go 1.26.10 (see `go.mod`).
 - Sibling checkouts of `kvs` and `cfg`, because `go.mod` contains replace
   directives:
 

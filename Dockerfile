@@ -9,7 +9,7 @@ COPY internal/router/ui/ ./
 RUN npm run build
 
 # Build stage
-FROM golang:1.26.4-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
 WORKDIR /app
 
@@ -67,7 +67,7 @@ COPY . .
 # which fails go mod tidy because that tag declares go.opentelemetry.io/otelc.
 # v1.0.1 fixes the pinned path and keeps the instrumentation deps compatible
 # with this module's OpenTelemetry log API.
-ARG OTELC_VERSION=v1.0.1
+ARG OTELC_VERSION=v1.2.0
 RUN GOBIN=/usr/local/bin go install go.opentelemetry.io/otelc/tool/cmd/otelc@${OTELC_VERSION}
 COPY --from=router-ui-builder /ui/dist ./internal/router/ui/dist
 
@@ -283,7 +283,7 @@ RUN curl -fsSL https://github.com/bazelbuild/bazelisk/releases/latest/download/b
     -o /usr/local/bin/bazel && \
     chmod +x /usr/local/bin/bazel
 
-# Copy Go 1.26.4 toolchain from the builder stage
+# Copy Go 1.26.10 toolchain from the builder stage
 COPY --from=builder /usr/local/go /usr/local/go
 ENV GOROOT=/usr/local/go
 ENV PATH=$GOROOT/bin:$PATH

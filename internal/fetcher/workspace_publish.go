@@ -308,6 +308,7 @@ func (s *Service) publishBundleRepository(ctx context.Context, req *pb.StartWork
 	}
 	commitHash, err := wt.Commit(commitMessage, &gogit.CommitOptions{
 		Author: &object.Signature{Name: authorName, Email: authorEmail, When: time.Now()},
+		Signer: unsignedCommit{},
 	})
 	if err != nil {
 		progress.Status = pb.RepoSyncStatus_REPO_SYNC_STATUS_FAILED
@@ -318,7 +319,7 @@ func (s *Service) publishBundleRepository(ctx context.Context, req *pb.StartWork
 
 	pushRef := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", progress.GetTargetBranch(), progress.GetTargetBranch()))
 	fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_publish", "started").Inc()
-	if err := repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, Auth: monogit.AuthForRepo(repo.RepoURL)}); err != nil {
+	if err := repoHandle.PushContext(ctx, &gogit.PushOptions{RefSpecs: []config.RefSpec{pushRef}, ClientOptions: monogit.AuthForRepo(repo.RepoURL)}); err != nil {
 		progress.Status, progress.ConflictReason = mapPublishError(err)
 		progress.Message = fmt.Sprintf("push repository changes: %v", err)
 		fetcherGitSyncRemoteOpsTotal.WithLabelValues("push_publish", "failed").Inc()
@@ -346,9 +347,9 @@ func (s *Service) clonePublishWorktree(ctx context.Context, repo workspacebundle
 		return "", "", fmt.Errorf("create publish worktree: %w", err)
 	}
 	cloneOptions := &gogit.CloneOptions{
-		URL:          repo.RepoURL,
-		Auth:         monogit.AuthForRepo(repo.RepoURL),
-		SingleBranch: true,
+		URL:           repo.RepoURL,
+		ClientOptions: monogit.AuthForRepo(repo.RepoURL),
+		SingleBranch:  true,
 	}
 	// An empty branch clones the remote default branch (HEAD), resolved from
 	// the remote refs so repositories whose HEAD is unset or points at a
@@ -383,7 +384,7 @@ func (s *Service) clonePublishWorktree(ctx context.Context, repo workspacebundle
 // its refs: the symbolic HEAD target when it exists, then main, then master.
 func resolveRemoteDefaultBranch(ctx context.Context, repoURL string) (string, error) {
 	remote := gogit.NewRemote(nil, &config.RemoteConfig{Name: "origin", URLs: []string{repoURL}})
-	refs, err := remote.ListContext(ctx, &gogit.ListOptions{Auth: monogit.AuthForRepo(repoURL)})
+	refs, err := remote.ListContext(ctx, &gogit.ListOptions{ClientOptions: monogit.AuthForRepo(repoURL)})
 	if err != nil {
 		return "", fmt.Errorf("list remote refs for %s: %w", repoURL, err)
 	}
