@@ -25,6 +25,14 @@ jobs:
         with:
           repository: radryc/cfg
           path: cfg
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: monofs/internal/router/ui/package-lock.json
+      - name: Build router UI
+        working-directory: monofs/internal/router/ui
+        run: npm ci && npm run build
       - uses: actions/setup-go@v7
         with:
           go-version-file: monofs/go.mod
@@ -62,6 +70,14 @@ jobs:
         with:
           repository: radryc/cfg
           path: cfg
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: monofs/internal/router/ui/package-lock.json
+      - name: Build router UI
+        working-directory: monofs/internal/router/ui
+        run: npm ci && npm run build
       - uses: actions/setup-go@v7
         with:
           go-version-file: monofs/go.mod
@@ -84,6 +100,14 @@ jobs:
         with:
           repository: radryc/cfg
           path: cfg
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: monofs/internal/router/ui/package-lock.json
+      - name: Build router UI
+        working-directory: monofs/internal/router/ui
+        run: npm ci && npm run build
       - uses: actions/setup-go@v7
         with:
           go-version-file: monofs/go.mod
@@ -107,6 +131,14 @@ jobs:
         with:
           repository: radryc/cfg
           path: cfg
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: monofs/internal/router/ui/package-lock.json
+      - name: Build router UI
+        working-directory: monofs/internal/router/ui
+        run: npm ci && npm run build
       - uses: actions/setup-go@v7
         with:
           go-version-file: monofs/go.mod
