@@ -8,21 +8,36 @@ on:
   schedule:
     - cron: '0 8 * * 1' # Monday 08:00 UTC
 
+permissions:
+  contents: read
+
 jobs:
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
         with:
-          go-version: '1.26.4'
+          path: monofs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/kvs
+          path: kvs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/cfg
+          path: cfg
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: monofs/go.mod
+          cache-dependency-path: monofs/go.sum
       - name: govulncheck
+        working-directory: monofs
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   dependency-review:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: dependency review
         uses: actions/dependency-review-action@v4

@@ -1,4 +1,4 @@
-FROM golang:1.26.4-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
 WORKDIR /app
 
@@ -48,7 +48,7 @@ RUN set -eu; \
 COPY . .
 
 # v1.0.1 fixes otelc pinning the pre-rename module path; see Dockerfile.
-ARG OTELC_VERSION=v1.0.1
+ARG OTELC_VERSION=v1.2.0
 RUN GOBIN=/usr/local/bin go install go.opentelemetry.io/otelc/tool/cmd/otelc@${OTELC_VERSION}
 
 FROM builder AS pipeline-worker-builder
@@ -61,7 +61,7 @@ RUN CGO_ENABLED=0 GOOS=linux otelc go build \
     -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /bin/monofs-pipeline-worker ./cmd/monofs-pipeline-worker
 
-FROM golang:1.26.4-alpine AS pipeline-worker-guardianctl-builder
+FROM golang:1.26.10-alpine AS pipeline-worker-guardianctl-builder
 
 RUN apk add --no-cache git ca-certificates
 

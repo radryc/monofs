@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.26.4-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
@@ -54,7 +54,7 @@ RUN set -eu; \
 COPY . .
 
 # v1.0.1 fixes otelc pinning the pre-rename module path; see Dockerfile.
-ARG OTELC_VERSION=v1.0.1
+ARG OTELC_VERSION=v1.2.0
 RUN GOBIN=/usr/local/bin go install go.opentelemetry.io/otelc/tool/cmd/otelc@${OTELC_VERSION}
 
 # Build the search binary
