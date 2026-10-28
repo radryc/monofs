@@ -2,6 +2,8 @@ package router
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/url"
@@ -13,11 +15,26 @@ import (
 )
 
 const pipelinePrincipalID = "monofs-pipeline"
-const pipelinePrincipalToken = "monofs-pipeline-internal-token"
 const pipelineConfigsPrefix = "/.pipelines"
 const pipelineQueuesPrefix = "/.queues/pipeline"
 const pipelineResultsMarker = "/.results/"
 const pipelinePackagesMetaPath = "/monofs-packages.yaml"
+
+// pipelinePrincipalToken authenticates the in-process pipeline client to the
+// router. Set MONOFS_PIPELINE_TOKEN when an external worker needs a stable
+// token; otherwise a random per-process token is generated.
+var pipelinePrincipalToken = loadPipelinePrincipalToken()
+
+func loadPipelinePrincipalToken() string {
+	if token := strings.TrimSpace(os.Getenv("MONOFS_PIPELINE_TOKEN")); token != "" {
+		return token
+	}
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		panic("monofs: generate pipeline principal token: " + err.Error())
+	}
+	return hex.EncodeToString(buf[:])
+}
 
 func (r *Router) initPipeline(logger *slog.Logger) {
 	r.guardianPrincipals.upsertConnectedClient(
