@@ -117,7 +117,7 @@ go build ./...
 Make your code change, then inspect it through MonoFS:
 
 ```bash
-cd /home/rydzu/strata/monofs
+cd ~/strata/monofs
 ./bin/monofs-session status
 ./bin/monofs-session diff
 ```
@@ -307,7 +307,7 @@ go build ./...
 Inspect the pending workspace changes:
 
 ```bash
-cd /home/rydzu/strata/monofs
+cd ~/strata/monofs
 ./bin/monofs-session status
 ./bin/monofs-session diff
 ```
