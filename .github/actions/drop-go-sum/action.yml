@@ -1,0 +1,86 @@
+name: Drop go.sum
+description: >-
+  Removes go.sum files from the checked-out tree while keeping go.mod.
+  No-op when disabled or when a .KEEP file protects the repo/module.
+
+inputs:
+  enabled:
+    description: Set to "false" to disable the removal.
+    required: false
+    default: "true"
+  commit:
+    description: Commit and push the removal to the current/default branch.
+    required: false
+    default: "false"
+  branch:
+    description: Branch to push to when commit=true (defaults to the checked-out branch).
+    required: false
+    default: ""
+  release_tag:
+    description: Release tag, used only in the commit message.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Drop go.sum unless .KEEP
+      shell: bash
+      env:
+        ENABLED: ${{ inputs.enabled }}
+        COMMIT: ${{ inputs.commit }}
+        BRANCH: ${{ inputs.branch }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+      run: |
+        set -euo pipefail
+
+        if [ "${ENABLED}" != "true" ]; then
+          echo "::notice::go.sum removal disabled (enabled=${ENABLED})"
+          exit 0
+        fi
+
+        keep_all=false
+        if [ -f .KEEP ]; then
+          keep_all=true
+          echo "::notice::.KEEP found at repo root - keeping every go.sum"
+        fi
+
+        removed=0
+        while IFS= read -r -d '' f; do
+          dir="$(dirname "$f")"
+          if [ "$keep_all" = "true" ] || [ -f "$dir/.KEEP" ]; then
+            echo "::notice::keeping $f (.KEEP)"
+            continue
+          fi
+
+          git rm -f --quiet -- "$f"
+          echo "::notice::removed $f"
+          removed=$((removed + 1))
+        done < <(git ls-files -z -- ':(glob)**/go.sum')
+
+        if [ "$removed" -eq 0 ]; then
+          echo "::notice::no go.sum files removed"
+          exit 0
+        fi
+
+        if [ "${COMMIT}" != "true" ]; then
+          exit 0
+        fi
+
+        target_branch="${BRANCH}"
+        if [ -z "${target_branch}" ]; then
+          target_branch="$(git branch --show-current)"
+        fi
+        if [ -z "${target_branch}" ]; then
+          echo "::error::cannot commit: detached HEAD and no branch input"
+          exit 1
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        if [ -n "${RELEASE_TAG}" ]; then
+          git commit -m "chore(release): drop go.sum for ${RELEASE_TAG}"
+        else
+          git commit -m "chore(release): drop go.sum"
+        fi
+        git push origin "HEAD:${target_branch}"
