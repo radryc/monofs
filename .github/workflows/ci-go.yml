@@ -3,20 +3,8 @@ name: CI — Go
 on:
   push:
     branches: [main]
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - 'Makefile'
-      - 'api/proto/**.proto'
   pull_request:
     branches: [main]
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - 'Makefile'
-      - 'api/proto/**.proto'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -26,52 +14,135 @@ jobs:
   vet:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
         with:
-          go-version: '1.26.4'
+          path: monofs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/kvs
+          path: kvs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/cfg
+          path: cfg
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: monofs/internal/router/ui/package-lock.json
+      - name: Build router UI
+        working-directory: monofs/internal/router/ui
+        run: npm ci && npm run build
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: monofs/go.mod
+          cache-dependency-path: monofs/go.sum
       - name: go vet
+        working-directory: monofs
         run: make vet
 
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
         with:
-          go-version: '1.26.4'
+          path: monofs
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: monofs/go.mod
+          cache-dependency-path: monofs/go.sum
       - name: go fmt check
+        working-directory: monofs
         run: make fmt-check
 
   test:
-    needs: [vet, fmt]
+    name: tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
         with:
-          go-version: '1.26.4'
+          path: monofs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/kvs
+          path: kvs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/cfg
+          path: cfg
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: monofs/internal/router/ui/package-lock.json
+      - name: Build router UI
+        working-directory: monofs/internal/router/ui
+        run: npm ci && npm run build
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: monofs/go.mod
+          cache-dependency-path: monofs/go.sum
       - name: unit tests
+        working-directory: monofs
         run: make test-unit
 
   test-race:
-    needs: [vet, fmt]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
         with:
-          go-version: '1.26.4'
+          path: monofs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/kvs
+          path: kvs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/cfg
+          path: cfg
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: monofs/internal/router/ui/package-lock.json
+      - name: Build router UI
+        working-directory: monofs/internal/router/ui
+        run: npm ci && npm run build
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: monofs/go.mod
+          cache-dependency-path: monofs/go.sum
       - name: race detector
+        working-directory: monofs
         run: make test-race
 
   build:
     needs: [test, test-race]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
         with:
-          go-version: '1.26.4'
+          path: monofs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/kvs
+          path: kvs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/cfg
+          path: cfg
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: monofs/internal/router/ui/package-lock.json
+      - name: Build router UI
+        working-directory: monofs/internal/router/ui
+        run: npm ci && npm run build
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: monofs/go.mod
+          cache-dependency-path: monofs/go.sum
       - name: build all
+        working-directory: monofs
         run: make build
