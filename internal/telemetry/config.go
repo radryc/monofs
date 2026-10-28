@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	defaultServiceName    = "monofs"
+	defaultServiceName    = "monofs.invalid.unconfigured"
 	defaultMetricInterval = 15 * time.Second
 )
 

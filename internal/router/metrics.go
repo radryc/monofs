@@ -36,7 +36,7 @@ var (
 		Subsystem: "router",
 		Name:      "guardian_flow_writes_total",
 		Help:      "Guardian path writes classified for topology flow mapping.",
-	}, []string{"guardian_partition", "guardian_intent", "path_kind"})
+	}, []string{"guardian_target_partition", "guardian_target_intent", "guardian_target_path_kind"})
 
 	// routerGuardianFlowWriteBytesTotal tracks guardian upsert bytes by partition/intent/path kind.
 	routerGuardianFlowWriteBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -44,7 +44,7 @@ var (
 		Subsystem: "router",
 		Name:      "guardian_flow_write_bytes_total",
 		Help:      "Guardian path write bytes classified for topology flow mapping.",
-	}, []string{"guardian_partition", "guardian_intent", "path_kind"})
+	}, []string{"guardian_target_partition", "guardian_target_intent", "guardian_target_path_kind"})
 
 	// routerGuardianDeleteBatchesTotal counts DeleteGuardianPaths RPC calls.
 	routerGuardianDeleteBatchesTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -68,7 +68,7 @@ var (
 		Subsystem: "router",
 		Name:      "guardian_flow_deletes_total",
 		Help:      "Guardian path deletes classified for topology flow mapping.",
-	}, []string{"guardian_partition", "guardian_intent", "path_kind"})
+	}, []string{"guardian_target_partition", "guardian_target_intent", "guardian_target_path_kind"})
 
 	// routerGuardianFlowDeleteBytesTotal tracks deleted content bytes by partition/intent/path kind.
 	routerGuardianFlowDeleteBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -76,7 +76,7 @@ var (
 		Subsystem: "router",
 		Name:      "guardian_flow_delete_bytes_total",
 		Help:      "Guardian path deleted content bytes classified for topology flow mapping.",
-	}, []string{"guardian_partition", "guardian_intent", "path_kind"})
+	}, []string{"guardian_target_partition", "guardian_target_intent", "guardian_target_path_kind"})
 
 	// routerIngestRepositoriesTotal counts IngestRepository RPC calls handled by the router.
 	routerIngestRepositoriesTotal = promauto.NewCounter(prometheus.CounterOpts{
