@@ -188,7 +188,7 @@ func emitSlogRecord(ctx context.Context, scope string, record slog.Record) {
 	otelRecord.SetTimestamp(record.Time.UTC())
 	otelRecord.SetSeverity(severityForSlogLevel(record.Level))
 	otelRecord.SetSeverityText(severityText(severityForSlogLevel(record.Level)))
-	otelRecord.SetBody(apilog.StringValue(record.Message))
+	otelRecord.SetBody(attribute.StringValue(record.Message))
 	record.Attrs(func(attr slog.Attr) bool {
 		otelRecord.AddAttributes(slogAttrToLogKV(attr))
 		return true
@@ -209,7 +209,7 @@ func emitLogRecord(ctx context.Context, scope string, severity apilog.Severity, 
 	record.SetTimestamp(time.Now().UTC())
 	record.SetSeverity(severity)
 	record.SetSeverityText(severityText(severity))
-	record.SetBody(apilog.StringValue(message))
+	record.SetBody(attribute.StringValue(message))
 	addTraceSpanAttrs(ctx, &record)
 	logger.Emit(ctx, record)
 }
@@ -220,47 +220,47 @@ func addTraceSpanAttrs(ctx context.Context, record *apilog.Record) {
 		return
 	}
 	record.AddAttributes(
-		apilog.KeyValue{Key: "trace_id", Value: apilog.StringValue(spanCtx.TraceID().String())},
-		apilog.KeyValue{Key: "span_id", Value: apilog.StringValue(spanCtx.SpanID().String())},
+		attribute.KeyValue{Key: "trace_id", Value: attribute.StringValue(spanCtx.TraceID().String())},
+		attribute.KeyValue{Key: "span_id", Value: attribute.StringValue(spanCtx.SpanID().String())},
 	)
 }
 
-func slogAttrToLogKV(attr slog.Attr) apilog.KeyValue {
-	return apilog.KeyValue{
-		Key:   attr.Key,
+func slogAttrToLogKV(attr slog.Attr) attribute.KeyValue {
+	return attribute.KeyValue{
+		Key:   attribute.Key(attr.Key),
 		Value: slogValueToLogValue(attr.Value.Resolve()),
 	}
 }
 
-func slogValueToLogValue(value slog.Value) apilog.Value {
+func slogValueToLogValue(value slog.Value) attribute.Value {
 	switch value.Kind() {
 	case slog.KindBool:
-		return apilog.BoolValue(value.Bool())
+		return attribute.BoolValue(value.Bool())
 	case slog.KindDuration:
-		return apilog.StringValue(value.Duration().String())
+		return attribute.StringValue(value.Duration().String())
 	case slog.KindFloat64:
-		return apilog.Float64Value(value.Float64())
+		return attribute.Float64Value(value.Float64())
 	case slog.KindInt64:
-		return apilog.Int64Value(value.Int64())
+		return attribute.Int64Value(value.Int64())
 	case slog.KindString:
-		return apilog.StringValue(value.String())
+		return attribute.StringValue(value.String())
 	case slog.KindTime:
-		return apilog.StringValue(value.Time().Format(time.RFC3339Nano))
+		return attribute.StringValue(value.Time().Format(time.RFC3339Nano))
 	case slog.KindUint64:
 		uintValue := value.Uint64()
 		if uintValue <= uint64(^uint64(0)>>1) {
-			return apilog.Int64Value(int64(uintValue))
+			return attribute.Int64Value(int64(uintValue))
 		}
-		return apilog.StringValue(fmt.Sprintf("%d", uintValue))
+		return attribute.StringValue(fmt.Sprintf("%d", uintValue))
 	case slog.KindGroup:
 		group := value.Group()
-		kvs := make([]apilog.KeyValue, 0, len(group))
+		kvs := make([]attribute.KeyValue, 0, len(group))
 		for _, nested := range group {
 			kvs = append(kvs, slogAttrToLogKV(nested))
 		}
-		return apilog.MapValue(kvs...)
+		return attribute.MapValue(kvs...)
 	default:
-		return apilog.StringValue(fmt.Sprint(value.Any()))
+		return attribute.StringValue(fmt.Sprint(value.Any()))
 	}
 }
 

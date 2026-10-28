@@ -9,7 +9,7 @@ COPY internal/router/ui/ ./
 RUN npm run build
 
 # Build stage
-FROM golang:1.26.4-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
 WORKDIR /app
 
@@ -283,7 +283,7 @@ RUN curl -fsSL https://github.com/bazelbuild/bazelisk/releases/latest/download/b
     -o /usr/local/bin/bazel && \
     chmod +x /usr/local/bin/bazel
 
-# Copy Go 1.26.4 toolchain from the builder stage
+# Copy Go 1.26.10 toolchain from the builder stage
 COPY --from=builder /usr/local/go /usr/local/go
 ENV GOROOT=/usr/local/go
 ENV PATH=$GOROOT/bin:$PATH
