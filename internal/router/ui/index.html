@@ -8,8 +8,16 @@
     <script>
       (function () {
         try {
-          var theme = localStorage.getItem("monofs.theme");
-          if (theme) document.documentElement.setAttribute("data-theme", theme);
+          var theme = localStorage.getItem("strata.theme") || localStorage.getItem("monofs.theme");
+          if (!theme) theme = "system";
+          var resolved = theme;
+          if (theme === "system") {
+            resolved = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "daylight"
+              : "midnight";
+          }
+          document.documentElement.setAttribute("data-theme", resolved);
+          document.documentElement.dataset.themePreference = theme;
         } catch (e) { /* localStorage unavailable */ }
       })();
     </script>

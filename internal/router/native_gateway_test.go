@@ -11,6 +11,18 @@ import (
 	"github.com/radryc/monofs/internal/nativeproto"
 )
 
+func TestNativeGatewayMountRequiresToken(t *testing.T) {
+	gateway := NewNativeGateway(nil, slog.Default())
+	gateway.SetAuthToken("expected-token")
+
+	if gateway.mountTokenValid("wrong-token") {
+		t.Fatal("wrong token accepted")
+	}
+	if !gateway.mountTokenValid("expected-token") {
+		t.Fatal("expected token rejected")
+	}
+}
+
 func TestNativeGatewayHelloMountLookupReadDirAndStatFS(t *testing.T) {
 	client, cleanup := newNativeNamespaceTestClient(t, &nativeNamespaceTestNodeServer{
 		lookup: map[string]*pb.LookupResponse{

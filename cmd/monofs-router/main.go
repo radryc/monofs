@@ -92,6 +92,7 @@ func main() {
 		port                   = flag.Int("port", 9090, "Router service port")
 		httpPort               = flag.Int("http-port", 8080, "HTTP UI port")
 		nativeAddr             = flag.String("native-addr", "", "Native protocol listen address (disabled when empty)")
+		nativeAuthToken        = flag.String("native-auth-token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Shared token required by native MountRequest.AuthToken (defaults to MONOFS_TOKEN)")
 		clusterID              = flag.String("cluster-id", "monofs-cluster", "Cluster identifier")
 		routerName             = flag.String("router-name", "local", "Router instance name for UI identification")
 		nodes                  = flag.String("nodes", "", "Initial nodes: node1=host1:port1,node2=host2:port2,...")
@@ -624,11 +625,15 @@ func main() {
 	var nativeListener net.Listener
 	var nativeServer *router.NativeGateway
 	if *nativeAddr != "" {
+		if strings.TrimSpace(*nativeAuthToken) == "" {
+			log.Fatal("native protocol requires --native-auth-token or MONOFS_TOKEN")
+		}
 		nativeListener, err = net.Listen("tcp", *nativeAddr)
 		if err != nil {
 			log.Fatalf("Failed to listen for native protocol: %v", err)
 		}
 		nativeServer = router.NewNativeGateway(r, logger)
+		nativeServer.SetAuthToken(strings.TrimSpace(*nativeAuthToken))
 		go func() {
 			logger.Info("monofs router native listener", "addr", *nativeAddr)
 			if err := nativeServer.Serve(nativeListener); err != nil {

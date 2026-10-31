@@ -18,6 +18,12 @@ SESSION_BINARY := monofs-session
 SEARCH_BINARY := monofs-search
 FETCHER_BINARY := monofs-fetcher
 TRACE_DUMP_BINARY := monofs-trace-dump
+REGISTRY_BINARY := monofs-registry
+PIPELINE_WORKER_BINARY := monofs-pipeline-worker
+CACHE_BINARY := monofs-cache
+BAZELCTL_BINARY := monofs-bazelctl
+LOGENGINE_COMPACT_BINARY := monofs-logengine-compact
+FUSE_PLUGIN_BINARY := k8s-fuse-device-plugin
 
 # Directories
 BIN_DIR := bin
@@ -58,7 +64,7 @@ ROUTER_B_PEERS ?= router-a=http://router-a:8080
 .DEFAULT_GOAL := build
 
 # Phony targets
-.PHONY: all build build-server build-client build-router build-admin build-session build-search build-fetcher build-trace-dump build-loadtest build-modverify build-kmod clean clean-kmod proto proto-check \
+.PHONY: all build build-server build-client build-router build-admin build-session build-search build-fetcher build-trace-dump build-loadtest build-registry build-pipeline-worker build-cache build-bazelctl build-logengine-compact build-fuse-plugin build-kmod clean clean-kmod proto proto-check \
         test test-unit test-e2e test-e2e-sudo test-smoke test-race test-coverage vet fmt fmt-check tidy \
         install-tools run-server run-client run-router run-cluster help \
         deploy deploy-s3 deploy-s3-external deploy-s3-clean deploy-stop deploy-clean deploy-restart deploy-local deploy-local-stop deploy-local-clean deploy-local-restart \
@@ -74,7 +80,7 @@ all: clean proto build test-unit ## Clean, generate proto, build, and run unit t
 
 ##@ Build
 
-build: build-server build-client build-router build-admin build-session build-search build-fetcher build-trace-dump build-loadtest ## Build all binaries
+build: build-server build-client build-router build-admin build-session build-search build-fetcher build-trace-dump build-loadtest build-registry build-pipeline-worker build-cache build-bazelctl build-logengine-compact build-fuse-plugin ## Build all binaries
 
 build-server: $(BIN_DIR) ## Build the server binary
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(SERVER_BINARY) ./$(CMD_DIR)/$(SERVER_BINARY)
@@ -112,9 +118,29 @@ build-loadtest: $(BIN_DIR) ## Build the load test binary
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/monofs-loadtest ./$(CMD_DIR)/monofs-loadtest
 	@echo "Built $(BIN_DIR)/monofs-loadtest"
 
-build-modverify: $(BIN_DIR) ## Build the module verification tool
-	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/modverify ./$(CMD_DIR)/modverify
-	@echo "Built $(BIN_DIR)/modverify"
+build-registry: $(BIN_DIR) ## Build the OCI registry binary
+	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(REGISTRY_BINARY) ./$(CMD_DIR)/$(REGISTRY_BINARY)
+	@echo "Built $(BIN_DIR)/$(REGISTRY_BINARY)"
+
+build-pipeline-worker: $(BIN_DIR) ## Build the pipeline worker binary
+	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(PIPELINE_WORKER_BINARY) ./$(CMD_DIR)/$(PIPELINE_WORKER_BINARY)
+	@echo "Built $(BIN_DIR)/$(PIPELINE_WORKER_BINARY)"
+
+build-cache: $(BIN_DIR) ## Build the Bazel remote cache binary
+	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(CACHE_BINARY) ./$(CMD_DIR)/$(CACHE_BINARY)
+	@echo "Built $(BIN_DIR)/$(CACHE_BINARY)"
+
+build-bazelctl: $(BIN_DIR) ## Build the Bazel migration CLI
+	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BAZELCTL_BINARY) ./$(CMD_DIR)/$(BAZELCTL_BINARY)
+	@echo "Built $(BIN_DIR)/$(BAZELCTL_BINARY)"
+
+build-logengine-compact: $(BIN_DIR) ## Build the offline log compactor
+	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(LOGENGINE_COMPACT_BINARY) ./$(CMD_DIR)/$(LOGENGINE_COMPACT_BINARY)
+	@echo "Built $(BIN_DIR)/$(LOGENGINE_COMPACT_BINARY)"
+
+build-fuse-plugin: $(BIN_DIR) ## Build the Kubernetes FUSE device plugin
+	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(FUSE_PLUGIN_BINARY) ./$(CMD_DIR)/$(FUSE_PLUGIN_BINARY)
+	@echo "Built $(BIN_DIR)/$(FUSE_PLUGIN_BINARY)"
 
 build-kmod: ## Build the out-of-tree kernel module scaffold
 	@$(MAKE) -C $(KMOD_DIR) all
@@ -197,6 +223,10 @@ deploy: ## Rebuild and deploy Docker cluster (router + 3 nodes)
 	fi
 	@echo "✅ Encryption key is set"
 	@echo ""
+	@echo "Checking for router authentication token..."
+	@if [ -z "$(MONOFS_TOKEN)" ]; then 		echo "❌ ERROR: MONOFS_TOKEN environment variable is not set!"; 		echo ""; 		echo "Generate a token with: openssl rand -hex 32"; 		echo ""; 		echo "Then either:"; 		echo "  1. Export it: export MONOFS_TOKEN=\$$(openssl rand -hex 32)"; 		echo "  2. Add to .env file: echo MONOFS_TOKEN=\$$(openssl rand -hex 32) >> .env"; 		echo ""; 		exit 1; 	fi
+	@echo "✅ Router authentication token is set"
+	@echo ""
 	@echo "Version: $(VERSION) ($(COMMIT))"
 	@echo "Build Time: $(BUILD_TIME)"
 	@echo ""
@@ -239,7 +269,7 @@ deploy: ## Rebuild and deploy Docker cluster (router + 3 nodes)
 	@echo "Admin CLI:"
 	@echo "  ./bin/monofs-admin status --router=localhost:9090"
 	@echo "  ./bin/monofs-admin failover --router=localhost:9090"
-	@echo "  ./bin/monofs-admin ingest --url=<repo-url>"
+	@echo "  ./bin/monofs-admin ingest --source=<repo-url>"
 	@echo ""
 	@echo "Logs & Management:"
 	@echo "  make docker-logs    - View container logs"
@@ -298,7 +328,7 @@ deploy-s3: ## Deploy Docker cluster with MinIO S3 backend
 	@echo ""
 	@echo "Admin CLI:"
 	@echo "  ./bin/monofs-admin status --router=localhost:9090"
-	@echo "  ./bin/monofs-admin ingest --url=<repo-url>"
+	@echo "  ./bin/monofs-admin ingest --source=<repo-url>"
 	@echo ""
 	@echo "Logs & Management:"
 	@echo "  make docker-logs    - View container logs"
@@ -356,7 +386,7 @@ deploy-s3-external: ## Deploy Docker cluster using existing external MinIO
 	@echo ""
 	@echo "Admin CLI:"
 	@echo "  ./bin/monofs-admin status --router=localhost:9090"
-	@echo "  ./bin/monofs-admin ingest --url=<repo-url>"
+	@echo "  ./bin/monofs-admin ingest --source=<repo-url>"
 	@echo ""
 	@echo "Logs & Management:"
 	@echo "  make docker-logs    - View container logs"
@@ -434,7 +464,7 @@ deploy-local: build ## Deploy local dev cluster (router + 3 nodes with proper di
 	@echo "Admin CLI:"
 	@echo "  ./bin/monofs-admin status --router=localhost:9090"
 	@echo "  ./bin/monofs-admin failover --router=localhost:9090"
-	@echo "  ./bin/monofs-admin ingest --url=<repo-url>"
+	@echo "  ./bin/monofs-admin ingest --source=<repo-url>"
 	@echo ""
 	@echo "View logs: tail -f /tmp/monofs-dev/*.log"
 	@echo "Stop cluster: make deploy-local-stop"

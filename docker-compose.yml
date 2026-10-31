@@ -12,8 +12,8 @@ services:
   fetcher-a:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: fetcher
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -52,8 +52,8 @@ services:
   fetcher-b:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: fetcher
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -92,8 +92,8 @@ services:
   search-index:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: search
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -153,8 +153,8 @@ services:
   router-a:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: router
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -176,6 +176,7 @@ services:
       - "--debug"
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
+      - MONOFS_TOKEN=${MONOFS_TOKEN:-}
     networks:
       - monofs-net
     depends_on:
@@ -197,8 +198,8 @@ services:
   router-b:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: router
       args:
         VERSION: ${GIT_VERSION:-dev}
@@ -220,6 +221,7 @@ services:
       - "--debug"
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
+      - MONOFS_TOKEN=${MONOFS_TOKEN:-}
     networks:
       - monofs-net
     depends_on:
@@ -241,15 +243,15 @@ services:
   node-a:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: server
       args:
         VERSION: ${GIT_VERSION:-dev}
         COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     ports:
-      - "9001:9000"
+      - "127.0.0.1:9001:9000"
     command:
       - "--addr=:9000"
       - "--node-id=node-a"
@@ -286,15 +288,15 @@ services:
   node-b:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: server
       args:
         VERSION: ${GIT_VERSION:-dev}
         COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     ports:
-      - "9002:9000"
+      - "127.0.0.1:9002:9000"
     command:
       - "--addr=:9000"
       - "--node-id=node-b"
@@ -330,15 +332,15 @@ services:
   node-c:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: server
       args:
         VERSION: ${GIT_VERSION:-dev}
         COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     ports:
-      - "9003:9000"
+      - "127.0.0.1:9003:9000"
     command:
       - "--addr=:9000"
       - "--node-id=node-c"
@@ -374,15 +376,15 @@ services:
   node-d:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: server
       args:
         VERSION: ${GIT_VERSION:-dev}
         COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     ports:
-      - "9004:9000"
+      - "127.0.0.1:9004:9000"
     command:
       - "--addr=:9000"
       - "--node-id=node-d"
@@ -418,15 +420,15 @@ services:
   node-e:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: server
       args:
         VERSION: ${GIT_VERSION:-dev}
         COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     ports:
-      - "9005:9000"
+      - "127.0.0.1:9005:9000"
     command:
       - "--addr=:9000"
       - "--node-id=node-e"
@@ -462,17 +464,18 @@ services:
   client:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: client
       args:
         VERSION: ${GIT_VERSION:-dev}
         COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     ports:
-      - "2222:22"
+      - "127.0.0.1:2222:22"
     environment:
       - ROUTER_ADDR=haproxy:9090
+      - MONOFS_TOKEN=${MONOFS_TOKEN:-}
       - ENABLE_LOADTEST=true
     volumes:
       - client-logs:/var/log
@@ -494,17 +497,18 @@ services:
   client2:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: client
       args:
         VERSION: ${GIT_VERSION:-dev}
         COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     ports:
-      - "2223:22"
+      - "127.0.0.1:2223:22"
     environment:
       - ROUTER_ADDR=haproxy:9090
+      - MONOFS_TOKEN=${MONOFS_TOKEN:-}
     volumes:
       - client2-logs:/var/log
       - client2-cache:/var/cache/monofs
@@ -525,17 +529,18 @@ services:
   client3:
     <<: *otel-syslog-logging
     build:
-      context: ..
-      dockerfile: monofs/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: client
       args:
         VERSION: ${GIT_VERSION:-dev}
         COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     ports:
-      - "2224:22"
+      - "127.0.0.1:2224:22"
     environment:
       - ROUTER_ADDR=haproxy:9090
+      - MONOFS_TOKEN=${MONOFS_TOKEN:-}
     volumes:
       - client3-logs:/var/log
       - client3-cache:/var/cache/monofs
