@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -31,6 +32,7 @@ var (
 	logLevel      = flag.String("log-level", "info", "log level: debug, info, warn, error")
 	mountPath     = flag.String("mount-path", "/mnt/monofs", "monofs FUSE mount path for source access")
 	executorPort  = flag.Int("executor-port", 0, "port for REAPI executor HTTP server (0 = disabled)")
+	executorToken = flag.String("executor-token", "", "bearer token for the executor HTTP API (defaults to MONOFS_EXECUTOR_TOKEN or MONOFS_TOKEN)")
 	cacheAddr     = flag.String("cache-addr", "", "monofs-cache address for executor (required if --executor-port set)")
 )
 
@@ -39,6 +41,12 @@ func main() {
 
 	if *guardianToken == "" {
 		*guardianToken = os.Getenv("MONOFS_GUARDIAN_TOKEN")
+	}
+	if *executorToken == "" {
+		*executorToken = os.Getenv("MONOFS_EXECUTOR_TOKEN")
+	}
+	if *executorToken == "" {
+		*executorToken = os.Getenv("MONOFS_TOKEN")
 	}
 
 	var level slog.Level
@@ -121,6 +129,10 @@ func main() {
 			logger.Error("--cache-addr is required when --executor-port is set")
 			os.Exit(1)
 		}
+		if *executorToken == "" {
+			logger.Error("--executor-token, MONOFS_EXECUTOR_TOKEN, or MONOFS_TOKEN is required when --executor-port is set")
+			os.Exit(1)
+		}
 		exec := executor.New(executor.Config{
 			ID:        *workerID,
 			CacheAddr: *cacheAddr,
@@ -133,7 +145,7 @@ func main() {
 			},
 			Logger: logger,
 		})
-		go startExecutorServer(exec, *executorPort, logger)
+		go startExecutorServer(exec, *executorPort, *executorToken, logger)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -161,13 +173,38 @@ func main() {
 //
 //	POST /execute  {"arguments":[...], "env":[...], "input_files":[...], ...}
 //	GET  /status   {"worker_id":"...", "total_execs":..., ...}
-func startExecutorServer(exec *executor.Executor, port int, logger *slog.Logger) {
+func executorRequestAuthorized(r *http.Request, token string) bool {
+	if token == "" {
+		return false
+	}
+	supplied := strings.TrimSpace(r.Header.Get("X-Monofs-Executor-Token"))
+	if supplied == "" {
+		auth := strings.TrimSpace(r.Header.Get("Authorization"))
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			supplied = strings.TrimSpace(auth[len("Bearer "):])
+		}
+	}
+	return subtle.ConstantTimeCompare([]byte(supplied), []byte(token)) == 1
+}
+
+func startExecutorServer(exec *executor.Executor, port int, token string, logger *slog.Logger) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/execute", func(w http.ResponseWriter, r *http.Request) {
+	guard := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !executorRequestAuthorized(r, token) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next(w, r)
+		}
+	}
+
+	mux.HandleFunc("/execute", guard(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
 		body, err := io.ReadAll(r.Body)
 		r.Body.Close()
 		if err != nil {
@@ -229,16 +266,24 @@ func startExecutorServer(exec *executor.Executor, port int, logger *slog.Logger)
 			"duration_ms":        result.Duration.Milliseconds(),
 			"error":              result.Error,
 		})
-	})
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/status", guard(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := exec.Status()
 		json.NewEncoder(w).Encode(status)
-	})
+	}))
 
 	addr := fmt.Sprintf(":%d", port)
 	logger.Info("executor HTTP server listening", "addr", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      15 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("executor server error", "error", err)
 	}
 }

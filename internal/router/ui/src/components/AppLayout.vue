@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterView, RouterLink, useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import ToastContainer from './ToastContainer.vue'
 import ThemePicker from './ThemePicker.vue'
+import CommandPalette from './CommandPalette.vue'
+import AskDrawer from './AskDrawer.vue'
 import {
   LayoutDashboard, Server, Users, Zap, GitBranch,
   BookOpen, Upload, Search, Layers, Download, Package, Container, SlidersHorizontal,
-  Cpu, Play
+  Cpu, Menu, Play
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -15,6 +17,9 @@ const store = useAppStore()
 const pageTitle = computed(() => (route.meta.title as string | undefined) ?? 'Dashboard')
 const logoSrc = import.meta.env.BASE_URL + 'static/static/monofs.png'
 const currentUser = ref('')
+const sidebarOpen = ref(false)
+
+watch(() => route.path, () => { sidebarOpen.value = false })
 
 onMounted(async () => {
   if (store.version) return
@@ -54,8 +59,13 @@ const navItems = [
 
 <template>
   <div class="flex h-full min-h-screen">
+    <a class="s-skip-link" href="#main-content">Skip to content</a>
     <!-- Sidebar -->
-    <aside class="w-64 shrink-0 fixed top-0 left-0 h-full flex flex-col bg-slate-900/85 backdrop-blur-xl border-r border-slate-700/40 overflow-y-auto z-40">
+    <div v-if="sidebarOpen" class="fixed inset-0 z-30 bg-black/50 lg:hidden" @click="sidebarOpen = false" />
+    <aside
+      class="w-[236px] shrink-0 fixed top-0 left-0 h-full flex flex-col bg-slate-900/85 backdrop-blur-xl border-r border-slate-700/40 overflow-y-auto z-40 transition-transform duration-200 lg:translate-x-0"
+      :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
+    >
       <!-- Logo -->
       <div class="px-5 py-5 border-b border-slate-700/40">
         <div class="flex items-center gap-3">
@@ -75,7 +85,7 @@ const navItems = [
           :to="item.to"
           class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150"
           :class="route.path === item.to
-            ? 'bg-violet-600/20 text-violet-300 border border-violet-500/30'
+            ? 'bg-accent-blue/15 text-accent-blue border border-accent-blue/30'
             : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'"
         >
           <component :is="item.icon" class="w-4 h-4 shrink-0" />
@@ -92,14 +102,19 @@ const navItems = [
     </aside>
 
     <!-- Main content -->
-    <main class="flex-1 ml-64 min-h-screen">
+    <main class="flex-1 ml-0 lg:ml-[236px] min-h-screen" id="main-content">
       <header class="app-topbar">
+        <button type="button" class="s-icon-btn lg:hidden" aria-label="Toggle navigation" @click="sidebarOpen = !sidebarOpen">
+          <Menu class="w-4 h-4" />
+        </button>
         <div class="app-topbar__crumb">
           <span>MonoFS</span>
           <span class="app-topbar__sep">/</span>
           <strong class="app-topbar__title">{{ pageTitle }}</strong>
         </div>
         <div class="flex items-center gap-3">
+          <AskDrawer />
+          <CommandPalette />
           <span v-if="currentUser" class="text-xs text-slate-400" title="Signed in">{{ currentUser }}</span>
           <ThemePicker />
           <a href="/auth/logout" class="text-xs font-medium text-slate-400 hover:text-slate-200 no-underline" title="Sign out">Sign out</a>

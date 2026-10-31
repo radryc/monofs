@@ -140,3 +140,7 @@ mem.prof
 .kilocode
 monofs-trace-dump
 third_party/
+
+# Internal notes, duplicates, and generated backups (not public docs)
+docs/internal/
+docs_backup/

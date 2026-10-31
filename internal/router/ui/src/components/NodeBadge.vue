@@ -8,6 +8,6 @@ defineProps<{ healthy: boolean; label?: string }>()
     :class="healthy ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/15 text-rose-400 border border-rose-500/20'"
   >
     <span class="w-1.5 h-1.5 rounded-full" :class="healthy ? 'bg-emerald-400' : 'bg-rose-400'" />
-    {{ label ?? (healthy ? 'Healthy' : 'Unhealthy') }}
+    {{ label ?? (healthy ? 'Healthy' : 'Critical') }}
   </span>
 </template>

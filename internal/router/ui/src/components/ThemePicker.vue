@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { THEMES, applyTheme, readStoredTheme, type Theme } from '../lib/theme'
+import { onMounted, ref } from 'vue'
+import { THEMES, applyTheme, readStoredTheme, watchSystemTheme, type Theme } from '../lib/theme'
 
 const theme = ref<Theme>(readStoredTheme())
 
-applyTheme(theme.value, false)
+onMounted(() => {
+  applyTheme(theme.value)
+  watchSystemTheme()
+})
 
 function onChange(event: Event) {
   const next = (event.target as HTMLSelectElement).value as Theme

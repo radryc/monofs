@@ -7,6 +7,23 @@ import DataCard from '../components/DataCard.vue'
 import StatCard from '../components/StatCard.vue'
 import NodeBadge from '../components/NodeBadge.vue'
 import ProgressBar from '../components/ProgressBar.vue'
+import {
+  ChartColumn,
+  CircleCheck,
+  Download,
+  FileText,
+  HardDrive,
+  Monitor,
+  Network,
+  Package,
+  RefreshCw,
+  Router,
+  Search,
+  ShieldCheck,
+  ScrollText,
+  TriangleAlert,
+  Zap,
+} from 'lucide-vue-next'
 import type {
   RoutersData,
   FetcherClusterStats,
@@ -105,6 +122,52 @@ async function load() {
   if (reposRes.status === 'fulfilled') recentRepos.value = reposRes.value
   if (workspaceSyncJobsRes.status === 'fulfilled') workspaceSyncJobs.value = workspaceSyncJobsRes.value
 }
+
+const heroStats = computed(() => [
+  {
+    icon: CircleCheck,
+    label: 'Healthy nodes',
+    value: loading.value ? '…' : `${healthyNodes.value}/${totalNodes.value}`,
+    sub: totalNodes.value > 0 ? 'MetaStore nodes reporting healthy' : 'Waiting for node telemetry',
+  },
+  {
+    icon: FileText,
+    label: 'Total files',
+    value: formatNumber(totalFiles.value),
+    sub: 'Across the deduplicated MetaStore fleet',
+  },
+  {
+    icon: HardDrive,
+    label: 'Cache hit rate',
+    value: fetcherStats.value ? `${((fetcherStats.value.aggregated_hit_rate || 0) * 100).toFixed(1)}%` : '-',
+    sub: fetcherStats.value ? `${formatNumber(fetcherStats.value.total_bytes_fetched || 0)} fetched` : 'Fetcher telemetry unavailable',
+  },
+  {
+    icon: Package,
+    label: 'Repositories',
+    value: loading.value ? '…' : formatNumber(totalRepos.value),
+    sub: 'Ingested repositories in this deployment',
+  },
+])
+
+const secondaryStats = computed(() => [
+  { icon: Router, label: 'Routers', value: routers.value?.routers?.length ?? '-' },
+  { icon: Network, label: 'MetaStore nodes', value: loading.value ? '…' : totalNodes.value },
+  { icon: Monitor, label: 'Clients', value: clients.value?.clients?.filter(c => c.state === 1)?.length ?? '-' },
+  { icon: RefreshCw, label: 'Fetchers', value: fetcherStats.value ? `${fetcherStats.value.healthy_fetchers}/${fetcherStats.value.total_fetchers}` : '-' },
+  { icon: Search, label: 'Search indexes', value: searchStats.value?.total_indexes ?? '-' },
+  { icon: ChartColumn, label: 'Total searches', value: searchStats.value ? formatNumber(searchStats.value.searches_total) : '-' },
+  { icon: Zap, label: 'Avg search', value: searchStats.value ? `${searchStats.value.avg_search_duration_ms?.toFixed(0) ?? 0}ms` : '-' },
+  { icon: Download, label: 'Data fetched', value: fetcherStats.value ? formatBytes(fetcherStats.value.total_bytes_fetched || 0) : '-' },
+  { icon: ShieldCheck, label: 'Active failovers', value: statusMetrics.value.failovers_active ?? '-' },
+  { icon: ScrollText, label: 'Workspace WAL', value: statusMetrics.value.workspace_wal_enabled === 1 ? 'enabled' : 'memory' },
+])
+
+const attentionCount = computed(() => {
+  const unhealthyNodes = totalNodes.value - healthyNodes.value
+  const failedJobs = (workspaceSyncJobs.value?.jobs ?? []).filter((job) => job.state === 4).length
+  return unhealthyNodes + failedJobs
+})
 
 const { loading } = useAutoRefresh(load, 15_000)
 
@@ -230,27 +293,26 @@ function shortHash(value: string | undefined): string {
   <div>
     <PageHeader title="Dashboard" subtitle="Overview across all routers in your MonoFS deployment" />
 
-    <!-- Stat cards -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 mb-6">
-      <StatCard v-for="stat in [
-        { icon: '🧭', label: 'Routers',          value: routers?.routers?.length ?? '-' },
-        { icon: '🌐', label: 'MetaStore Nodes',   value: loading ? '…' : totalNodes },
-        { icon: '✅', label: 'Healthy Nodes',     value: loading ? '…' : healthyNodes },
-        { icon: '📦', label: 'Repositories',      value: loading ? '…' : totalRepos },
-        { icon: '💻', label: 'Clients',           value: clients?.clients?.filter(c => c.state === 1)?.length ?? '-' },
-        { icon: '📄', label: 'Total Files',       value: formatNumber(totalFiles) },
-        { icon: '🔄', label: 'Fetchers',          value: fetcherStats ? `${fetcherStats.healthy_fetchers}/${fetcherStats.total_fetchers}` : '-' },
-        { icon: '💾', label: 'Cache Hit Rate',    value: fetcherStats ? `${((fetcherStats.aggregated_hit_rate || 0) * 100).toFixed(1)}%` : '-' },
-        { icon: '🔍', label: 'Search Indexes',    value: searchStats?.total_indexes ?? '-' },
-        { icon: '📊', label: 'Total Searches',    value: searchStats ? formatNumber(searchStats.searches_total) : '-' },
-        { icon: '⚡', label: 'Avg Search',        value: searchStats ? `${searchStats.avg_search_duration_ms?.toFixed(0) ?? 0}ms` : '-' },
-        { icon: '📥', label: 'Data Fetched',      value: fetcherStats ? formatBytes(fetcherStats.total_bytes_fetched || 0) : '-' },
-        { icon: '🛡️', label: 'Active Failovers',  value: statusMetrics.failovers_active ?? '-' },
-        { icon: '🧾', label: 'Workspace WAL',      value: statusMetrics.workspace_wal_enabled === 1 ? 'enabled' : 'memory' },
-      ]" :key="stat.label"
-        :icon="stat.icon"
-        :label="stat.label"
-        :value="stat.value" />
+    <!-- Hero health signals -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-4">
+      <article v-for="stat in heroStats" :key="stat.label" class="s-card p-5">
+        <div class="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.12em] text-slate-400">
+          <component :is="stat.icon" class="w-4 h-4 text-accent-blue" aria-hidden="true" />
+          {{ stat.label }}
+        </div>
+        <div class="mt-3 font-display text-2xl font-bold text-slate-100">{{ stat.value }}</div>
+        <p class="mt-1 text-xs text-slate-400">{{ stat.sub }}</p>
+      </article>
+    </div>
+
+    <div v-if="attentionCount > 0" class="mb-4 flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+      <TriangleAlert class="w-4 h-4 shrink-0" />
+      <span>{{ attentionCount }} item{{ attentionCount === 1 ? '' : 's' }} need attention — review unhealthy nodes and failed sync jobs below.</span>
+    </div>
+
+    <!-- Secondary metrics -->
+    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2 mb-6">
+      <StatCard v-for="stat in secondaryStats" :key="stat.label" :icon="stat.icon" :label="stat.label" :value="stat.value" />
     </div>
 
     <!-- Routers overview -->
@@ -274,7 +336,7 @@ function shortHash(value: string | undefined): string {
               <div class="text-xs text-slate-500">v{{ r.status?.version?.version || '?' }}</div>
             </div>
             <span v-if="r.status?.drain_mode?.active"
-              class="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/20">🚧 Drain</span>
+              class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/20"><TriangleAlert class="w-3.5 h-3.5" /> Drain</span>
             <span v-if="r.error"
               class="text-xs px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/20">{{ r.error }}</span>
           </div>
@@ -330,9 +392,9 @@ function shortHash(value: string | undefined): string {
 
           <div class="flex items-center justify-between gap-1">
             <span class="text-slate-500">KVS</span>
-            <span v-if="node.kvs?.healthy" class="text-emerald-400">✓ {{ node.kvs?.mode || 'OK' }}</span>
+            <span v-if="node.kvs?.healthy" class="inline-flex items-center gap-1 text-emerald-400"><CircleCheck class="w-3.5 h-3.5" /> {{ node.kvs?.mode || 'OK' }}</span>
             <span v-else-if="node.kvs?.enabled === false" class="text-slate-500">disabled</span>
-            <span v-else-if="node.kvs" class="text-rose-400">⚠ err</span>
+            <span v-else-if="node.kvs" class="inline-flex items-center gap-1 text-rose-400"><TriangleAlert class="w-3.5 h-3.5" /> err</span>
             <span v-else class="text-slate-500">-</span>
           </div>
 

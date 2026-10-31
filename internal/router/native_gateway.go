@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"io"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 type NativeGateway struct {
 	router      *Router
 	logger      *slog.Logger
+	authToken   string
 	nextSession atomic.Uint64
 }
 
@@ -40,6 +42,21 @@ func NewNativeGateway(r *Router, logger *slog.Logger) *NativeGateway {
 		router: r,
 		logger: logger.With("component", "native-gateway"),
 	}
+}
+
+// SetAuthToken configures the shared token required by MountRequest.AuthToken.
+// An empty token preserves the legacy behavior for tests and explicitly
+// unauthenticated development mounts; production startup rejects an empty
+// token when the native listener is enabled.
+func (g *NativeGateway) SetAuthToken(token string) {
+	g.authToken = token
+}
+
+func (g *NativeGateway) mountTokenValid(token string) bool {
+	if g.authToken == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(g.authToken)) == 1
 }
 
 func (g *NativeGateway) currentGeneration() uint64 {
@@ -170,9 +187,12 @@ func (g *NativeGateway) handleHello(body []byte) ([]byte, uint32, uint64) {
 }
 
 func (g *NativeGateway) handleMount(ctx context.Context, body []byte) ([]byte, uint32, uint64, uint64) {
-	_, err := nativeproto.DecodeMountRequest(body)
+	req, err := nativeproto.DecodeMountRequest(body)
 	if err != nil {
 		return nil, nativeproto.StatusInvalidRequest, 0, g.currentGeneration()
+	}
+	if !g.mountTokenValid(req.AuthToken) {
+		return nil, nativeproto.StatusAuth, 0, g.currentGeneration()
 	}
 
 	info, err := g.router.NativeMountInfo(ctx)
