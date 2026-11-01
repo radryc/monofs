@@ -13,7 +13,6 @@ services:
   # Fetcher 1 with S3 backend (using external MinIO)
   fetcher-a:
     command:
-      - "monofs-fetcher"
       - "--port=9200"
       - "--cache-dir=/data/cache"
       - "--max-cache-gb=20"
@@ -33,7 +32,6 @@ services:
   # Fetcher 2 with S3 backend (using external MinIO)
   fetcher-b:
     command:
-      - "monofs-fetcher"
       - "--port=9200"
       - "--cache-dir=/data/cache"
       - "--max-cache-gb=20"

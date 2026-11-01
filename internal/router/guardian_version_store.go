@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -339,6 +340,73 @@ func (s *guardianVersionStore) list(logicalPath string, pageSize int32, pageToke
 		next = strconv.Itoa(end)
 	}
 	return newestFirst[offset:end], next, nil
+}
+
+// listCurrentUnderPrefix returns the current (non-tombstone) version for every
+// logical path under prefix. It is used by the pipeline/queue KVS adapter,
+// where list(prefix) previously performed an exact-path lookup and therefore
+// returned nothing against the real store.
+func (s *guardianVersionStore) listCurrentUnderPrefix(prefix string, limit int32) []*pb.GuardianFileVersion {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	seen := make(map[string]struct{})
+	result := make([]*pb.GuardianFileVersion, 0)
+
+	add := func(logicalPath string) {
+		if !strings.HasPrefix(logicalPath, prefix) {
+			return
+		}
+		if _, ok := seen[logicalPath]; ok {
+			return
+		}
+		record, ok := s.currentRecordLocked(logicalPath)
+		if !ok || record == nil || record.Tombstone {
+			return
+		}
+		seen[logicalPath] = struct{}{}
+		result = append(result, record.toProto())
+	}
+
+	for logicalPath := range s.current {
+		add(logicalPath)
+	}
+	for logicalPath := range s.ephemeral {
+		add(logicalPath)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].GetLogicalPath() < result[j].GetLogicalPath()
+	})
+	if len(result) > int(limit) {
+		result = result[:limit]
+	}
+	return result
+}
+
+// currentRecordLocked resolves the current record without re-acquiring the
+// store lock. Callers must hold s.mu for reading.
+func (s *guardianVersionStore) currentRecordLocked(logicalPath string) (*storedGuardianFileVersion, bool) {
+	if record, ok := s.ephemeral[logicalPath]; ok && record != nil {
+		return record, true
+	}
+	versionID, ok := s.current[logicalPath]
+	if !ok {
+		return nil, false
+	}
+	records := s.records[logicalPath]
+	for i := len(records) - 1; i >= 0; i-- {
+		if records[i] != nil && records[i].VersionID == versionID {
+			return records[i], true
+		}
+	}
+	return nil, false
 }
 
 func (s *guardianVersionStore) get(logicalPath, versionID string) (*pb.GuardianFileVersion, []byte, bool) {

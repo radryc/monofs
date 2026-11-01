@@ -8,7 +8,31 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/storage"
 )
+
+// TestNormalizeIngestionType verifies protobuf enum names are mapped to
+// storage backend identifiers, including the file backend that previously
+// fell through as "ingestion_file".
+func TestNormalizeIngestionType(t *testing.T) {
+	tests := []struct {
+		name string
+		in   pb.IngestionType
+		want storage.IngestionType
+	}{
+		{name: "git", in: pb.IngestionType_INGESTION_GIT, want: storage.IngestionTypeGit},
+		{name: "s3", in: pb.IngestionType_INGESTION_S3, want: storage.IngestionTypeS3},
+		{name: "file", in: pb.IngestionType_INGESTION_FILE, want: storage.IngestionTypeFile},
+		{name: "guardian", in: pb.IngestionType_INGESTION_GUARDIAN, want: storage.IngestionTypeGit},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeIngestionType(tt.in); got != tt.want {
+				t.Fatalf("normalizeIngestionType(%s) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
 
 // TestGenerateStorageID verifies storage ID generation from display paths.
 func TestGenerateStorageID(t *testing.T) {

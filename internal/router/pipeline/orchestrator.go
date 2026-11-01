@@ -19,6 +19,11 @@ type Orchestrator struct {
 	queue   *TaskQueue
 	logger  *slog.Logger
 
+	// tasks keeps the enqueued task definitions by task ID so a retry can
+	// reuse the original steps/runner/matrix expansion instead of sending an
+	// empty builder task.
+	tasks map[string]*Task
+
 	runHistory []*PipelineRun
 	maxHistory int
 
@@ -31,6 +36,7 @@ func NewOrchestrator(queue *TaskQueue, logger *slog.Logger) *Orchestrator {
 	return &Orchestrator{
 		runs:       make(map[string]*PipelineRun),
 		configs:    make(map[string]*PipelineConfig),
+		tasks:      make(map[string]*Task),
 		queue:      queue,
 		logger:     logger,
 		maxHistory: 100,
@@ -239,7 +245,9 @@ func (o *Orchestrator) enqueueJobTasks(run *PipelineRun, cfg *PipelineConfig, jo
 			task := o.buildTask(run, jobName, job, combo)
 			if err := o.queue.EnqueueTask(run.RunID, task); err != nil {
 				o.logger.Error("enqueue task failed", "job", jobName, "error", err)
+				continue
 			}
+			o.rememberTaskLocked(task)
 		}
 		return len(matrixCombos)
 	}
@@ -247,8 +255,62 @@ func (o *Orchestrator) enqueueJobTasks(run *PipelineRun, cfg *PipelineConfig, jo
 	task := o.buildTask(run, jobName, job, nil)
 	if err := o.queue.EnqueueTask(run.RunID, task); err != nil {
 		o.logger.Error("enqueue task failed", "job", jobName, "error", err)
+	} else {
+		o.rememberTaskLocked(task)
 	}
 	return 1
+}
+
+// rememberTaskLocked stores a copy of an enqueued task so a later retry can
+// reuse the exact steps, runner and matrix expansion. Callers must hold o.mu.
+func (o *Orchestrator) rememberTaskLocked(task *Task) {
+	if task == nil || task.TaskID == "" {
+		return
+	}
+	copied := *task
+	copied.Steps = append([]StepConfig(nil), task.Steps...)
+	if task.Env != nil {
+		copied.Env = make(map[string]string, len(task.Env))
+		for k, v := range task.Env {
+			copied.Env[k] = v
+		}
+	}
+	copied.Affected = append([]string(nil), task.Affected...)
+	copied.ChangedFiles = append([]string(nil), task.ChangedFiles...)
+	o.tasks[task.TaskID] = &copied
+}
+
+// retryTaskLocked builds a replacement task for a failed task. It prefers the
+// original task definition and falls back to the job config if the task is no
+// longer known (for example after a process restart). Callers must hold o.mu.
+func (o *Orchestrator) retryTaskLocked(run *PipelineRun, jobName, taskID string, retries int) *Task {
+	var retry *Task
+	if original := o.tasks[taskID]; original != nil {
+		copied := *original
+		copied.Steps = append([]StepConfig(nil), original.Steps...)
+		if original.Env != nil {
+			copied.Env = make(map[string]string, len(original.Env))
+			for k, v := range original.Env {
+				copied.Env[k] = v
+			}
+		}
+		copied.Affected = append([]string(nil), original.Affected...)
+		copied.ChangedFiles = append([]string(nil), original.ChangedFiles...)
+		copied.TaskID = ""
+		retry = &copied
+	} else if cfg := o.configs[run.PipelineName]; cfg != nil {
+		if job, ok := cfg.Jobs[jobName]; ok {
+			retry = o.buildTask(run, jobName, job, nil)
+		}
+	}
+	if retry == nil {
+		return nil
+	}
+	retry.MaxRetries = retries
+	if retry.TimeoutSec == 0 {
+		retry.TimeoutSec = 600
+	}
+	return retry
 }
 
 // resolveNeedsOutputExpr resolves a ${{ needs.<job>.outputs.<key> }}
@@ -373,15 +435,15 @@ func (o *Orchestrator) OnTaskResult(ctx context.Context, result *TaskResult) {
 		if job.Retries < job.MaxRetries {
 			job.State = JobRunning
 			o.logger.Info("retrying job", "job", result.JobName, "retry", job.Retries)
-			if err := o.queue.EnqueueTask(result.RunID, &Task{
-				RunID:      result.RunID,
-				JobName:    result.JobName,
-				RunnerType: RunnerBuilder,
-				TimeoutSec: 600,
-				MaxRetries: job.MaxRetries - job.Retries,
-			}); err != nil {
+			retry := o.retryTaskLocked(run, result.JobName, result.TaskID, job.MaxRetries-job.Retries)
+			if retry == nil {
+				o.logger.Error("retry task unavailable", "job", result.JobName)
+				job.State = JobFailed
+			} else if err := o.queue.EnqueueTask(result.RunID, retry); err != nil {
 				o.logger.Error("retry enqueue failed", "job", result.JobName, "error", err)
 				job.State = JobFailed
+			} else {
+				o.rememberTaskLocked(retry)
 			}
 		} else {
 			job.State = JobFailed
@@ -644,6 +706,13 @@ func (o *Orchestrator) PipelineConfigs() map[string]*PipelineConfig {
 
 func (o *Orchestrator) setRunStateLocked(run *PipelineRun, state RunState) {
 	run.State = state
+	if isTerminalRunState(state) {
+		for taskID, task := range o.tasks {
+			if task != nil && task.RunID == run.RunID {
+				delete(o.tasks, taskID)
+			}
+		}
+	}
 }
 
 func (o *Orchestrator) setJobStateLocked(run *PipelineRun, jobName string, state JobState) {

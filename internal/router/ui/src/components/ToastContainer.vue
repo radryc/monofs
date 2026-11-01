@@ -13,7 +13,7 @@ const colors = {
 </script>
 
 <template>
-  <div class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end">
+  <div class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end" aria-live="polite" aria-atomic="false">
     <TransitionGroup
       enter-active-class="transition duration-200"
       enter-from-class="opacity-0 translate-x-4"

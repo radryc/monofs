@@ -91,10 +91,7 @@ func (r *Router) listPipelinePath(logicalDir string) ([]string, error) {
 	prefix := logicalDir + "/"
 	var entries []string
 
-	versions, _, err := r.guardianVersions.list(prefix, 1000, "")
-	if err != nil {
-		return nil, err
-	}
+	versions := r.guardianVersions.listCurrentUnderPrefix(prefix, 1000)
 	for _, version := range versions {
 		if version == nil || version.GetTombstone() {
 			continue
