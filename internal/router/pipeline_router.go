@@ -195,10 +195,7 @@ func (r *Router) reportPipelineStatus(run *pipeline.PipelineRun, logger *slog.Lo
 }
 
 func (r *Router) loadPipelinesFromKVS(logger *slog.Logger) error {
-	versions, _, err := r.guardianVersions.list(pipelineConfigsPrefix, 1000, "")
-	if err != nil {
-		return err
-	}
+	versions := r.guardianVersions.listCurrentUnderPrefix(pipelineConfigsPrefix, 1000)
 
 	if len(versions) == 0 {
 		return nil

@@ -29,6 +29,22 @@ func min(a, b int) int {
 	return b
 }
 
+func normalizeIngestionType(ingestionType pb.IngestionType) storage.IngestionType {
+	switch ingestionType {
+	case pb.IngestionType_INGESTION_S3:
+		return storage.IngestionTypeS3
+	case pb.IngestionType_INGESTION_FILE:
+		return storage.IngestionTypeFile
+	case pb.IngestionType_INGESTION_GUARDIAN:
+		// Guardian partitions are cloned through the Git backend.
+		return storage.IngestionTypeGit
+	case pb.IngestionType_INGESTION_GIT:
+		return storage.IngestionTypeGit
+	default:
+		return storage.IngestionTypeGit
+	}
+}
+
 // normalizeRepoID converts a repository URL to a normalized path format
 // Examples:
 //   - https://github.com/owner/repo -> github.com/owner/repo
@@ -194,16 +210,10 @@ func (r *Router) IngestRepository(req *pb.IngestRequest, stream pb.MonoFSRouter_
 	// Step 2: Generate internal storage ID (SHA-256 hash)
 	storageID := sharding.GenerateStorageID(displayPath)
 
-	// Determine backend types
-	ingestionType := storage.IngestionType(strings.ToLower(req.IngestionType.String()))
-	if ingestionType == "" || ingestionType == "ingestion_git" {
-		ingestionType = storage.IngestionTypeGit
-	} else if ingestionType == "ingestion_s3" {
-		ingestionType = storage.IngestionTypeS3
-	} else if ingestionType == "ingestion_guardian" {
-		// Guardian uses standard git backend for ingestion
-		ingestionType = storage.IngestionTypeGit
-	}
+	// Determine backend types. Keep the protobuf enum translation in one
+	// place: enum.String() is "INGESTION_FILE", not "file", so deriving the
+	// storage type from the string silently breaks file ingestion.
+	ingestionType := normalizeIngestionType(req.GetIngestionType())
 	if ingestionType == storage.IngestionTypeFile && !r.config.AllowLocalIngest {
 		return fmt.Errorf("local filesystem ingestion is disabled on this router (--local-ingest=false)")
 	}

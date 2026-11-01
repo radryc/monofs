@@ -426,6 +426,80 @@ func TestOnTaskResultFailureNotifies(t *testing.T) {
 	}
 }
 
+func TestRetryPreservesTaskDefinition(t *testing.T) {
+	kvs := newMockKVS()
+	queue := NewTaskQueue(kvs)
+	orch := NewOrchestrator(queue, slog.New(slog.DiscardHandler))
+
+	cfg, err := ParseConfig([]byte(`
+name: retry-pipeline
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: builder
+    timeout-minutes: 7
+    steps:
+      - run: make build
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	orch.RegisterPipeline(cfg)
+
+	run, err := orch.StartRun(cfg, WebhookEvent{EventType: TriggerPush, CommitSHA: "abc", Branch: "main"}, nil)
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+
+	var original *Task
+	waitFor(t, func() bool {
+		tasks, err := queue.ListRunTasks(run.RunID)
+		if err != nil || len(tasks) == 0 {
+			return false
+		}
+		original = tasks[0]
+		return true
+	})
+
+	orch.OnTaskResult(nil, &TaskResult{
+		TaskID:  original.TaskID,
+		RunID:   run.RunID,
+		JobName: "build",
+		State:   JobFailed,
+		Error:   "compile failed",
+	})
+
+	var retried *Task
+	waitFor(t, func() bool {
+		tasks, err := queue.ListRunTasks(run.RunID)
+		if err != nil {
+			return false
+		}
+		for _, task := range tasks {
+			if task.TaskID != original.TaskID {
+				retried = task
+				return true
+			}
+		}
+		return false
+	})
+
+	if retried.RunnerType != RunnerBuilder {
+		t.Errorf("retry runner = %q, want %q", retried.RunnerType, RunnerBuilder)
+	}
+	if retried.TimeoutSec != 420 {
+		t.Errorf("retry timeout = %d, want 420", retried.TimeoutSec)
+	}
+	if len(retried.Steps) != 1 || retried.Steps[0].Run != "make build" {
+		t.Fatalf("retry steps = %+v, want original step", retried.Steps)
+	}
+	if retried.MaxRetries != 1 {
+		t.Errorf("retry MaxRetries = %d, want 1", retried.MaxRetries)
+	}
+}
+
 func TestOnTaskResultUnknownRun(t *testing.T) {
 	orch := testOrchestrator()
 

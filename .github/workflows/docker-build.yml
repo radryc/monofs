@@ -30,10 +30,15 @@ jobs:
     strategy:
       matrix:
         target:
-          - target: monofs
+          - name: server
             dockerfile: Dockerfile
-          - target: monofs-search
+            build_target: server
+          - name: router
+            dockerfile: Dockerfile
+            build_target: router
+          - name: search
             dockerfile: Dockerfile.search
+            build_target: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -44,16 +49,17 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: monofs/${{ matrix.target.target }}
+          images: monofs/${{ matrix.target.name }}
           tags: |
             type=ref,event=branch
             type=sha,prefix=
 
-      - name: build ${{ matrix.target.target }}
+      - name: build ${{ matrix.target.name }}
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.target.dockerfile }}
+          target: ${{ matrix.target.build_target }}
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha

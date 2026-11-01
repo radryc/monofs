@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
 	cat <<'EOF'
 Usage:
-  scripts/mount-monofs-kmod.sh --mount=/path [--gateway=host:port] [--seed-paths=a/b,c/d] [--cluster-version=N] [--debug]
+  scripts/mount-monofs-kmod.sh --mount=/path [--gateway=host:port] [--auth-token=TOKEN] [--seed-paths=a/b,c/d] [--cluster-version=N] [--debug]
 
 Mounts the native monofs kernel-module scaffold as the lower filesystem.
 This script expects the `monofs` kernel module to already be built and loaded.
@@ -12,6 +12,7 @@ This script expects the `monofs` kernel module to already be built and loaded.
 Options:
   --mount=PATH           Target mount point (required)
   --gateway=HOST:PORT    Router/gateway address to record in mount options
+  --auth-token=TOKEN     Native gateway token (defaults to MONOFS_TOKEN)
   --seed-paths=LIST      Comma-separated synthetic display paths to expose
   --cluster-version=N    Initial topology/version hint for the mount
   --debug                Enable scaffold debug logging inside the kmod
@@ -21,6 +22,7 @@ EOF
 
 mount_point=""
 gateway=""
+auth_token="${MONOFS_TOKEN:-}"
 seed_paths=""
 cluster_version=""
 debug=0
@@ -32,6 +34,9 @@ for arg in "$@"; do
 		;;
 	--gateway=*)
 		gateway="${arg#*=}"
+		;;
+	--auth-token=*)
+		auth_token="${arg#*=}"
 		;;
 	--seed-paths=*)
 		seed_paths="${arg#*=}"
@@ -66,6 +71,10 @@ mount_opts=("overlay_writes")
 
 if [[ -n "$gateway" ]]; then
 	mount_opts+=("gateway=$gateway")
+fi
+
+if [[ -n "$auth_token" ]]; then
+	mount_opts+=("auth_token=$auth_token")
 fi
 
 if [[ -n "$seed_paths" ]]; then
