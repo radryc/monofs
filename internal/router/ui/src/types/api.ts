@@ -380,6 +380,9 @@ export interface LogEngineData {
   duckdb_nodes?: number
   duckdb_queries?: number
   duckdb_errors?: number
+  compaction_runs?: number
+  compaction_input_chunks?: number
+  compaction_output_chunks?: number
   nodes: LogEngineNode[]
 }
 
@@ -395,6 +398,14 @@ export interface LogEngineNode {
   duckdb_threads?: number
   duckdb_queries?: number
   duckdb_errors?: number
+  compaction_runs?: number
+  compaction_input_chunks?: number
+  compaction_output_chunks?: number
+  compaction_deleted_chunks?: number
+  compaction_records?: number
+  compaction_running?: boolean
+  compaction_target_bytes?: number
+  last_compaction_unix_nano?: number
 }
 
 // DependenciesData matches router.DependenciesData from Go

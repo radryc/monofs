@@ -302,3 +302,36 @@ func TestCompactorWritesMultipleRowGroups(t *testing.T) {
 		t.Fatal("compacted manifest parquet_bytes is zero")
 	}
 }
+
+func TestCompactorStatsTracksLastRun(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_compact_stats_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	ctx := context.Background()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{LocalCacheDir: filepath.Join(tmpDir, "cache")})
+	hour := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	for idx := 0; idx < 2; idx++ {
+		start := hour.Add(time.Duration(idx) * time.Minute)
+		if err := engine.IngestLogs(ctx, fmt.Sprintf("chunk-stats-%d-%d", idx, start.UnixNano()), []LogRecord{
+			{Timestamp: start, Service: "payment", Level: "info", RawMessage: "a"},
+			{Timestamp: start.Add(time.Second), Service: "payment", Level: "info", RawMessage: "b"},
+		}); err != nil {
+			t.Fatalf("IngestLogs(%d) error = %v", idx, err)
+		}
+	}
+	if _, err := engine.CompactRange(ctx, SignalLogs, hour, hour.Add(time.Hour)); err != nil {
+		t.Fatalf("CompactRange() error = %v", err)
+	}
+	stats := engine.CompactionStats()
+	if stats.Runs != 1 || stats.LastRun.IsZero() {
+		t.Fatalf("compaction stats = %+v", stats)
+	}
+	if stats.LastResult.OutputChunks != 1 || stats.InputChunks != 2 {
+		t.Fatalf("compaction totals = %+v", stats)
+	}
+	if stats.TargetBytes != 256<<20 {
+		t.Fatalf("target bytes = %d", stats.TargetBytes)
+	}
+}

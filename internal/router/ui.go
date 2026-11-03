@@ -1647,17 +1647,28 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 		DuckDBThreads     int32  `json:"duckdb_threads,omitempty"`
 		DuckDBQueries     uint64 `json:"duckdb_queries,omitempty"`
 		DuckDBErrors      uint64 `json:"duckdb_errors,omitempty"`
+		CompactionRuns    uint64 `json:"compaction_runs"`
+		CompactionInput   uint64 `json:"compaction_input_chunks"`
+		CompactionOutput  uint64 `json:"compaction_output_chunks"`
+		CompactionDeleted uint64 `json:"compaction_deleted_chunks"`
+		CompactionRecords uint64 `json:"compaction_records"`
+		CompactionRunning bool   `json:"compaction_running"`
+		CompactionTarget  int64  `json:"compaction_target_bytes"`
+		LastCompaction    int64  `json:"last_compaction_unix_nano"`
 	}
 
 	var (
-		nodes             []nodeLogStats
-		totalLogs         int64
-		totalMetrics      int64
-		totalTraces       int64
-		totalDuckDBQuery  uint64
-		totalDuckDBErrors uint64
-		duckDBNodes       int
-		anyEnabled        bool
+		nodes               []nodeLogStats
+		totalLogs           int64
+		totalMetrics        int64
+		totalTraces         int64
+		totalDuckDBQuery    uint64
+		totalDuckDBErrors   uint64
+		totalCompactionRuns uint64
+		totalCompactionIn   uint64
+		totalCompactionOut  uint64
+		duckDBNodes         int
+		anyEnabled          bool
 	)
 
 	for nodeID, state := range nodesSnapshot {
@@ -1675,6 +1686,14 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 			ns.DuckDBThreads = le.DuckdbThreads
 			ns.DuckDBQueries = le.DuckdbQueries
 			ns.DuckDBErrors = le.DuckdbErrors
+			ns.CompactionRuns = le.CompactionRuns
+			ns.CompactionInput = le.CompactionInputChunks
+			ns.CompactionOutput = le.CompactionOutputChunks
+			ns.CompactionDeleted = le.CompactionDeletedChunks
+			ns.CompactionRecords = le.CompactionRecords
+			ns.CompactionRunning = le.CompactionRunning
+			ns.CompactionTarget = le.CompactionTargetBytes
+			ns.LastCompaction = le.LastCompactionUnixNano
 			if le.Enabled {
 				anyEnabled = true
 				totalLogs += le.LogChunks
@@ -1686,6 +1705,9 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 				totalDuckDBQuery += le.DuckdbQueries
 				totalDuckDBErrors += le.DuckdbErrors
 			}
+			totalCompactionRuns += le.CompactionRuns
+			totalCompactionIn += le.CompactionInputChunks
+			totalCompactionOut += le.CompactionOutputChunks
 		}
 		nodes = append(nodes, ns)
 	}

@@ -6859,18 +6859,26 @@ func (x *NodeStatInfo) GetLogEngine() *LogEngineStats {
 }
 
 type LogEngineStats struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	Enabled           bool                   `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	LogChunks         int64                  `protobuf:"varint,2,opt,name=log_chunks,json=logChunks,proto3" json:"log_chunks,omitempty"`
-	MetricChunks      int64                  `protobuf:"varint,3,opt,name=metric_chunks,json=metricChunks,proto3" json:"metric_chunks,omitempty"`
-	TraceChunks       int64                  `protobuf:"varint,4,opt,name=trace_chunks,json=traceChunks,proto3" json:"trace_chunks,omitempty"`
-	DuckdbEnabled     bool                   `protobuf:"varint,5,opt,name=duckdb_enabled,json=duckdbEnabled,proto3" json:"duckdb_enabled,omitempty"`
-	DuckdbMemoryLimit string                 `protobuf:"bytes,6,opt,name=duckdb_memory_limit,json=duckdbMemoryLimit,proto3" json:"duckdb_memory_limit,omitempty"`
-	DuckdbThreads     int32                  `protobuf:"varint,7,opt,name=duckdb_threads,json=duckdbThreads,proto3" json:"duckdb_threads,omitempty"`
-	DuckdbQueries     uint64                 `protobuf:"varint,8,opt,name=duckdb_queries,json=duckdbQueries,proto3" json:"duckdb_queries,omitempty"`
-	DuckdbErrors      uint64                 `protobuf:"varint,9,opt,name=duckdb_errors,json=duckdbErrors,proto3" json:"duckdb_errors,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state                   protoimpl.MessageState `protogen:"open.v1"`
+	Enabled                 bool                   `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	LogChunks               int64                  `protobuf:"varint,2,opt,name=log_chunks,json=logChunks,proto3" json:"log_chunks,omitempty"`
+	MetricChunks            int64                  `protobuf:"varint,3,opt,name=metric_chunks,json=metricChunks,proto3" json:"metric_chunks,omitempty"`
+	TraceChunks             int64                  `protobuf:"varint,4,opt,name=trace_chunks,json=traceChunks,proto3" json:"trace_chunks,omitempty"`
+	DuckdbEnabled           bool                   `protobuf:"varint,5,opt,name=duckdb_enabled,json=duckdbEnabled,proto3" json:"duckdb_enabled,omitempty"`
+	DuckdbMemoryLimit       string                 `protobuf:"bytes,6,opt,name=duckdb_memory_limit,json=duckdbMemoryLimit,proto3" json:"duckdb_memory_limit,omitempty"`
+	DuckdbThreads           int32                  `protobuf:"varint,7,opt,name=duckdb_threads,json=duckdbThreads,proto3" json:"duckdb_threads,omitempty"`
+	DuckdbQueries           uint64                 `protobuf:"varint,8,opt,name=duckdb_queries,json=duckdbQueries,proto3" json:"duckdb_queries,omitempty"`
+	DuckdbErrors            uint64                 `protobuf:"varint,9,opt,name=duckdb_errors,json=duckdbErrors,proto3" json:"duckdb_errors,omitempty"`
+	CompactionRuns          uint64                 `protobuf:"varint,10,opt,name=compaction_runs,json=compactionRuns,proto3" json:"compaction_runs,omitempty"`
+	CompactionInputChunks   uint64                 `protobuf:"varint,11,opt,name=compaction_input_chunks,json=compactionInputChunks,proto3" json:"compaction_input_chunks,omitempty"`
+	CompactionOutputChunks  uint64                 `protobuf:"varint,12,opt,name=compaction_output_chunks,json=compactionOutputChunks,proto3" json:"compaction_output_chunks,omitempty"`
+	CompactionDeletedChunks uint64                 `protobuf:"varint,13,opt,name=compaction_deleted_chunks,json=compactionDeletedChunks,proto3" json:"compaction_deleted_chunks,omitempty"`
+	CompactionRecords       uint64                 `protobuf:"varint,14,opt,name=compaction_records,json=compactionRecords,proto3" json:"compaction_records,omitempty"`
+	LastCompactionUnixNano  int64                  `protobuf:"varint,15,opt,name=last_compaction_unix_nano,json=lastCompactionUnixNano,proto3" json:"last_compaction_unix_nano,omitempty"`
+	CompactionRunning       bool                   `protobuf:"varint,16,opt,name=compaction_running,json=compactionRunning,proto3" json:"compaction_running,omitempty"`
+	CompactionTargetBytes   int64                  `protobuf:"varint,17,opt,name=compaction_target_bytes,json=compactionTargetBytes,proto3" json:"compaction_target_bytes,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *LogEngineStats) Reset() {
@@ -6962,6 +6970,62 @@ func (x *LogEngineStats) GetDuckdbQueries() uint64 {
 func (x *LogEngineStats) GetDuckdbErrors() uint64 {
 	if x != nil {
 		return x.DuckdbErrors
+	}
+	return 0
+}
+
+func (x *LogEngineStats) GetCompactionRuns() uint64 {
+	if x != nil {
+		return x.CompactionRuns
+	}
+	return 0
+}
+
+func (x *LogEngineStats) GetCompactionInputChunks() uint64 {
+	if x != nil {
+		return x.CompactionInputChunks
+	}
+	return 0
+}
+
+func (x *LogEngineStats) GetCompactionOutputChunks() uint64 {
+	if x != nil {
+		return x.CompactionOutputChunks
+	}
+	return 0
+}
+
+func (x *LogEngineStats) GetCompactionDeletedChunks() uint64 {
+	if x != nil {
+		return x.CompactionDeletedChunks
+	}
+	return 0
+}
+
+func (x *LogEngineStats) GetCompactionRecords() uint64 {
+	if x != nil {
+		return x.CompactionRecords
+	}
+	return 0
+}
+
+func (x *LogEngineStats) GetLastCompactionUnixNano() int64 {
+	if x != nil {
+		return x.LastCompactionUnixNano
+	}
+	return 0
+}
+
+func (x *LogEngineStats) GetCompactionRunning() bool {
+	if x != nil {
+		return x.CompactionRunning
+	}
+	return false
+}
+
+func (x *LogEngineStats) GetCompactionTargetBytes() int64 {
+	if x != nil {
+		return x.CompactionTargetBytes
 	}
 	return 0
 }
@@ -12955,7 +13019,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x0elast_heartbeat\x18\v \x01(\x03R\rlastHeartbeat\x12'\n" +
 	"\x03kvs\x18\f \x01(\v2\x15.monofs.KVSNodeStatusR\x03kvs\x125\n" +
 	"\n" +
-	"log_engine\x18\r \x01(\v2\x16.monofs.LogEngineStatsR\tlogEngine\"\xdb\x02\n" +
+	"log_engine\x18\r \x01(\v2\x16.monofs.LogEngineStatsR\tlogEngine\"\x83\x06\n" +
 	"\x0eLogEngineStats\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x1d\n" +
 	"\n" +
@@ -12966,7 +13030,16 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\x13duckdb_memory_limit\x18\x06 \x01(\tR\x11duckdbMemoryLimit\x12%\n" +
 	"\x0educkdb_threads\x18\a \x01(\x05R\rduckdbThreads\x12%\n" +
 	"\x0educkdb_queries\x18\b \x01(\x04R\rduckdbQueries\x12#\n" +
-	"\rduckdb_errors\x18\t \x01(\x04R\fduckdbErrors\"V\n" +
+	"\rduckdb_errors\x18\t \x01(\x04R\fduckdbErrors\x12'\n" +
+	"\x0fcompaction_runs\x18\n" +
+	" \x01(\x04R\x0ecompactionRuns\x126\n" +
+	"\x17compaction_input_chunks\x18\v \x01(\x04R\x15compactionInputChunks\x128\n" +
+	"\x18compaction_output_chunks\x18\f \x01(\x04R\x16compactionOutputChunks\x12:\n" +
+	"\x19compaction_deleted_chunks\x18\r \x01(\x04R\x17compactionDeletedChunks\x12-\n" +
+	"\x12compaction_records\x18\x0e \x01(\x04R\x11compactionRecords\x129\n" +
+	"\x19last_compaction_unix_nano\x18\x0f \x01(\x03R\x16lastCompactionUnixNano\x12-\n" +
+	"\x12compaction_running\x18\x10 \x01(\bR\x11compactionRunning\x126\n" +
+	"\x17compaction_target_bytes\x18\x11 \x01(\x03R\x15compactionTargetBytes\"V\n" +
 	"\x13DrainClusterRequest\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12'\n" +
 	"\x0ftimeout_seconds\x18\x02 \x01(\x03R\x0etimeoutSeconds\"i\n" +
