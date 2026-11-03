@@ -294,3 +294,29 @@ func (r *Router) filterWorkspaceJobs(req *http.Request, resp *pb.ListWorkspaceSy
 	}
 	return out
 }
+
+// queryScope resolves the caller's visible partitions for a telemetry query.
+// The second result reports whether the query is restricted. Metrics are
+// always visible under the Strata policy and return unrestricted.
+func (r *Router) queryScope(ctx context.Context, signal policy.Signal) ([]string, bool) {
+	st := r.accessPolicySnapshot()
+	if st == nil || !st.enforce {
+		return nil, false
+	}
+	p := st.loader.Get()
+	if p == nil {
+		return []string{}, true
+	}
+	id, _ := authz.IdentityFromContext(ctx)
+	if p.IsAdmin(id) {
+		return nil, false
+	}
+	if signal == policy.SignalMetrics {
+		return nil, false
+	}
+	names, all := p.VisiblePartitions(id)
+	if all {
+		return nil, false
+	}
+	return names, true
+}

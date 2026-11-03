@@ -648,6 +648,7 @@ const storageObjectsHealthy = computed(() => storageObjects.value?.healthy ?? fa
               <th class="text-right px-6 py-3 font-medium" title="Number of log data chunks stored on this Doctor node.">Logs</th>
               <th class="text-right px-6 py-3 font-medium" title="Number of metrics data chunks stored on this Doctor node.">Metrics</th>
               <th class="text-right px-6 py-3 font-medium" title="Number of trace data chunks stored on this Doctor node.">Traces</th>
+              <th class="text-right px-6 py-3 font-medium" title="DuckDB query sidecar status and query count.">DuckDB</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-700/20">
@@ -656,6 +657,10 @@ const storageObjectsHealthy = computed(() => storageObjects.value?.healthy ?? fa
               <td class="px-6 py-3 text-right text-slate-300">{{ formatNumber(n.log_chunks) }}</td>
               <td class="px-6 py-3 text-right text-slate-300">{{ formatNumber(n.metric_chunks) }}</td>
               <td class="px-6 py-3 text-right text-slate-300">{{ formatNumber(n.trace_chunks) }}</td>
+              <td class="px-6 py-3 text-right text-slate-300">
+                <span v-if="n.duckdb_enabled" class="text-emerald-400" :title="`${n.duckdb_queries || 0} queries, ${n.duckdb_errors || 0} errors`">enabled</span>
+                <span v-else class="text-slate-500">native</span>
+              </td>
             </tr>
           </tbody>
         </table>

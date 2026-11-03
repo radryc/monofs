@@ -207,6 +207,17 @@ func (q *QueryEngine) StreamLogs(ctx context.Context, queryStr, service string, 
 	observer := beginQueryPathObservation(SignalLogs)
 	defer observer.finish()
 
+	scope, _ := QueryScopeFromContext(ctx)
+	if scope.Restricted {
+		next := yield
+		yield = func(record LogRecord) error {
+			if !scope.allowsLog(record) {
+				return nil
+			}
+			return next(record)
+		}
+	}
+
 	// 1. Parse the MonoFS-compatible query subset.
 	parsed, err := logquery.Parse(queryStr)
 	if err != nil {
@@ -256,7 +267,7 @@ func (q *QueryEngine) StreamLogs(ctx context.Context, queryStr, service string, 
 				continue
 			}
 
-			parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, "data.parquet")
+			parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, chunkDataFileName)
 			if err := q.scanLogParquet(ctx, parquetPath, validRows, compiled, from, to, observer, func(record LogRecord) error {
 				if top.Len() < limit {
 					heap.Push(&top, record)
@@ -337,7 +348,7 @@ func (q *QueryEngine) collectLogChunkRecords(ctx context.Context, candidate cand
 		return nil, nil
 	}
 
-	parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, "data.parquet")
+	parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, chunkDataFileName)
 	records := make([]LogRecord, 0)
 	if err := q.scanLogParquet(ctx, parquetPath, validRows, compiled, from, to, observer, func(record LogRecord) error {
 		records = append(records, record)
@@ -825,7 +836,7 @@ func (q *QueryEngine) StreamMetrics(ctx context.Context, query MetricQuery, from
 
 	returned := 0
 	for _, candidate := range candidates {
-		if err := q.scanMetricParquet(ctx, filepath.Join("chunks", string(SignalMetrics), candidate.chunkID, "data.parquet"), query, compiledMatchers, from, to, observer, func(record MetricRecord) error {
+		if err := q.scanMetricParquet(ctx, filepath.Join("chunks", string(SignalMetrics), candidate.chunkID, chunkDataFileName), query, compiledMatchers, from, to, observer, func(record MetricRecord) error {
 			if err := yield(record); err != nil {
 				return err
 			}
@@ -908,7 +919,7 @@ func (q *QueryEngine) StreamMetricSeries(ctx context.Context, query MetricQuery,
 			// Chunks written before the series index existed still need to be
 			// discoverable. Fall back to the sample scan for that chunk only;
 			// new chunks continue to use the metadata path.
-			if scanErr := q.scanMetricParquet(ctx, filepath.Join("chunks", string(SignalMetrics), candidate.chunkID, "data.parquet"), query, compiledMatchers, from, to, observer, func(record MetricRecord) error {
+			if scanErr := q.scanMetricParquet(ctx, filepath.Join("chunks", string(SignalMetrics), candidate.chunkID, chunkDataFileName), query, compiledMatchers, from, to, observer, func(record MetricRecord) error {
 				if record.MetricName == "" || record.Timestamp.IsZero() {
 					return nil
 				}
@@ -1268,6 +1279,17 @@ func (q *QueryEngine) StreamTraces(ctx context.Context, traceID, service string,
 	observer := beginQueryPathObservation(SignalTraces)
 	defer observer.finish()
 
+	scope, _ := QueryScopeFromContext(ctx)
+	if scope.Restricted {
+		next := yield
+		yield = func(record SpanRecord) error {
+			if !scope.allowsSpan(record) {
+				return nil
+			}
+			return next(record)
+		}
+	}
+
 	listStart := time.Now()
 	chunkIDs, err := q.store.ListChunkPaths(ctx, SignalTraces, from, to)
 	observer.observeStage("chunk_listing", listStart)
@@ -1288,7 +1310,7 @@ func (q *QueryEngine) StreamTraces(ctx context.Context, traceID, service string,
 				break
 			}
 
-			if err := q.scanTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, "data.parquet"), traceID, service, from, to, observer, func(record SpanRecord) error {
+			if err := q.scanTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, chunkDataFileName), traceID, service, from, to, observer, func(record SpanRecord) error {
 				if top.Len() < limit {
 					heap.Push(&top, record)
 					return nil
@@ -1378,7 +1400,7 @@ func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, tr
 
 func (q *QueryEngine) collectTraceChunkRecords(ctx context.Context, candidate candidateChunk, traceID, service string, from, to time.Time, observer *queryPathObserver) ([]SpanRecord, error) {
 	records := make([]SpanRecord, 0)
-	if err := q.scanTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, "data.parquet"), traceID, service, from, to, observer, func(record SpanRecord) error {
+	if err := q.scanTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, chunkDataFileName), traceID, service, from, to, observer, func(record SpanRecord) error {
 		records = append(records, record)
 		return nil
 	}); err != nil {

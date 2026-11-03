@@ -116,6 +116,28 @@ jobs:
         working-directory: monofs
         run: make test-race
 
+  test-duckdb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: monofs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/kvs
+          path: kvs
+      - uses: actions/checkout@v7
+        with:
+          repository: radryc/cfg
+          path: cfg
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: monofs/go.mod
+          cache-dependency-path: monofs/go.sum
+      - name: DuckDB tests
+        working-directory: monofs
+        run: make test-duckdb
+
   build:
     needs: [test, test-race]
     runs-on: ubuntu-latest
