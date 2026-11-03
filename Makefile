@@ -23,6 +23,7 @@ PIPELINE_WORKER_BINARY := monofs-pipeline-worker
 CACHE_BINARY := monofs-cache
 BAZELCTL_BINARY := monofs-bazelctl
 LOGENGINE_COMPACT_BINARY := monofs-logengine-compact
+LOGQUERY_BINARY := monofs-logquery
 FUSE_PLUGIN_BINARY := k8s-fuse-device-plugin
 
 # Directories
@@ -64,8 +65,8 @@ ROUTER_B_PEERS ?= router-a=http://router-a:8080
 .DEFAULT_GOAL := build
 
 # Phony targets
-.PHONY: all build build-server build-client build-router build-admin build-session build-search build-fetcher build-trace-dump build-loadtest build-registry build-pipeline-worker build-cache build-bazelctl build-logengine-compact build-fuse-plugin build-kmod clean clean-kmod proto proto-check \
-        test test-unit test-e2e test-e2e-sudo test-smoke test-race test-coverage vet fmt fmt-check tidy \
+.PHONY: all build build-server build-client build-router build-admin build-session build-search build-fetcher build-trace-dump build-loadtest build-registry build-pipeline-worker build-cache build-bazelctl build-logengine-compact build-logquery build-server-duckdb build-fuse-plugin build-kmod clean clean-kmod proto proto-check \
+        test test-unit test-duckdb test-e2e test-e2e-sudo test-smoke test-race test-coverage vet fmt fmt-check tidy \
         install-tools run-server run-client run-router run-cluster help \
         deploy deploy-s3 deploy-s3-external deploy-s3-clean deploy-stop deploy-clean deploy-restart deploy-local deploy-local-stop deploy-local-clean deploy-local-restart \
         mount mount-writable unmount mount-kmod umount-kmod \
@@ -137,6 +138,14 @@ build-bazelctl: $(BIN_DIR) ## Build the Bazel migration CLI
 build-logengine-compact: $(BIN_DIR) ## Build the offline log compactor
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(LOGENGINE_COMPACT_BINARY) ./$(CMD_DIR)/$(LOGENGINE_COMPACT_BINARY)
 	@echo "Built $(BIN_DIR)/$(LOGENGINE_COMPACT_BINARY)"
+
+build-logquery: $(BIN_DIR) ## Build the DuckDB query sidecar (CGo)
+	CGO_ENABLED=1 $(GOBUILD) -tags duckdb $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(LOGQUERY_BINARY) ./$(CMD_DIR)/$(LOGQUERY_BINARY)
+	@echo "Built $(BIN_DIR)/$(LOGQUERY_BINARY)"
+
+build-server-duckdb: $(BIN_DIR) ## Build the server binary with embedded DuckDB
+	CGO_ENABLED=1 $(GOBUILD) -tags duckdb $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(SERVER_BINARY)-duckdb ./$(CMD_DIR)/$(SERVER_BINARY)
+	@echo "Built $(BIN_DIR)/$(SERVER_BINARY)-duckdb"
 
 build-fuse-plugin: $(BIN_DIR) ## Build the Kubernetes FUSE device plugin
 	$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(FUSE_PLUGIN_BINARY) ./$(CMD_DIR)/$(FUSE_PLUGIN_BINARY)
@@ -658,6 +667,9 @@ test: test-unit ## Run all tests (alias for test-unit)
 
 test-unit: ## Run unit tests only
 	$(GOTEST) -v -count=1 ./internal/...
+
+test-duckdb: ## Run DuckDB tests (requires CGo)
+	CGO_ENABLED=1 $(GOTEST) -tags duckdb -count=1 ./internal/storage/logengine/... ./internal/server/... ./cmd/monofs-logquery/...
 
 test-deadlock: ## Run deadlock detection tests
 	@echo "Running deadlock detection tests..."

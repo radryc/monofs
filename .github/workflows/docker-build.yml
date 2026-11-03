@@ -39,6 +39,9 @@ jobs:
           - name: search
             dockerfile: Dockerfile.search
             build_target: ""
+          - name: logquery
+            dockerfile: Dockerfile.logquery
+            build_target: ""
     steps:
       - uses: actions/checkout@v4
 

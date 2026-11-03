@@ -183,6 +183,7 @@ func (q *QueryEngine) traceDiscoveryManifests(ctx context.Context, from, to time
 		remaining = append(remaining, chunkID)
 	}
 	q.prefetchManifests(ctx, SignalTraces, remaining)
+	scope, _ := QueryScopeFromContext(ctx)
 	candidates := make([]candidateChunk, 0, len(remaining))
 	for _, chunkID := range remaining {
 		manifest, err := q.store.ReadManifest(ctx, SignalTraces, chunkID)
@@ -198,6 +199,9 @@ func (q *QueryEngine) traceDiscoveryManifests(ctx context.Context, from, to time
 		if !from.IsZero() && manifest.MaxTime.Before(from) {
 			continue
 		}
+		if !manifestMatchesScope(manifest, scope) {
+			continue
+		}
 		candidates = append(candidates, candidateChunk{chunkID: chunkID, manifest: manifest, cutoffMax: manifest.MaxTime})
 	}
 	return candidates, nil
@@ -206,8 +210,12 @@ func (q *QueryEngine) traceDiscoveryManifests(ctx context.Context, from, to time
 func (q *QueryEngine) scanTraceDiscovery(ctx context.Context, chunkID string, collect func(SpanRecord)) error {
 	observer := beginQueryPathObservation(SignalTraces)
 	defer observer.finish()
-	path := filepath.Join("chunks", string(SignalTraces), chunkID, "data.parquet")
+	scope, _ := QueryScopeFromContext(ctx)
+	path := filepath.Join("chunks", string(SignalTraces), chunkID, chunkDataFileName)
 	return q.scanTraceParquet(ctx, path, "", "", time.Time{}, time.Time{}, observer, func(record SpanRecord) error {
+		if scope.Restricted && !scope.allowsSpan(record) {
+			return nil
+		}
 		collect(record)
 		return nil
 	})

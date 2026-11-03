@@ -27,6 +27,8 @@ type doctorStreamBackendStub struct {
 	streamMetricCalls int
 	queryTraceCalls   int
 	streamTraceCalls  int
+	aggregateRows     []logengine.AggregateRow
+	lastAggregate     logengine.AggregateQuery
 }
 
 func (s *doctorStreamBackendStub) IngestLogs(context.Context, string, []logengine.LogRecord) error {
@@ -93,6 +95,11 @@ func (s *doctorStreamBackendStub) StreamTraces(_ context.Context, _ string, _ st
 		}
 	}
 	return nil
+}
+
+func (s *doctorStreamBackendStub) Aggregate(_ context.Context, query logengine.AggregateQuery) ([]logengine.AggregateRow, error) {
+	s.lastAggregate = query
+	return append([]logengine.AggregateRow(nil), s.aggregateRows...), nil
 }
 
 func (s *doctorStreamBackendStub) Stats(context.Context) (logengine.LogEngineStats, error) {

@@ -68,6 +68,9 @@ service MonoFSRouter {
     rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
     rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
     rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
+    // AggregateTelemetry performs a shard-local partial aggregation. The
+    // router fans this out and merges the partial rows.
+    rpc AggregateTelemetry(AggregateTelemetryRequest) returns (AggregateTelemetryResponse);
     rpc IngestLogs(IngestLogsRequest) returns (IngestLogsResponse);
     rpc IngestMetrics(IngestMetricsRequest) returns (IngestMetricsResponse);
     rpc IngestTraces(IngestTracesRequest) returns (IngestTracesResponse);
@@ -171,6 +174,9 @@ service MonoFS {
     rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
     rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
     rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
+    // AggregateTelemetry performs a shard-local partial aggregation. The
+    // router fans this out and merges the partial rows.
+    rpc AggregateTelemetry(AggregateTelemetryRequest) returns (AggregateTelemetryResponse);
     rpc IngestLogs(IngestLogsRequest) returns (IngestLogsResponse);
     rpc IngestMetrics(IngestMetricsRequest) returns (IngestMetricsResponse);
     rpc IngestTraces(IngestTracesRequest) returns (IngestTracesResponse);
@@ -922,6 +928,19 @@ message LogEngineStats {
     int64 log_chunks = 2;
     int64 metric_chunks = 3;
     int64 trace_chunks = 4;
+    bool duckdb_enabled = 5;
+    string duckdb_memory_limit = 6;
+    int32 duckdb_threads = 7;
+    uint64 duckdb_queries = 8;
+    uint64 duckdb_errors = 9;
+    uint64 compaction_runs = 10;
+    uint64 compaction_input_chunks = 11;
+    uint64 compaction_output_chunks = 12;
+    uint64 compaction_deleted_chunks = 13;
+    uint64 compaction_records = 14;
+    int64 last_compaction_unix_nano = 15;
+    bool compaction_running = 16;
+    int64 compaction_target_bytes = 17;
 }
 
 // Cluster maintenance messages
@@ -1230,6 +1249,10 @@ message QueryLogsRequest {
     // batch_size requests batched QueryResultItem responses (items_json) of up
     // to this many records. Zero keeps the legacy one-record-per-message stream.
     int32 batch_size = 6;
+    // visible_partitions carries the caller's authorized log partitions. When
+    // visible_partitions_set is false the query is unrestricted.
+    repeated string visible_partitions = 7;
+    bool visible_partitions_set = 8;
 }
 
 message QueryLogsResponse {
@@ -1259,6 +1282,8 @@ message QueryMetricsRequest {
     // batch_size requests batched QueryResultItem responses (items_json) of up
     // to this many records. Zero keeps the legacy one-record-per-message stream.
     int32 batch_size = 6;
+    repeated string visible_partitions = 7;
+    bool visible_partitions_set = 8;
 }
 
 message QueryMetricsResponse {
@@ -1278,10 +1303,55 @@ message QueryTracesRequest {
     // Supported values: services, tags, tag_values.
     string discovery = 7;
     string discovery_tag = 8;
+    repeated string visible_partitions = 9;
+    bool visible_partitions_set = 10;
 }
 
 message QueryTracesResponse {
     bytes results_json = 1;
+}
+
+enum AggregateOp {
+    AGGREGATE_OP_UNSPECIFIED = 0;
+    AGGREGATE_OP_COUNT = 1;
+    AGGREGATE_OP_SUM = 2;
+    AGGREGATE_OP_MIN = 3;
+    AGGREGATE_OP_MAX = 4;
+}
+
+message AggregateSpec {
+    AggregateOp op = 1;
+    // field is a top-level telemetry field (timestamp, service, value,
+    // metric_name, level, status_code, partition) or a label/attribute path
+    // such as labels.env or attributes.http.method.
+    string field = 2;
+    // alias is the output key; when empty it is derived as <op>_<field>.
+    string alias = 3;
+}
+
+message AggregateTelemetryRequest {
+    // signal is logs, metrics, or traces.
+    string signal = 1;
+    string query = 2;
+    int64 from_unix_nano = 3;
+    int64 to_unix_nano = 4;
+    string service = 5;
+    string metric_name = 6;
+    string trace_id = 7;
+    repeated MetricLabelMatcher label_matchers = 8;
+    repeated string group_by = 9;
+    repeated AggregateSpec aggregates = 10;
+    repeated string visible_partitions = 11;
+    bool visible_partitions_set = 12;
+    // limit is applied by the coordinator after merging all shard rows.
+    int32 limit = 13;
+}
+
+message AggregateTelemetryResponse {
+    // rows_json is a JSON array of {"group":{...},"values":{...}} objects.
+    // Values are numbers; the coordinator preserves integer precision by
+    // decoding with json.Number.
+    bytes rows_json = 1;
 }
 
 message QueryResultItem {

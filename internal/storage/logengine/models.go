@@ -79,9 +79,16 @@ type ChunkManifest struct {
 	MaxTime           time.Time           `json:"max_time"`
 	Services          []string            `json:"services,omitempty"`
 	Levels            []string            `json:"levels,omitempty"`
+	Partitions        []string            `json:"partitions,omitempty"`
 	LabelValues       map[string][]string `json:"label_values,omitempty"`
 	MetricNames       []string            `json:"metric_names,omitempty"`
 	MetricLabelValues map[string][]string `json:"metric_label_values,omitempty"`
+	ParquetBytes      int64               `json:"parquet_bytes,omitempty"`
+	RecordCount       int64               `json:"record_count,omitempty"`
+	RowGroups         int                 `json:"row_groups,omitempty"`
+	CompactionLevel   int                 `json:"compaction_level,omitempty"`
+	CompactionSources []string            `json:"compaction_sources,omitempty"`
+	SchemaVersion     int                 `json:"schema_version,omitempty"`
 	// TraceBloom is a serialized bloom filter for trace IDs. Logs also use it
 	// so trace-id lookups can prune chunks without opening Parquet.
 	TraceBloom []byte `json:"trace_bloom,omitempty"`

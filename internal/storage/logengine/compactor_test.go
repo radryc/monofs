@@ -207,3 +207,131 @@ func TestCompactorGroupsLogsByService(t *testing.T) {
 		}
 	}
 }
+
+func TestCompactorGroupsByPartitionAndService(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_compact_partition_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+	hour := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	records := [][]LogRecord{
+		{
+			{Timestamp: hour.Add(time.Minute), Service: "alpha", Level: "info", RawMessage: "a-eu", Labels: map[string]string{"guardian.partition": "prod-eu"}},
+			{Timestamp: hour.Add(2 * time.Minute), Service: "alpha", Level: "info", RawMessage: "a-us", Labels: map[string]string{"guardian.partition": "prod-us"}},
+		},
+		{
+			{Timestamp: hour.Add(3 * time.Minute), Service: "alpha", Level: "info", RawMessage: "b-eu", Labels: map[string]string{"guardian.partition": "prod-eu"}},
+			{Timestamp: hour.Add(4 * time.Minute), Service: "alpha", Level: "info", RawMessage: "b-us", Labels: map[string]string{"guardian.partition": "prod-us"}},
+		},
+	}
+	for idx, chunkRecords := range records {
+		chunkID := fmt.Sprintf("chunk-partition-%d-%d", idx, chunkRecords[0].Timestamp.UnixNano())
+		if err := engine.IngestLogs(ctx, chunkID, chunkRecords); err != nil {
+			t.Fatalf("IngestLogs(%d) error = %v", idx, err)
+		}
+	}
+	if _, err := engine.CompactRange(ctx, SignalLogs, hour, hour.Add(time.Hour)); err != nil {
+		t.Fatalf("CompactRange() error = %v", err)
+	}
+	paths, err := engine.store.ListChunkPaths(ctx, SignalLogs, hour, hour.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListChunkPaths() error = %v", err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("compacted paths = %v, want one per partition/service group", paths)
+	}
+	for _, path := range paths {
+		manifest, err := engine.store.ReadManifest(ctx, SignalLogs, path)
+		if err != nil {
+			t.Fatalf("ReadManifest() error = %v", err)
+		}
+		if len(manifest.Partitions) != 1 {
+			t.Fatalf("manifest partitions = %v, want one partition per output", manifest.Partitions)
+		}
+	}
+}
+
+func TestCompactorWritesMultipleRowGroups(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_compact_rowgroup_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+	engine.ingester.rowGroupRows = 2
+	hour := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	for idx := 0; idx < 2; idx++ {
+		start := hour.Add(time.Duration(idx) * time.Minute)
+		records := []LogRecord{
+			{Timestamp: start, Service: "payment", Level: "info", RawMessage: "a", Labels: map[string]string{"guardian.partition": "prod-eu"}},
+			{Timestamp: start.Add(time.Second), Service: "payment", Level: "info", RawMessage: "b", Labels: map[string]string{"guardian.partition": "prod-eu"}},
+			{Timestamp: start.Add(2 * time.Second), Service: "payment", Level: "info", RawMessage: "c", Labels: map[string]string{"guardian.partition": "prod-eu"}},
+		}
+		chunkID := fmt.Sprintf("chunk-rowgroup-%d-%d", idx, start.UnixNano())
+		if err := engine.IngestLogs(ctx, chunkID, records); err != nil {
+			t.Fatalf("IngestLogs(%d) error = %v", idx, err)
+		}
+	}
+	if _, err := engine.CompactRange(ctx, SignalLogs, hour, hour.Add(time.Hour)); err != nil {
+		t.Fatalf("CompactRange() error = %v", err)
+	}
+	paths, err := engine.store.ListChunkPaths(ctx, SignalLogs, hour, hour.Add(time.Hour))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("ListChunkPaths() = %v, %v", paths, err)
+	}
+	manifest, err := engine.store.ReadManifest(ctx, SignalLogs, paths[0])
+	if err != nil {
+		t.Fatalf("ReadManifest() error = %v", err)
+	}
+	if manifest.RowGroups != 3 {
+		t.Fatalf("compacted row groups = %d, want 3", manifest.RowGroups)
+	}
+	if manifest.ParquetBytes == 0 {
+		t.Fatal("compacted manifest parquet_bytes is zero")
+	}
+}
+
+func TestCompactorStatsTracksLastRun(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_compact_stats_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	ctx := context.Background()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{LocalCacheDir: filepath.Join(tmpDir, "cache")})
+	hour := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	for idx := 0; idx < 2; idx++ {
+		start := hour.Add(time.Duration(idx) * time.Minute)
+		if err := engine.IngestLogs(ctx, fmt.Sprintf("chunk-stats-%d-%d", idx, start.UnixNano()), []LogRecord{
+			{Timestamp: start, Service: "payment", Level: "info", RawMessage: "a"},
+			{Timestamp: start.Add(time.Second), Service: "payment", Level: "info", RawMessage: "b"},
+		}); err != nil {
+			t.Fatalf("IngestLogs(%d) error = %v", idx, err)
+		}
+	}
+	if _, err := engine.CompactRange(ctx, SignalLogs, hour, hour.Add(time.Hour)); err != nil {
+		t.Fatalf("CompactRange() error = %v", err)
+	}
+	stats := engine.CompactionStats()
+	if stats.Runs != 1 || stats.LastRun.IsZero() {
+		t.Fatalf("compaction stats = %+v", stats)
+	}
+	if stats.LastResult.OutputChunks != 1 || stats.InputChunks != 2 {
+		t.Fatalf("compaction totals = %+v", stats)
+	}
+	if stats.TargetBytes != 256<<20 {
+		t.Fatalf("target bytes = %d", stats.TargetBytes)
+	}
+}

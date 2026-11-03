@@ -146,6 +146,8 @@ func main() {
 	logengineDir := flag.String("logengine-dir", "", "Directory for the doctor telemetry log engine (empty disables)")
 	logengineCompactInterval := flag.Duration("logengine-compact-interval", 10*time.Minute, "Interval for background telemetry chunk compaction (0 disables)")
 	logengineCompactAge := flag.Duration("logengine-compact-age", time.Hour, "Only compact telemetry chunks older than this")
+	logQuerySidecar := flag.String("logquery-sidecar", "", "Node-local DuckDB query sidecar address (host:port; empty uses the native scanner)")
+	logQuerySidecarFallback := flag.Bool("logquery-sidecar-fallback", true, "Fall back to the native scanner when the DuckDB sidecar is unavailable")
 
 	// Metrics
 	metricsAddr := flag.String("metrics-addr", ":9100", "Listen address for Prometheus /metrics endpoint (empty disables)")
@@ -410,6 +412,19 @@ func main() {
 		}
 		srv.SetDoctorBackend(le)
 		logger.Info("doctor logengine enabled", "dir", dir)
+
+		if sidecarAddr := strings.TrimSpace(*logQuerySidecar); sidecarAddr != "" {
+			conn, err := grpc.NewClient(sidecarAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				logger.Error("failed to connect to logquery sidecar", "addr", sidecarAddr, "error", err)
+				os.Exit(1)
+			}
+			defer conn.Close()
+			srv.SetLogQuerySidecar(pb.NewMonoFSClient(conn), *logQuerySidecarFallback)
+			logger.Info("doctor DuckDB query sidecar enabled",
+				"addr", sidecarAddr,
+				"fallback", *logQuerySidecarFallback)
+		}
 	}
 
 	srv.Register(grpcServer)
