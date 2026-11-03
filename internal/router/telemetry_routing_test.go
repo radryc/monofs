@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -26,6 +27,7 @@ type telemetryTestNodeServer struct {
 	logResults    []byte
 	metricResults []byte
 	traceResults  []byte
+	aggregateRows []byte
 }
 
 type queryResultItemCollector struct {
@@ -115,6 +117,12 @@ func (s *telemetryTestNodeServer) StreamQueryMetrics(_ *pb.QueryMetricsRequest, 
 	return streamTelemetryResults(results, stream.Send)
 }
 
+func (s *telemetryTestNodeServer) AggregateTelemetry(context.Context, *pb.AggregateTelemetryRequest) (*pb.AggregateTelemetryResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return &pb.AggregateTelemetryResponse{RowsJson: append([]byte(nil), s.aggregateRows...)}, nil
+}
+
 func (s *telemetryTestNodeServer) QueryTraces(context.Context, *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,6 +176,7 @@ func newTelemetryRouterHarness(t *testing.T, nodeIDs ...string) (*Router, map[st
 			logResults:    []byte("[]"),
 			metricResults: []byte("[]"),
 			traceResults:  []byte("[]"),
+			aggregateRows: []byte("[]"),
 		}
 		client, cleanup := newTelemetryNodeClient(t, server)
 		router.nodes[nodeID] = &nodeState{
@@ -442,5 +451,46 @@ func TestStreamQueryTracesHonorsMergedLimit(t *testing.T) {
 	}
 	if len(collector.items) != 2 {
 		t.Fatalf("streamed trace count = %d, want 2", len(collector.items))
+	}
+}
+
+func TestAggregateTelemetryMergesShardPartials(t *testing.T) {
+	router, servers, cleanup := newTelemetryRouterHarness(t, "node-a", "node-b")
+	defer cleanup()
+	for _, server := range servers {
+		server.mu.Lock()
+		server.aggregateRows = []byte(`[{"group":{"service":"guardian"},"values":{"count":2,"sum_value":7,"min_ts":100,"max_ts":200}}]`)
+		server.mu.Unlock()
+	}
+	resp, err := router.AggregateTelemetry(context.Background(), &pb.AggregateTelemetryRequest{
+		Signal:  "metrics",
+		GroupBy: []string{"service"},
+		Aggregates: []*pb.AggregateSpec{
+			{Op: pb.AggregateOp_AGGREGATE_OP_COUNT, Alias: "count"},
+			{Op: pb.AggregateOp_AGGREGATE_OP_SUM, Field: "value", Alias: "sum_value"},
+			{Op: pb.AggregateOp_AGGREGATE_OP_MIN, Field: "timestamp", Alias: "min_ts"},
+			{Op: pb.AggregateOp_AGGREGATE_OP_MAX, Field: "timestamp", Alias: "max_ts"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("AggregateTelemetry() error = %v", err)
+	}
+	var rows []aggregateWireRow
+	decoder := json.NewDecoder(bytes.NewReader(resp.GetRowsJson()))
+	decoder.UseNumber()
+	if err := decoder.Decode(&rows); err != nil {
+		t.Fatalf("decode aggregate rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want one merged group", rows)
+	}
+	if got := rows[0].Values["count"].String(); got != "4" {
+		t.Fatalf("count = %s, want 4", got)
+	}
+	if got := rows[0].Values["sum_value"].String(); got != "14" {
+		t.Fatalf("sum = %s, want 14", got)
+	}
+	if got := rows[0].Values["max_ts"].String(); got != "200" {
+		t.Fatalf("max = %s, want 200", got)
 	}
 }

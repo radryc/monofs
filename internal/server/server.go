@@ -78,6 +78,11 @@ type Server struct {
 	// Doctor telemetry backend
 	logEngine DoctorBackend
 
+	// Optional DuckDB query sidecar. When configured, read queries are routed
+	// to it and ingest/stats remain on the local logengine.
+	logQuerySidecar         pb.MonoFSClient
+	logQuerySidecarFallback bool
+
 	// Phase 1B/6: node-owned ledger (WAL-backed when initialization succeeds).
 	workspaceStore *workspacestore.Store
 	ledger         *workspaceledger.Ledger

@@ -24,6 +24,7 @@ import (
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
 	"github.com/radryc/monofs/pkg/authz"
+	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"github.com/radryc/monofs/pkg/repowatch"
 	"google.golang.org/grpc"
@@ -1300,6 +1301,10 @@ func (r *Router) GetNodeForFile(ctx context.Context, req *pb.GetNodeForFileReque
 
 // QueryLogs implements pb.MonoFSRouterServer.
 func (r *Router) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
+	if partitions, restricted := r.queryScope(ctx, policy.SignalLogs); restricted {
+		req.VisiblePartitions = partitions
+		req.VisiblePartitionsSet = true
+	}
 	resultsJSON, err := r.fanoutJSONQueryStream(ctx, int(req.GetLimit()), "merge log results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryLogs(callCtx, req)
 	})
@@ -1311,6 +1316,10 @@ func (r *Router) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 
 // StreamQueryLogs implements pb.MonoFSRouterServer.
 func (r *Router) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	if partitions, restricted := r.queryScope(stream.Context(), policy.SignalLogs); restricted {
+		req.VisiblePartitions = partitions
+		req.VisiblePartitionsSet = true
+	}
 	return r.fanoutQueryItems(stream.Context(), int(req.GetLimit()), "stream log results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryLogs(callCtx, req)
 	}, stream.Send)
@@ -1339,6 +1348,10 @@ func (r *Router) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.Ser
 // distributed across shards are always returned regardless of which node
 // holds the chunks.
 func (r *Router) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
+	if partitions, restricted := r.queryScope(ctx, policy.SignalTraces); restricted {
+		req.VisiblePartitions = partitions
+		req.VisiblePartitionsSet = true
+	}
 	resultsJSON, err := r.fanoutJSONQueryStream(ctx, int(req.GetLimit()), "merge trace results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryTraces(callCtx, req)
 	})
@@ -1350,6 +1363,10 @@ func (r *Router) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*
 
 // StreamQueryTraces implements pb.MonoFSRouterServer.
 func (r *Router) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	if partitions, restricted := r.queryScope(stream.Context(), policy.SignalTraces); restricted {
+		req.VisiblePartitions = partitions
+		req.VisiblePartitionsSet = true
+	}
 	return r.fanoutQueryItems(stream.Context(), int(req.GetLimit()), "stream trace results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryTraces(callCtx, req)
 	}, stream.Send)

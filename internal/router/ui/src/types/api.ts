@@ -377,6 +377,9 @@ export interface LogEngineData {
   log_chunks: number
   metric_chunks: number
   trace_chunks: number
+  duckdb_nodes?: number
+  duckdb_queries?: number
+  duckdb_errors?: number
   nodes: LogEngineNode[]
 }
 
@@ -387,6 +390,11 @@ export interface LogEngineNode {
   log_chunks: number
   metric_chunks: number
   trace_chunks: number
+  duckdb_enabled?: boolean
+  duckdb_memory_limit?: string
+  duckdb_threads?: number
+  duckdb_queries?: number
+  duckdb_errors?: number
 }
 
 // DependenciesData matches router.DependenciesData from Go

@@ -257,6 +257,7 @@ services:
       - "--node-id=node-a"
       - "--db-path=/data/db"
       - "--logengine-dir=/data/logengine"
+      - "--logquery-sidecar=logquery-a:9101"
       - "--git-cache=/data/git"
       - "--kvs-data-dir=/data/kvs"
       - "--kvs-api-addr=node-a:9000"
@@ -302,6 +303,7 @@ services:
       - "--node-id=node-b"
       - "--db-path=/data/db"
       - "--logengine-dir=/data/logengine"
+      - "--logquery-sidecar=logquery-b:9101"
       - "--git-cache=/data/git"
       - "--kvs-data-dir=/data/kvs"
       - "--kvs-api-addr=node-b:9000"
@@ -346,6 +348,7 @@ services:
       - "--node-id=node-c"
       - "--db-path=/data/db"
       - "--logengine-dir=/data/logengine"
+      - "--logquery-sidecar=logquery-c:9101"
       - "--git-cache=/data/git"
       - "--kvs-data-dir=/data/kvs"
       - "--kvs-api-addr=node-c:9000"
@@ -390,6 +393,7 @@ services:
       - "--node-id=node-d"
       - "--db-path=/data/db"
       - "--logengine-dir=/data/logengine"
+      - "--logquery-sidecar=logquery-d:9101"
       - "--git-cache=/data/git"
       - "--kvs-data-dir=/data/kvs"
       - "--kvs-api-addr=node-d:9000"
@@ -434,6 +438,7 @@ services:
       - "--node-id=node-e"
       - "--db-path=/data/db"
       - "--logengine-dir=/data/logengine"
+      - "--logquery-sidecar=logquery-e:9101"
       - "--git-cache=/data/git"
       - "--kvs-data-dir=/data/kvs"
       - "--kvs-api-addr=node-e:9000"
@@ -556,6 +561,114 @@ services:
       - /dev/fuse
     security_opt:
       - apparmor:unconfined
+
+  # DuckDB query sidecars. Each sidecar reads the same node-local logengine
+  # volume as its monofs-server and serves the telemetry query RPCs.
+  logquery-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.logquery
+    command:
+      - "--addr=:9101"
+      - "--logengine-dir=/data/logengine"
+      - "--duckdb-temp-dir=/tmp/duckdb"
+      - "--duckdb-memory-limit=2GB"
+      - "--duckdb-threads=4"
+    volumes:
+      - node-a-data:/data:ro
+    networks:
+      - monofs-net
+    depends_on:
+      - node-a
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/monofs-logquery", "--self-test", "--logengine-dir=/data/logengine", "--duckdb-temp-dir=/tmp/duckdb"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  logquery-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.logquery
+    command:
+      - "--addr=:9101"
+      - "--logengine-dir=/data/logengine"
+      - "--duckdb-temp-dir=/tmp/duckdb"
+      - "--duckdb-memory-limit=2GB"
+      - "--duckdb-threads=4"
+    volumes:
+      - node-b-data:/data:ro
+    networks:
+      - monofs-net
+    depends_on:
+      - node-b
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/monofs-logquery", "--self-test", "--logengine-dir=/data/logengine", "--duckdb-temp-dir=/tmp/duckdb"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  logquery-c:
+    build:
+      context: .
+      dockerfile: Dockerfile.logquery
+    command:
+      - "--addr=:9101"
+      - "--logengine-dir=/data/logengine"
+      - "--duckdb-temp-dir=/tmp/duckdb"
+      - "--duckdb-memory-limit=2GB"
+      - "--duckdb-threads=4"
+    volumes:
+      - node-c-data:/data:ro
+    networks:
+      - monofs-net
+    depends_on:
+      - node-c
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/monofs-logquery", "--self-test", "--logengine-dir=/data/logengine", "--duckdb-temp-dir=/tmp/duckdb"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  logquery-d:
+    build:
+      context: .
+      dockerfile: Dockerfile.logquery
+    command:
+      - "--addr=:9101"
+      - "--logengine-dir=/data/logengine"
+      - "--duckdb-temp-dir=/tmp/duckdb"
+      - "--duckdb-memory-limit=2GB"
+      - "--duckdb-threads=4"
+    volumes:
+      - node-d-data:/data:ro
+    networks:
+      - monofs-net
+    depends_on:
+      - node-d
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/monofs-logquery", "--self-test", "--logengine-dir=/data/logengine", "--duckdb-temp-dir=/tmp/duckdb"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  logquery-e:
+    build:
+      context: .
+      dockerfile: Dockerfile.logquery
+    command:
+      - "--addr=:9101"
+      - "--logengine-dir=/data/logengine"
+      - "--duckdb-temp-dir=/tmp/duckdb"
+      - "--duckdb-memory-limit=2GB"
+      - "--duckdb-threads=4"
+    volumes:
+      - node-e-data:/data:ro
+    networks:
+      - monofs-net
+    depends_on:
+      - node-e
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/monofs-logquery", "--self-test", "--logengine-dir=/data/logengine", "--duckdb-temp-dir=/tmp/duckdb"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   fetcher-a-cache:

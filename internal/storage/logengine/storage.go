@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +29,13 @@ const (
 	// chunks. Queries list only the buckets overlapping their time range instead
 	// of the flat chunks/<signal>/ directory, which grows with retention.
 	chunkTimeBucketDuration = time.Hour
-	chunkTimeBucketLayout   = "2006/01/02/15"
+	// chunkTimeBucketLayout is retained for reading legacy chunks written
+	// before the partition/date/hour layout.
+	chunkTimeBucketLayout = "2006/01/02/15"
+	chunkDateLayout       = "2006-01-02"
+	chunkHourLayout       = "15"
+	// chunkDataFileName is the Parquet segment inside a chunk directory.
+	chunkDataFileName = "segment.parquet"
 	// maxBucketedRangeScan bounds how many hourly buckets a single query will
 	// enumerate before falling back to a recursive bucket walk. This keeps an
 	// accidentally unbounded from/to from turning into thousands of listings.
@@ -70,6 +77,79 @@ type ObjectStoreBackend interface {
 	ListChunks(ctx context.Context, prefix string) ([]string, error)
 	// Delete removes a path and, for a chunk directory, all of its objects.
 	Delete(ctx context.Context, path string) error
+}
+
+// LocalPathProvider is implemented by object stores that expose their objects
+// on the local filesystem (for example the local doctor log directory). DuckDB
+// can scan those files directly without a copy.
+type LocalPathProvider interface {
+	LocalPath(path string) (string, bool)
+}
+
+// EnsureLocalParquet returns a local filesystem path for a Parquet object. When
+// the backend exposes local files it returns that path; otherwise it downloads
+// the object once into the local cache and reuses it. Callers must only pass
+// trusted paths derived from chunk listings.
+func (c *CachedStore) EnsureLocalParquet(ctx context.Context, path string) (string, error) {
+	cleaned := strings.Trim(strings.TrimSpace(filepath.ToSlash(path)), "/")
+	if cleaned == "" || strings.Contains(cleaned, "..") {
+		return "", fmt.Errorf("invalid parquet path %q", path)
+	}
+	if provider, ok := c.remote.(LocalPathProvider); ok {
+		if local, ok := provider.LocalPath(cleaned); ok {
+			if _, err := os.Stat(local); err != nil {
+				if os.IsNotExist(err) {
+					return "", ErrGhostChunk
+				}
+				return "", err
+			}
+			return local, nil
+		}
+	}
+	if c.localDir == "" {
+		return "", fmt.Errorf("logengine local cache directory is not configured")
+	}
+
+	cacheDir := filepath.Join(c.localDir, "parquet")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(cleaned))
+	localPath := filepath.Join(cacheDir, fmt.Sprintf("%x.parquet", sum[:16]))
+
+	_, err, _ := c.sf.Do("parquet:"+cleaned, func() (interface{}, error) {
+		if info, statErr := os.Stat(localPath); statErr == nil && info.Size() > 0 {
+			return nil, nil
+		}
+		rc, readErr := c.remote.Read(ctx, cleaned)
+		if readErr != nil {
+			return nil, readErr
+		}
+		defer rc.Close()
+
+		tmp, tmpErr := os.CreateTemp(cacheDir, ".parquet-*")
+		if tmpErr != nil {
+			return nil, tmpErr
+		}
+		tmpName := tmp.Name()
+		defer os.Remove(tmpName)
+		if _, copyErr := io.Copy(tmp, rc); copyErr != nil {
+			tmp.Close()
+			return nil, copyErr
+		}
+		if syncErr := tmp.Sync(); syncErr != nil {
+			tmp.Close()
+			return nil, syncErr
+		}
+		if closeErr := tmp.Close(); closeErr != nil {
+			return nil, closeErr
+		}
+		return nil, os.Rename(tmpName, localPath)
+	})
+	if err != nil {
+		return "", err
+	}
+	return localPath, nil
 }
 
 // CachedStore implements a caching decorator around a remote ObjectStoreBackend.
@@ -217,9 +297,9 @@ func (c *CachedStore) ListChunks(ctx context.Context, prefix string) ([]string, 
 }
 
 // ListChunkPaths returns chunk paths relative to chunks/<signal>/ for chunks
-// that overlap [from, to]. New chunks are written under hourly time buckets
-// (YYYY/MM/DD/HH/<chunkID>); legacy flat chunks are still returned. The result
-// is suitable for filepath.Join("chunks", signal, path, ...).
+// that overlap [from, to]. New chunks use the Hive-friendly layout
+// partition=<p>/date=YYYY-MM-DD/hour=HH/<chunkID>. Legacy time buckets
+// (YYYY/MM/DD/HH/<chunkID>) and flat chunks remain readable during migration.
 func (c *CachedStore) ListChunkPaths(ctx context.Context, signal Signal, from, to time.Time) ([]string, error) {
 	root := filepath.ToSlash(filepath.Join("chunks", string(signal)))
 	entries, err := c.ListChunks(ctx, root)
@@ -240,35 +320,71 @@ func (c *CachedStore) ListChunkPaths(ctx context.Context, signal Signal, from, t
 		paths = append(paths, path)
 	}
 
+	partitions := make([]string, 0)
 	years := make([]string, 0)
 	for _, entry := range entries {
-		if isTimeBucketName(entry, 4) {
+		switch {
+		case strings.HasPrefix(entry, "partition="):
+			partitions = append(partitions, entry)
+		case isTimeBucketName(entry, 4):
 			years = append(years, entry)
-			continue
-		}
-		if looksLikeChunkID(entry) {
+		case looksLikeChunkID(entry):
 			add(entry)
 		}
 	}
 
-	if !from.IsZero() && !to.IsZero() && to.Sub(from) <= maxBucketedRangeScan {
-		start := chunkBucketStart(from).Add(-chunkTimeBucketDuration)
-		end := chunkBucketStart(to)
-		for bucket := start; !bucket.After(end); bucket = bucket.Add(chunkTimeBucketDuration) {
-			relativeBucket := bucket.Format(chunkTimeBucketLayout)
-			bucketPrefix := filepath.ToSlash(filepath.Join(root, relativeBucket))
-			chunkIDs, listErr := c.ListChunks(ctx, bucketPrefix)
-			if listErr != nil {
-				return nil, listErr
+	if len(partitions) > 0 {
+		if !from.IsZero() && !to.IsZero() && to.Sub(from) <= maxBucketedRangeScan {
+			start := chunkBucketStart(from).Add(-chunkTimeBucketDuration)
+			end := chunkBucketStart(to)
+			for _, partition := range partitions {
+				for bucket := start; !bucket.After(end); bucket = bucket.Add(chunkTimeBucketDuration) {
+					relativeBucket := filepath.ToSlash(filepath.Join(
+						partition,
+						"date="+bucket.UTC().Format(chunkDateLayout),
+						"hour="+bucket.UTC().Format(chunkHourLayout),
+					))
+					bucketPrefix := filepath.ToSlash(filepath.Join(root, relativeBucket))
+					chunkIDs, listErr := c.ListChunks(ctx, bucketPrefix)
+					if listErr != nil {
+						return nil, listErr
+					}
+					for _, chunkID := range chunkIDs {
+						if looksLikeChunkID(chunkID) {
+							add(filepath.ToSlash(filepath.Join(relativeBucket, chunkID)))
+						}
+					}
+				}
 			}
-			for _, chunkID := range chunkIDs {
-				add(filepath.ToSlash(filepath.Join(relativeBucket, chunkID)))
+		} else {
+			for _, partition := range partitions {
+				if err := c.walkPartitionBuckets(ctx, root, partition, add); err != nil {
+					return nil, err
+				}
 			}
 		}
-	} else {
-		for _, year := range years {
-			if err := c.walkTimeBuckets(ctx, root, year, 1, add); err != nil {
-				return nil, err
+	}
+
+	if len(years) > 0 {
+		if !from.IsZero() && !to.IsZero() && to.Sub(from) <= maxBucketedRangeScan {
+			start := chunkBucketStart(from).Add(-chunkTimeBucketDuration)
+			end := chunkBucketStart(to)
+			for bucket := start; !bucket.After(end); bucket = bucket.Add(chunkTimeBucketDuration) {
+				relativeBucket := bucket.Format(chunkTimeBucketLayout)
+				bucketPrefix := filepath.ToSlash(filepath.Join(root, relativeBucket))
+				chunkIDs, listErr := c.ListChunks(ctx, bucketPrefix)
+				if listErr != nil {
+					return nil, listErr
+				}
+				for _, chunkID := range chunkIDs {
+					add(filepath.ToSlash(filepath.Join(relativeBucket, chunkID)))
+				}
+			}
+		} else {
+			for _, year := range years {
+				if err := c.walkTimeBuckets(ctx, root, year, 1, add); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -284,6 +400,40 @@ func (c *CachedStore) ListChunkPaths(ctx context.Context, signal Signal, from, t
 	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+func (c *CachedStore) walkPartitionBuckets(ctx context.Context, root, partition string, add func(string)) error {
+	partitionPrefix := filepath.ToSlash(filepath.Join(root, partition))
+	dates, err := c.ListChunks(ctx, partitionPrefix)
+	if err != nil {
+		return err
+	}
+	for _, date := range dates {
+		if !strings.HasPrefix(date, "date=") {
+			continue
+		}
+		datePrefix := filepath.ToSlash(filepath.Join(partitionPrefix, date))
+		hours, err := c.ListChunks(ctx, datePrefix)
+		if err != nil {
+			return err
+		}
+		for _, hour := range hours {
+			if !strings.HasPrefix(hour, "hour=") {
+				continue
+			}
+			hourPrefix := filepath.ToSlash(filepath.Join(datePrefix, hour))
+			chunkIDs, err := c.ListChunks(ctx, hourPrefix)
+			if err != nil {
+				return err
+			}
+			for _, chunkID := range chunkIDs {
+				if looksLikeChunkID(chunkID) {
+					add(filepath.ToSlash(filepath.Join(partition, date, hour, chunkID)))
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (c *CachedStore) walkTimeBuckets(ctx context.Context, root, relative string, depth int, add func(string)) error {
@@ -318,12 +468,45 @@ func chunkBucketStart(t time.Time) time.Time {
 
 // relativeChunkPath returns the path of a new chunk relative to
 // chunks/<signal>/. Buckets are selected by the data's min timestamp, not by
-// the ingestion wall clock.
-func relativeChunkPath(chunkID string, minTime time.Time) string {
+// the ingestion wall clock. Chunks are grouped by partition so DuckDB can use
+// Hive partition pruning without scanning unrelated directories.
+func relativeChunkPath(chunkID string, minTime time.Time, partition string) string {
 	if minTime.IsZero() {
 		return chunkID
 	}
-	return filepath.ToSlash(filepath.Join(minTime.UTC().Format(chunkTimeBucketLayout), chunkID))
+	return filepath.ToSlash(filepath.Join(
+		partitionDir(partition),
+		"date="+minTime.UTC().Format(chunkDateLayout),
+		"hour="+minTime.UTC().Format(chunkHourLayout),
+		chunkID,
+	))
+}
+
+// partitionDir returns a filesystem-safe Hive partition directory. The
+// authoritative value remains the Parquet partition column; this directory is
+// only a pruning hint.
+func partitionDir(partition string) string {
+	partition = strings.TrimSpace(partition)
+	if partition == "" {
+		return "partition=_unpartitioned"
+	}
+	var builder strings.Builder
+	for _, r := range partition {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+	value := strings.Trim(builder.String(), ".-")
+	if value == "" {
+		return "partition=_unpartitioned"
+	}
+	return "partition=" + value
 }
 
 func isTimeBucketName(name string, width int) bool {
@@ -450,20 +633,18 @@ func (c *CachedStore) invalidatePath(path string) {
 		return
 	}
 
-	// Invalidate the signal root and every time-bucket ancestor of the written
-	// path. Recursive bucket walks cache each level, so deleting only the leaf
-	// would let a query miss a newly created hour bucket until the 10s TTL.
+	// Invalidate the signal root and every bucket ancestor of the written
+	// path. Recursive walks cache each level, so deleting only the leaf would
+	// let a query miss a newly created partition/date/hour bucket until the
+	// listing TTL expires.
 	signalPrefix := filepath.ToSlash(filepath.Join(parts[0], parts[1]))
 	ancestors := []string{signalPrefix}
-	if len(parts) >= 5 {
-		ancestors = append(ancestors,
-			strings.Join(parts[:3], "/"),
-			strings.Join(parts[:4], "/"),
-			strings.Join(parts[:5], "/"),
-		)
+	last := len(parts)
+	if last > 2 {
+		last-- // drop the file name; the remaining prefix is the chunk directory
 	}
-	if len(parts) >= 6 {
-		ancestors = append(ancestors, strings.Join(parts[:6], "/"))
+	for idx := 2; idx <= last; idx++ {
+		ancestors = append(ancestors, strings.Join(parts[:idx], "/"))
 	}
 	c.mu.Lock()
 	for _, prefix := range ancestors {
