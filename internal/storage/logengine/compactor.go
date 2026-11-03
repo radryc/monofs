@@ -18,10 +18,13 @@ import (
 // configured minimum age are compacted, and a range that already contains a
 // compacted chunk is treated as complete.
 const (
-	defaultCompactionMaxRecords = 250_000
-	defaultCompactionMaxBytes   = 64 << 20
+	defaultCompactionMaxRecords = 1_000_000
+	defaultCompactionMaxBytes   = 256 << 20
 	defaultCompactionMinAge     = time.Hour
-	maxCompactionCatchUp        = 2 * time.Hour
+	// maxCompactionCatchUp bounds how far back the background worker looks for
+	// uncompacted chunks on each tick. Older backlog can still be compacted with
+	// monofs-logengine-compact.
+	maxCompactionCatchUp = 24 * time.Hour
 )
 
 // CompactionOptions bounds the memory used by one output chunk.
@@ -43,10 +46,33 @@ type CompactionResult struct {
 
 // Compactor merges small chunks within a time range.
 type Compactor struct {
-	store    *CachedStore
-	ingester *Ingester
-	query    *QueryEngine
-	mu       sync.Mutex
+	store           *CachedStore
+	ingester        *Ingester
+	query           *QueryEngine
+	mu              sync.Mutex
+	compactionLevel int
+
+	running       bool
+	lastRun       time.Time
+	lastResult    CompactionResult
+	runs          uint64
+	inputChunks   uint64
+	outputChunks  uint64
+	deletedChunks uint64
+	records       uint64
+}
+
+// CompactionStats is a snapshot for the node info API and UI.
+type CompactionStats struct {
+	Running       bool
+	LastRun       time.Time
+	LastResult    CompactionResult
+	Runs          uint64
+	InputChunks   uint64
+	OutputChunks  uint64
+	DeletedChunks uint64
+	Records       uint64
+	TargetBytes   int64
 }
 
 func newCompactor(store *CachedStore, ingester *Ingester, query *QueryEngine) *Compactor {
@@ -87,6 +113,21 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.compactionLevel = 1
+	c.running = true
+	defer func() {
+		c.running = false
+		c.compactionLevel = 0
+		c.lastRun = time.Now().UTC()
+		c.lastResult = result
+		if err == nil {
+			c.runs++
+			c.inputChunks += uint64(result.InputChunks)
+			c.outputChunks += uint64(result.OutputChunks)
+			c.deletedChunks += uint64(result.DeletedChunks)
+			c.records += uint64(result.Records)
+		}
+	}()
 
 	paths, err := c.store.ListChunkPaths(ctx, signal, from, to)
 	if err != nil {
@@ -301,16 +342,23 @@ func (c *Compactor) writeLogCompacted(ctx context.Context, records []LogRecord, 
 		maxRecords = defaultCompactionMaxRecords
 	}
 	sort.SliceStable(records, func(i, j int) bool {
+		leftPartition := recordPartition(records[i].Labels)
+		rightPartition := recordPartition(records[j].Labels)
+		if leftPartition != rightPartition {
+			return leftPartition < rightPartition
+		}
 		if records[i].Service != records[j].Service {
 			return records[i].Service < records[j].Service
 		}
 		return records[i].Timestamp.Before(records[j].Timestamp)
 	})
-	groupByService := countLogServiceGroups(records) <= maxCompactionGroupKeys
+	groupByService := countLogGroupKeys(records) <= maxCompactionGroupKeys
 	for start := 0; start < len(records); {
 		end := start + 1
 		if groupByService {
-			for end < len(records) && records[end].Service == records[start].Service && end-start < maxRecords {
+			partition := recordPartition(records[start].Labels)
+			service := records[start].Service
+			for end < len(records) && records[end].Service == service && recordPartition(records[end].Labels) == partition && end-start < maxRecords {
 				end++
 			}
 		} else {
@@ -328,7 +376,7 @@ func (c *Compactor) writeLogCompacted(ctx context.Context, records []LogRecord, 
 			}
 		}
 		chunkID := nextCompactedChunkID(minTime, maxTime, seq)
-		if err := c.ingester.FlushChunk(ctx, SignalLogs, chunkID, records[start:end], nil, nil); err != nil {
+		if err := c.ingester.FlushChunkWithOptions(ctx, SignalLogs, chunkID, records[start:end], nil, nil, ChunkWriteOptions{CompactionLevel: c.compactionLevel}); err != nil {
 			return err
 		}
 		start = end
@@ -344,16 +392,23 @@ func (c *Compactor) writeMetricCompacted(ctx context.Context, records []MetricRe
 		maxRecords = defaultCompactionMaxRecords
 	}
 	sort.SliceStable(records, func(i, j int) bool {
+		leftPartition := recordPartition(records[i].Labels)
+		rightPartition := recordPartition(records[j].Labels)
+		if leftPartition != rightPartition {
+			return leftPartition < rightPartition
+		}
 		if records[i].MetricName != records[j].MetricName {
 			return records[i].MetricName < records[j].MetricName
 		}
 		return records[i].Timestamp.Before(records[j].Timestamp)
 	})
-	groupByMetric := countMetricNameGroups(records) <= maxCompactionGroupKeys
+	groupByMetric := countMetricGroupKeys(records) <= maxCompactionGroupKeys
 	for start := 0; start < len(records); {
 		end := start + 1
 		if groupByMetric {
-			for end < len(records) && records[end].MetricName == records[start].MetricName && end-start < maxRecords {
+			partition := recordPartition(records[start].Labels)
+			name := records[start].MetricName
+			for end < len(records) && records[end].MetricName == name && recordPartition(records[end].Labels) == partition && end-start < maxRecords {
 				end++
 			}
 		} else {
@@ -371,7 +426,7 @@ func (c *Compactor) writeMetricCompacted(ctx context.Context, records []MetricRe
 			}
 		}
 		chunkID := nextCompactedChunkID(minTime, maxTime, seq)
-		if err := c.ingester.FlushChunk(ctx, SignalMetrics, chunkID, nil, records[start:end], nil); err != nil {
+		if err := c.ingester.FlushChunkWithOptions(ctx, SignalMetrics, chunkID, nil, records[start:end], nil, ChunkWriteOptions{CompactionLevel: c.compactionLevel}); err != nil {
 			return err
 		}
 		start = end
@@ -387,16 +442,23 @@ func (c *Compactor) writeSpanCompacted(ctx context.Context, records []SpanRecord
 		maxRecords = defaultCompactionMaxRecords
 	}
 	sort.SliceStable(records, func(i, j int) bool {
+		leftPartition := recordPartition(records[i].Attributes)
+		rightPartition := recordPartition(records[j].Attributes)
+		if leftPartition != rightPartition {
+			return leftPartition < rightPartition
+		}
 		if records[i].Service != records[j].Service {
 			return records[i].Service < records[j].Service
 		}
 		return records[i].Timestamp.Before(records[j].Timestamp)
 	})
-	groupByService := countSpanServiceGroups(records) <= maxCompactionGroupKeys
+	groupByService := countSpanGroupKeys(records) <= maxCompactionGroupKeys
 	for start := 0; start < len(records); {
 		end := start + 1
 		if groupByService {
-			for end < len(records) && records[end].Service == records[start].Service && end-start < maxRecords {
+			partition := recordPartition(records[start].Attributes)
+			service := records[start].Service
+			for end < len(records) && records[end].Service == service && recordPartition(records[end].Attributes) == partition && end-start < maxRecords {
 				end++
 			}
 		} else {
@@ -414,7 +476,7 @@ func (c *Compactor) writeSpanCompacted(ctx context.Context, records []SpanRecord
 			}
 		}
 		chunkID := nextCompactedChunkID(minTime, maxTime, seq)
-		if err := c.ingester.FlushChunk(ctx, SignalTraces, chunkID, nil, nil, records[start:end]); err != nil {
+		if err := c.ingester.FlushChunkWithOptions(ctx, SignalTraces, chunkID, nil, nil, records[start:end], ChunkWriteOptions{CompactionLevel: c.compactionLevel}); err != nil {
 			return err
 		}
 		start = end
@@ -422,44 +484,47 @@ func (c *Compactor) writeSpanCompacted(ctx context.Context, records []SpanRecord
 	return nil
 }
 
-func countLogServiceGroups(records []LogRecord) int {
+func countLogGroupKeys(records []LogRecord) int {
 	count := 0
-	previous := ""
-	for idx, record := range records {
-		if idx == 0 || record.Service != previous {
+	previous := "\x00"
+	for _, record := range records {
+		key := recordPartition(record.Labels) + "\x00" + record.Service
+		if key != previous {
 			count++
-			previous = record.Service
+			previous = key
 		}
 	}
 	return count
 }
 
-func countMetricNameGroups(records []MetricRecord) int {
+func countMetricGroupKeys(records []MetricRecord) int {
 	count := 0
-	previous := ""
-	for idx, record := range records {
-		if idx == 0 || record.MetricName != previous {
+	previous := "\x00"
+	for _, record := range records {
+		key := recordPartition(record.Labels) + "\x00" + record.MetricName
+		if key != previous {
 			count++
-			previous = record.MetricName
+			previous = key
 		}
 	}
 	return count
 }
 
-func countSpanServiceGroups(records []SpanRecord) int {
+func countSpanGroupKeys(records []SpanRecord) int {
 	count := 0
-	previous := ""
-	for idx, record := range records {
-		if idx == 0 || record.Service != previous {
+	previous := "\x00"
+	for _, record := range records {
+		key := recordPartition(record.Attributes) + "\x00" + record.Service
+		if key != previous {
 			count++
-			previous = record.Service
+			previous = key
 		}
 	}
 	return count
 }
 
 func chunkDataPath(signal Signal, chunkPath string) string {
-	return filepath.Join("chunks", string(signal), chunkPath, "data.parquet")
+	return filepath.Join("chunks", string(signal), chunkPath, chunkDataFileName)
 }
 
 func chunkStoragePath(signal Signal, chunkPath string) string {
@@ -500,10 +565,10 @@ func (e *LogEngine) CompactRange(ctx context.Context, signal Signal, from, to ti
 	return e.compactor.CompactRange(ctx, signal, from, to, compactionOptions(signal))
 }
 
-// RunCompactor starts a background loop that compacts complete hourly windows.
-// Only windows whose end is at least minAge in the past are touched. A small
-// backlog is processed on every tick so a restart does not strand the most
-// recent chunks forever.
+// RunCompactor starts a background loop that compacts complete windows. Only
+// windows whose end is at least minAge in the past are touched. It walks the
+// configured lookback on every tick so a restart or a burst of small files
+// does not strand older chunks forever.
 func (e *LogEngine) RunCompactor(ctx context.Context, interval, minAge time.Duration) {
 	if interval <= 0 {
 		return
@@ -574,4 +639,29 @@ func compactionOptions(signal Signal) CompactionOptions {
 		MaxRecords: defaultCompactionMaxRecords,
 		MaxBytes:   defaultCompactionMaxBytes,
 	}
+}
+
+// Stats returns a snapshot of the compactor state.
+func (c *Compactor) Stats() CompactionStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return CompactionStats{
+		Running:       c.running,
+		LastRun:       c.lastRun,
+		LastResult:    c.lastResult,
+		Runs:          c.runs,
+		InputChunks:   c.inputChunks,
+		OutputChunks:  c.outputChunks,
+		DeletedChunks: c.deletedChunks,
+		Records:       c.records,
+		TargetBytes:   defaultCompactionMaxBytes,
+	}
+}
+
+// CompactionStats returns the local compactor status.
+func (e *LogEngine) CompactionStats() CompactionStats {
+	if e.compactor == nil {
+		return CompactionStats{}
+	}
+	return e.compactor.Stats()
 }

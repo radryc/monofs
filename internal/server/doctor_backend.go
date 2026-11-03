@@ -23,6 +23,7 @@ type DoctorBackend interface {
 	QueryLogs(ctx context.Context, query, service string, from, to time.Time, limit int) ([]logengine.LogRecord, error)
 	QueryMetrics(ctx context.Context, query logengine.MetricQuery, from, to time.Time) ([]logengine.MetricRecord, error)
 	QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]logengine.SpanRecord, error)
+	Aggregate(ctx context.Context, query logengine.AggregateQuery) ([]logengine.AggregateRow, error)
 	Stats(ctx context.Context) (logengine.LogEngineStats, error)
 }
 
@@ -36,12 +37,41 @@ func (s *Server) logEngineProtoStats(ctx context.Context) *pb.LogEngineStats {
 	if err != nil {
 		return &pb.LogEngineStats{Enabled: true}
 	}
-	return &pb.LogEngineStats{
+	out := &pb.LogEngineStats{
 		Enabled:      true,
 		LogChunks:    stats.LogChunks,
 		MetricChunks: stats.MetricChunks,
 		TraceChunks:  stats.TraceChunks,
 	}
+	if provider, ok := s.logEngine.(interface {
+		DuckDBStats() logengine.DuckDBStats
+	}); ok {
+		duck := provider.DuckDBStats()
+		out.DuckdbEnabled = duck.Enabled
+		out.DuckdbMemoryLimit = duck.Memory
+		out.DuckdbThreads = int32(duck.Threads)
+		out.DuckdbQueries = duck.Queries
+		out.DuckdbErrors = duck.Errors
+	}
+	if s.logQuerySidecar != nil {
+		out.DuckdbEnabled = true
+	}
+	if provider, ok := s.logEngine.(interface {
+		CompactionStats() logengine.CompactionStats
+	}); ok {
+		compaction := provider.CompactionStats()
+		out.CompactionRuns = compaction.Runs
+		out.CompactionInputChunks = compaction.InputChunks
+		out.CompactionOutputChunks = compaction.OutputChunks
+		out.CompactionDeletedChunks = compaction.DeletedChunks
+		out.CompactionRecords = compaction.Records
+		out.CompactionRunning = compaction.Running
+		out.CompactionTargetBytes = compaction.TargetBytes
+		if !compaction.LastRun.IsZero() {
+			out.LastCompactionUnixNano = compaction.LastRun.UnixNano()
+		}
+	}
+	return out
 }
 
 // SetDoctorBackend configures the telemetry backend for this server node.
@@ -49,10 +79,21 @@ func (s *Server) SetDoctorBackend(b DoctorBackend) {
 	s.logEngine = b
 }
 
+// SetLogQuerySidecar routes telemetry read queries to a DuckDB sidecar. The
+// sidecar must expose the MonoFS telemetry query RPCs. Ingest and stats stay
+// on the local logengine.
+func (s *Server) SetLogQuerySidecar(client pb.MonoFSClient, fallback bool) {
+	s.logQuerySidecar = client
+	s.logQuerySidecarFallback = fallback
+}
+
 // doctorBackendOrErr returns the configured backend or an error if not set.
 func (s *Server) doctorBackendOrErr() (DoctorBackend, error) {
 	if s.logEngine == nil {
 		return nil, fmt.Errorf("doctor backend not configured on this node")
+	}
+	if s.logQuerySidecar != nil {
+		return newSidecarBackend(s.logEngine, s.logQuerySidecar, s.logger, s.logQuerySidecarFallback), nil
 	}
 	return s.logEngine, nil
 }
@@ -110,4 +151,11 @@ func protoToSpanRecords(entries []*pb.SpanEntry) []logengine.SpanRecord {
 
 func marshalJSON(v any) ([]byte, error) {
 	return json.Marshal(v)
+}
+
+func requestQueryScope(partitions []string, restricted bool) logengine.QueryScope {
+	if !restricted {
+		return logengine.QueryScope{}
+	}
+	return logengine.QueryScope{Partitions: append([]string(nil), partitions...), Restricted: true}
 }

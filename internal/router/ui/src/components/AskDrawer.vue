@@ -8,7 +8,12 @@ const open = ref(false)
 const drawer = ref<HTMLElement | null>(null)
 const closeButton = ref<HTMLButtonElement | null>(null)
 let previousFocus: HTMLElement | null = null
-const base = ((import.meta.env.VITE_AGENT_URL as string | undefined) || 'http://localhost:3000').replace(/\/$/, '')
+const runtimeBase = typeof window !== 'undefined'
+  ? (window as unknown as { STRATA_AGENT_URL?: string }).STRATA_AGENT_URL
+  : undefined
+const fallbackHost = typeof window !== 'undefined' ? (window.location.hostname || 'localhost') : 'localhost'
+const fallbackProto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'https:' : 'http:'
+const base = (runtimeBase || (import.meta.env.VITE_AGENT_URL as string | undefined) || `${fallbackProto}//${fallbackHost}:9191`).replace(/\/$/, '')
 const url = computed(() => {
   const context = `MonoFS · ${route.fullPath}`
   return `${base}/embed/ask?context=${encodeURIComponent(context)}`
@@ -51,7 +56,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
-  <button type="button" class="s-btn s-btn-secondary" title="Ask Strata about this view" @click="open = true">
+  <button
+    type="button"
+    class="s-btn s-btn-secondary"
+    title="Ask Strata about this view"
+    aria-haspopup="dialog"
+    :aria-expanded="open"
+    @click="open = !open"
+  >
     <Sparkles class="w-4 h-4 text-accent-purple" />
     Ask
   </button>

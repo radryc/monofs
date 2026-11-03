@@ -615,11 +615,12 @@ There is no auth, no TLS, no cross-repo mount, no range support, and no referenc
 service -> IngestLogs/IngestMetrics/IngestTraces
   -> router selects a stable shard per signal/chunk and fans out
   -> node log engine flush chunk:
-       -> compute min/max time, manifest metadata
-       -> write data.parquet + metadata.json + index files
+       -> compute min/max time, partition, manifest metadata
+       -> write segment.parquet + index files + metadata.json (last)
 ```
 
-Writes are object-by-object; there is no manifest commit or WAL.
+The chunk manifest is the commit marker; a reader ignores a directory until
+metadata.json is present.
 
 ### 12.2 Query
 

@@ -1636,20 +1636,39 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 	r.mu.RUnlock()
 
 	type nodeLogStats struct {
-		NodeID       string `json:"node_id"`
-		Address      string `json:"address"`
-		Enabled      bool   `json:"enabled"`
-		LogChunks    int64  `json:"log_chunks"`
-		MetricChunks int64  `json:"metric_chunks"`
-		TraceChunks  int64  `json:"trace_chunks"`
+		NodeID            string `json:"node_id"`
+		Address           string `json:"address"`
+		Enabled           bool   `json:"enabled"`
+		LogChunks         int64  `json:"log_chunks"`
+		MetricChunks      int64  `json:"metric_chunks"`
+		TraceChunks       int64  `json:"trace_chunks"`
+		DuckDBEnabled     bool   `json:"duckdb_enabled"`
+		DuckDBMemoryLimit string `json:"duckdb_memory_limit,omitempty"`
+		DuckDBThreads     int32  `json:"duckdb_threads,omitempty"`
+		DuckDBQueries     uint64 `json:"duckdb_queries,omitempty"`
+		DuckDBErrors      uint64 `json:"duckdb_errors,omitempty"`
+		CompactionRuns    uint64 `json:"compaction_runs"`
+		CompactionInput   uint64 `json:"compaction_input_chunks"`
+		CompactionOutput  uint64 `json:"compaction_output_chunks"`
+		CompactionDeleted uint64 `json:"compaction_deleted_chunks"`
+		CompactionRecords uint64 `json:"compaction_records"`
+		CompactionRunning bool   `json:"compaction_running"`
+		CompactionTarget  int64  `json:"compaction_target_bytes"`
+		LastCompaction    int64  `json:"last_compaction_unix_nano"`
 	}
 
 	var (
-		nodes        []nodeLogStats
-		totalLogs    int64
-		totalMetrics int64
-		totalTraces  int64
-		anyEnabled   bool
+		nodes               []nodeLogStats
+		totalLogs           int64
+		totalMetrics        int64
+		totalTraces         int64
+		totalDuckDBQuery    uint64
+		totalDuckDBErrors   uint64
+		totalCompactionRuns uint64
+		totalCompactionIn   uint64
+		totalCompactionOut  uint64
+		duckDBNodes         int
+		anyEnabled          bool
 	)
 
 	for nodeID, state := range nodesSnapshot {
@@ -1662,12 +1681,33 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 			ns.LogChunks = le.LogChunks
 			ns.MetricChunks = le.MetricChunks
 			ns.TraceChunks = le.TraceChunks
+			ns.DuckDBEnabled = le.DuckdbEnabled
+			ns.DuckDBMemoryLimit = le.DuckdbMemoryLimit
+			ns.DuckDBThreads = le.DuckdbThreads
+			ns.DuckDBQueries = le.DuckdbQueries
+			ns.DuckDBErrors = le.DuckdbErrors
+			ns.CompactionRuns = le.CompactionRuns
+			ns.CompactionInput = le.CompactionInputChunks
+			ns.CompactionOutput = le.CompactionOutputChunks
+			ns.CompactionDeleted = le.CompactionDeletedChunks
+			ns.CompactionRecords = le.CompactionRecords
+			ns.CompactionRunning = le.CompactionRunning
+			ns.CompactionTarget = le.CompactionTargetBytes
+			ns.LastCompaction = le.LastCompactionUnixNano
 			if le.Enabled {
 				anyEnabled = true
 				totalLogs += le.LogChunks
 				totalMetrics += le.MetricChunks
 				totalTraces += le.TraceChunks
 			}
+			if le.DuckdbEnabled {
+				duckDBNodes++
+				totalDuckDBQuery += le.DuckdbQueries
+				totalDuckDBErrors += le.DuckdbErrors
+			}
+			totalCompactionRuns += le.CompactionRuns
+			totalCompactionIn += le.CompactionInputChunks
+			totalCompactionOut += le.CompactionOutputChunks
 		}
 		nodes = append(nodes, ns)
 	}
@@ -1677,11 +1717,14 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"enabled":       anyEnabled,
-		"log_chunks":    totalLogs,
-		"metric_chunks": totalMetrics,
-		"trace_chunks":  totalTraces,
-		"nodes":         nodes,
+		"enabled":        anyEnabled,
+		"log_chunks":     totalLogs,
+		"metric_chunks":  totalMetrics,
+		"trace_chunks":   totalTraces,
+		"duckdb_nodes":   duckDBNodes,
+		"duckdb_queries": totalDuckDBQuery,
+		"duckdb_errors":  totalDuckDBErrors,
+		"nodes":          nodes,
 	})
 }
 func (r *Router) handleDependenciesAPI(w http.ResponseWriter, req *http.Request) {

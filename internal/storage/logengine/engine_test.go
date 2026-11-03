@@ -720,11 +720,11 @@ func TestLogEngine_WritesChunksUnderTimeBuckets(t *testing.T) {
 	if len(paths) != 1 {
 		t.Fatalf("ListChunkPaths() = %v, want one path", paths)
 	}
-	if want := "2026/10/26/12/" + chunkID; paths[0] != want {
+	if want := "partition=_unpartitioned/date=2026-10-26/hour=12/" + chunkID; paths[0] != want {
 		t.Fatalf("chunk path = %q, want %q", paths[0], want)
 	}
-	if !strings.Contains(paths[0], minTime.Format("2006/01/02/15")) {
-		t.Fatalf("chunk path = %q, want hour bucket %q", paths[0], minTime.Format("2006/01/02/15"))
+	if !strings.Contains(paths[0], "date=2026-10-26/hour=12") {
+		t.Fatalf("chunk path = %q, want partition/date/hour bucket", paths[0])
 	}
 
 	records, err := engine.QueryLogs(ctx, `{service="payment"}`, "", minTime.Add(-time.Minute), maxTime.Add(time.Minute), 0)

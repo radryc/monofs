@@ -440,8 +440,9 @@ Writable mounts create a session automatically. Writes go to ordinary files unde
 
 - `internal/telemetry` configures OTLP exporters, trace/metric/log providers, and a `slog` bridge.
 - The default endpoint mode is insecure; `https://` schemes are stripped and not re-applied unless `insecure=false`.
-- `internal/storage/logengine` stores Parquet chunks plus manifests/indexes; query execution prunes by time, labels, and manifests.
+- `internal/storage/logengine` stores Parquet chunks plus manifests/indexes; query execution prunes by time, labels, partitions, and manifests.
 - `internal/storage/logquery` implements the query language (filters, regex, pipes; unknown pipes are silently ignored).
+- `cmd/monofs-logquery` is an optional DuckDB sidecar on each storage node. `monofs-server --logquery-sidecar=...` proxies telemetry read RPCs to it and keeps ingest/compaction local. See `docs/duckdb-logquery.md`.
 
 ### 8.5 Bazel
 

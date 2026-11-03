@@ -1,0 +1,40 @@
+# DuckDB query sidecar for MonoFS storage nodes. Built on glibc because the
+# prebuilt duckdb-go bindings do not support musl/Alpine.
+FROM golang:1.26-bookworm AS builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates git && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG KVS_REPO_URL=https://github.com/radryc/kvs.git
+ARG KVS_REF=1cf406ad1da680ae06e3db84aa3a5aa3e95585b3
+ARG CFG_REPO_URL=https://github.com/radryc/cfg.git
+ARG CFG_REF=1772380a1c25a39e0fe06cd0c4265c5b45fb5930
+
+COPY go.mod go.sum ./
+RUN git init /kvs && \
+    git -C /kvs remote add origin "$KVS_REPO_URL" && \
+    git -C /kvs fetch --depth 1 origin "$KVS_REF" && \
+    git -C /kvs checkout --detach FETCH_HEAD && \
+    git init /cfg && \
+    git -C /cfg remote add origin "$CFG_REPO_URL" && \
+    git -C /cfg fetch --depth 1 origin "$CFG_REF" && \
+    git -C /cfg checkout --detach FETCH_HEAD
+
+COPY . .
+RUN CGO_ENABLED=1 GOOS=linux go build -tags duckdb -buildvcs=false -trimpath \
+    -ldflags "-s -w" \
+    -o /bin/monofs-logquery ./cmd/monofs-logquery
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates libstdc++6 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /bin/monofs-logquery /usr/local/bin/monofs-logquery
+
+EXPOSE 9101
+ENTRYPOINT ["/usr/local/bin/monofs-logquery"]

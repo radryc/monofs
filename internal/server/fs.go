@@ -1169,7 +1169,11 @@ func (s *Server) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStr
 		batcher = newQueryResultBatcher(stream.Send, int(req.GetBatchSize()))
 		yield = func(record logengine.LogRecord) error { return batcher.add(record) }
 	}
-	if err := backend.StreamLogs(stream.Context(), req.Query, req.Service, from, to, int(req.Limit), yield); err != nil {
+	queryCtx := stream.Context()
+	if req.GetVisiblePartitionsSet() {
+		queryCtx = logengine.WithQueryScope(queryCtx, requestQueryScope(req.GetVisiblePartitions(), true))
+	}
+	if err := backend.StreamLogs(queryCtx, req.Query, req.Service, from, to, int(req.Limit), yield); err != nil {
 		return status.Errorf(codes.Internal, "query logs failed: %v", err)
 	}
 	if batcher != nil {
@@ -1227,7 +1231,11 @@ func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
-	records, err := backend.QueryLogs(ctx, req.Query, req.Service, from, to, int(req.Limit))
+	queryCtx := ctx
+	if req.GetVisiblePartitionsSet() {
+		queryCtx = logengine.WithQueryScope(queryCtx, requestQueryScope(req.GetVisiblePartitions(), true))
+	}
+	records, err := backend.QueryLogs(queryCtx, req.Query, req.Service, from, to, int(req.Limit))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query logs failed: %v", err)
 	}
@@ -1346,8 +1354,12 @@ func (s *Server) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.Serve
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
+	traceCtx := stream.Context()
+	if req.GetVisiblePartitionsSet() {
+		traceCtx = logengine.WithQueryScope(traceCtx, requestQueryScope(req.GetVisiblePartitions(), true))
+	}
 	if discovery := strings.TrimSpace(req.GetDiscovery()); discovery != "" {
-		return s.streamTraceDiscovery(backend, discovery, req.GetDiscoveryTag(), from, to, stream)
+		return s.streamTraceDiscovery(traceCtx, backend, discovery, req.GetDiscoveryTag(), from, to, stream)
 	}
 	yield := func(record logengine.SpanRecord) error {
 		return streamQueryResult(record, stream.Send, "stream traces")
@@ -1357,7 +1369,7 @@ func (s *Server) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.Serve
 		batcher = newQueryResultBatcher(stream.Send, int(req.GetBatchSize()))
 		yield = func(record logengine.SpanRecord) error { return batcher.add(record) }
 	}
-	if err := backend.StreamTraces(stream.Context(), req.TraceId, req.Service, from, to, int(req.Limit), yield); err != nil {
+	if err := backend.StreamTraces(traceCtx, req.TraceId, req.Service, from, to, int(req.Limit), yield); err != nil {
 		return status.Errorf(codes.Internal, "query traces failed: %v", err)
 	}
 	if batcher != nil {
@@ -1372,7 +1384,7 @@ type traceDiscoveryBackend interface {
 	DiscoverTraceTagValues(context.Context, time.Time, time.Time, string) ([]string, error)
 }
 
-func (s *Server) streamTraceDiscovery(backend DoctorBackend, discovery, tag string, from, to time.Time, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+func (s *Server) streamTraceDiscovery(ctx context.Context, backend DoctorBackend, discovery, tag string, from, to time.Time, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
 	provider, ok := backend.(traceDiscoveryBackend)
 	if !ok {
 		return status.Errorf(codes.Unimplemented, "trace discovery is not supported by this backend")
@@ -1383,11 +1395,11 @@ func (s *Server) streamTraceDiscovery(backend DoctorBackend, discovery, tag stri
 	)
 	switch discovery {
 	case "services":
-		values, err = provider.DiscoverTraceServices(stream.Context(), from, to)
+		values, err = provider.DiscoverTraceServices(ctx, from, to)
 	case "tags":
-		values, err = provider.DiscoverTraceTags(stream.Context(), from, to)
+		values, err = provider.DiscoverTraceTags(ctx, from, to)
 	case "tag_values":
-		values, err = provider.DiscoverTraceTagValues(stream.Context(), from, to, tag)
+		values, err = provider.DiscoverTraceTagValues(ctx, from, to, tag)
 	default:
 		return status.Errorf(codes.InvalidArgument, "unknown trace discovery mode %q", discovery)
 	}
@@ -1419,7 +1431,11 @@ func (s *Server) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
-	records, err := backend.QueryTraces(ctx, req.TraceId, req.Service, from, to, int(req.Limit))
+	traceCtx := ctx
+	if req.GetVisiblePartitionsSet() {
+		traceCtx = logengine.WithQueryScope(traceCtx, requestQueryScope(req.GetVisiblePartitions(), true))
+	}
+	records, err := backend.QueryTraces(traceCtx, req.TraceId, req.Service, from, to, int(req.Limit))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query traces failed: %v", err)
 	}
