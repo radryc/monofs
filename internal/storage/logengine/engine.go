@@ -2,6 +2,7 @@ package logengine
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log"
@@ -205,6 +206,16 @@ func (e *LogEngine) CheckDuckDB(ctx context.Context) error {
 		return ErrDuckDBUnavailable
 	}
 	return e.duck.Ping(ctx)
+}
+
+// QueryDuckDB executes an ad-hoc SQL query against the local Parquet files.
+// This is intended for the sidecar CLI and local diagnostics, not for
+// untrusted remote callers.
+func (e *LogEngine) QueryDuckDB(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if e.duck == nil {
+		return nil, ErrDuckDBUnavailable
+	}
+	return e.duck.QueryDuckDB(ctx, query, args...)
 }
 
 // LogEngineStats is a snapshot of per-signal chunk counts.

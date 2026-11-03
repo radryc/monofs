@@ -51,6 +51,28 @@ type Compactor struct {
 	query           *QueryEngine
 	mu              sync.Mutex
 	compactionLevel int
+
+	running       bool
+	lastRun       time.Time
+	lastResult    CompactionResult
+	runs          uint64
+	inputChunks   uint64
+	outputChunks  uint64
+	deletedChunks uint64
+	records       uint64
+}
+
+// CompactionStats is a snapshot for the node info API and UI.
+type CompactionStats struct {
+	Running       bool
+	LastRun       time.Time
+	LastResult    CompactionResult
+	Runs          uint64
+	InputChunks   uint64
+	OutputChunks  uint64
+	DeletedChunks uint64
+	Records       uint64
+	TargetBytes   int64
 }
 
 func newCompactor(store *CachedStore, ingester *Ingester, query *QueryEngine) *Compactor {
@@ -92,7 +114,20 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.compactionLevel = 1
-	defer func() { c.compactionLevel = 0 }()
+	c.running = true
+	defer func() {
+		c.running = false
+		c.compactionLevel = 0
+		c.lastRun = time.Now().UTC()
+		c.lastResult = result
+		if err == nil {
+			c.runs++
+			c.inputChunks += uint64(result.InputChunks)
+			c.outputChunks += uint64(result.OutputChunks)
+			c.deletedChunks += uint64(result.DeletedChunks)
+			c.records += uint64(result.Records)
+		}
+	}()
 
 	paths, err := c.store.ListChunkPaths(ctx, signal, from, to)
 	if err != nil {
@@ -604,4 +639,29 @@ func compactionOptions(signal Signal) CompactionOptions {
 		MaxRecords: defaultCompactionMaxRecords,
 		MaxBytes:   defaultCompactionMaxBytes,
 	}
+}
+
+// Stats returns a snapshot of the compactor state.
+func (c *Compactor) Stats() CompactionStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return CompactionStats{
+		Running:       c.running,
+		LastRun:       c.lastRun,
+		LastResult:    c.lastResult,
+		Runs:          c.runs,
+		InputChunks:   c.inputChunks,
+		OutputChunks:  c.outputChunks,
+		DeletedChunks: c.deletedChunks,
+		Records:       c.records,
+		TargetBytes:   defaultCompactionMaxBytes,
+	}
+}
+
+// CompactionStats returns the local compactor status.
+func (e *LogEngine) CompactionStats() CompactionStats {
+	if e.compactor == nil {
+		return CompactionStats{}
+	}
+	return e.compactor.Stats()
 }

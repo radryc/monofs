@@ -131,6 +131,15 @@ func (d *duckQueryEngine) acquire(ctx context.Context) error {
 
 func (d *duckQueryEngine) release() { <-d.querySlots }
 
+func (d *duckQueryEngine) QueryDuckDB(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	d.queries.Add(1)
+	rows, err := d.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		d.queryErrors.Add(1)
+	}
+	return rows, err
+}
+
 func (d *duckQueryEngine) Ping(ctx context.Context) error {
 	if err := d.acquire(ctx); err != nil {
 		return err

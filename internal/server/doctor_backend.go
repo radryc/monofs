@@ -56,6 +56,21 @@ func (s *Server) logEngineProtoStats(ctx context.Context) *pb.LogEngineStats {
 	if s.logQuerySidecar != nil {
 		out.DuckdbEnabled = true
 	}
+	if provider, ok := s.logEngine.(interface {
+		CompactionStats() logengine.CompactionStats
+	}); ok {
+		compaction := provider.CompactionStats()
+		out.CompactionRuns = compaction.Runs
+		out.CompactionInputChunks = compaction.InputChunks
+		out.CompactionOutputChunks = compaction.OutputChunks
+		out.CompactionDeletedChunks = compaction.DeletedChunks
+		out.CompactionRecords = compaction.Records
+		out.CompactionRunning = compaction.Running
+		out.CompactionTargetBytes = compaction.TargetBytes
+		if !compaction.LastRun.IsZero() {
+			out.LastCompactionUnixNano = compaction.LastRun.UnixNano()
+		}
+	}
 	return out
 }
 

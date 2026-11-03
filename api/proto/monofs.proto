@@ -933,6 +933,14 @@ message LogEngineStats {
     int32 duckdb_threads = 7;
     uint64 duckdb_queries = 8;
     uint64 duckdb_errors = 9;
+    uint64 compaction_runs = 10;
+    uint64 compaction_input_chunks = 11;
+    uint64 compaction_output_chunks = 12;
+    uint64 compaction_deleted_chunks = 13;
+    uint64 compaction_records = 14;
+    int64 last_compaction_unix_nano = 15;
+    bool compaction_running = 16;
+    int64 compaction_target_bytes = 17;
 }
 
 // Cluster maintenance messages

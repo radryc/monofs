@@ -41,6 +41,7 @@ func main() {
 	maxConns := flag.Int("duckdb-max-conns", 4, "Maximum DuckDB connections")
 	fallback := flag.Bool("fallback", true, "Fall back to the native scanner when DuckDB cannot run a query")
 	selfTest := flag.Bool("self-test", false, "Open DuckDB, run a validation query, and exit")
+	sqlQuery := flag.String("sql", "", "Run an ad-hoc DuckDB SQL query and exit")
 	healthInterval := flag.Duration("health-interval", 30*time.Second, "DuckDB health check interval")
 	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
 	flag.Parse()
@@ -91,6 +92,15 @@ func main() {
 	}
 	if *selfTest {
 		logger.Info("DuckDB self-test passed")
+		return
+	}
+	if strings.TrimSpace(*sqlQuery) != "" {
+		queryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := runSQL(queryCtx, engine, *sqlQuery); err != nil {
+			logger.Error("SQL query failed", "error", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -456,4 +466,37 @@ func aggregateOp(op pb.AggregateOp) logengine.AggregateOp {
 	default:
 		return logengine.AggregateOp(strings.ToLower(strings.TrimPrefix(op.String(), "AGGREGATE_OP_")))
 	}
+}
+
+func runSQL(ctx context.Context, engine *logengine.LogEngine, query string) error {
+	rows, err := engine.QueryDuckDB(ctx, query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	fmt.Println(strings.Join(columns, "\t"))
+	for rows.Next() {
+		values := make([]any, len(columns))
+		pointers := make([]any, len(columns))
+		for idx := range values {
+			pointers[idx] = &values[idx]
+		}
+		if err := rows.Scan(pointers...); err != nil {
+			return err
+		}
+		fields := make([]string, len(values))
+		for idx, value := range values {
+			if value == nil {
+				fields[idx] = ""
+				continue
+			}
+			fields[idx] = fmt.Sprint(value)
+		}
+		fmt.Println(strings.Join(fields, "\t"))
+	}
+	return rows.Err()
 }

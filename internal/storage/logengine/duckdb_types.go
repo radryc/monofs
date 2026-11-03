@@ -2,6 +2,7 @@ package logengine
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 )
@@ -44,6 +45,7 @@ type duckQueryBackend interface {
 	StreamMetrics(ctx context.Context, query MetricQuery, from, to time.Time, yield func(MetricRecord) error) error
 	StreamTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int, yield func(SpanRecord) error) error
 	Ping(ctx context.Context) error
+	QueryDuckDB(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	Stats() DuckDBStats
 	Close() error
 }
