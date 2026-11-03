@@ -1,0 +1,88 @@
+apiVersion: guardian/v1alpha1
+kind: Intent
+metadata:
+  name: platform
+spec:
+  intentType: standard
+  targetPusher: k8s-main
+  target:
+    cluster: k8s-main
+    namespace: strata
+  locked: false
+  assets:
+    - type: Compute
+      name: monofs-server
+      properties:
+        image: strata/monofs-server:dev
+        imagePullPolicy: IfNotPresent
+        observeExisting: true
+        ports:
+          - name: api
+            containerPort: 9000
+            servicePort: 9000
+          - name: raft
+            containerPort: 7000
+            servicePort: 7000
+
+    - type: Compute
+      name: monofs-router
+      properties:
+        image: strata/monofs-router:dev
+        imagePullPolicy: IfNotPresent
+        observeExisting: true
+        ports:
+          - name: grpc
+            containerPort: 9090
+            servicePort: 9090
+          - name: http
+            containerPort: 8080
+            servicePort: 8080
+
+    - type: Compute
+      name: monofs-fetcher
+      properties:
+        image: strata/monofs-fetcher:dev
+        imagePullPolicy: IfNotPresent
+        observeExisting: true
+        ports:
+          - name: http
+            containerPort: 9200
+            servicePort: 9200
+
+    - type: Probe
+      name: monofs-router-health
+      dependsOn:
+        - monofs-router
+      properties:
+        target: monofs-router
+        type: http
+        url: http://monofs-router.strata.svc.cluster.local:8080/health
+        interval: 30s
+        timeout: 3s
+        retries: 2
+
+    - type: Probe
+      name: monofs-server-health
+      dependsOn:
+        - monofs-server
+      properties:
+        target: monofs-server
+        type: tcp
+        address: monofs-server.strata.svc.cluster.local
+        port: 9000
+        interval: 30s
+        timeout: 3s
+        retries: 2
+
+    - type: Probe
+      name: monofs-fetcher-health
+      dependsOn:
+        - monofs-fetcher
+      properties:
+        target: monofs-fetcher
+        type: tcp
+        address: monofs-fetcher.strata.svc.cluster.local
+        port: 9200
+        interval: 30s
+        timeout: 3s
+        retries: 2

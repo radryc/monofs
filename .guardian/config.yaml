@@ -1,0 +1,10 @@
+apiVersion: guardian/v1alpha1
+kind: RepoConfig
+pusher:
+  name: k8s-main
+  description: Kubernetes cluster used by the Strata bootstrap
+repo:
+  name: monofs
+  partition: monofs
+  source: .
+  description: MonoFS platform partition
