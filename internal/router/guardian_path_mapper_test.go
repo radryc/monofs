@@ -35,15 +35,15 @@ func TestGuardianPathMappingRoundTrip(t *testing.T) {
 		},
 		{
 			name:        "scan request file",
-			logicalPath: "/.scans/aws-975049940689/requests/scan-1.json",
+			logicalPath: "/.scans/aws-111111111111/requests/scan-1.json",
 			displayPath: "guardian-system",
-			relative:    ".scans/aws-975049940689/requests/scan-1.json",
+			relative:    ".scans/aws-111111111111/requests/scan-1.json",
 		},
 		{
 			name:        "scan result file",
-			logicalPath: "/.scans/aws-975049940689/.results/scan-1.json",
+			logicalPath: "/.scans/aws-111111111111/.results/scan-1.json",
 			displayPath: "guardian-system",
-			relative:    ".scans/aws-975049940689/.results/scan-1.json",
+			relative:    ".scans/aws-111111111111/.results/scan-1.json",
 		},
 		{
 			name:        "access policy file",
