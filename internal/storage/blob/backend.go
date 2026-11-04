@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,9 @@ import (
 	"github.com/radryc/packager"
 	"github.com/radryc/packager/pipeline"
 	pkgstorage "github.com/radryc/packager/storage"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/api/iterator"
 )
@@ -38,6 +42,14 @@ const (
 	// defaultCloudUploadQueueSize is the minimum number of archive uploads that
 	// can be buffered locally before writers start applying backpressure.
 	defaultCloudUploadQueueSize = 32
+
+	// archiveIndexSuffix is the sidecar file next to a .pack archive. It lists
+	// the blob hashes contained in the archive so another fetcher can locate a
+	// blob in S3 without downloading every archive.
+	archiveIndexSuffix = ".idx"
+
+	// cloudIndexTTL bounds how long a fetcher trusts its S3 index snapshot.
+	cloudIndexTTL = 5 * time.Minute
 )
 
 type cloudArchiveUploadJob struct {
@@ -66,6 +78,44 @@ type openArchive struct {
 	reader   *packager.ArchiveReader
 	store    pkgstorage.ObjectReader
 	lastUsed time.Time
+}
+
+type blobOTelMetrics struct {
+	walPending     metric.Int64Gauge
+	walRecords     metric.Int64Counter
+	walReplays     metric.Int64Counter
+	walFailures    metric.Int64Counter
+	uploads        metric.Int64Counter
+	uploadDuration metric.Float64Histogram
+	indexLoads     metric.Int64Counter
+	indexEntries   metric.Int64Gauge
+	indexDuration  metric.Float64Histogram
+	lookups        metric.Int64Counter
+	downloads      metric.Int64Counter
+	downloadBytes  metric.Int64Counter
+	archiveDeletes metric.Int64Counter
+	invalidations  metric.Int64Counter
+}
+
+// BlobObservability is the JSON view of WAL and S3 read-through state exposed
+// to the fetch diagnostics endpoint and the router UI.
+type BlobObservability struct {
+	WALPath                 string `json:"wal_path"`
+	WALPending              int    `json:"wal_pending"`
+	WALRecordedTotal        int64  `json:"wal_recorded_total"`
+	WALReplayedTotal        int64  `json:"wal_replayed_total"`
+	WALUploadFailuresTotal  int64  `json:"wal_upload_failures_total"`
+	CloudIndexLoaded        bool   `json:"cloud_index_loaded"`
+	CloudIndexPrefixes      int    `json:"cloud_index_prefixes"`
+	CloudIndexEntries       int    `json:"cloud_index_entries"`
+	CloudIndexLoadsTotal    int64  `json:"cloud_index_loads_total"`
+	CloudLookupHits         int64  `json:"cloud_lookup_hits"`
+	CloudLookupMisses       int64  `json:"cloud_lookup_misses"`
+	CloudLookupErrors       int64  `json:"cloud_lookup_errors"`
+	CloudDownloadsTotal     int64  `json:"cloud_downloads_total"`
+	CloudDownloadBytes      int64  `json:"cloud_download_bytes"`
+	ArchiveDeletesTotal     int64  `json:"archive_deletes_total"`
+	CacheInvalidationsTotal int64  `json:"cache_invalidations_total"`
 }
 
 // BlobBackend stores and serves blobs using packager archives.
@@ -106,6 +156,36 @@ type BlobBackend struct {
 	cloudUploadQueue  chan cloudArchiveUploadJob
 	cloudUploadWG     sync.WaitGroup
 
+	// Upload WAL. Every archive is recorded here before it is queued for S3;
+	// pending entries are replayed on startup so S3 remains the source of
+	// truth across fetcher restarts or crashes.
+	walMu      sync.Mutex
+	walPath    string
+	walPending map[string]struct{}
+
+	// Cloud blob index: blob hash -> S3 archive object key. It is built
+	// lazily from the .idx sidecars and lets any fetcher serve a cache miss
+	// by downloading the owning archive from S3.
+	cloudIndexMu       sync.Mutex
+	cloudBlobIndex     map[string]string
+	cloudIndexLoaded   bool
+	cloudIndexAt       time.Time
+	cloudIndexPrefixes map[string]time.Time
+
+	otel blobOTelMetrics
+
+	walRecordedTotal        atomic.Int64
+	walReplayedTotal        atomic.Int64
+	walUploadFailuresTotal  atomic.Int64
+	cloudIndexLoadsTotal    atomic.Int64
+	cloudLookupHits         atomic.Int64
+	cloudLookupMisses       atomic.Int64
+	cloudLookupErrors       atomic.Int64
+	cloudDownloadsTotal     atomic.Int64
+	cloudDownloadBytes      atomic.Int64
+	archiveDeletesTotal     atomic.Int64
+	cacheInvalidationsTotal atomic.Int64
+
 	cloudStores    atomic.Int64
 	cloudRetrieves atomic.Int64
 
@@ -128,12 +208,15 @@ type BlobBackend struct {
 // NewBlobBackend creates a new packager-based blob backend.
 func NewBlobBackend() *BlobBackend {
 	bb := &BlobBackend{
-		blobIndex:         make(map[string]archiveRef),
-		archiveCache:      make(map[string]*openArchive),
-		storageIDs:        make(map[string]bool),
-		storageBlobCounts: make(map[string]int64),
-		archivePaths:      make(map[string]bool),
-		stats:             storage.NewAtomicStats(),
+		blobIndex:          make(map[string]archiveRef),
+		archiveCache:       make(map[string]*openArchive),
+		storageIDs:         make(map[string]bool),
+		storageBlobCounts:  make(map[string]int64),
+		archivePaths:       make(map[string]bool),
+		walPending:         make(map[string]struct{}),
+		cloudBlobIndex:     make(map[string]string),
+		cloudIndexPrefixes: make(map[string]time.Time),
+		stats:              storage.NewAtomicStats(),
 	}
 	bb.storageHealthy.Store(true)
 	bb.lastStorageErr.Store("")
@@ -156,6 +239,7 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 		return fmt.Errorf("failed to create packager pipeline: %w", err)
 	}
 	bb.pipeline = p
+	bb.initOTelMetrics()
 
 	// Initialize cloud storage client when configured.
 	switch config.StorageType {
@@ -214,12 +298,19 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 		return fmt.Errorf("failed to create archive dir: %w", err)
 	}
 
+	// Restore the upload WAL before scanning so pending S3 uploads are not
+	// lost if the process restarted between archive creation and upload.
+	if err := bb.initUploadWAL(archiveDir); err != nil {
+		return fmt.Errorf("initialize upload WAL: %w", err)
+	}
+
 	// Scan locally-cached archives and build blob index.
 	if err := bb.scanArchives(archiveDir); err != nil {
 		return fmt.Errorf("failed to scan existing archives: %w", err)
 	}
 
 	bb.startCloudUploadWorkers()
+	bb.replayUploadWAL(ctx)
 	bb.startCloudBackupScanner()
 
 	// Verify the encryption key against the durably-stored accepted fingerprint.
@@ -229,12 +320,88 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 		return fmt.Errorf("encryption key verification failed: %w", err)
 	}
 
+	// Backfill sidecars for archives created before the sidecar format
+	// existed. Run it in the background so startup is not blocked. Skip the
+	// goroutine entirely when cloud upload is not configured; callers may
+	// enable upload after Initialize in tests.
+	if bb.hasCloudUpload() {
+		go bb.backfillCloudArchiveIndexes(context.Background())
+	}
+
 	return nil
 }
 
 // SetLogger sets the logger for the blob backend.
 func (bb *BlobBackend) SetLogger(logger *slog.Logger) {
 	bb.logger = logger
+}
+
+func (bb *BlobBackend) initOTelMetrics() {
+	meter := otel.Meter("monofs.packager")
+	bb.otel.walPending, _ = meter.Int64Gauge("monofs.packager.wal.pending",
+		metric.WithDescription("Archives waiting for durable S3 upload."))
+	bb.otel.walRecords, _ = meter.Int64Counter("monofs.packager.wal.records",
+		metric.WithDescription("Archive upload WAL records written."))
+	bb.otel.walReplays, _ = meter.Int64Counter("monofs.packager.wal.replays",
+		metric.WithDescription("Archive upload WAL entries replayed after restart."))
+	bb.otel.walFailures, _ = meter.Int64Counter("monofs.packager.wal.upload_failures",
+		metric.WithDescription("Archive uploads that exhausted retries and remain in the WAL."))
+	bb.otel.uploads, _ = meter.Int64Counter("monofs.packager.archive.uploads",
+		metric.WithDescription("Archive upload attempts by result."))
+	bb.otel.uploadDuration, _ = meter.Float64Histogram("monofs.packager.archive.upload.duration",
+		metric.WithDescription("Archive upload duration in seconds."),
+		metric.WithUnit("s"))
+	bb.otel.indexLoads, _ = meter.Int64Counter("monofs.packager.cloud.index.loads",
+		metric.WithDescription("S3 archive index prefix loads."))
+	bb.otel.indexEntries, _ = meter.Int64Gauge("monofs.packager.cloud.index.entries",
+		metric.WithDescription("Blob-to-S3-archive entries currently indexed."))
+	bb.otel.indexDuration, _ = meter.Float64Histogram("monofs.packager.cloud.index.load.duration",
+		metric.WithDescription("S3 archive index prefix load duration in seconds."),
+		metric.WithUnit("s"))
+	bb.otel.lookups, _ = meter.Int64Counter("monofs.packager.cloud.lookup",
+		metric.WithDescription("Cloud blob index lookups by result."))
+	bb.otel.downloads, _ = meter.Int64Counter("monofs.packager.cloud.downloads",
+		metric.WithDescription("Archives downloaded from S3 on a local cache miss."))
+	bb.otel.downloadBytes, _ = meter.Int64Counter("monofs.packager.cloud.download.bytes",
+		metric.WithDescription("Bytes downloaded from S3 on cache misses."),
+		metric.WithUnit("By"))
+	bb.otel.archiveDeletes, _ = meter.Int64Counter("monofs.packager.archive.deletes",
+		metric.WithDescription("Archives removed by compaction or deletion."))
+	bb.otel.invalidations, _ = meter.Int64Counter("monofs.packager.cache.invalidations",
+		metric.WithDescription("Blob index entries invalidated by deletion."))
+}
+
+// Observability returns the WAL and cloud read-through state for the UI.
+func (bb *BlobBackend) Observability() BlobObservability {
+	bb.walMu.Lock()
+	walPath := bb.walPath
+	pending := len(bb.walPending)
+	bb.walMu.Unlock()
+
+	bb.cloudIndexMu.Lock()
+	indexLoaded := bb.cloudIndexLoaded
+	prefixes := len(bb.cloudIndexPrefixes)
+	entries := len(bb.cloudBlobIndex)
+	bb.cloudIndexMu.Unlock()
+
+	return BlobObservability{
+		WALPath:                 walPath,
+		WALPending:              pending,
+		WALRecordedTotal:        bb.walRecordedTotal.Load(),
+		WALReplayedTotal:        bb.walReplayedTotal.Load(),
+		WALUploadFailuresTotal:  bb.walUploadFailuresTotal.Load(),
+		CloudIndexLoaded:        indexLoaded,
+		CloudIndexPrefixes:      prefixes,
+		CloudIndexEntries:       entries,
+		CloudIndexLoadsTotal:    bb.cloudIndexLoadsTotal.Load(),
+		CloudLookupHits:         bb.cloudLookupHits.Load(),
+		CloudLookupMisses:       bb.cloudLookupMisses.Load(),
+		CloudLookupErrors:       bb.cloudLookupErrors.Load(),
+		CloudDownloadsTotal:     bb.cloudDownloadsTotal.Load(),
+		CloudDownloadBytes:      bb.cloudDownloadBytes.Load(),
+		ArchiveDeletesTotal:     bb.archiveDeletesTotal.Load(),
+		CacheInvalidationsTotal: bb.cacheInvalidationsTotal.Load(),
+	}
 }
 
 func (bb *BlobBackend) startCloudUploadWorkers() {
@@ -252,47 +419,285 @@ func (bb *BlobBackend) startCloudUploadWorkers() {
 	}
 }
 
-func (bb *BlobBackend) cloudUploadWorker(workerID int) {
-	defer bb.cloudUploadWG.Done()
+// initUploadWAL loads the durable upload queue from disk.
+func (bb *BlobBackend) initUploadWAL(archiveDir string) error {
+	if !bb.hasCloudUpload() {
+		return nil
+	}
+	bb.walMu.Lock()
+	defer bb.walMu.Unlock()
 
-	for job := range bb.cloudUploadQueue {
-		if err := bb.uploadArchiveFunc(context.Background(), job.archivePath); err != nil {
-			bb.storageHealthy.Store(false)
-			bb.lastStorageErr.Store(err.Error())
-			if bb.logger != nil {
-				bb.logger.Error("failed to upload archive to cloud",
-					"archive_path", job.archivePath,
-					"worker", workerID,
-					"error", err)
+	bb.walPath = filepath.Join(archiveDir, "upload.wal.json")
+	data, err := os.ReadFile(bb.walPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var pending []string
+	if err := json.Unmarshal(data, &pending); err != nil {
+		return fmt.Errorf("decode %s: %w", bb.walPath, err)
+	}
+	for _, path := range pending {
+		if strings.TrimSpace(path) != "" {
+			bb.walPending[path] = struct{}{}
+		}
+	}
+	if bb.otel.walPending != nil {
+		bb.otel.walPending.Record(context.Background(), int64(len(bb.walPending)))
+	}
+	return nil
+}
+
+// persistUploadWALLocked writes the WAL atomically. Caller must hold walMu.
+func (bb *BlobBackend) persistUploadWALLocked() error {
+	if bb.walPath == "" {
+		return nil
+	}
+	paths := make([]string, 0, len(bb.walPending))
+	for path := range bb.walPending {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	data, err := json.MarshalIndent(paths, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := bb.walPath + ".tmp"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, bb.walPath); err != nil {
+		return err
+	}
+	if dir, err := os.Open(filepath.Dir(bb.walPath)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
+}
+
+func (bb *BlobBackend) walAdd(archivePath string) error {
+	bb.walMu.Lock()
+	defer bb.walMu.Unlock()
+	if _, exists := bb.walPending[archivePath]; exists {
+		return nil
+	}
+	bb.walPending[archivePath] = struct{}{}
+	if err := bb.persistUploadWALLocked(); err != nil {
+		delete(bb.walPending, archivePath)
+		return err
+	}
+	bb.walRecordedTotal.Add(1)
+	if bb.otel.walRecords != nil {
+		bb.otel.walRecords.Add(context.Background(), 1)
+	}
+	if bb.otel.walPending != nil {
+		bb.otel.walPending.Record(context.Background(), int64(len(bb.walPending)))
+	}
+	return nil
+}
+
+func (bb *BlobBackend) walRemove(archivePath string) error {
+	bb.walMu.Lock()
+	defer bb.walMu.Unlock()
+	if _, exists := bb.walPending[archivePath]; !exists {
+		return nil
+	}
+	delete(bb.walPending, archivePath)
+	if err := bb.persistUploadWALLocked(); err != nil {
+		bb.walPending[archivePath] = struct{}{}
+		return err
+	}
+	if bb.otel.walPending != nil {
+		bb.otel.walPending.Record(context.Background(), int64(len(bb.walPending)))
+	}
+	return nil
+}
+
+// replayUploadWAL re-queues archives that were pending when the process
+// stopped. Archives that no longer exist are dropped from the WAL.
+func (bb *BlobBackend) replayUploadWAL(ctx context.Context) {
+	if !bb.hasCloudUpload() {
+		return
+	}
+	bb.walMu.Lock()
+	pending := make([]string, 0, len(bb.walPending))
+	for path := range bb.walPending {
+		pending = append(pending, path)
+	}
+	bb.walMu.Unlock()
+
+	for _, path := range pending {
+		if _, err := os.Stat(path); err != nil {
+			_ = bb.walRemove(path)
+			continue
+		}
+		bb.walReplayedTotal.Add(1)
+		if bb.otel.walReplays != nil {
+			bb.otel.walReplays.Add(context.Background(), 1)
+		}
+		if err := bb.queueCloudUpload(path); err != nil && bb.logger != nil {
+			bb.logger.Warn("failed to replay cloud upload from WAL",
+				"archive_path", path, "error", err)
+		}
+	}
+	if len(pending) > 0 && bb.logger != nil {
+		bb.logger.Info("replayed cloud upload WAL", "entries", len(pending))
+	}
+}
+
+// backfillCloudArchiveIndexes uploads sidecars for local archives whose .pack
+// already exists in S3. This bootstraps read-through for archives created
+// before sidecar indexes were introduced.
+func (bb *BlobBackend) backfillCloudArchiveIndexes(ctx context.Context) {
+	if !bb.hasCloudUpload() {
+		return
+	}
+	bb.mu.RLock()
+	archives := make([]string, 0, len(bb.archivePaths))
+	for path := range bb.archivePaths {
+		archives = append(archives, path)
+	}
+	bb.mu.RUnlock()
+
+	for _, path := range archives {
+		if _, err := os.Stat(path + archiveIndexSuffix); err != nil {
+			hashes, hashErr := bb.archiveHashes(path)
+			if hashErr != nil {
+				if bb.logger != nil {
+					bb.logger.Warn("failed to build archive index", "archive_path", path, "error", hashErr)
+				}
+				continue
 			}
-		} else {
-			bb.cloudStores.Add(1)
-			bb.storageHealthy.Store(true)
-			bb.lastStorageErr.Store("")
+			if err := bb.writeArchiveIndex(path, hashes); err != nil {
+				if bb.logger != nil {
+					bb.logger.Warn("failed to write archive index", "archive_path", path, "error", err)
+				}
+				continue
+			}
+		}
+		if !bb.cloudArchiveExists(path) || bb.cloudArchiveIndexExists(path) {
+			continue
+		}
+		if err := bb.uploadArchiveIndex(ctx, path); err != nil && bb.logger != nil {
+			bb.logger.Warn("failed to backfill cloud archive index", "archive_path", path, "error", err)
 		}
 	}
 }
 
-func (bb *BlobBackend) queueCloudUpload(archivePath string) {
+func (bb *BlobBackend) cloudUploadWorker(workerID int) {
+	defer bb.cloudUploadWG.Done()
+
+	for job := range bb.cloudUploadQueue {
+		start := time.Now()
+		var uploadErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt) * time.Second)
+			}
+			if uploadErr = bb.uploadArchiveFunc(context.Background(), job.archivePath); uploadErr == nil {
+				break
+			}
+		}
+		duration := time.Since(start).Seconds()
+		if uploadErr != nil {
+			bb.storageHealthy.Store(false)
+			bb.lastStorageErr.Store(uploadErr.Error())
+			bb.walUploadFailuresTotal.Add(1)
+			if bb.otel.walFailures != nil {
+				bb.otel.walFailures.Add(context.Background(), 1)
+			}
+			if bb.otel.uploads != nil {
+				bb.otel.uploads.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "failure")))
+			}
+			if bb.otel.uploadDuration != nil {
+				bb.otel.uploadDuration.Record(context.Background(), duration, metric.WithAttributes(attribute.String("result", "failure")))
+			}
+			if bb.logger != nil {
+				bb.logger.Error("failed to upload archive to cloud",
+					"archive_path", job.archivePath,
+					"worker", workerID,
+					"error", uploadErr)
+			}
+			continue
+		}
+		bb.cloudStores.Add(1)
+		bb.storageHealthy.Store(true)
+		bb.lastStorageErr.Store("")
+		if bb.otel.uploads != nil {
+			bb.otel.uploads.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "success")))
+		}
+		if bb.otel.uploadDuration != nil {
+			bb.otel.uploadDuration.Record(context.Background(), duration, metric.WithAttributes(attribute.String("result", "success")))
+		}
+		if err := bb.walRemove(job.archivePath); err != nil && bb.logger != nil {
+			bb.logger.Warn("failed to remove uploaded archive from WAL",
+				"archive_path", job.archivePath, "error", err)
+		}
+	}
+}
+
+func (bb *BlobBackend) queueCloudUpload(archivePath string) error {
 	if !bb.hasCloudUpload() {
-		return
+		return nil
+	}
+	if err := bb.walAdd(archivePath); err != nil {
+		return fmt.Errorf("record archive in upload WAL: %w", err)
 	}
 
 	if bb.cloudUploadQueue == nil {
+		start := time.Now()
 		if err := bb.uploadArchiveFunc(context.Background(), archivePath); err != nil {
 			bb.storageHealthy.Store(false)
 			bb.lastStorageErr.Store(err.Error())
+			bb.walUploadFailuresTotal.Add(1)
+			if bb.otel.walFailures != nil {
+				bb.otel.walFailures.Add(context.Background(), 1)
+			}
+			if bb.otel.uploads != nil {
+				bb.otel.uploads.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "failure")))
+			}
+			if bb.otel.uploadDuration != nil {
+				bb.otel.uploadDuration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(attribute.String("result", "failure")))
+			}
 			if bb.logger != nil {
 				bb.logger.Error("failed to upload archive to cloud",
 					"archive_path", archivePath,
 					"error", err)
 			}
-		} else {
-			bb.cloudStores.Add(1)
-			bb.storageHealthy.Store(true)
-			bb.lastStorageErr.Store("")
+			return err
 		}
-		return
+		bb.cloudStores.Add(1)
+		bb.storageHealthy.Store(true)
+		bb.lastStorageErr.Store("")
+		if bb.otel.uploads != nil {
+			bb.otel.uploads.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "success")))
+		}
+		if bb.otel.uploadDuration != nil {
+			bb.otel.uploadDuration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(attribute.String("result", "success")))
+		}
+		if err := bb.walRemove(archivePath); err != nil && bb.logger != nil {
+			bb.logger.Warn("failed to remove uploaded archive from WAL",
+				"archive_path", archivePath, "error", err)
+		}
+		return nil
 	}
 
 	job := cloudArchiveUploadJob{archivePath: archivePath}
@@ -306,6 +711,7 @@ func (bb *BlobBackend) queueCloudUpload(archivePath string) {
 		}
 		bb.cloudUploadQueue <- job
 	}
+	return nil
 }
 
 // startCloudBackupScanner starts a background goroutine that periodically
@@ -359,6 +765,7 @@ func (bb *BlobBackend) runCloudBackupScan() {
 	var repaired int64
 	for _, archivePath := range archives {
 		if bb.cloudArchiveExists(archivePath) {
+			_ = bb.walRemove(archivePath)
 			continue
 		}
 		missing++
@@ -379,6 +786,7 @@ func (bb *BlobBackend) runCloudBackupScan() {
 			continue
 		}
 		repaired++
+		_ = bb.walRemove(archivePath)
 		packagerCloudBackupRepairedTotal.Inc()
 		if bb.logger != nil {
 			bb.logger.Info("repaired cloud backup for local archive",
@@ -774,6 +1182,95 @@ func (bb *BlobBackend) indexArchive(archivePath string) (int, error) {
 	return indexed, nil
 }
 
+// archiveHashes lists the blob hashes indexed in an archive. Only entries that
+// look like content IDs are returned, matching indexArchive's filter.
+func (bb *BlobBackend) archiveHashes(archivePath string) ([]string, error) {
+	store, err := pkgstorage.NewLocalFileReader(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("open archive %s: %w", archivePath, err)
+	}
+	defer store.Close()
+
+	ar, err := packager.OpenArchive(store, bb.pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("open/decrypt archive %s: %w", archivePath, err)
+	}
+	defer ar.Close()
+
+	hashes := make([]string, 0)
+	for _, entry := range ar.ListFiles() {
+		if strings.Contains(entry, "/") || strings.Contains(entry, ".") {
+			continue
+		}
+		hexPart := entry
+		if after, found := strings.CutPrefix(entry, "sha256:"); found {
+			hexPart = after
+		}
+		if isHexString(hexPart) {
+			hashes = append(hashes, entry)
+		}
+	}
+	sort.Strings(hashes)
+	return hashes, nil
+}
+
+// writeArchiveIndex writes the sidecar index atomically next to an archive.
+func (bb *BlobBackend) writeArchiveIndex(archivePath string, hashes []string) error {
+	if len(hashes) == 0 {
+		return nil
+	}
+	unique := make([]string, 0, len(hashes))
+	seen := make(map[string]struct{}, len(hashes))
+	for _, hash := range hashes {
+		if hash == "" {
+			continue
+		}
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+		seen[hash] = struct{}{}
+		unique = append(unique, hash)
+	}
+	sort.Strings(unique)
+	data, err := json.Marshal(unique)
+	if err != nil {
+		return err
+	}
+	indexPath := archivePath + archiveIndexSuffix
+	tmpPath := indexPath + ".tmp"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, indexPath)
+}
+
+func (bb *BlobBackend) readLocalArchiveIndex(archivePath string) ([]string, error) {
+	data, err := os.ReadFile(archivePath + archiveIndexSuffix)
+	if err != nil {
+		return nil, err
+	}
+	var hashes []string
+	if err := json.Unmarshal(data, &hashes); err != nil {
+		return nil, err
+	}
+	return hashes, nil
+}
+
 // cloudKey returns the S3/GCS object key for a local archive path.
 // The key is: <prefix>/<storageID>/<filename.pack>
 func (bb *BlobBackend) cloudKey(archivePath string) string {
@@ -812,6 +1309,27 @@ func (bb *BlobBackend) uploadArchiveToS3(ctx context.Context, archivePath string
 	if err != nil {
 		return fmt.Errorf("s3 PutObject %s: %w", key, err)
 	}
+	return bb.uploadArchiveIndexToS3(ctx, archivePath)
+}
+
+func (bb *BlobBackend) uploadArchiveIndexToS3(ctx context.Context, archivePath string) error {
+	indexPath := archivePath + archiveIndexSuffix
+	file, err := os.Open(indexPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("open archive index %s: %w", indexPath, err)
+	}
+	defer file.Close()
+	key := bb.cloudKey(archivePath) + archiveIndexSuffix
+	if _, err := bb.s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bb.config.Cloud.S3Bucket),
+		Key:    aws.String(key),
+		Body:   file,
+	}); err != nil {
+		return fmt.Errorf("s3 PutObject %s: %w", key, err)
+	}
 	return nil
 }
 
@@ -832,7 +1350,58 @@ func (bb *BlobBackend) uploadArchiveToGCS(ctx context.Context, archivePath strin
 	if err := writer.Close(); err != nil {
 		return fmt.Errorf("gcs close %s: %w", key, err)
 	}
+	return bb.uploadArchiveIndexToGCS(ctx, archivePath)
+}
+
+func (bb *BlobBackend) uploadArchiveIndexToGCS(ctx context.Context, archivePath string) error {
+	indexPath := archivePath + archiveIndexSuffix
+	file, err := os.Open(indexPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("open archive index %s: %w", indexPath, err)
+	}
+	defer file.Close()
+	key := bb.cloudKey(archivePath) + archiveIndexSuffix
+	bucket := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket)
+	writer := bucket.Object(key).NewWriter(ctx)
+	if _, err := io.Copy(writer, file); err != nil {
+		writer.Close()
+		return fmt.Errorf("gcs write %s: %w", key, err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("gcs close %s: %w", key, err)
+	}
 	return nil
+}
+
+func (bb *BlobBackend) deleteCloudArchive(ctx context.Context, archivePath string) error {
+	key := bb.cloudKey(archivePath)
+	switch bb.config.StorageType {
+	case storage.StorageTypeS3:
+		// Remove the sidecar first so a concurrent read-through cannot resolve
+		// a blob to an archive that is about to disappear.
+		for _, objectKey := range []string{key + archiveIndexSuffix, key} {
+			if _, err := bb.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(bb.config.Cloud.S3Bucket),
+				Key:    aws.String(objectKey),
+			}); err != nil {
+				return fmt.Errorf("s3 DeleteObject %s: %w", objectKey, err)
+			}
+		}
+		return nil
+	case storage.StorageTypeGCS:
+		bucket := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket)
+		for _, objectKey := range []string{key + archiveIndexSuffix, key} {
+			if err := bucket.Object(objectKey).Delete(ctx); err != nil {
+				return fmt.Errorf("gcs delete %s: %w", objectKey, err)
+			}
+		}
+		return nil
+	default:
+		return nil
+	}
 }
 
 func (bb *BlobBackend) openS3Reader(key string) (io.ReadCloser, error) {
@@ -902,6 +1471,16 @@ func (bb *BlobBackend) downloadFromCloud(archivePath string) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename local cache: %w", err)
 	}
+	if info, err := os.Stat(archivePath); err == nil {
+		bb.cloudDownloadBytes.Add(info.Size())
+		if bb.otel.downloadBytes != nil {
+			bb.otel.downloadBytes.Add(context.Background(), info.Size())
+		}
+	}
+	bb.cloudDownloadsTotal.Add(1)
+	if bb.otel.downloads != nil {
+		bb.otel.downloads.Add(context.Background(), 1)
+	}
 	bb.cloudRetrieves.Add(1)
 	return nil
 }
@@ -936,9 +1515,31 @@ func (bb *BlobBackend) ensureArchiveInCloud(ctx context.Context, archivePath str
 		return fmt.Errorf("cloud upload not configured")
 	}
 	if bb.cloudArchiveExists(archivePath) {
+		// Repair a missing sidecar index without re-uploading the payload.
+		if _, err := os.Stat(archivePath + archiveIndexSuffix); err == nil && !bb.cloudArchiveIndexExists(archivePath) {
+			return bb.uploadArchiveIndex(ctx, archivePath)
+		}
 		return nil
 	}
 	return bb.uploadArchiveFunc(ctx, archivePath)
+}
+
+func (bb *BlobBackend) uploadArchiveIndex(ctx context.Context, archivePath string) error {
+	switch bb.config.StorageType {
+	case storage.StorageTypeS3:
+		return bb.uploadArchiveIndexToS3(ctx, archivePath)
+	case storage.StorageTypeGCS:
+		return bb.uploadArchiveIndexToGCS(ctx, archivePath)
+	default:
+		return nil
+	}
+}
+
+func (bb *BlobBackend) cloudArchiveIndexExists(archivePath string) bool {
+	if bb.headCloudObject == nil {
+		return false
+	}
+	return bb.headCloudObject(bb.cloudKey(archivePath) + archiveIndexSuffix)
 }
 
 // isCloudConfigured returns true when archives should be replicated to cloud.
@@ -980,9 +1581,14 @@ func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Re
 		return 0, 0, fmt.Errorf("rename archive: %w", err)
 	}
 
-	// Replicate to cloud asynchronously; local cache remains authoritative.
-	if bb.hasCloudUpload() {
-		bb.queueCloudUpload(archivePath)
+	// Build the sidecar index before the archive is uploaded so other fetchers
+	// can locate blobs in S3 without downloading every archive.
+	hashes, err := bb.archiveHashes(archivePath)
+	if err != nil {
+		return written, 0, fmt.Errorf("build archive index: %w", err)
+	}
+	if err := bb.writeArchiveIndex(archivePath, hashes); err != nil {
+		return written, 0, fmt.Errorf("write archive index: %w", err)
 	}
 
 	bb.evictArchiveReader(archivePath)
@@ -997,6 +1603,14 @@ func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Re
 	bb.storageBlobCounts[storageID] += int64(count)
 	bb.archivePaths[archivePath] = true
 	bb.mu.Unlock()
+
+	// Replicate to cloud. The WAL makes the archive recoverable if the
+	// fetcher stops before the upload completes.
+	if bb.hasCloudUpload() {
+		if err := bb.queueCloudUpload(archivePath); err != nil {
+			return written, count, fmt.Errorf("queue cloud upload: %w", err)
+		}
+	}
 
 	stats := *bb.stats.Load()
 	stats.CachedItems += int64(count)
@@ -1070,9 +1684,8 @@ func (bb *BlobBackend) StoreBlob(blobHash string, content []byte) error {
 			return nil, fmt.Errorf("rename loose archive: %w", err)
 		}
 
-		// Replicate to cloud asynchronously; local cache remains authoritative.
-		if bb.hasCloudUpload() {
-			bb.queueCloudUpload(archivePath)
+		if err := bb.writeArchiveIndex(archivePath, []string{blobHash}); err != nil {
+			return nil, fmt.Errorf("write loose archive index: %w", err)
 		}
 
 		bb.mu.Lock()
@@ -1084,6 +1697,12 @@ func (bb *BlobBackend) StoreBlob(blobHash string, content []byte) error {
 		bb.storageBlobCounts["_loose"]++
 		bb.archivePaths[archivePath] = true
 		bb.mu.Unlock()
+
+		if bb.hasCloudUpload() {
+			if err := bb.queueCloudUpload(archivePath); err != nil {
+				return nil, fmt.Errorf("queue loose archive upload: %w", err)
+			}
+		}
 
 		stats := *bb.stats.Load()
 		stats.CachedItems++
@@ -1248,12 +1867,14 @@ func (w *StoreBlobBatchWriter) sealCurrentArchive() error {
 		return fmt.Errorf("rename batch archive: %w", err)
 	}
 
-	// Replicate to cloud asynchronously; local cache remains authoritative.
-	if w.bb.hasCloudUpload() {
-		w.bb.queueCloudUpload(w.archivePath)
+	archivePath := w.archivePath
+	if err := w.bb.writeArchiveIndex(archivePath, w.curHashes); err != nil {
+		w.tmpFile = nil
+		w.counter = nil
+		w.writer = nil
+		return fmt.Errorf("write batch archive index: %w", err)
 	}
 
-	archivePath := w.archivePath
 	w.bb.mu.Lock()
 	for _, hash := range w.curHashes {
 		w.bb.blobIndex[hash] = archiveRef{
@@ -1265,6 +1886,17 @@ func (w *StoreBlobBatchWriter) sealCurrentArchive() error {
 	w.bb.storageBlobCounts["_batch"] += int64(len(w.curHashes))
 	w.bb.archivePaths[archivePath] = true
 	w.bb.mu.Unlock()
+
+	// Replicate to cloud. The WAL makes the archive recoverable if the
+	// fetcher stops before the upload completes.
+	if w.bb.hasCloudUpload() {
+		if err := w.bb.queueCloudUpload(archivePath); err != nil {
+			w.tmpFile = nil
+			w.counter = nil
+			w.writer = nil
+			return fmt.Errorf("queue batch archive upload: %w", err)
+		}
+	}
 
 	stats := *w.bb.stats.Load()
 	stats.CachedItems += int64(len(w.curHashes))
@@ -1362,43 +1994,69 @@ func (bb *BlobBackend) DeleteBlobs(hashes []string, compact bool) *DeleteBlobsRe
 		}
 
 		for archivePath := range affectedArchives {
-			if archiveEntryCount[archivePath] == 0 {
-				// Before removing the local archive, make sure it is durably backed
-				// up to cloud storage. If the backup is missing, try to upload it.
-				// Only delete the local file once the cloud copy is verified.
-				if bb.isCloudConfigured() {
-					if !bb.cloudArchiveExists(archivePath) {
-						uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-						uploadErr := bb.ensureArchiveInCloud(uploadCtx, archivePath)
-						cancel()
-						if uploadErr != nil {
-							if bb.logger != nil {
-								bb.logger.Error("refusing to delete local archive without verified cloud backup",
-									"archive_path", archivePath,
-									"error", uploadErr)
-							}
-							packagerLocalArchiveDeletionBlockedTotal.Inc()
-							continue
-						}
-					}
-				}
+			if archiveEntryCount[archivePath] != 0 {
+				continue
+			}
 
-				bb.archiveMu.Lock()
-				if cached, ok := bb.archiveCache[archivePath]; ok {
-					cached.reader.Close()
-					cached.store.Close()
-					delete(bb.archiveCache, archivePath)
-				}
-				bb.archiveMu.Unlock()
+			// The archive is empty, so there is nothing left to upload. Drop
+			// any pending WAL entry before deleting the local files.
+			_ = bb.walRemove(archivePath)
 
-				os.Remove(archivePath)
-				delete(bb.archivePaths, archivePath)
-				result.ArchivesRemoved++
+			bb.archiveMu.Lock()
+			if cached, ok := bb.archiveCache[archivePath]; ok {
+				cached.reader.Close()
+				cached.store.Close()
+				delete(bb.archiveCache, archivePath)
+			}
+			bb.archiveMu.Unlock()
+
+			// The sidecar must disappear with the archive. Otherwise a
+			// read-through lookup can resolve a blob to a dead archive.
+			if err := os.Remove(archivePath + archiveIndexSuffix); err != nil && !os.IsNotExist(err) && bb.logger != nil {
+				bb.logger.Warn("failed to remove archive sidecar", "archive_path", archivePath, "error", err)
+			}
+			if err := os.Remove(archivePath); err != nil && !os.IsNotExist(err) {
+				if bb.logger != nil {
+					bb.logger.Warn("failed to remove archive", "archive_path", archivePath, "error", err)
+				}
+				continue
+			}
+			delete(bb.archivePaths, archivePath)
+			result.ArchivesRemoved++
+			bb.archiveDeletesTotal.Add(1)
+
+			// S3 is authoritative. Remove both the pack and its index so other
+			// fetchers cannot resurrect deleted blobs from the cloud copy.
+			if bb.isCloudConfigured() {
+				delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if err := bb.deleteCloudArchive(delCtx, archivePath); err != nil && bb.logger != nil {
+					bb.logger.Warn("failed to delete archive from cloud", "archive_path", archivePath, "error", err)
+				}
+				cancel()
+			}
+			if bb.otel.archiveDeletes != nil {
+				bb.otel.archiveDeletes.Add(context.Background(), 1,
+					metric.WithAttributes(attribute.String("reason", "compaction")))
 			}
 		}
 	}
 
 	bb.mu.Unlock()
+
+	// Invalidate cloud read-through entries for every deleted blob. Other
+	// fetchers are invalidated by the client fan-out; offline fetchers drop
+	// stale entries when their S3 prefix index is refreshed.
+	bb.cloudIndexMu.Lock()
+	for _, hash := range hashes {
+		delete(bb.cloudBlobIndex, hash)
+	}
+	bb.cloudIndexMu.Unlock()
+	if result.Deleted > 0 {
+		bb.cacheInvalidationsTotal.Add(int64(result.Deleted))
+		if bb.otel.invalidations != nil {
+			bb.otel.invalidations.Add(context.Background(), int64(result.Deleted))
+		}
+	}
 
 	if result.Deleted > 0 {
 		stats := *bb.stats.Load()
@@ -1501,9 +2159,14 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 	bb.mu.RUnlock()
 
 	if !ok {
-		recoveredRef, recovered, err := bb.findBlobOnDisk(req.ContentID)
-		if err != nil && bb.logger != nil {
-			bb.logger.Warn("blob miss rescan failed", "content_id", req.ContentID, "error", err)
+		storageID := strings.TrimSpace(req.SourceConfig["storage_id"])
+		if storageID == "" {
+			storageID = strings.TrimSpace(req.SourceKey)
+		}
+
+		recoveredRef, recovered, localErr := bb.findBlobOnDisk(req.ContentID)
+		if localErr != nil && bb.logger != nil {
+			bb.logger.Warn("blob miss rescan failed", "content_id", req.ContentID, "error", localErr)
 		}
 		if recovered {
 			bb.mu.Lock()
@@ -1522,15 +2185,33 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 			if bb.logger != nil {
 				bb.logger.Info("recovered blob from disk", "content_id", req.ContentID, "archive_path", ref.archivePath)
 			}
-		} else if err != nil {
+		}
+
+		// Local cache miss: S3 is the source of truth. Use the sidecar index
+		// to find and download the archive that owns this blob.
+		if !ok && bb.hasCloudDownload() {
+			cloudRef, cloudOK, cloudErr := bb.findBlobInCloud(ctx, storageID, req.ContentID)
+			if cloudErr != nil && bb.logger != nil {
+				bb.logger.Warn("blob miss cloud lookup failed", "content_id", req.ContentID, "error", cloudErr)
+			}
+			if cloudOK {
+				ref = cloudRef
+				ok = true
+				if bb.logger != nil {
+					bb.logger.Info("recovered blob from cloud", "content_id", req.ContentID, "archive_path", ref.archivePath)
+				}
+			}
+		}
+
+		if !ok && localErr != nil {
 			newStats.CacheMisses++
 			newStats.Errors++
 			bb.stats.Store(&newStats)
 			packagerFetchErrorsTotal.WithLabelValues(string(bb.config.StorageType)).Inc()
-			if errors.Is(err, pipeline.ErrDecryption) || errors.Is(err, pipeline.ErrDecompression) {
-				return nil, fmt.Errorf("blob %s: archives exist but cannot be decrypted (wrong encryption key?): %w", req.ContentID, err)
+			if errors.Is(localErr, pipeline.ErrDecryption) || errors.Is(localErr, pipeline.ErrDecompression) {
+				return nil, fmt.Errorf("blob %s: archives exist but cannot be decrypted (wrong encryption key?): %w", req.ContentID, localErr)
 			}
-			return nil, fmt.Errorf("blob %s: archives exist but failed to open: %w", req.ContentID, err)
+			return nil, fmt.Errorf("blob %s: archives exist but failed to open: %w", req.ContentID, localErr)
 		}
 	}
 
@@ -1575,6 +2256,154 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 		FromCache:      true,
 		FetchLatencyMs: time.Since(start).Milliseconds(),
 	}, nil
+}
+
+// findBlobInCloud locates a blob through the S3 sidecar index, downloads its
+// archive into the local cache, indexes it, and returns the local reference.
+func (bb *BlobBackend) findBlobInCloud(ctx context.Context, storageID, blobHash string) (archiveRef, bool, error) {
+	if !bb.hasCloudDownload() {
+		return archiveRef{}, false, nil
+	}
+	if err := bb.ensureCloudBlobIndex(ctx, storageID); err != nil {
+		bb.cloudLookupErrors.Add(1)
+		if bb.otel.lookups != nil {
+			bb.otel.lookups.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "error")))
+		}
+		return archiveRef{}, false, err
+	}
+
+	bb.cloudIndexMu.Lock()
+	archiveKey, ok := bb.cloudBlobIndex[blobHash]
+	bb.cloudIndexMu.Unlock()
+	if !ok {
+		bb.cloudLookupMisses.Add(1)
+		if bb.otel.lookups != nil {
+			bb.otel.lookups.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "miss")))
+		}
+		return archiveRef{}, false, nil
+	}
+	bb.cloudLookupHits.Add(1)
+	if bb.otel.lookups != nil {
+		bb.otel.lookups.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "hit")))
+	}
+
+	archivePath := filepath.Join(bb.config.CacheDir, "archives", filepath.FromSlash(archiveKey))
+	if _, err := os.Stat(archivePath); err != nil {
+		if err := bb.downloadFromCloud(archivePath); err != nil {
+			return archiveRef{}, false, fmt.Errorf("download archive %s: %w", archiveKey, err)
+		}
+	}
+	if _, err := bb.indexArchive(archivePath); err != nil {
+		return archiveRef{}, false, fmt.Errorf("index downloaded archive %s: %w", archiveKey, err)
+	}
+
+	bb.mu.Lock()
+	bb.archivePaths[archivePath] = true
+	sid := strings.SplitN(archiveKey, "/", 2)[0]
+	if sid != "" {
+		bb.storageIDs[sid] = true
+	}
+	ref, exists := bb.blobIndex[blobHash]
+	bb.mu.Unlock()
+	if exists {
+		return ref, true, nil
+	}
+	return archiveRef{archivePath: archivePath, entryPath: blobHash}, true, nil
+}
+
+// ensureCloudBlobIndex loads .idx sidecars for the requested storage prefix,
+// plus the shared _batch/_loose archive prefixes.
+func (bb *BlobBackend) ensureCloudBlobIndex(ctx context.Context, storageID string) error {
+	if !bb.hasCloudDownload() || bb.s3Client == nil {
+		return fmt.Errorf("cloud index unavailable")
+	}
+
+	prefixes := []string{"_batch/", "_loose/"}
+	if storageID == "" {
+		// Unknown storage scope: scan the whole archive namespace. This is
+		// more expensive but still bounded and only happens on demand.
+		prefixes = []string{""}
+	} else if storageID != "_batch" && storageID != "_loose" {
+		prefixes = append(prefixes, storageID+"/")
+	}
+
+	for _, prefix := range prefixes {
+		bb.cloudIndexMu.Lock()
+		loadedAt, loaded := bb.cloudIndexPrefixes[prefix]
+		bb.cloudIndexMu.Unlock()
+		if loaded && time.Since(loadedAt) < cloudIndexTTL {
+			continue
+		}
+
+		objects, err := bb.listS3ObjectsPrefix(ctx, prefix, 5000)
+		if err != nil {
+			return err
+		}
+		start := time.Now()
+		entries := make(map[string]string)
+		for _, object := range objects {
+			if !strings.HasSuffix(object.Key, archiveIndexSuffix) {
+				continue
+			}
+			data, err := bb.readCloudObject(ctx, object.Key)
+			if err != nil {
+				continue
+			}
+			var hashes []string
+			if err := json.Unmarshal(data, &hashes); err != nil {
+				continue
+			}
+			archiveKey := strings.TrimSuffix(object.Key, archiveIndexSuffix)
+			for _, hash := range hashes {
+				if hash != "" {
+					entries[hash] = archiveKey
+				}
+			}
+		}
+
+		bb.cloudIndexMu.Lock()
+		// Replace, don't merge, this prefix's entries. A deleted S3 archive
+		// must not survive in a fetcher's in-memory index after refresh.
+		for hash, key := range bb.cloudBlobIndex {
+			if prefix == "" || strings.HasPrefix(key, prefix) {
+				delete(bb.cloudBlobIndex, hash)
+			}
+		}
+		for hash, key := range entries {
+			bb.cloudBlobIndex[hash] = key
+		}
+		bb.cloudIndexPrefixes[prefix] = time.Now()
+		bb.cloudIndexLoaded = true
+		bb.cloudIndexAt = time.Now()
+		bb.cloudIndexMu.Unlock()
+
+		bb.cloudIndexLoadsTotal.Add(1)
+		if bb.otel.indexLoads != nil {
+			bb.otel.indexLoads.Add(context.Background(), 1)
+		}
+		if bb.otel.indexDuration != nil {
+			bb.otel.indexDuration.Record(context.Background(), time.Since(start).Seconds())
+		}
+		if bb.otel.indexEntries != nil {
+			bb.cloudIndexMu.Lock()
+			totalEntries := len(bb.cloudBlobIndex)
+			bb.cloudIndexMu.Unlock()
+			bb.otel.indexEntries.Record(context.Background(), int64(totalEntries))
+		}
+	}
+	return nil
+}
+
+func (bb *BlobBackend) readCloudObject(ctx context.Context, key string) ([]byte, error) {
+	if !bb.hasCloudDownload() {
+		return nil, fmt.Errorf("cloud download not configured")
+	}
+	reader, err := bb.openCloudReader(key)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
 }
 
 func (bb *BlobBackend) findBlobOnDisk(blobHash string) (archiveRef, bool, error) {
@@ -1860,6 +2689,65 @@ func (bb *BlobBackend) listS3Objects(ctx context.Context) ([]storage.StorageObje
 		continuationToken = out.NextContinuationToken
 	}
 
+	return objects, nil
+}
+
+// listS3ObjectsPrefix lists a bounded set of objects under one prefix. The
+// configured S3Prefix is prepended, matching cloudKey().
+func (bb *BlobBackend) listS3ObjectsPrefix(ctx context.Context, prefix string, maxTotal int) ([]storage.StorageObject, error) {
+	if bb.s3Client == nil {
+		return nil, fmt.Errorf("s3 client not initialized")
+	}
+	if maxTotal <= 0 {
+		maxTotal = 5000
+	}
+	basePrefix := strings.TrimRight(bb.config.Cloud.S3Prefix, "/")
+	if basePrefix != "" {
+		basePrefix += "/"
+	}
+	fullPrefix := basePrefix + strings.TrimLeft(prefix, "/")
+
+	var objects []storage.StorageObject
+	var continuationToken *string
+	const maxPerPage = 1000
+	for {
+		if len(objects) >= maxTotal {
+			break
+		}
+		out, err := bb.s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bb.config.Cloud.S3Bucket),
+			Prefix:            aws.String(fullPrefix),
+			ContinuationToken: continuationToken,
+			MaxKeys:           aws.Int32(maxPerPage),
+		})
+		if err != nil {
+			return objects, fmt.Errorf("list s3 objects under %s: %w", fullPrefix, err)
+		}
+		for _, obj := range out.Contents {
+			key := aws.ToString(obj.Key)
+			if key == "" {
+				continue
+			}
+			var mtime int64
+			if obj.LastModified != nil {
+				mtime = obj.LastModified.Unix()
+			}
+			objects = append(objects, storage.StorageObject{
+				Key:          key,
+				Size:         aws.ToInt64(obj.Size),
+				LastModified: mtime,
+				StorageType:  string(storage.StorageTypeS3),
+				Bucket:       bb.config.Cloud.S3Bucket,
+			})
+			if len(objects) >= maxTotal {
+				break
+			}
+		}
+		if !aws.ToBool(out.IsTruncated) {
+			break
+		}
+		continuationToken = out.NextContinuationToken
+	}
 	return objects, nil
 }
 

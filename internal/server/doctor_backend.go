@@ -3,11 +3,14 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/storage/logengine"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // DoctorBackend is the interface the server uses to ingest and query telemetry signals.
@@ -24,6 +27,7 @@ type DoctorBackend interface {
 	QueryMetrics(ctx context.Context, query logengine.MetricQuery, from, to time.Time) ([]logengine.MetricRecord, error)
 	QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]logengine.SpanRecord, error)
 	Aggregate(ctx context.Context, query logengine.AggregateQuery) ([]logengine.AggregateRow, error)
+	QueryDuckDBSQL(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope) (logengine.DuckDBSQLResult, error)
 	Stats(ctx context.Context) (logengine.LogEngineStats, error)
 }
 
@@ -38,10 +42,16 @@ func (s *Server) logEngineProtoStats(ctx context.Context) *pb.LogEngineStats {
 		return &pb.LogEngineStats{Enabled: true}
 	}
 	out := &pb.LogEngineStats{
-		Enabled:      true,
-		LogChunks:    stats.LogChunks,
-		MetricChunks: stats.MetricChunks,
-		TraceChunks:  stats.TraceChunks,
+		Enabled:                true,
+		LogChunks:              stats.LogChunks,
+		MetricChunks:           stats.MetricChunks,
+		TraceChunks:            stats.TraceChunks,
+		LogBuckets:             stats.LogBuckets,
+		MetricBuckets:          stats.MetricBuckets,
+		TraceBuckets:           stats.TraceBuckets,
+		LogCompactedBuckets:    stats.LogCompactedBuckets,
+		MetricCompactedBuckets: stats.MetricCompactedBuckets,
+		TraceCompactedBuckets:  stats.TraceCompactedBuckets,
 	}
 	if provider, ok := s.logEngine.(interface {
 		DuckDBStats() logengine.DuckDBStats
@@ -52,6 +62,8 @@ func (s *Server) logEngineProtoStats(ctx context.Context) *pb.LogEngineStats {
 		out.DuckdbThreads = int32(duck.Threads)
 		out.DuckdbQueries = duck.Queries
 		out.DuckdbErrors = duck.Errors
+		out.DuckdbTempDir = duck.TempDir
+		out.DuckdbFallbacks = duck.Fallbacks
 	}
 	if s.logQuerySidecar != nil {
 		out.DuckdbEnabled = true
@@ -81,10 +93,12 @@ func (s *Server) SetDoctorBackend(b DoctorBackend) {
 
 // SetLogQuerySidecar routes telemetry read queries to a DuckDB sidecar. The
 // sidecar must expose the MonoFS telemetry query RPCs. Ingest and stats stay
-// on the local logengine.
-func (s *Server) SetLogQuerySidecar(client pb.MonoFSClient, fallback bool) {
+// on the local logengine. proxyTraces is false when traces are served by a
+// different engine, such as ClickHouse.
+func (s *Server) SetLogQuerySidecar(client pb.MonoFSClient, fallback, proxyTraces bool) {
 	s.logQuerySidecar = client
 	s.logQuerySidecarFallback = fallback
+	s.logQuerySidecarProxyTraces = proxyTraces
 }
 
 // doctorBackendOrErr returns the configured backend or an error if not set.
@@ -93,7 +107,7 @@ func (s *Server) doctorBackendOrErr() (DoctorBackend, error) {
 		return nil, fmt.Errorf("doctor backend not configured on this node")
 	}
 	if s.logQuerySidecar != nil {
-		return newSidecarBackend(s.logEngine, s.logQuerySidecar, s.logger, s.logQuerySidecarFallback), nil
+		return newSidecarBackend(s.logEngine, s.logQuerySidecar, s.logger, s.logQuerySidecarFallback, s.logQuerySidecarProxyTraces), nil
 	}
 	return s.logEngine, nil
 }
@@ -158,4 +172,17 @@ func requestQueryScope(partitions []string, restricted bool) logengine.QueryScop
 		return logengine.QueryScope{}
 	}
 	return logengine.QueryScope{Partitions: append([]string(nil), partitions...), Restricted: true}
+}
+
+// telemetryQueryStatus maps storage budget errors to gRPC status codes instead
+// of reporting every failure as Internal.
+func telemetryQueryStatus(prefix string, err error) error {
+	switch {
+	case errors.Is(err, logengine.ErrQueryTooBroad), errors.Is(err, logengine.ErrMetricSeriesLimit):
+		return status.Errorf(codes.ResourceExhausted, "%s: %v", prefix, err)
+	case errors.Is(err, logengine.ErrDuckDBUnavailable):
+		return status.Errorf(codes.FailedPrecondition, "%s: %v", prefix, err)
+	default:
+		return status.Errorf(codes.Internal, "%s: %v", prefix, err)
+	}
 }

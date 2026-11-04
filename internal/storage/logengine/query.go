@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/RoaringBitmap/roaring"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -26,6 +28,17 @@ import (
 // QueryEngine handles parsing and executing MonoFS log queries against the storage.
 type QueryEngine struct {
 	store *CachedStore
+
+	// maxMetricSeries bounds the number of distinct series StreamMetricSeries
+	// may merge. The stream is used by discovery and presence aggregations, so
+	// an unbounded high-cardinality store must fail with a typed limit error
+	// instead of growing a map until the process is OOM-killed.
+	maxMetricSeries int
+	// maxQueryChunks bounds chunk candidates and maxQueryRecords bounds rows
+	// yielded by a streaming query.
+	maxQueryChunks  int
+	maxQueryRecords int64
+	discoveryCache  *metricDiscoveryCache
 }
 
 type candidateChunk struct {
@@ -159,13 +172,86 @@ const (
 	// discovery call returns. High-cardinality labels (trace_id, task ids) would
 	// otherwise make the value union unbounded.
 	maxDiscoveredLabelValues = 10000
+
+	// defaultMaxMetricSeries bounds the cross-chunk series merge performed by
+	// StreamMetricSeries. The limit is intentionally generous enough for
+	// normal tenants while still turning pathological cardinality into a
+	// ResourceExhausted error rather than an OOM kill.
+	defaultMaxMetricSeries = 200_000
+
+	// maxDiscoveredMetricNames bounds exact, partition-filtered metric-name
+	// discovery. There are far fewer metric names than series, so a limit this
+	// high only trips for a genuinely misconfigured store.
+	maxDiscoveredMetricNames = 20_000
+
+	// defaultMaxQueryChunks and defaultMaxQueryRecords bound an unbounded
+	// telemetry query. Compaction uses the scan helpers directly and is not
+	// subject to these limits.
+	defaultMaxQueryChunks  = 20_000
+	defaultMaxQueryRecords = 1_000_000
 )
+
+// ErrQueryTooBroad is returned when a query exceeds a configured chunk or
+// record budget.
+var ErrQueryTooBroad = errors.New("telemetry query exceeds configured resource budget")
+
+// Exported discovery protocol values for alternative telemetry backends.
+// Doctor sends these as a synthetic label matcher; backends that do not share
+// logengine's internal constants must use the same strings.
+const (
+	MetricDiscoveryMatcherName = metricDiscoveryMatcherName
+	MetricDiscoveryModeNames   = metricDiscoveryModeNames
+	MetricDiscoveryModeLabels  = metricDiscoveryModeLabels
+	MetricDiscoveryModeValues  = metricDiscoveryModeValues
+)
+
+// StripMetricDiscoveryMatchers removes the discovery sentinel from a metric
+// query and returns the requested discovery mode.
+func StripMetricDiscoveryMatchers(query MetricQuery) (MetricQuery, string) {
+	return stripMetricDiscoveryMatchers(query)
+}
+
+// ErrMetricSeriesLimit is returned when a metric-series scan exceeds the
+// configured bounded cardinality budget.
+var ErrMetricSeriesLimit = errors.New("metric series limit reached")
 
 // NewQueryEngine creates a new QueryEngine.
 func NewQueryEngine(store *CachedStore) *QueryEngine {
 	return &QueryEngine{
-		store: store,
+		store:           store,
+		maxMetricSeries: defaultMaxMetricSeries,
+		maxQueryChunks:  defaultMaxQueryChunks,
+		maxQueryRecords: defaultMaxQueryRecords,
+		discoveryCache:  newMetricDiscoveryCache(),
 	}
+}
+
+func (q *QueryEngine) chunkLimit() int {
+	if q == nil || q.maxQueryChunks <= 0 {
+		return defaultMaxQueryChunks
+	}
+	return q.maxQueryChunks
+}
+
+func (q *QueryEngine) recordLimit() int64 {
+	if q == nil || q.maxQueryRecords <= 0 {
+		return defaultMaxQueryRecords
+	}
+	return q.maxQueryRecords
+}
+
+func (q *QueryEngine) checkChunkBudget(count int) error {
+	if count > q.chunkLimit() {
+		return fmt.Errorf("%w: %d chunks exceeds the limit of %d", ErrQueryTooBroad, count, q.chunkLimit())
+	}
+	return nil
+}
+
+func (q *QueryEngine) metricSeriesLimit() int {
+	if q == nil || q.maxMetricSeries <= 0 {
+		return defaultMaxMetricSeries
+	}
+	return q.maxMetricSeries
 }
 
 // Query executes a MonoFS log query and is kept for backward compatibility.
@@ -216,6 +302,19 @@ func (q *QueryEngine) StreamLogs(ctx context.Context, queryStr, service string, 
 			}
 			return next(record)
 		}
+	}
+	recordCount := int64(0)
+	recordLimit := q.recordLimit()
+	if limit > 0 && int64(limit) > recordLimit {
+		return fmt.Errorf("%w: limit %d exceeds the record budget of %d", ErrQueryTooBroad, limit, recordLimit)
+	}
+	nextYield := yield
+	yield = func(record LogRecord) error {
+		recordCount++
+		if recordCount > recordLimit {
+			return fmt.Errorf("%w: more than %d log records", ErrQueryTooBroad, recordLimit)
+		}
+		return nextYield(record)
 	}
 
 	// 1. Parse the MonoFS-compatible query subset.
@@ -306,10 +405,23 @@ func (q *QueryEngine) logValidRows(ctx context.Context, chunkID string, textFilt
 	if len(textFilters) == 0 {
 		return nil, nil
 	}
+	for _, filter := range textFilters {
+		if !lineFilterIndexable(filter) {
+			// The Bluge query analyzer emits no terms for punctuation-only or
+			// empty filters, which would incorrectly produce an empty result.
+			// Fall back to scanning and let the exact line filter decide.
+			return nil, nil
+		}
+	}
 
 	indexPath := filepath.Join("chunks", string(SignalLogs), chunkID, "text.index.tar.gz")
 	localIndexPath, err := q.store.GetLocalIndexPath(ctx, indexPath)
 	if err != nil {
+		if errors.Is(err, ErrGhostChunk) {
+			// The data is still queryable; just fall back to scanning the
+			// Parquet rows and applying the exact line filters.
+			return nil, nil
+		}
 		return nil, err
 	}
 
@@ -328,13 +440,45 @@ func (q *QueryEngine) logValidRows(ctx context.Context, chunkID string, textFilt
 	}
 
 	validRows := roaring.New()
+	sawRowID := false
+	legacyIndex := false
 	match, err := documentMatchIterator.Next()
 	for err == nil && match != nil {
-		validRows.Add(uint32(match.Number))
+		foundRowID := false
+		visitErr := reader.VisitStoredFields(match.Number, func(field string, value []byte) bool {
+			if field != logRowIDField {
+				return true
+			}
+			rowID, parseErr := strconv.ParseUint(string(value), 10, 32)
+			if parseErr != nil {
+				return true
+			}
+			validRows.Add(uint32(rowID))
+			foundRowID = true
+			sawRowID = true
+			return false
+		})
+		if visitErr != nil {
+			return nil, visitErr
+		}
+		if !foundRowID {
+			// Chunks written before the row-id field was added can still be
+			// searched, but their document numbers cannot be used as Parquet
+			// row indexes. Fall back to a full scan for those chunks.
+			legacyIndex = true
+		}
 		match, err = documentMatchIterator.Next()
 	}
 	if err != nil {
 		return nil, err
+	}
+	if legacyIndex {
+		return nil, nil
+	}
+	if !sawRowID {
+		// No matches at all. The index query is a superset of the exact line
+		// filters, so an empty result is authoritative even for legacy chunks.
+		return validRows, nil
 	}
 	return validRows, nil
 }
@@ -412,25 +556,29 @@ func (q *QueryEngine) scanLogParquet(ctx context.Context, path string, validRows
 	defer rc.Close()
 	defer rdr.Close()
 
+	rowBase := 0
 	for rgIdx := 0; rgIdx < rdr.NumRowGroups(); rgIdx++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		rg := rdr.RowGroup(rgIdx)
 		n := int(rg.NumRows())
+		rowStart := rowBase
+		rowBase += n
 		if n == 0 {
 			continue
 		}
 
 		// Phase 1: Read filter column col 0 (timestamp) and intersect with validRows.
 		// Only decode payload columns if at least one row in the row group passes.
-		tsCol, err := rg.Column(0)
+		tsBuf, err := readInt64Column(rg, 0, n)
 		if err != nil {
 			return err
 		}
-		tsBuf := make([]int64, n)
-		tsCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), tsBuf, nil, nil) //nolint:errcheck
 
 		candidateIdxs := make([]int, 0, 64)
 		for i := 0; i < n; i++ {
-			if validRows != nil && !validRows.ContainsInt(i) {
+			if validRows != nil && !validRows.ContainsInt(rowStart+i) {
 				continue
 			}
 			ts := time.Unix(0, tsBuf[i])
@@ -448,56 +596,44 @@ func (q *QueryEngine) scanLogParquet(ctx context.Context, path string, validRows
 
 		// Phase 2: Materialize payload columns only for row groups with matching rows.
 		// col 1: level (ByteArray)
-		lvlCol, err := rg.Column(1)
+		lvlBuf, err := readByteArrayColumn(rg, 1, n)
 		if err != nil {
 			return err
 		}
-		lvlBuf := make([]parquet.ByteArray, n)
-		lvlCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), lvlBuf, nil, nil) //nolint:errcheck
 
 		// col 2: service (ByteArray)
-		svcCol, err := rg.Column(2)
+		svcBuf, err := readByteArrayColumn(rg, 2, n)
 		if err != nil {
 			return err
 		}
-		svcBuf := make([]parquet.ByteArray, n)
-		svcCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), svcBuf, nil, nil) //nolint:errcheck
 
 		// col 3: trace_id (ByteArray)
-		traceCol, err := rg.Column(3)
+		traceBuf, err := readByteArrayColumn(rg, 3, n)
 		if err != nil {
 			return err
 		}
-		traceBuf := make([]parquet.ByteArray, n)
-		traceCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), traceBuf, nil, nil) //nolint:errcheck
 
 		// col 4: raw_message (ByteArray)
-		msgCol, err := rg.Column(4)
+		msgBuf, err := readByteArrayColumn(rg, 4, n)
 		if err != nil {
 			return err
 		}
-		msgBuf := make([]parquet.ByteArray, n)
-		msgCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), msgBuf, nil, nil) //nolint:errcheck
 
 		// col 5: span_id, col 6: labels_json. Optional for backward
 		// compatibility with chunks written before the schema extension.
 		var spanBuf []parquet.ByteArray
 		if rg.NumColumns() > 5 {
-			spanCol, err := rg.Column(5)
+			spanBuf, err = readByteArrayColumn(rg, 5, n)
 			if err != nil {
 				return err
 			}
-			spanBuf = make([]parquet.ByteArray, n)
-			spanCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), spanBuf, nil, nil) //nolint:errcheck
 		}
 		var lblBuf []parquet.ByteArray
 		if rg.NumColumns() > 6 {
-			lblCol, err := rg.Column(6)
+			lblBuf, err = readByteArrayColumn(rg, 6, n)
 			if err != nil {
 				return err
 			}
-			lblBuf = make([]parquet.ByteArray, n)
-			lblCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), lblBuf, nil, nil) //nolint:errcheck
 		}
 
 		for _, i := range candidateIdxs {
@@ -535,7 +671,7 @@ func compileLogQuery(query logquery.Query) (compiledLogQuery, error) {
 	for _, matcher := range query.Matchers {
 		compiledMatcher := compiledLogMatcher{matcher: matcher}
 		if matcher.Op == "=~" || matcher.Op == "!~" {
-			re, err := regexp.Compile(matcher.Value)
+			re, err := regexp.Compile(anchorLabelRegex(matcher.Value))
 			if err != nil {
 				return compiledLogQuery{}, fmt.Errorf("invalid matcher regexp for %s: %w", matcher.Name, err)
 			}
@@ -593,30 +729,52 @@ func logRecordField(record LogRecord, name string) (string, bool) {
 	case "body", "raw_message":
 		return record.RawMessage, true
 	default:
-		if value, ok := record.Labels[name]; ok && value != "" {
-			return value, true
-		}
-		// Query labels may be underscore-normalized while stored attribute
-		// keys are dotted (e.g. guardian_partition vs guardian.partition).
-		if alt := strings.ReplaceAll(name, "_", "."); alt != name {
-			if value, ok := record.Labels[alt]; ok && value != "" {
-				return value, true
-			}
-		}
-		return "", false
+		return lookupLabelValue(record.Labels, name)
 	}
 }
 
+// lookupLabelValue resolves a label through both common normalization forms.
+// OTel keeps dotted attribute keys while Grafana/PromQL emit underscore names;
+// callers may use either spelling.
+func lookupLabelValue(values map[string]string, name string) (string, bool) {
+	if value, ok := values[name]; ok {
+		return value, true
+	}
+	for _, alt := range []string{
+		strings.ReplaceAll(name, "_", "."),
+		strings.ReplaceAll(name, ".", "_"),
+	} {
+		if alt == name {
+			continue
+		}
+		if value, ok := values[alt]; ok {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+// anchorLabelRegex implements Prometheus/Loki label-matcher semantics: label
+// regexes are fully anchored, unlike line filters.
+func anchorLabelRegex(pattern string) string {
+	return "^(?:" + pattern + ")$"
+}
+
 func matchesLogMatcher(value string, found bool, matcher compiledLogMatcher) bool {
+	if !found {
+		// Prometheus/Loki label matchers evaluate against the empty string when
+		// a label is absent, so `foo=""` and `foo=~".*"` match missing labels.
+		value = ""
+	}
 	switch matcher.matcher.Op {
 	case "=":
-		return found && value == matcher.matcher.Value
+		return value == matcher.matcher.Value
 	case "!=":
-		return !found || value != matcher.matcher.Value
+		return value != matcher.matcher.Value
 	case "=~":
-		return found && matcher.regex != nil && matcher.regex.MatchString(value)
+		return matcher.regex != nil && matcher.regex.MatchString(value)
 	case "!~":
-		return !found || matcher.regex == nil || !matcher.regex.MatchString(value)
+		return matcher.regex == nil || !matcher.regex.MatchString(value)
 	default:
 		return false
 	}
@@ -646,6 +804,18 @@ func buildBlugeLineFilterQuery(filters []string) bluge.Query {
 		query.AddMust(bluge.NewMatchQuery(filter).SetField("raw_message"))
 	}
 	return query
+}
+
+// lineFilterIndexable reports whether the standard analyzer will produce at
+// least one term for a line filter. Filters containing only punctuation are
+// valid substring/equality filters but cannot be looked up in the term index.
+func lineFilterIndexable(value string) bool {
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
 }
 
 func (q *QueryEngine) prefetchManifests(ctx context.Context, signal Signal, chunkIDs []string) {
@@ -686,6 +856,9 @@ func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, serv
 			}
 		}
 		remaining = append(remaining, chunkID)
+	}
+	if err := q.checkChunkBudget(len(remaining)); err != nil {
+		return nil, err
 	}
 	q.prefetchManifests(ctx, SignalLogs, remaining)
 
@@ -744,10 +917,7 @@ func manifestMatchesLogQuery(manifest ChunkManifest, compiled compiledLogQuery) 
 				return false
 			}
 		default:
-			values := manifest.LabelValues[matcher.Name]
-			if len(values) == 0 {
-				values = manifest.LabelValues[strings.ReplaceAll(matcher.Name, "_", ".")]
-			}
+			values := manifestLabelValues(manifest.LabelValues, matcher.Name)
 			if !manifestValuesMayMatch(values, compiledMatcher) {
 				return false
 			}
@@ -762,6 +932,11 @@ func manifestValuesMayMatch(values []string, matcher compiledLogMatcher) bool {
 	}
 	switch matcher.matcher.Op {
 	case "=":
+		if matcher.matcher.Value == "" {
+			// Missing labels compare as empty; manifests do not store empty
+			// values, so an empty equality matcher must keep the chunk.
+			return true
+		}
 		for _, value := range values {
 			if value == matcher.matcher.Value {
 				return true
@@ -770,6 +945,9 @@ func manifestValuesMayMatch(values []string, matcher compiledLogMatcher) bool {
 		return false
 	case "=~":
 		if matcher.regex == nil {
+			return true
+		}
+		if matcher.regex.MatchString("") {
 			return true
 		}
 		for _, value := range values {
@@ -817,6 +995,17 @@ func (q *QueryEngine) StreamMetrics(ctx context.Context, query MetricQuery, from
 
 	observer := beginQueryPathObservation(SignalMetrics)
 	defer observer.finish()
+
+	recordCount := int64(0)
+	recordLimit := q.recordLimit()
+	nextYield := yield
+	yield = func(record MetricRecord) error {
+		recordCount++
+		if recordCount > recordLimit {
+			return fmt.Errorf("%w: more than %d metric samples", ErrQueryTooBroad, recordLimit)
+		}
+		return nextYield(record)
+	}
 
 	listStart := time.Now()
 	chunkIDs, err := q.store.ListChunkPaths(ctx, SignalMetrics, from, to)
@@ -910,6 +1099,7 @@ func (q *QueryEngine) StreamMetricSeries(ctx context.Context, query MetricQuery,
 	indexStart := time.Now()
 	merged := make(map[string]*MetricSeriesMeta)
 	order := make([]string, 0)
+	limit := q.metricSeriesLimit()
 	for _, candidate := range candidates {
 		series, err := q.store.ReadSeriesIndex(ctx, candidate.chunkID)
 		if err != nil {
@@ -933,8 +1123,7 @@ func (q *QueryEngine) StreamMetricSeries(ctx context.Context, query MetricQuery,
 				if !metricSeriesMatches(meta, query, compiledMatchers) {
 					return nil
 				}
-				mergeMetricSeriesMeta(merged, &order, meta)
-				return nil
+				return mergeMetricSeriesMeta(merged, &order, meta, limit)
 			}); scanErr != nil && !errors.Is(scanErr, ErrGhostChunk) {
 				return scanErr
 			}
@@ -944,7 +1133,9 @@ func (q *QueryEngine) StreamMetricSeries(ctx context.Context, query MetricQuery,
 			if !metricSeriesMatches(meta, query, compiledMatchers) {
 				continue
 			}
-			mergeMetricSeriesMeta(merged, &order, meta)
+			if err := mergeMetricSeriesMeta(merged, &order, meta, limit); err != nil {
+				return err
+			}
 		}
 	}
 	observer.observeStage("series_index_scan", indexStart)
@@ -971,14 +1162,17 @@ func metricSeriesMatches(meta MetricSeriesMeta, query MetricQuery, matchers []co
 	return metricLabelsMatch(meta.MetricName, meta.Service, meta.Labels, matchers)
 }
 
-func mergeMetricSeriesMeta(merged map[string]*MetricSeriesMeta, order *[]string, meta MetricSeriesMeta) {
+func mergeMetricSeriesMeta(merged map[string]*MetricSeriesMeta, order *[]string, meta MetricSeriesMeta, limit int) error {
 	key := metricSeriesMetaKey(meta)
 	existing := merged[key]
 	if existing == nil {
+		if limit > 0 && len(merged) >= limit {
+			return fmt.Errorf("%w: more than %d distinct series", ErrMetricSeriesLimit, limit)
+		}
 		copied := meta
 		merged[key] = &copied
 		*order = append(*order, key)
-		return
+		return nil
 	}
 	if meta.MinTime.Before(existing.MinTime) {
 		existing.MinTime = meta.MinTime
@@ -986,6 +1180,7 @@ func mergeMetricSeriesMeta(merged map[string]*MetricSeriesMeta, order *[]string,
 	if meta.MaxTime.After(existing.MaxTime) {
 		existing.MaxTime = meta.MaxTime
 	}
+	return nil
 }
 
 // metricSeriesMetaKey builds the cross-chunk identity key for a series entry.
@@ -1009,11 +1204,30 @@ func metricSeriesMetaKey(meta MetricSeriesMeta) string {
 }
 
 func (q *QueryEngine) discoverMetricNames(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
+	cacheKey := metricDiscoveryCacheKey("names", "", query, from, to)
+	if cached, ok := q.discoveryCache.get(cacheKey); ok {
+		return cached, nil
+	}
+
 	candidates, observer, err := q.metricDiscoveryCandidates(ctx, query, from, to)
 	if err != nil {
 		return nil, err
 	}
 	defer observer.finish()
+
+	// With a label or service filter, chunk manifests alone cannot prove that
+	// a name belongs to the requested partition: a chunk may contain series
+	// from several partitions. Scan the per-chunk series index instead, but
+	// retain only metric-name strings (never full label sets), which keeps the
+	// result bounded even for high-cardinality tenants.
+	if len(query.LabelMatchers) > 0 || query.Service != "" {
+		results, err := q.discoverMetricNamesFromSeries(ctx, query, from, to, candidates, observer)
+		if err != nil {
+			return nil, err
+		}
+		q.discoveryCache.put(cacheKey, results)
+		return results, nil
+	}
 
 	seen := make(map[string]struct{})
 	results := make([]MetricRecord, 0)
@@ -1034,6 +1248,79 @@ func (q *QueryEngine) discoverMetricNames(ctx context.Context, query MetricQuery
 		return results[i].MetricName < results[j].MetricName
 	})
 	observer.addReturnedRecords(len(results))
+	q.discoveryCache.put(cacheKey, results)
+	return results, nil
+}
+
+// discoverMetricNamesFromSeries walks the per-chunk series indexes and keeps
+// only the distinct metric names that match the query. Unlike StreamMetricSeries
+// it never retains full per-series label maps, so partition-filtered discovery
+// stays memory-bounded.
+func (q *QueryEngine) discoverMetricNamesFromSeries(ctx context.Context, query MetricQuery, from, to time.Time, candidates []candidateChunk, observer *queryPathObserver) ([]MetricRecord, error) {
+	compiledMatchers, err := compileMetricMatchers(query.LabelMatchers)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{})
+	add := func(name string) error {
+		if name == "" {
+			return nil
+		}
+		if _, ok := seen[name]; ok {
+			return nil
+		}
+		if len(seen) >= maxDiscoveredMetricNames {
+			return fmt.Errorf("%w: more than %d metric names", ErrMetricSeriesLimit, maxDiscoveredMetricNames)
+		}
+		seen[name] = struct{}{}
+		return nil
+	}
+
+	for _, candidate := range candidates {
+		series, err := q.store.ReadSeriesIndexUncached(ctx, candidate.chunkID)
+		if err != nil {
+			if !errors.Is(err, ErrGhostChunk) {
+				return nil, err
+			}
+			// Legacy chunks have no series index. Project names from the
+			// sample scan for that chunk only and keep the same bounds.
+			if scanErr := q.scanMetricParquet(ctx, filepath.Join("chunks", string(SignalMetrics), candidate.chunkID, chunkDataFileName), query, compiledMatchers, from, to, observer, func(record MetricRecord) error {
+				meta := MetricSeriesMeta{
+					MetricName: record.MetricName,
+					Service:    record.Service,
+					Labels:     record.Labels,
+				}
+				if !metricSeriesMatches(meta, query, compiledMatchers) {
+					return nil
+				}
+				return add(record.MetricName)
+			}); scanErr != nil && !errors.Is(scanErr, ErrGhostChunk) {
+				return nil, scanErr
+			}
+			continue
+		}
+		for _, meta := range series {
+			if !metricSeriesMatches(meta, query, compiledMatchers) {
+				continue
+			}
+			if err := add(meta.MetricName); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	results := make([]MetricRecord, 0, len(names))
+	for _, name := range names {
+		results = append(results, MetricRecord{MetricName: name})
+	}
+	observer.addReturnedRecords(len(results))
 	return results, nil
 }
 
@@ -1041,6 +1328,10 @@ func (q *QueryEngine) discoverMetricNames(ctx context.Context, query MetricQuery
 // in the matching chunk manifests. Label names are carried in the record's
 // Labels map (with empty values).
 func (q *QueryEngine) discoverMetricLabels(ctx context.Context, query MetricQuery, from, to time.Time) ([]MetricRecord, error) {
+	cacheKey := metricDiscoveryCacheKey("labels", "", query, from, to)
+	if cached, ok := q.discoveryCache.get(cacheKey); ok {
+		return cached, nil
+	}
 	candidates, observer, err := q.metricDiscoveryCandidates(ctx, query, from, to)
 	if err != nil {
 		return nil, err
@@ -1050,15 +1341,34 @@ func (q *QueryEngine) discoverMetricLabels(ctx context.Context, query MetricQuer
 	seen := make(map[string]struct{})
 	names := make([]string, 0)
 	for _, candidate := range candidates {
-		for name := range candidate.manifest.MetricLabelValues {
-			if name == "" {
-				continue
+		if candidate.manifest.MetricLabelValues != nil && !candidate.manifest.MetricLabelValuesTruncated {
+			for name := range candidate.manifest.MetricLabelValues {
+				if name == "" {
+					continue
+				}
+				if _, ok := seen[name]; ok {
+					continue
+				}
+				seen[name] = struct{}{}
+				names = append(names, name)
 			}
-			if _, ok := seen[name]; ok {
-				continue
+			continue
+		}
+		series, err := q.metricSeriesForChunk(ctx, candidate, observer)
+		if err != nil {
+			return nil, err
+		}
+		for _, meta := range series {
+			for name := range meta.Labels {
+				if name == "" {
+					continue
+				}
+				if _, ok := seen[name]; ok {
+					continue
+				}
+				seen[name] = struct{}{}
+				names = append(names, name)
 			}
-			seen[name] = struct{}{}
-			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
@@ -1068,7 +1378,33 @@ func (q *QueryEngine) discoverMetricLabels(ctx context.Context, query MetricQuer
 		results = append(results, MetricRecord{Labels: map[string]string{name: ""}})
 	}
 	observer.addReturnedRecords(len(results))
+	q.discoveryCache.put(cacheKey, results)
 	return results, nil
+}
+
+// metricSeriesForChunk reads the per-chunk series index, falling back to a
+// sample scan for chunks written before the series index existed.
+func (q *QueryEngine) metricSeriesForChunk(ctx context.Context, candidate candidateChunk, observer *queryPathObserver) ([]MetricSeriesMeta, error) {
+	series, err := q.store.ReadSeriesIndexUncached(ctx, candidate.chunkID)
+	if err == nil {
+		return series, nil
+	}
+	if !errors.Is(err, ErrGhostChunk) {
+		return nil, err
+	}
+	path := filepath.Join("chunks", string(SignalMetrics), candidate.chunkID, chunkDataFileName)
+	collected := make([]MetricSeriesMeta, 0, len(candidate.manifest.MetricNames))
+	if err := q.scanMetricParquet(ctx, path, MetricQuery{}, nil, time.Time{}, time.Time{}, observer, func(record MetricRecord) error {
+		collected = append(collected, MetricSeriesMeta{
+			MetricName: record.MetricName,
+			Service:    record.Service,
+			Labels:     record.Labels,
+		})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return collected, nil
 }
 
 // discoverMetricLabelValues returns one record per distinct value of the given
@@ -1076,6 +1412,10 @@ func (q *QueryEngine) discoverMetricLabels(ctx context.Context, query MetricQuer
 func (q *QueryEngine) discoverMetricLabelValues(ctx context.Context, query MetricQuery, labelName string, from, to time.Time) ([]MetricRecord, error) {
 	if labelName == "" {
 		return nil, fmt.Errorf("label name is required")
+	}
+	cacheKey := metricDiscoveryCacheKey("values", labelName, query, from, to)
+	if cached, ok := q.discoveryCache.get(cacheKey); ok {
+		return cached, nil
 	}
 	candidates, observer, err := q.metricDiscoveryCandidates(ctx, query, from, to)
 	if err != nil {
@@ -1086,7 +1426,21 @@ func (q *QueryEngine) discoverMetricLabelValues(ctx context.Context, query Metri
 	seen := make(map[string]struct{})
 	values := make([]string, 0)
 	for _, candidate := range candidates {
-		for _, value := range candidate.manifest.MetricLabelValues[labelName] {
+		candidateValues := []string(nil)
+		if candidate.manifest.MetricLabelValues != nil && !candidate.manifest.MetricLabelValuesTruncated {
+			candidateValues = manifestLabelValues(candidate.manifest.MetricLabelValues, labelName)
+		} else {
+			series, err := q.metricSeriesForChunk(ctx, candidate, observer)
+			if err != nil {
+				return nil, err
+			}
+			for _, meta := range series {
+				if value, ok := lookupLabelValue(meta.Labels, labelName); ok && value != "" {
+					candidateValues = append(candidateValues, value)
+				}
+			}
+		}
+		for _, value := range candidateValues {
 			if value == "" {
 				continue
 			}
@@ -1110,7 +1464,51 @@ func (q *QueryEngine) discoverMetricLabelValues(ctx context.Context, query Metri
 		results = append(results, MetricRecord{Labels: map[string]string{labelName: value}})
 	}
 	observer.addReturnedRecords(len(results))
+	q.discoveryCache.put(cacheKey, results)
 	return results, nil
+}
+
+// metricDiscoveryCacheKey builds a stable key for discovery results. Time is
+// bucketed to five minutes so dashboard refreshes hit the cache while the
+// result still tracks the requested discovery window.
+func metricDiscoveryCacheKey(mode, label string, query MetricQuery, from, to time.Time) string {
+	var builder strings.Builder
+	builder.WriteString(mode)
+	builder.WriteByte(0)
+	builder.WriteString(label)
+	builder.WriteByte(0)
+	builder.WriteString(query.MetricName)
+	builder.WriteByte(0)
+	builder.WriteString(query.Service)
+
+	matchers := append([]MetricLabelMatcher(nil), query.LabelMatchers...)
+	sort.Slice(matchers, func(i, j int) bool {
+		if matchers[i].Name != matchers[j].Name {
+			return matchers[i].Name < matchers[j].Name
+		}
+		if matchers[i].Value != matchers[j].Value {
+			return matchers[i].Value < matchers[j].Value
+		}
+		return matchers[i].Type < matchers[j].Type
+	})
+	for _, matcher := range matchers {
+		builder.WriteByte(0)
+		builder.WriteString(matcher.Name)
+		builder.WriteByte('=')
+		builder.WriteString(matcher.Value)
+		builder.WriteByte(':')
+		builder.WriteString(string(matcher.Type))
+	}
+
+	builder.WriteByte(0)
+	if !from.IsZero() {
+		builder.WriteString(strconv.FormatInt(from.Unix()/300, 10))
+	}
+	builder.WriteByte('/')
+	if !to.IsZero() {
+		builder.WriteString(strconv.FormatInt(to.Unix()/300, 10))
+	}
+	return builder.String()
 }
 
 func (q *QueryEngine) metricCandidates(ctx context.Context, chunkIDs []string, query MetricQuery, compiledMatchers []compiledMetricMatcher, from, to time.Time, observer *queryPathObserver) ([]candidateChunk, error) {
@@ -1130,6 +1528,9 @@ func (q *QueryEngine) metricCandidates(ctx context.Context, chunkIDs []string, q
 			}
 		}
 		remaining = append(remaining, chunkID)
+	}
+	if err := q.checkChunkBudget(len(remaining)); err != nil {
+		return nil, err
 	}
 	q.prefetchManifests(ctx, SignalMetrics, remaining)
 
@@ -1178,6 +1579,9 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 	defer rdr.Close()
 
 	for rgIdx := 0; rgIdx < rdr.NumRowGroups(); rgIdx++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		rg := rdr.RowGroup(rgIdx)
 		n := int(rg.NumRows())
 		if n == 0 {
@@ -1185,26 +1589,20 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 		}
 
 		// Phase 1: Read filter columns (timestamp, service, metric_name) first.
-		tsCol, err := rg.Column(0)
+		tsBuf, err := readInt64Column(rg, 0, n)
 		if err != nil {
 			return err
 		}
-		tsBuf := make([]int64, n)
-		tsCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), tsBuf, nil, nil) //nolint:errcheck
 
-		svcCol, err := rg.Column(1)
+		svcBuf, err := readByteArrayColumn(rg, 1, n)
 		if err != nil {
 			return err
 		}
-		svcBuf := make([]parquet.ByteArray, n)
-		svcCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), svcBuf, nil, nil) //nolint:errcheck
 
-		nameCol, err := rg.Column(2)
+		nameBuf, err := readByteArrayColumn(rg, 2, n)
 		if err != nil {
 			return err
 		}
-		nameBuf := make([]parquet.ByteArray, n)
-		nameCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), nameBuf, nil, nil) //nolint:errcheck
 
 		candidateIdxs := make([]int, 0, 64)
 		for i := 0; i < n; i++ {
@@ -1228,19 +1626,15 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 		}
 
 		// Phase 2: Materialize value & labels_json only when candidate rows exist.
-		valCol, err := rg.Column(3)
+		valBuf, err := readFloat64Column(rg, 3, n)
 		if err != nil {
 			return err
 		}
-		valBuf := make([]float64, n)
-		valCol.(*file.Float64ColumnChunkReader).ReadBatch(int64(n), valBuf, nil, nil) //nolint:errcheck
 
-		lblCol, err := rg.Column(4)
+		lblBuf, err := readByteArrayColumn(rg, 4, n)
 		if err != nil {
 			return err
 		}
-		lblBuf := make([]parquet.ByteArray, n)
-		lblCol.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), lblBuf, nil, nil) //nolint:errcheck
 
 		for _, i := range candidateIdxs {
 			ts := time.Unix(0, tsBuf[i])
@@ -1288,6 +1682,19 @@ func (q *QueryEngine) StreamTraces(ctx context.Context, traceID, service string,
 			}
 			return next(record)
 		}
+	}
+	recordCount := int64(0)
+	recordLimit := q.recordLimit()
+	if limit > 0 && int64(limit) > recordLimit {
+		return fmt.Errorf("%w: limit %d exceeds the record budget of %d", ErrQueryTooBroad, limit, recordLimit)
+	}
+	nextYield := yield
+	yield = func(record SpanRecord) error {
+		recordCount++
+		if recordCount > recordLimit {
+			return fmt.Errorf("%w: more than %d span records", ErrQueryTooBroad, recordLimit)
+		}
+		return nextYield(record)
 	}
 
 	listStart := time.Now()
@@ -1361,6 +1768,9 @@ func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, tr
 			}
 		}
 		remaining = append(remaining, chunkID)
+	}
+	if err := q.checkChunkBudget(len(remaining)); err != nil {
+		return nil, err
 	}
 	q.prefetchManifests(ctx, SignalTraces, remaining)
 
@@ -1463,6 +1873,9 @@ func (q *QueryEngine) scanTraceParquet(ctx context.Context, path, traceID, servi
 	defer rdr.Close()
 
 	for rgIdx := 0; rgIdx < rdr.NumRowGroups(); rgIdx++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		rg := rdr.RowGroup(rgIdx)
 		n := int(rg.NumRows())
 		if n == 0 {
@@ -1470,28 +1883,16 @@ func (q *QueryEngine) scanTraceParquet(ctx context.Context, path, traceID, servi
 		}
 
 		// Phase 1: Read filter columns (timestamp, trace_id, service) first.
-		tsCol, err := rg.Column(0)
+		tsBuf, err := readInt64Column(rg, 0, n)
 		if err != nil {
 			return err
 		}
-		tsBuf := make([]int64, n)
-		tsCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), tsBuf, nil, nil) //nolint:errcheck
 
-		readBytes := func(colIdx int) ([]parquet.ByteArray, error) {
-			col, err := rg.Column(colIdx)
-			if err != nil {
-				return nil, err
-			}
-			buf := make([]parquet.ByteArray, n)
-			col.(*file.ByteArrayColumnChunkReader).ReadBatch(int64(n), buf, nil, nil) //nolint:errcheck
-			return buf, nil
-		}
-
-		traceIDs, err := readBytes(2)
+		traceIDs, err := readByteArrayColumn(rg, 2, n)
 		if err != nil {
 			return err
 		}
-		services, err := readBytes(5)
+		services, err := readByteArrayColumn(rg, 5, n)
 		if err != nil {
 			return err
 		}
@@ -1518,30 +1919,28 @@ func (q *QueryEngine) scanTraceParquet(ctx context.Context, path, traceID, servi
 		}
 
 		// Phase 2: Materialize payload columns only when candidate rows exist.
-		etCol, err := rg.Column(1)
+		etBuf, err := readInt64Column(rg, 1, n)
 		if err != nil {
 			return err
 		}
-		etBuf := make([]int64, n)
-		etCol.(*file.Int64ColumnChunkReader).ReadBatch(int64(n), etBuf, nil, nil) //nolint:errcheck
 
-		spanIDs, err := readBytes(3)
+		spanIDs, err := readByteArrayColumn(rg, 3, n)
 		if err != nil {
 			return err
 		}
-		parentSpanIDs, err := readBytes(4)
+		parentSpanIDs, err := readByteArrayColumn(rg, 4, n)
 		if err != nil {
 			return err
 		}
-		names, err := readBytes(6)
+		names, err := readByteArrayColumn(rg, 6, n)
 		if err != nil {
 			return err
 		}
-		statusCodes, err := readBytes(7)
+		statusCodes, err := readByteArrayColumn(rg, 7, n)
 		if err != nil {
 			return err
 		}
-		attrJSONs, err := readBytes(8)
+		attrJSONs, err := readByteArrayColumn(rg, 8, n)
 		if err != nil {
 			return err
 		}
@@ -1598,6 +1997,66 @@ func openParquetReader(reader io.ReadSeekCloser) (*file.Reader, error) {
 	}
 
 	return nil, fmt.Errorf("reader does not support parquet seeking")
+}
+
+func readInt64Column(rg *file.RowGroupReader, column, rows int) ([]int64, error) {
+	chunk, err := rg.Column(column)
+	if err != nil {
+		return nil, err
+	}
+	reader, ok := chunk.(*file.Int64ColumnChunkReader)
+	if !ok {
+		return nil, fmt.Errorf("column %d: unexpected reader type %T (want int64)", column, chunk)
+	}
+	values := make([]int64, rows)
+	total, valuesRead, err := reader.ReadBatch(int64(rows), values, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read column %d: %w", column, err)
+	}
+	if total != int64(rows) || valuesRead != rows {
+		return nil, fmt.Errorf("read column %d: short read (%d/%d values, %d/%d rows)", column, total, rows, valuesRead, rows)
+	}
+	return values, nil
+}
+
+func readFloat64Column(rg *file.RowGroupReader, column, rows int) ([]float64, error) {
+	chunk, err := rg.Column(column)
+	if err != nil {
+		return nil, err
+	}
+	reader, ok := chunk.(*file.Float64ColumnChunkReader)
+	if !ok {
+		return nil, fmt.Errorf("column %d: unexpected reader type %T (want float64)", column, chunk)
+	}
+	values := make([]float64, rows)
+	total, valuesRead, err := reader.ReadBatch(int64(rows), values, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read column %d: %w", column, err)
+	}
+	if total != int64(rows) || valuesRead != rows {
+		return nil, fmt.Errorf("read column %d: short read (%d/%d values, %d/%d rows)", column, total, rows, valuesRead, rows)
+	}
+	return values, nil
+}
+
+func readByteArrayColumn(rg *file.RowGroupReader, column, rows int) ([]parquet.ByteArray, error) {
+	chunk, err := rg.Column(column)
+	if err != nil {
+		return nil, err
+	}
+	reader, ok := chunk.(*file.ByteArrayColumnChunkReader)
+	if !ok {
+		return nil, fmt.Errorf("column %d: unexpected reader type %T (want byte array)", column, chunk)
+	}
+	values := make([]parquet.ByteArray, rows)
+	total, valuesRead, err := reader.ReadBatch(int64(rows), values, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read column %d: %w", column, err)
+	}
+	if total != int64(rows) || valuesRead != rows {
+		return nil, fmt.Errorf("read column %d: short read (%d/%d values, %d/%d rows)", column, total, rows, valuesRead, rows)
+	}
+	return values, nil
 }
 
 func compileMetricMatchers(matchers []MetricLabelMatcher) ([]compiledMetricMatcher, error) {
@@ -1661,7 +2120,39 @@ func manifestContains(values []string, wanted string) bool {
 	return false
 }
 
+// manifestLabelValues returns the union of the dictionaries for the query
+// spelling and both normalization forms. A chunk may contain series using
+// dotted OTel keys and others using underscore-normalized keys, so taking only
+// the first non-empty dictionary would falsely prune chunks.
+func manifestLabelValues(values map[string][]string, name string) []string {
+	keys := []string{name}
+	for _, alt := range []string{
+		strings.ReplaceAll(name, "_", "."),
+		strings.ReplaceAll(name, ".", "_"),
+	} {
+		if alt != name {
+			keys = append(keys, alt)
+		}
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, key := range keys {
+		for _, value := range values[key] {
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 func manifestMatchesMetricLabels(manifest ChunkManifest, matchers []compiledMetricMatcher) bool {
+	if manifest.MetricLabelValuesTruncated {
+		// The manifest dictionary is incomplete and cannot prove absence.
+		return true
+	}
 	for _, matcher := range matchers {
 		if matcher.matcher.Type != labels.MatchEqual {
 			continue
@@ -1669,8 +2160,18 @@ func manifestMatchesMetricLabels(manifest ChunkManifest, matchers []compiledMetr
 		if matcher.name == labels.MetricName || matcher.name == "service" {
 			continue
 		}
-		values := manifest.MetricLabelValues[matcher.name]
-		if len(values) == 0 || !manifestContains(values, matcher.matcher.Value) {
+		if matcher.matcher.Value == "" {
+			// Missing labels compare as empty and manifests omit empty values.
+			continue
+		}
+		values := manifestLabelValues(manifest.MetricLabelValues, matcher.name)
+		if len(values) == 0 {
+			// Chunks written before this label was indexed cannot prove the
+			// label is absent. Keep them as candidates; the record-level scan
+			// still applies the matcher exactly.
+			continue
+		}
+		if !manifestContains(values, matcher.matcher.Value) {
 			return false
 		}
 	}
@@ -1686,7 +2187,7 @@ func metricLabelsMatch(metricName, service string, values map[string]string, mat
 		case "service":
 			value = service
 		default:
-			value = values[matcher.name]
+			value, _ = lookupLabelValue(values, matcher.name)
 		}
 		if !matcher.matcher.Matches(value) {
 			return false

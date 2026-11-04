@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -41,6 +42,113 @@ func TestBlobBackend_Initialize(t *testing.T) {
 
 	if backend.Type() != storage.FetchTypeBlob {
 		t.Errorf("expected FetchTypeBlob, got %v", backend.Type())
+	}
+}
+
+func TestBlobBackend_ArchiveIndexSidecar(t *testing.T) {
+	backend := newTestBlobBackend(t)
+
+	content := []byte("sidecar-index-content")
+	hash := fmt.Sprintf("%x", sha256.Sum256(content))
+	if err := backend.StoreBlob(hash, content); err != nil {
+		t.Fatalf("StoreBlob() error = %v", err)
+	}
+
+	backend.mu.RLock()
+	ref, ok := backend.blobIndex[hash]
+	backend.mu.RUnlock()
+	if !ok {
+		t.Fatalf("blob %s missing from index", hash)
+	}
+
+	hashes, err := backend.readLocalArchiveIndex(ref.archivePath)
+	if err != nil {
+		t.Fatalf("readLocalArchiveIndex() error = %v", err)
+	}
+	if len(hashes) != 1 || hashes[0] != hash {
+		t.Fatalf("archive index = %v, want [%s]", hashes, hash)
+	}
+}
+
+func TestBlobBackend_DeleteBlobsRemovesSidecarAndInvalidates(t *testing.T) {
+	backend := newTestBlobBackend(t)
+
+	content := []byte("delete-me")
+	hash := fmt.Sprintf("%x", sha256.Sum256(content))
+	if err := backend.StoreBlob(hash, content); err != nil {
+		t.Fatalf("StoreBlob() error = %v", err)
+	}
+
+	backend.mu.RLock()
+	ref, ok := backend.blobIndex[hash]
+	backend.mu.RUnlock()
+	if !ok {
+		t.Fatalf("blob %s missing from index", hash)
+	}
+
+	result := backend.DeleteBlobs([]string{hash}, true)
+	if result.Deleted != 1 || result.ArchivesRemoved != 1 {
+		t.Fatalf("DeleteBlobs() = %+v, want 1 deleted and 1 archive removed", result)
+	}
+	if _, err := os.Stat(ref.archivePath); !os.IsNotExist(err) {
+		t.Fatalf("archive %q still exists after compaction", ref.archivePath)
+	}
+	if _, err := os.Stat(ref.archivePath + archiveIndexSuffix); !os.IsNotExist(err) {
+		t.Fatalf("sidecar for %q still exists after compaction", ref.archivePath)
+	}
+
+	obs := backend.Observability()
+	if obs.ArchiveDeletesTotal != 1 || obs.CacheInvalidationsTotal != 1 {
+		t.Fatalf("observability = %+v, want archive_deletes=1 cache_invalidations=1", obs)
+	}
+}
+
+func TestBlobBackend_UploadWALPersistsPendingArchives(t *testing.T) {
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, "archives")
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &BlobBackend{
+		walPending:        make(map[string]struct{}),
+		uploadArchiveFunc: func(context.Context, string) error { return nil },
+	}
+	if err := backend.initUploadWAL(archiveDir); err != nil {
+		t.Fatalf("initUploadWAL() error = %v", err)
+	}
+
+	archivePath := filepath.Join(archiveDir, "test.pack")
+	if err := os.WriteFile(archivePath, []byte("archive"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.walAdd(archivePath); err != nil {
+		t.Fatalf("walAdd() error = %v", err)
+	}
+
+	restored := &BlobBackend{
+		walPending:        make(map[string]struct{}),
+		uploadArchiveFunc: func(context.Context, string) error { return nil },
+	}
+	if err := restored.initUploadWAL(archiveDir); err != nil {
+		t.Fatalf("restored initUploadWAL() error = %v", err)
+	}
+	if _, ok := restored.walPending[archivePath]; !ok {
+		t.Fatalf("pending archive %q was not restored from WAL", archivePath)
+	}
+
+	if err := restored.walRemove(archivePath); err != nil {
+		t.Fatalf("walRemove() error = %v", err)
+	}
+	final := &BlobBackend{
+		walPending:        make(map[string]struct{}),
+		uploadArchiveFunc: func(context.Context, string) error { return nil },
+	}
+	if err := final.initUploadWAL(archiveDir); err != nil {
+		t.Fatalf("final initUploadWAL() error = %v", err)
+	}
+	if _, ok := final.walPending[archivePath]; ok {
+		t.Fatalf("archive %q still pending after walRemove", archivePath)
 	}
 }
 

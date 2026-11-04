@@ -31,13 +31,15 @@ type DuckDBConfig struct {
 
 // DuckDBStats is a small operational snapshot for /metrics and the UI.
 type DuckDBStats struct {
-	Enabled   bool
-	Memory    string
-	Threads   int
-	TempDir   string
-	Queries   uint64
-	Errors    uint64
-	Fallbacks uint64
+	Enabled       bool
+	Memory        string
+	Threads       int
+	TempDir       string
+	Queries       uint64
+	Errors        uint64
+	Fallbacks     uint64
+	ActiveQueries int64
+	QueuedQueries int64
 }
 
 type duckQueryBackend interface {

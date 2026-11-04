@@ -823,3 +823,27 @@ func TestStreamMetricSeriesFallsBackForChunksWithoutIndex(t *testing.T) {
 		t.Fatalf("series metadata = %#v, want requests_total", metas)
 	}
 }
+
+func TestChunkBucketCountsDistinguishCompactedAndRawBuckets(t *testing.T) {
+	paths := []string{
+		"partition=prod/date=2026-11-03/hour=10/raw-a",
+		"partition=prod/date=2026-11-03/hour=10/compact-100-200-1",
+		"partition=prod/date=2026-11-03/hour=11/raw-b",
+		"2026/11/03/12/legacy-raw",
+		"flat-chunk",
+	}
+	stored, compacted := countChunkBuckets(paths)
+	if stored != 4 {
+		t.Fatalf("stored buckets = %d, want 4", stored)
+	}
+	if compacted != 1 {
+		t.Fatalf("compacted buckets = %d, want 1", compacted)
+	}
+
+	if got := chunkBucketKey("partition=prod/date=2026-11-03/hour=10/compact-100-200-1"); got != "partition=prod/date=2026-11-03/hour=10" {
+		t.Fatalf("chunkBucketKey() = %q", got)
+	}
+	if got := chunkBucketKey("2026/11/03/12/legacy-raw"); got != "2026/11/03/12" {
+		t.Fatalf("legacy chunkBucketKey() = %q", got)
+	}
+}

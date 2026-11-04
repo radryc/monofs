@@ -784,6 +784,82 @@ func TestGuardianManagedReposTargetKVSLeaderOnly(t *testing.T) {
 	}
 }
 
+func TestGuardianKVSLeaderIncludedWhenGenericHealthFails(t *testing.T) {
+	router, nodes, cleanup := newGuardianMultiNodeRouterTestHarness(t, map[string]*pb.KVSNodeStatus{
+		"node-1": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
+		"node-2": {Enabled: true, Healthy: true, Mode: "raft", Role: "leader", LeaderId: "node-2", PeerCount: 3},
+		"node-3": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
+	})
+	defer cleanup()
+
+	// The generic health probe may time out while the KVS leader is still
+	// serving writes. KVS target selection must not exclude it.
+	router.nodes["node-2"].info.Healthy = false
+
+	_, err := router.UpsertGuardianPaths(context.Background(), &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{{
+			LogicalPath: "/.queues/health-timeout/task.yaml",
+			Content:     []byte("kind: Task\n"),
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "kvs leader health",
+			CorrelationId: "leader-health-timeout",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGuardianPaths() error = %v", err)
+	}
+
+	for nodeID, node := range nodes {
+		node.mu.Lock()
+		ingestCalls := node.ingestBatchCalls
+		node.mu.Unlock()
+		if nodeID == "node-2" {
+			if ingestCalls != 1 {
+				t.Fatalf("leader ingest calls = %d, want 1", ingestCalls)
+			}
+			continue
+		}
+		if ingestCalls != 0 {
+			t.Fatalf("follower %s ingest calls = %d, want 0", nodeID, ingestCalls)
+		}
+	}
+}
+
+func TestGuardianKVSRetriesAfterLeadershipError(t *testing.T) {
+	router, nodes, cleanup := newGuardianMultiNodeRouterTestHarness(t, map[string]*pb.KVSNodeStatus{
+		"node-1": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
+		"node-2": {Enabled: true, Healthy: true, Mode: "raft", Role: "leader", LeaderId: "node-2", PeerCount: 3},
+		"node-3": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
+	})
+	defer cleanup()
+
+	nodes["node-2"].ingestFailures = 1
+
+	_, err := router.UpsertGuardianPaths(context.Background(), &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{{
+			LogicalPath: "/.queues/retry/task.yaml",
+			Content:     []byte("kind: Task\n"),
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "kvs leader retry",
+			CorrelationId: "leader-retry",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGuardianPaths() error = %v", err)
+	}
+
+	nodes["node-2"].mu.Lock()
+	ingestCalls := nodes["node-2"].ingestBatchCalls
+	nodes["node-2"].mu.Unlock()
+	if ingestCalls != 2 {
+		t.Fatalf("leader ingest calls = %d, want 2 (one Aborted, one success)", ingestCalls)
+	}
+}
+
 func TestGuardianManagedRepoDeletesTargetKVSLeaderOnly(t *testing.T) {
 	router, nodes, cleanup := newGuardianMultiNodeRouterTestHarness(t, map[string]*pb.KVSNodeStatus{
 		"node-1": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
@@ -1291,6 +1367,7 @@ type guardianTestNodeServer struct {
 	lastIngestBatch  []*pb.FileMetadata
 	registerCalls    int
 	ingestBatchCalls int
+	ingestFailures   int
 	deleteFileCalls  int
 	deleteDirCalls   int
 	deleteRepoCalls  int
@@ -1353,6 +1430,10 @@ func (s *guardianTestNodeServer) IngestFileBatch(_ context.Context, req *pb.Inge
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ingestBatchCalls++
+	if s.ingestFailures > 0 {
+		s.ingestFailures--
+		return nil, status.Error(codes.Aborted, "kvsapi: not leader")
+	}
 	batchCopy := cloneFileMetadataSlice(req.GetFiles())
 	s.lastIngestBatch = batchCopy
 	s.ingestBatches[req.GetStorageId()] = batchCopy

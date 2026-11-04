@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -320,50 +321,65 @@ func (t *TagStore) ListRepoInfos(ctx context.Context) ([]RepoInfo, error) {
 }
 
 func (t *TagStore) addToCatalog(ctx context.Context, repo string) error {
-	repos, _ := t.ListRepos(ctx)
-	for _, r := range repos {
-		if r == repo {
-			// Repo already exists. Persist updated timestamp for newest-first listing.
-			t.mu.RLock()
-			updated := t.repoUpdated[repo]
-			updatedMap := make(map[string]int64, len(t.repoUpdated))
-			for k, v := range t.repoUpdated {
-				updatedMap[k] = v
-			}
-			t.mu.RUnlock()
-			if updated == 0 {
-				updated = time.Now().Unix()
-				updatedMap[repo] = updated
-				t.mu.Lock()
-				t.repoUpdated[repo] = updated
-				t.mu.Unlock()
-			}
-			data, err := json.Marshal(catalogEntry{Repos: repos, Updated: updatedMap})
-			if err != nil {
-				return err
-			}
-			return t.client.Write(ctx, catalogPath, data)
+	// Merge the persisted catalog before writing. Relying on the in-memory
+	// cache here is unsafe: after a restart the cache is empty, and a failed
+	// or incomplete catalog read would overwrite the index with just the repo
+	// being written.
+	repoSet := map[string]bool{}
+	updatedMap := map[string]int64{}
+	data, err := t.client.Read(ctx, catalogPath)
+	if err == nil {
+		var cat catalogEntry
+		if err := json.Unmarshal(data, &cat); err != nil {
+			return fmt.Errorf("decode registry catalog: %w", err)
+		}
+		for _, r := range cat.Repos {
+			repoSet[r] = true
+		}
+		for r, updated := range cat.Updated {
+			repoSet[r] = true
+			updatedMap[r] = updated
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read registry catalog: %w", err)
+	}
+
+	t.mu.RLock()
+	for r := range t.repoCache {
+		repoSet[r] = true
+	}
+	for r, updated := range t.repoUpdated {
+		repoSet[r] = true
+		if updatedMap[r] == 0 {
+			updatedMap[r] = updated
 		}
 	}
-	repos = append(repos, repo)
-	sort.Strings(repos)
-	t.mu.RLock()
-	updatedMap := make(map[string]int64, len(t.repoUpdated))
-	for k, v := range t.repoUpdated {
-		updatedMap[k] = v
-	}
 	t.mu.RUnlock()
-	if _, ok := updatedMap[repo]; !ok || updatedMap[repo] == 0 {
+
+	repoSet[repo] = true
+	if updatedMap[repo] == 0 {
 		updatedMap[repo] = time.Now().Unix()
-		t.mu.Lock()
-		t.repoUpdated[repo] = updatedMap[repo]
-		t.mu.Unlock()
 	}
-	data, err := json.Marshal(catalogEntry{Repos: repos, Updated: updatedMap})
+
+	repos := make([]string, 0, len(repoSet))
+	for r := range repoSet {
+		repos = append(repos, r)
+	}
+	sort.Strings(repos)
+
+	data, err = json.Marshal(catalogEntry{Repos: repos, Updated: updatedMap})
 	if err != nil {
 		return err
 	}
-	return t.client.Write(ctx, catalogPath, data)
+	if err := t.client.Write(ctx, catalogPath, data); err != nil {
+		return err
+	}
+
+	t.mu.Lock()
+	t.repoCache[repo] = true
+	t.repoUpdated[repo] = updatedMap[repo]
+	t.mu.Unlock()
+	return nil
 }
 
 func (t *TagStore) GetManifest(ctx context.Context, repo, ref string) ([]byte, string, error) {

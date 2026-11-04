@@ -12,6 +12,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/sharding"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"sync/atomic"
@@ -260,6 +261,7 @@ func TestClient_FetchBlobSimple(t *testing.T) {
 	data, err := client.FetchBlobSimple(
 		context.Background(),
 		"https://github.com/test/repo",
+		"https://github.com/test/repo",
 		"abc123",
 		"main.go",
 		"main",
@@ -395,13 +397,19 @@ func TestClient_DiscardWorkspaceBundleUsesWorkspaceShard(t *testing.T) {
 			{address: addr1, conn: conn1, sync: pb.NewRepoSyncWorkerClient(conn1)},
 			{address: addr2, conn: conn2, sync: pb.NewRepoSyncWorkerClient(conn2)},
 		},
-		affinity: make(map[string]int),
-		config:   DefaultClientConfig(),
-		logger:   slog.Default(),
+		byAddress: map[string]*fetcherConn{},
+		affinity:  make(map[string]int),
+		config:    DefaultClientConfig(),
+		logger:    slog.Default(),
 	}
 	for _, fetcher := range client.fetchers {
 		fetcher.healthy.Store(true)
+		client.byAddress[fetcher.address] = fetcher
 	}
+	client.ring = sharding.NewHRW([]sharding.Node{
+		{ID: addr1, Address: addr1, Weight: 100, Healthy: true},
+		{ID: addr2, Address: addr2, Weight: 100, Healthy: true},
+	})
 
 	workspaceID := "workspace-a"
 	bundleID := "bundle-0"
@@ -604,7 +612,7 @@ func TestClient_StoreBlobBatch_StreamFails_FallbackSucceeds(t *testing.T) {
 		"h2": []byte("blob-two"),
 	}
 
-	stored, failed, err := client.StoreBlobBatch(context.Background(), blobs)
+	stored, failed, err := client.StoreBlobBatch(context.Background(), "test-storage", blobs)
 	if err != nil {
 		t.Fatalf("StoreBlobBatch should succeed when fallback stores all blobs: %v", err)
 	}
@@ -613,6 +621,65 @@ func TestClient_StoreBlobBatch_StreamFails_FallbackSucceeds(t *testing.T) {
 	}
 	if server.storeCalls.Load() != 2 {
 		t.Fatalf("expected fallback StoreBlob to be called twice, got %d", server.storeCalls.Load())
+	}
+}
+
+func TestClient_SelectFetcherUsesStableHRW(t *testing.T) {
+	addr1, server1, cleanup1 := startMockServer(t)
+	defer cleanup1()
+	addr2, server2, cleanup2 := startMockServer(t)
+	defer cleanup2()
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	config := DefaultClientConfig()
+	config.FetcherAddresses = []string{addr1, addr2}
+
+	client, err := NewClient(config, logger)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer client.Close()
+
+	first := client.selectFetcher("storage-a")
+	second := client.selectFetcher("storage-a")
+	if first == nil || second == nil {
+		t.Fatal("selectFetcher returned nil")
+	}
+	if first.address != second.address {
+		t.Fatalf("same key routed to different fetchers: %s vs %s", first.address, second.address)
+	}
+
+	// Different keys should use both fetchers. The exact split is not
+	// important, but a single-fetcher result would mean sharding is broken.
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		fetcher := client.selectFetcher("storage-" + strconv.Itoa(i))
+		if fetcher != nil {
+			seen[fetcher.address] = true
+		}
+	}
+	if !seen[addr1] || !seen[addr2] {
+		t.Fatalf("HRW did not distribute keys across both fetchers: %v", seen)
+	}
+
+	// A write for a key must go to the same fetcher a read selects.
+	owner := client.selectFetcher("storage-write")
+	if owner == nil {
+		t.Fatal("no owner for storage-write")
+	}
+	if _, _, err := client.StoreBlobBatch(context.Background(), "storage-write", map[string][]byte{
+		"hash-1": []byte("payload"),
+	}); err != nil {
+		t.Fatalf("StoreBlobBatch failed: %v", err)
+	}
+	var ownerServer *mockBlobFetcherServer
+	if owner.address == addr1 {
+		ownerServer = server1
+	} else {
+		ownerServer = server2
+	}
+	if ownerServer.storeCalls.Load() != 1 {
+		t.Fatalf("expected write on owner %s, got %d calls", owner.address, ownerServer.storeCalls.Load())
 	}
 }
 

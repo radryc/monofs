@@ -5,14 +5,14 @@ import PageHeader from '../components/PageHeader.vue'
 import StatCard from '../components/StatCard.vue'
 import DataCard from '../components/DataCard.vue'
 import NodeBadge from '../components/NodeBadge.vue'
-import type { AutoRefreshWorkerStats, FetcherStats, FetcherKeyStatus, LogEngineData, RegistryStats, FetcherStorageObjectsResponse, StorageObject } from '../types/api'
+import type { AutoRefreshWorkerStats, FetcherStats, FetcherKeyStatus, RegistryStats, FetcherStorageObjectsResponse, StorageObject, FetcherObservabilityResponse } from '../types/api'
 
 const fetchers = ref<FetcherStats | null>(null)
 const keyStatus = ref<FetcherKeyStatus | null>(null)
-const logEngine = ref<LogEngineData | null>(null)
 const registryStats = ref<RegistryStats | null>(null)
 const storageObjects = ref<FetcherStorageObjectsResponse | null>(null)
 const autoRefreshWorker = ref<AutoRefreshWorkerStats | null>(null)
+const observability = ref<FetcherObservabilityResponse | null>(null)
 const detailed = ref(false)
 const confirming = ref(false)
 const confirmMessage = ref('')
@@ -47,10 +47,6 @@ async function confirmKeys() {
   }
 }
 
-async function loadLogEngine() {
-  logEngine.value = await fetch('/api/logengine').then(r => r.json())
-}
-
 async function loadRegistryStats() {
   try {
     registryStats.value = await fetch('/api/registry/stats').then(r => r.json())
@@ -69,8 +65,14 @@ async function loadAutoRefreshWorker() {
   } catch {}
 }
 
+async function loadObservability() {
+  try {
+    observability.value = await fetch('/api/fetchers/observability').then(r => r.json())
+  } catch {}
+}
+
 const { loading: fetchersLoading } = useAutoRefresh(async () => {
-  await Promise.allSettled([loadFetchers(), loadKeyStatus(), loadLogEngine(), loadRegistryStats(), loadStorageObjects(), loadAutoRefreshWorker()])
+  await Promise.allSettled([loadFetchers(), loadKeyStatus(), loadRegistryStats(), loadStorageObjects(), loadAutoRefreshWorker(), loadObservability()])
 }, 10_000)
 
 function hitColor(rate: number): string {
@@ -123,6 +125,11 @@ const pendingKeyFetchers = computed(() => {
 })
 
 const anyKeyPending = computed(() => pendingKeyFetchers.value.length > 0)
+
+const observabilityFetchers = computed(() => {
+  const list = observability.value?.fetchers ?? []
+  return [...list].sort((a, b) => a.address.localeCompare(b.address))
+})
 
 const storageObjectSearchQuery = ref('')
 const storageObjectTypeFilter = ref('')
@@ -430,6 +437,99 @@ const storageObjectsHealthy = computed(() => storageObjects.value?.healthy ?? fa
       </div>
     </DataCard>
 
+    <!-- Durable upload WAL and S3 read-through -->
+    <DataCard v-if="observability" class="mb-6" :loading="fetchersLoading">
+      <template #header>
+        <div>
+          <h2 class="text-sm font-semibold text-slate-200">Durable Uploads &amp; S3 Read-Through</h2>
+          <p class="text-xs text-slate-400 mt-0.5">WAL-backed archive uploads and cache-miss recovery from S3</p>
+        </div>
+      </template>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 p-5 text-xs">
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Archives written locally and waiting for a confirmed S3 upload. Replayed from the WAL after a restart.">
+          <div class="text-slate-400">WAL Pending</div>
+          <div class="text-lg font-semibold" :class="(observability.totals.wal_pending ?? 0) > 0 ? 'text-amber-300' : 'text-emerald-400'">{{ formatNumber(observability.totals.wal_pending ?? 0) }}</div>
+          <div class="text-slate-500">awaiting S3 upload</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Archive uploads recorded in the WAL, including entries later replayed after a restart.">
+          <div class="text-slate-400">WAL Recorded</div>
+          <div class="text-lg font-semibold text-sky-300">{{ formatNumber(observability.totals.wal_recorded_total ?? 0) }}</div>
+          <div class="text-slate-500">durable upload records</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="WAL entries replayed by fetchers after a restart.">
+          <div class="text-slate-400">WAL Replayed</div>
+          <div class="text-lg font-semibold text-indigo-300">{{ formatNumber(observability.totals.wal_replayed_total ?? 0) }}</div>
+          <div class="text-slate-500">recovered after restart</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Archive uploads that exhausted retries and remain in the WAL.">
+          <div class="text-slate-400">Upload Failures</div>
+          <div class="text-lg font-semibold" :class="(observability.totals.wal_upload_failures_total ?? 0) > 0 ? 'text-rose-300' : 'text-emerald-400'">{{ formatNumber(observability.totals.wal_upload_failures_total ?? 0) }}</div>
+          <div class="text-slate-500">will retry from WAL</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Blob hashes currently indexed from S3 archive sidecars. These let any fetcher locate a blob in S3.">
+          <div class="text-slate-400">S3 Index Entries</div>
+          <div class="text-lg font-semibold text-sky-300">{{ formatNumber(observability.totals.cloud_index_entries ?? 0) }}</div>
+          <div class="text-slate-500">blob → archive mappings</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Cloud index lookups performed on local cache misses.">
+          <div class="text-slate-400">S3 Lookups</div>
+          <div class="text-lg font-semibold text-emerald-300">{{ formatNumber((observability.totals.cloud_lookup_hits ?? 0) + (observability.totals.cloud_lookup_misses ?? 0) + (observability.totals.cloud_lookup_errors ?? 0)) }}</div>
+          <div class="text-slate-500">{{ formatNumber(observability.totals.cloud_lookup_hits ?? 0) }} hit · {{ formatNumber(observability.totals.cloud_lookup_misses ?? 0) }} miss</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Archives downloaded from S3 after a local cache miss.">
+          <div class="text-slate-400">S3 Downloads</div>
+          <div class="text-lg font-semibold text-sky-300">{{ formatNumber(observability.totals.cloud_downloads_total ?? 0) }}</div>
+          <div class="text-slate-500">{{ formatBytes(observability.totals.cloud_download_bytes ?? 0) }} downloaded</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Cloud index lookup errors, usually S3 or sidecar index availability problems.">
+          <div class="text-slate-400">Lookup Errors</div>
+          <div class="text-lg font-semibold" :class="(observability.totals.cloud_lookup_errors ?? 0) > 0 ? 'text-amber-300' : 'text-emerald-400'">{{ formatNumber(observability.totals.cloud_lookup_errors ?? 0) }}</div>
+          <div class="text-slate-500">S3 index failures</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Empty archives removed by compaction, including their sidecar indexes and S3 copies.">
+          <div class="text-slate-400">Archives Removed</div>
+          <div class="text-lg font-semibold text-slate-300">{{ formatNumber(observability.totals.archive_deletes_total ?? 0) }}</div>
+          <div class="text-slate-500">compacted archives</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Blob index entries invalidated after deletion. The client fans deletion out to every fetcher.">
+          <div class="text-slate-400">Invalidated Blobs</div>
+          <div class="text-lg font-semibold text-slate-300">{{ formatNumber(observability.totals.cache_invalidations_total ?? 0) }}</div>
+          <div class="text-slate-500">removed from caches</div>
+        </div>
+      </div>
+      <div v-if="observabilityFetchers.length" class="overflow-x-auto border-t border-slate-700/30">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-800/30 text-slate-400">
+            <tr>
+              <th class="text-left font-medium px-4 py-2">Fetcher</th>
+              <th class="text-right font-medium px-3 py-2">WAL Pending</th>
+              <th class="text-right font-medium px-3 py-2">WAL Recorded</th>
+              <th class="text-right font-medium px-3 py-2">Replayed</th>
+              <th class="text-right font-medium px-3 py-2">Index Entries</th>
+              <th class="text-right font-medium px-3 py-2">Lookups</th>
+              <th class="text-right font-medium px-3 py-2">Downloads</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800">
+            <tr v-for="entry in observabilityFetchers" :key="entry.address" class="hover:bg-slate-800/20">
+              <td class="px-4 py-2">
+                <div class="flex items-center gap-2">
+                  <NodeBadge :healthy="entry.healthy" />
+                  <span class="font-mono text-slate-300">{{ entry.address }}</span>
+                </div>
+              </td>
+              <td class="text-right px-3 py-2" :class="(entry.blob?.wal_pending ?? 0) > 0 ? 'text-amber-300' : 'text-slate-400'">{{ formatNumber(entry.blob?.wal_pending ?? 0) }}</td>
+              <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber(entry.blob?.wal_recorded_total ?? 0) }}</td>
+              <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber(entry.blob?.wal_replayed_total ?? 0) }}</td>
+              <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber(entry.blob?.cloud_index_entries ?? 0) }}</td>
+              <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber((entry.blob?.cloud_lookup_hits ?? 0) + (entry.blob?.cloud_lookup_misses ?? 0)) }}</td>
+              <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber(entry.blob?.cloud_downloads_total ?? 0) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </DataCard>
+
     <!-- Backend Storage Objects (S3 / GCS / local) -->
     <DataCard v-if="storageObjects" class="mb-6" :loading="fetchersLoading">
       <template #header>
@@ -626,49 +726,6 @@ const storageObjectsHealthy = computed(() => storageObjects.value?.healthy ?? fa
               <td class="py-2 text-slate-300">Total</td>
               <td class="py-2 text-right text-slate-200">{{ formatNumber(totalBlobs) }}</td>
               <td class="py-2 text-right text-slate-200">-</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </DataCard>
-
-    <!-- Log Store / Doctor telemetry -->
-    <DataCard v-if="logEngine?.nodes?.length" class="mb-6">
-      <template #header>
-        <div>
-          <h2 class="text-sm font-semibold text-slate-200">Log Store</h2>
-          <p class="text-xs text-slate-400 mt-0.5">Doctor telemetry engine — per-node chunk counts</p>
-        </div>
-      </template>
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="border-b border-slate-700/40 text-xs text-slate-400 uppercase tracking-wider">
-              <th class="text-left px-6 py-3 font-medium">Node</th>
-              <th class="text-right px-6 py-3 font-medium" title="Number of log data chunks stored on this Doctor node.">Logs</th>
-              <th class="text-right px-6 py-3 font-medium" title="Number of metrics data chunks stored on this Doctor node.">Metrics</th>
-              <th class="text-right px-6 py-3 font-medium" title="Number of trace data chunks stored on this Doctor node.">Traces</th>
-              <th class="text-right px-6 py-3 font-medium" title="DuckDB query sidecar status and query count.">DuckDB</th>
-              <th class="text-right px-6 py-3 font-medium" title="Background chunk compaction status.">Compactor</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-700/20">
-            <tr v-for="n in logEngine.nodes" :key="n.address" class="hover:bg-slate-800/30 transition-colors">
-              <td class="px-6 py-3 font-mono text-xs text-slate-300">{{ n.node_id || n.address }}</td>
-              <td class="px-6 py-3 text-right text-slate-300">{{ formatNumber(n.log_chunks) }}</td>
-              <td class="px-6 py-3 text-right text-slate-300">{{ formatNumber(n.metric_chunks) }}</td>
-              <td class="px-6 py-3 text-right text-slate-300">{{ formatNumber(n.trace_chunks) }}</td>
-              <td class="px-6 py-3 text-right text-slate-300">
-                <span v-if="n.duckdb_enabled" class="text-emerald-400" :title="`${n.duckdb_queries || 0} queries, ${n.duckdb_errors || 0} errors`">enabled</span>
-                <span v-else class="text-slate-500">native</span>
-              </td>
-              <td class="px-6 py-3 text-right text-slate-300">
-                <span v-if="n.compaction_running" class="text-amber-400">running</span>
-                <span v-else-if="n.last_compaction_unix_nano" class="text-slate-300" :title="`${n.compaction_input_chunks || 0} inputs, ${n.compaction_output_chunks || 0} outputs, ${n.compaction_deleted_chunks || 0} deleted`">
-                  {{ n.compaction_runs || 0 }} runs
-                </span>
-                <span v-else class="text-slate-500">idle</span>
-              </td>
             </tr>
           </tbody>
         </table>

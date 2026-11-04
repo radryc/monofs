@@ -1,7 +1,9 @@
 package logengine
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,8 +17,8 @@ import (
 // Compaction turns many small ingest chunks into fewer, larger chunks. This
 // reduces directory listings, manifest reads, parquet opens, and per-chunk text
 // indexes. It is intentionally conservative: only ranges older than the
-// configured minimum age are compacted, and a range that already contains a
-// compacted chunk is treated as complete.
+// configured minimum age are compacted, and source chunks are deleted only
+// after a durable completion marker confirms every output is present.
 const (
 	defaultCompactionMaxRecords = 1_000_000
 	defaultCompactionMaxBytes   = 256 << 20
@@ -25,6 +27,11 @@ const (
 	// uncompacted chunks on each tick. Older backlog can still be compacted with
 	// monofs-logengine-compact.
 	maxCompactionCatchUp = 24 * time.Hour
+	// compactionMarkerDirName stores per-run completion markers. A marker is
+	// written only after every output chunk is durable; source chunks are
+	// deleted only after the marker exists, so a crash cannot strand duplicate
+	// rows without a way to finish or roll back the run.
+	compactionMarkerDirName = "compaction-runs"
 )
 
 // CompactionOptions bounds the memory used by one output chunk.
@@ -44,6 +51,19 @@ type CompactionResult struct {
 	DeletedChunks int
 }
 
+// compactionRunMarker is the durable completion record for one compaction run.
+// It is written after all output manifests exist and before any source is
+// deleted. Cleanup verifies every output before deleting sources.
+type compactionRunMarker struct {
+	Signal    Signal    `json:"signal"`
+	Group     string    `json:"group"`
+	From      time.Time `json:"from"`
+	To        time.Time `json:"to"`
+	Sources   []string  `json:"sources"`
+	Outputs   []string  `json:"outputs"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // Compactor merges small chunks within a time range.
 type Compactor struct {
 	store           *CachedStore
@@ -51,6 +71,7 @@ type Compactor struct {
 	query           *QueryEngine
 	mu              sync.Mutex
 	compactionLevel int
+	compactionGroup string
 
 	running       bool
 	lastRun       time.Time
@@ -129,29 +150,55 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 		}
 	}()
 
+	c.compactionGroup = fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	validGroups, err := c.cleanupCompactionMarkers(ctx, signal)
+	if err != nil {
+		return result, err
+	}
+
 	paths, err := c.store.ListChunkPaths(ctx, signal, from, to)
 	if err != nil {
 		return result, err
 	}
 	raw := make([]string, 0, len(paths))
 	compacted := make([]string, 0)
+	legacyCompacted := false
 	for _, path := range paths {
-		if isCompactedChunkPath(path) {
-			compacted = append(compacted, path)
+		if !isCompactedChunkPath(path) {
+			raw = append(raw, path)
 			continue
 		}
-		raw = append(raw, path)
+		manifest, err := c.store.ReadManifest(ctx, signal, path)
+		if err != nil {
+			if errors.Is(err, ErrGhostChunk) {
+				continue
+			}
+			return result, err
+		}
+		if manifest.CompactionGroup != "" {
+			if _, ok := validGroups[manifest.CompactionGroup]; !ok {
+				// Orphaned output from a run that never wrote its marker. All
+				// sources still exist because deletion happens after the
+				// marker, so removing the output and retrying is safe.
+				if err := c.store.Delete(ctx, chunkStoragePath(signal, path)); err != nil {
+					return result, err
+				}
+				result.DeletedChunks++
+				continue
+			}
+		} else {
+			legacyCompacted = true
+		}
+		compacted = append(compacted, path)
 	}
 	result.InputChunks = len(raw)
-	if len(raw) == 0 {
+	if len(compacted) > 0 && legacyCompacted && len(raw) > 0 {
+		// Manifests written before compaction markers/provenance existed cannot
+		// prove that they cover every raw source. Leave the range alone rather
+		// than risk deleting data.
 		return result, nil
 	}
-	if len(compacted) > 0 {
-		// A range that already contains a compacted chunk is considered
-		// complete. Do not delete leftover sources here: without a durable
-		// compaction manifest we cannot prove every source record was written
-		// into the compacted outputs. Leaving duplicates is safer than losing
-		// data after a partial run.
+	if len(raw) == 0 {
 		return result, nil
 	}
 	if len(raw) < 2 {
@@ -161,18 +208,27 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 	observer := beginQueryPathObservation(signal)
 	defer observer.finish()
 
+	sources := append([]string(nil), raw...)
+	outputs := make([]string, 0)
 	outputSeq := 0
 	writeCompacted := func(records any, _ time.Time, _ time.Time) error {
+		var written []string
+		var err error
 		switch typed := records.(type) {
 		case []LogRecord:
-			return c.writeLogCompacted(ctx, typed, opts.MaxRecords, &outputSeq)
+			written, err = c.writeLogCompacted(ctx, typed, opts.MaxRecords, &outputSeq, sources)
 		case []MetricRecord:
-			return c.writeMetricCompacted(ctx, typed, opts.MaxRecords, &outputSeq)
+			written, err = c.writeMetricCompacted(ctx, typed, opts.MaxRecords, &outputSeq, sources)
 		case []SpanRecord:
-			return c.writeSpanCompacted(ctx, typed, opts.MaxRecords, &outputSeq)
+			written, err = c.writeSpanCompacted(ctx, typed, opts.MaxRecords, &outputSeq, sources)
 		default:
 			return fmt.Errorf("unsupported compaction record type %T", records)
 		}
+		if err != nil {
+			return err
+		}
+		outputs = append(outputs, written...)
+		return nil
 	}
 
 	switch signal {
@@ -252,14 +308,123 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 		return result, fmt.Errorf("unknown signal: %s", signal)
 	}
 
-	result.OutputChunks = outputSeq
-	for _, path := range raw {
+	result.OutputChunks = len(outputs)
+	if len(outputs) == 0 {
+		// Nothing was written; keep all sources.
+		return result, nil
+	}
+	marker := compactionRunMarker{
+		Signal:    signal,
+		Group:     c.compactionGroup,
+		From:      from,
+		To:        to,
+		Sources:   sources,
+		Outputs:   outputs,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := c.writeCompactionMarker(ctx, signal, marker); err != nil {
+		return result, err
+	}
+	for _, path := range sources {
 		if err := c.store.Delete(ctx, chunkStoragePath(signal, path)); err != nil {
 			return result, err
 		}
 		result.DeletedChunks++
 	}
 	return result, nil
+}
+
+func compactionMarkerDir(signal Signal, group string) string {
+	return filepath.ToSlash(filepath.Join("chunks", string(signal), compactionMarkerDirName, group))
+}
+
+func compactionMarkerPath(signal Signal, group string) string {
+	return filepath.Join(compactionMarkerDir(signal, group), "marker.json")
+}
+
+func (c *Compactor) writeCompactionMarker(ctx context.Context, signal Signal, marker compactionRunMarker) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(marker); err != nil {
+		return err
+	}
+	return c.store.Write(ctx, compactionMarkerPath(signal, marker.Group), &buf)
+}
+
+// cleanupCompactionMarkers finishes or rolls back interrupted compaction runs.
+// It returns the groups whose output manifests are all present and whose source
+// chunks have been deleted. A marker with missing outputs is rolled back by
+// deleting the outputs it did write; the sources are still intact, so the next
+// compaction can retry from scratch.
+func (c *Compactor) cleanupCompactionMarkers(ctx context.Context, signal Signal) (map[string]struct{}, error) {
+	valid := make(map[string]struct{})
+	root := filepath.ToSlash(filepath.Join("chunks", string(signal), compactionMarkerDirName))
+	groups, err := c.store.ListChunks(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	for _, group := range groups {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		markerPath := compactionMarkerPath(signal, group)
+		rc, readErr := c.store.Read(ctx, markerPath)
+		if readErr != nil {
+			if errors.Is(readErr, ErrGhostChunk) {
+				continue
+			}
+			return nil, readErr
+		}
+		var marker compactionRunMarker
+		decodeErr := json.NewDecoder(rc).Decode(&marker)
+		rc.Close()
+		if decodeErr != nil {
+			// A torn marker is equivalent to a run that never completed. The
+			// outputs have a group without a valid marker and are removed when
+			// the range is scanned again.
+			log.Printf("logengine compaction marker %s is invalid, discarding: %v", markerPath, decodeErr)
+			if deleteErr := c.store.Delete(ctx, compactionMarkerDir(signal, group)); deleteErr != nil {
+				return nil, deleteErr
+			}
+			continue
+		}
+		complete := true
+		for _, output := range marker.Outputs {
+			if _, err := c.store.ReadManifest(ctx, signal, output); err != nil {
+				if errors.Is(err, ErrGhostChunk) {
+					complete = false
+					break
+				}
+				return nil, err
+			}
+		}
+		if !complete {
+			// Roll back the partial run. Sources were never deleted before the
+			// marker existed, so they can be compacted again.
+			for _, output := range marker.Outputs {
+				if deleteErr := c.store.Delete(ctx, chunkStoragePath(signal, output)); deleteErr != nil {
+					return nil, deleteErr
+				}
+			}
+		} else {
+			for _, source := range marker.Sources {
+				if _, err := c.store.ReadManifest(ctx, signal, source); err != nil {
+					if errors.Is(err, ErrGhostChunk) {
+						continue
+					}
+					return nil, err
+				}
+				if deleteErr := c.store.Delete(ctx, chunkStoragePath(signal, source)); deleteErr != nil {
+					return nil, deleteErr
+				}
+			}
+			valid[group] = struct{}{}
+		}
+		if deleteErr := c.store.Delete(ctx, compactionMarkerDir(signal, group)); deleteErr != nil {
+			return nil, deleteErr
+		}
+	}
+	return valid, nil
 }
 
 type compactAccumulator[T any] struct {
@@ -328,15 +493,15 @@ func (a *compactAccumulator[T]) Flush() error {
 
 const maxCompactionGroupKeys = 128
 
-func nextCompactedChunkID(minTime, maxTime time.Time, seq *int) string {
-	chunkID := fmt.Sprintf("compact-%d-%d-%d", minTime.UTC().UnixNano(), maxTime.UTC().UnixNano(), *seq)
+func nextCompactedChunkID(minTime, maxTime time.Time, seq *int, group string) string {
+	chunkID := fmt.Sprintf("compact-%d-%d-%s-%d", minTime.UTC().UnixNano(), maxTime.UTC().UnixNano(), group, *seq)
 	*seq++
 	return chunkID
 }
 
-func (c *Compactor) writeLogCompacted(ctx context.Context, records []LogRecord, maxRecords int, seq *int) error {
+func (c *Compactor) writeLogCompacted(ctx context.Context, records []LogRecord, maxRecords int, seq *int, sources []string) ([]string, error) {
 	if len(records) == 0 {
-		return nil
+		return nil, nil
 	}
 	if maxRecords <= 0 {
 		maxRecords = defaultCompactionMaxRecords
@@ -353,6 +518,7 @@ func (c *Compactor) writeLogCompacted(ctx context.Context, records []LogRecord, 
 		return records[i].Timestamp.Before(records[j].Timestamp)
 	})
 	groupByService := countLogGroupKeys(records) <= maxCompactionGroupKeys
+	outputs := make([]string, 0, 1)
 	for start := 0; start < len(records); {
 		end := start + 1
 		if groupByService {
@@ -375,18 +541,24 @@ func (c *Compactor) writeLogCompacted(ctx context.Context, records []LogRecord, 
 				maxTime = record.Timestamp
 			}
 		}
-		chunkID := nextCompactedChunkID(minTime, maxTime, seq)
-		if err := c.ingester.FlushChunkWithOptions(ctx, SignalLogs, chunkID, records[start:end], nil, nil, ChunkWriteOptions{CompactionLevel: c.compactionLevel}); err != nil {
-			return err
+		chunkID := nextCompactedChunkID(minTime, maxTime, seq, c.compactionGroup)
+		path, err := c.ingester.FlushChunkWithOptions(ctx, SignalLogs, chunkID, records[start:end], nil, nil, ChunkWriteOptions{
+			CompactionLevel:   c.compactionLevel,
+			CompactionGroup:   c.compactionGroup,
+			CompactionSources: sources,
+		})
+		if err != nil {
+			return nil, err
 		}
+		outputs = append(outputs, path)
 		start = end
 	}
-	return nil
+	return outputs, nil
 }
 
-func (c *Compactor) writeMetricCompacted(ctx context.Context, records []MetricRecord, maxRecords int, seq *int) error {
+func (c *Compactor) writeMetricCompacted(ctx context.Context, records []MetricRecord, maxRecords int, seq *int, sources []string) ([]string, error) {
 	if len(records) == 0 {
-		return nil
+		return nil, nil
 	}
 	if maxRecords <= 0 {
 		maxRecords = defaultCompactionMaxRecords
@@ -403,6 +575,7 @@ func (c *Compactor) writeMetricCompacted(ctx context.Context, records []MetricRe
 		return records[i].Timestamp.Before(records[j].Timestamp)
 	})
 	groupByMetric := countMetricGroupKeys(records) <= maxCompactionGroupKeys
+	outputs := make([]string, 0, 1)
 	for start := 0; start < len(records); {
 		end := start + 1
 		if groupByMetric {
@@ -425,18 +598,24 @@ func (c *Compactor) writeMetricCompacted(ctx context.Context, records []MetricRe
 				maxTime = record.Timestamp
 			}
 		}
-		chunkID := nextCompactedChunkID(minTime, maxTime, seq)
-		if err := c.ingester.FlushChunkWithOptions(ctx, SignalMetrics, chunkID, nil, records[start:end], nil, ChunkWriteOptions{CompactionLevel: c.compactionLevel}); err != nil {
-			return err
+		chunkID := nextCompactedChunkID(minTime, maxTime, seq, c.compactionGroup)
+		path, err := c.ingester.FlushChunkWithOptions(ctx, SignalMetrics, chunkID, nil, records[start:end], nil, ChunkWriteOptions{
+			CompactionLevel:   c.compactionLevel,
+			CompactionGroup:   c.compactionGroup,
+			CompactionSources: sources,
+		})
+		if err != nil {
+			return nil, err
 		}
+		outputs = append(outputs, path)
 		start = end
 	}
-	return nil
+	return outputs, nil
 }
 
-func (c *Compactor) writeSpanCompacted(ctx context.Context, records []SpanRecord, maxRecords int, seq *int) error {
+func (c *Compactor) writeSpanCompacted(ctx context.Context, records []SpanRecord, maxRecords int, seq *int, sources []string) ([]string, error) {
 	if len(records) == 0 {
-		return nil
+		return nil, nil
 	}
 	if maxRecords <= 0 {
 		maxRecords = defaultCompactionMaxRecords
@@ -453,6 +632,7 @@ func (c *Compactor) writeSpanCompacted(ctx context.Context, records []SpanRecord
 		return records[i].Timestamp.Before(records[j].Timestamp)
 	})
 	groupByService := countSpanGroupKeys(records) <= maxCompactionGroupKeys
+	outputs := make([]string, 0, 1)
 	for start := 0; start < len(records); {
 		end := start + 1
 		if groupByService {
@@ -475,13 +655,19 @@ func (c *Compactor) writeSpanCompacted(ctx context.Context, records []SpanRecord
 				maxTime = record.Timestamp
 			}
 		}
-		chunkID := nextCompactedChunkID(minTime, maxTime, seq)
-		if err := c.ingester.FlushChunkWithOptions(ctx, SignalTraces, chunkID, nil, nil, records[start:end], ChunkWriteOptions{CompactionLevel: c.compactionLevel}); err != nil {
-			return err
+		chunkID := nextCompactedChunkID(minTime, maxTime, seq, c.compactionGroup)
+		path, err := c.ingester.FlushChunkWithOptions(ctx, SignalTraces, chunkID, nil, nil, records[start:end], ChunkWriteOptions{
+			CompactionLevel:   c.compactionLevel,
+			CompactionGroup:   c.compactionGroup,
+			CompactionSources: sources,
+		})
+		if err != nil {
+			return nil, err
 		}
+		outputs = append(outputs, path)
 		start = end
 	}
-	return nil
+	return outputs, nil
 }
 
 func countLogGroupKeys(records []LogRecord) int {

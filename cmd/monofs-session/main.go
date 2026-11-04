@@ -1527,7 +1527,11 @@ func (sc *SessionCommand) searchCode(args []string) error {
 	// Parse search flags
 	searchCmd := flag.NewFlagSet("search", flag.ExitOnError)
 	query := searchCmd.String("query", "", "Search query (required)")
-	searchAddr := searchCmd.String("search", "localhost:9100", "MonoFS search service address")
+	defaultSearchAddr := strings.TrimSpace(os.Getenv("MONOFS_SEARCH_ADDR"))
+	if defaultSearchAddr == "" {
+		defaultSearchAddr = "localhost:9100"
+	}
+	searchAddr := searchCmd.String("search", defaultSearchAddr, "MonoFS search service address (default: $MONOFS_SEARCH_ADDR or localhost:9100)")
 	token := searchCmd.String("token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Bearer token for the search service (defaults to MONOFS_TOKEN); required on policy-enforcing clusters")
 	storageID := searchCmd.String("storage-id", "", "Limit search to specific repository")
 	maxResults := searchCmd.Int("max-results", 50, "Maximum number of results")

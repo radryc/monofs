@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -24,7 +23,9 @@ type LineFilter struct {
 // Query captures the MonoFS log query subset currently used by the logengine.
 //
 // It intentionally supports a narrow compatibility surface today:
-// common label selector operators and line-filter stages.
+// common label selector operators and line-filter stages. Other pipeline
+// stages are rejected rather than silently ignored, because pretending to
+// evaluate an unsupported stage would return incorrect results.
 type Query struct {
 	Matchers    []Matcher
 	LineFilters []LineFilter
@@ -65,12 +66,7 @@ func Parse(input string) (Query, error) {
 		}
 
 		if strings.HasPrefix(rest, "|") {
-			remaining, err := skipPipelineStage(rest[1:])
-			if err != nil {
-				return Query{}, err
-			}
-			rest = remaining
-			continue
+			return Query{}, fmt.Errorf("unsupported pipeline stage %q", strings.TrimSpace(rest))
 		}
 
 		return Query{}, fmt.Errorf("unsupported query fragment %q", rest)
@@ -249,52 +245,4 @@ func consumeQuotedString(input string) (string, string, error) {
 	}
 
 	return "", "", fmt.Errorf("unterminated quoted string")
-}
-
-func skipPipelineStage(input string) (string, error) {
-	inQuote := rune(0)
-	escaped := false
-	depth := 0
-	for i, r := range input {
-		switch {
-		case inQuote != 0:
-			if r == '\\' && inQuote != '`' && !escaped {
-				escaped = true
-				continue
-			}
-			if r == inQuote && !escaped {
-				inQuote = 0
-			}
-			escaped = false
-		case r == '"' || r == '\'' || r == '`':
-			inQuote = r
-		case r == '(' || r == '[' || r == '{':
-			depth++
-		case r == ')' || r == ']' || r == '}':
-			if depth > 0 {
-				depth--
-			}
-		case depth == 0 && startsLineFilterAt(input, i):
-			return input[i:], nil
-		}
-	}
-	if inQuote != 0 {
-		return "", fmt.Errorf("unterminated quoted string in pipeline stage")
-	}
-	return "", nil
-}
-
-func startsLineFilterAt(input string, index int) bool {
-	rest := input[index:]
-	if strings.HasPrefix(rest, "|=") || strings.HasPrefix(rest, "|~") {
-		return true
-	}
-	if !strings.HasPrefix(rest, "!=") && !strings.HasPrefix(rest, "!~") {
-		return false
-	}
-	if index == 0 {
-		return true
-	}
-	prev, _ := utf8.DecodeLastRuneInString(input[:index])
-	return unicode.IsSpace(prev)
 }

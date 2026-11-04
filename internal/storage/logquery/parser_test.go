@@ -18,16 +18,9 @@ func TestParseSelectorAndLineFilter(t *testing.T) {
 	}
 }
 
-func TestParseSkipsUnknownPipelineStages(t *testing.T) {
-	parsed, err := Parse(`{service="payment"} | json |= "timeout"`)
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
-	if got := parsed.ServiceEquals(); got != "payment" {
-		t.Fatalf("ServiceEquals() = %q, want %q", got, "payment")
-	}
-	if len(parsed.LineFilters) != 1 || parsed.LineFilters[0].Value != "timeout" {
-		t.Fatalf("LineFilters = %#v, want one timeout filter", parsed.LineFilters)
+func TestParseRejectsUnknownPipelineStages(t *testing.T) {
+	if _, err := Parse(`{service="payment"} | json |= "timeout"`); err == nil {
+		t.Fatal("Parse() error = nil, want unsupported pipeline stage error")
 	}
 }
 

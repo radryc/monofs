@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -573,7 +574,7 @@ func (r *Router) applyGuardianUpsertGroups(ctx context.Context, groups map[strin
 	if len(groups) == 0 {
 		return nil
 	}
-	nodes := r.collectHealthyGuardianNodes()
+	nodes := r.collectGuardianNodes()
 	if len(nodes) == 0 {
 		return fmt.Errorf("no healthy nodes available")
 	}
@@ -587,6 +588,24 @@ func (r *Router) applyGuardianUpsertGroups(ctx context.Context, groups map[strin
 }
 
 func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianNodeTarget, group *guardianUpsertGroup, principal *guardianPrincipal) error {
+	err := r.applyGuardianUpsertGroupOnce(ctx, nodes, group, principal)
+	if err == nil || !isRetryableKVSError(err) {
+		return err
+	}
+	if guardianRepoStorageBackend(group.displayPath) != "kvs" {
+		return err
+	}
+
+	// A leadership change can happen between the role check and the write.
+	// Re-probe KVS roles and retry once against the refreshed target.
+	r.logger.Info("retrying guardian kvs write after leadership error",
+		"display_path", group.displayPath,
+		"error", err)
+	r.refreshGuardianKVSStatuses(ctx)
+	return r.applyGuardianUpsertGroupOnce(ctx, r.collectGuardianNodes(), group, principal)
+}
+
+func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guardianNodeTarget, group *guardianUpsertGroup, principal *guardianPrincipal) error {
 	var (
 		wg      sync.WaitGroup
 		errMu   sync.Mutex
@@ -598,6 +617,12 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 	}
 	batchFiles := appendGuardianDirHints(group.files)
 	targetNodes := r.guardianMutationTargets(nodes, group.displayPath)
+	if len(targetNodes) == 0 {
+		if guardianRepoStorageBackend(group.displayPath) == "kvs" {
+			return fmt.Errorf("no healthy kvs node available for %s", group.displayPath)
+		}
+		return fmt.Errorf("no healthy guardian node available for %s", group.displayPath)
+	}
 
 	for _, node := range targetNodes {
 		node := node
@@ -689,6 +714,29 @@ func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianN
 	r.bumpNativeNamespaceGeneration("guardian upsert")
 
 	return nil
+}
+
+func grpcCode(err error) codes.Code {
+	type grpcStatus interface {
+		GRPCStatus() *status.Status
+	}
+	var gs grpcStatus
+	if errors.As(err, &gs) {
+		return gs.GRPCStatus().Code()
+	}
+	return status.Code(err)
+}
+
+func isRetryableKVSError(err error) bool {
+	switch grpcCode(err) {
+	case codes.Aborted, codes.Unavailable:
+		return true
+	case codes.Internal:
+		// Mixed-version clusters may still wrap raft.ErrNotLeader in Internal.
+		return strings.Contains(err.Error(), "not the leader") ||
+			strings.Contains(err.Error(), "leader unknown")
+	}
+	return false
 }
 
 func (r *Router) evictGuardianRegisteredRepo(storageID string) {

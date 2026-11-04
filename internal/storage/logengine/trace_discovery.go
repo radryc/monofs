@@ -14,31 +14,49 @@ const (
 	maxTraceDiscoveryTagValues = 64
 )
 
-func collectTraceDiscovery(spans []SpanRecord) ([]string, map[string][]string) {
+type traceDiscovery struct {
+	Keys            []string
+	Values          map[string][]string
+	KeysTruncated   bool
+	ValuesTruncated []string
+}
+
+func collectTraceDiscovery(spans []SpanRecord) traceDiscovery {
 	keys := map[string]struct{}{
 		"service.name": {},
 		"name":         {},
 	}
 	values := make(map[string]map[string]struct{})
-	addKey := func(key string) {
+	truncatedValues := make(map[string]struct{})
+	keysTruncated := false
+	addKey := func(key string) bool {
+		if _, ok := keys[key]; ok {
+			return true
+		}
 		if len(keys) >= maxTraceDiscoveryTagKeys {
-			return
+			keysTruncated = true
+			return false
 		}
 		keys[key] = struct{}{}
+		return true
 	}
 	addValue := func(key, value string) {
 		if key == "" || value == "" {
 			return
 		}
-		if _, ok := keys[key]; !ok {
-			addKey(key)
+		if !addKey(key) {
+			return
 		}
 		set := values[key]
 		if set == nil {
 			set = make(map[string]struct{})
 			values[key] = set
 		}
+		if _, ok := set[value]; ok {
+			return
+		}
 		if len(set) >= maxTraceDiscoveryTagValues {
+			truncatedValues[key] = struct{}{}
 			return
 		}
 		set[value] = struct{}{}
@@ -71,7 +89,17 @@ func collectTraceDiscovery(spans []SpanRecord) ([]string, map[string][]string) {
 		sort.Strings(list)
 		outValues[key] = list
 	}
-	return outKeys, outValues
+	outTruncated := make([]string, 0, len(truncatedValues))
+	for key := range truncatedValues {
+		outTruncated = append(outTruncated, key)
+	}
+	sort.Strings(outTruncated)
+	return traceDiscovery{
+		Keys:            outKeys,
+		Values:          outValues,
+		KeysTruncated:   keysTruncated,
+		ValuesTruncated: outTruncated,
+	}
 }
 
 // DiscoverTraceServices returns the services present in trace chunks that
@@ -101,7 +129,7 @@ func (q *QueryEngine) DiscoverTraceTags(ctx context.Context, from, to time.Time)
 	}
 	values := make(map[string]struct{})
 	for _, candidate := range manifests {
-		if candidate.manifest.TraceTagKeys != nil {
+		if candidate.manifest.TraceTagKeys != nil && !candidate.manifest.TraceTagKeysTruncated {
 			for _, key := range candidate.manifest.TraceTagKeys {
 				if key != "" {
 					values[key] = struct{}{}
@@ -110,8 +138,8 @@ func (q *QueryEngine) DiscoverTraceTags(ctx context.Context, from, to time.Time)
 			continue
 		}
 		if err := q.scanTraceDiscovery(ctx, candidate.chunkID, func(span SpanRecord) {
-			keys, _ := collectTraceDiscovery([]SpanRecord{span})
-			for _, key := range keys {
+			discovery := collectTraceDiscovery([]SpanRecord{span})
+			for _, key := range discovery.Keys {
 				values[key] = struct{}{}
 			}
 		}); err != nil {
@@ -142,8 +170,11 @@ func (q *QueryEngine) DiscoverTraceTagValues(ctx context.Context, from, to time.
 	}
 	values := make(map[string]struct{})
 	for _, candidate := range manifests {
-		if candidate.manifest.TraceTagValues != nil {
-			for _, value := range candidate.manifest.TraceTagValues[tag] {
+		manifest := candidate.manifest
+		valuesTruncated := manifestContains(manifest.TraceTagValuesTruncated, tag)
+		keyTruncated := manifest.TraceTagKeysTruncated && !manifestContains(manifest.TraceTagKeys, tag)
+		if manifest.TraceTagValues != nil && !valuesTruncated && !keyTruncated {
+			for _, value := range manifest.TraceTagValues[tag] {
 				if value != "" {
 					values[value] = struct{}{}
 				}
@@ -151,8 +182,8 @@ func (q *QueryEngine) DiscoverTraceTagValues(ctx context.Context, from, to time.
 			continue
 		}
 		if err := q.scanTraceDiscovery(ctx, candidate.chunkID, func(span SpanRecord) {
-			_, tagValues := collectTraceDiscovery([]SpanRecord{span})
-			for _, value := range tagValues[tag] {
+			discovery := collectTraceDiscovery([]SpanRecord{span})
+			for _, value := range discovery.Values[tag] {
 				values[value] = struct{}{}
 			}
 		}); err != nil {
@@ -181,6 +212,9 @@ func (q *QueryEngine) traceDiscoveryManifests(ctx context.Context, from, to time
 			}
 		}
 		remaining = append(remaining, chunkID)
+	}
+	if err := q.checkChunkBudget(len(remaining)); err != nil {
+		return nil, err
 	}
 	q.prefetchManifests(ctx, SignalTraces, remaining)
 	scope, _ := QueryScopeFromContext(ctx)

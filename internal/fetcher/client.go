@@ -3,7 +3,6 @@ package fetcher
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log/slog"
 	"sort"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -24,6 +24,12 @@ import (
 type Client struct {
 	fetchers []*fetcherConn
 	mu       sync.RWMutex
+
+	// ring maps a stable routing key (storage ID, workspace ID, repo URL) to
+	// one fetcher using rendezvous hashing. It replaces modulo hashing so the
+	// mapping changes only for keys owned by a fetcher that is added/removed.
+	ring      *sharding.HRW
+	byAddress map[string]*fetcherConn
 
 	// Affinity map: sourceKey -> preferred fetcher index
 	affinity   map[string]int
@@ -89,10 +95,11 @@ func DefaultClientConfig() ClientConfig {
 // NewClient creates a new fetcher client with repo-affinity routing.
 func NewClient(config ClientConfig, logger *slog.Logger) (*Client, error) {
 	c := &Client{
-		fetchers: make([]*fetcherConn, 0, len(config.FetcherAddresses)),
-		affinity: make(map[string]int),
-		logger:   logger,
-		config:   config,
+		fetchers:  make([]*fetcherConn, 0, len(config.FetcherAddresses)),
+		byAddress: make(map[string]*fetcherConn, len(config.FetcherAddresses)),
+		affinity:  make(map[string]int),
+		logger:    logger,
+		config:    config,
 	}
 
 	// Connect to all fetchers
@@ -103,11 +110,23 @@ func NewClient(config ClientConfig, logger *slog.Logger) (*Client, error) {
 			continue
 		}
 		c.fetchers = append(c.fetchers, fc)
+		c.byAddress[addr] = fc
 	}
 
 	if len(c.fetchers) == 0 {
 		return nil, fmt.Errorf("no fetchers available")
 	}
+
+	nodes := make([]sharding.Node, 0, len(c.fetchers))
+	for _, fc := range c.fetchers {
+		nodes = append(nodes, sharding.Node{
+			ID:      fc.address,
+			Address: fc.address,
+			Weight:  100,
+			Healthy: fc.healthy.Load(),
+		})
+	}
+	c.ring = sharding.NewHRW(nodes)
 
 	// Start health check loop
 	go c.healthCheckLoop()
@@ -521,7 +540,9 @@ func (c *Client) Prefetch(ctx context.Context, requests []*FetchRequest, sourceT
 	return nil
 }
 
-// selectFetcher chooses a fetcher using repo-affinity routing.
+// selectFetcher chooses a fetcher using a stable rendezvous-hash ring.
+// Affinity is kept as a hint for sources already observed on a fetcher, but it
+// no longer changes the primary mapping for a key.
 func (c *Client) selectFetcher(sourceKey string) *fetcherConn {
 	c.mu.RLock()
 	fetchers := c.fetchers
@@ -531,24 +552,13 @@ func (c *Client) selectFetcher(sourceKey string) *fetcherConn {
 		return nil
 	}
 
-	// Get healthy fetchers
-	healthy := make([]*fetcherConn, 0, len(fetchers))
-	for _, f := range fetchers {
-		if f.healthy.Load() {
-			healthy = append(healthy, f)
-		}
-	}
-	if len(healthy) == 0 {
-		// Fall back to any fetcher
-		healthy = fetchers
-	}
-
-	// Check affinity
+	// Check affinity first — this preserves warm-cache locality for a source
+	// that is already known to live on one fetcher.
 	c.affinityMu.RLock()
 	preferredIdx, hasAffinity := c.affinity[sourceKey]
 	c.affinityMu.RUnlock()
 
-	if hasAffinity && preferredIdx < len(fetchers) {
+	if hasAffinity && preferredIdx >= 0 && preferredIdx < len(fetchers) {
 		preferred := fetchers[preferredIdx]
 		if preferred.healthy.Load() {
 			c.affinityHits.Add(1)
@@ -557,12 +567,21 @@ func (c *Client) selectFetcher(sourceKey string) *fetcherConn {
 	}
 	c.affinityMisses.Add(1)
 
-	// Hash-based selection for consistent routing
-	h := fnv.New32a()
-	h.Write([]byte(sourceKey))
-	idx := int(h.Sum32()) % len(healthy)
+	if c.ring != nil {
+		if node := c.ring.GetNode(sourceKey); node != nil {
+			if fetcher := c.byAddress[node.Address]; fetcher != nil {
+				return fetcher
+			}
+		}
+	}
 
-	return healthy[idx]
+	// Fallback for the edge case where the ring has no healthy nodes.
+	for _, fetcher := range fetchers {
+		if fetcher.healthy.Load() {
+			return fetcher
+		}
+	}
+	return fetchers[0]
 }
 
 func (c *Client) nextHealthyFetcherExcluding(sourceKey string, tried map[*fetcherConn]bool) *fetcherConn {
@@ -570,16 +589,18 @@ func (c *Client) nextHealthyFetcherExcluding(sourceKey string, tried map[*fetche
 	fetchers := c.fetchers
 	c.mu.RUnlock()
 
-	// Hash-based initial selection, then scan past already-tried fetchers.
-	h := fnv.New32a()
-	h.Write([]byte(sourceKey))
-	start := int(h.Sum32()) % len(fetchers)
+	if c.ring != nil {
+		for _, node := range c.ring.GetNodes(sourceKey, len(fetchers)) {
+			fetcher := c.byAddress[node.Address]
+			if fetcher != nil && !tried[fetcher] {
+				return fetcher
+			}
+		}
+	}
 
-	for i := 0; i < len(fetchers); i++ {
-		idx := (start + i) % len(fetchers)
-		f := fetchers[idx]
-		if !tried[f] && f.healthy.Load() {
-			return f
+	for _, fetcher := range fetchers {
+		if !tried[fetcher] && fetcher.healthy.Load() {
+			return fetcher
 		}
 	}
 	return nil
@@ -629,6 +650,9 @@ func (c *Client) checkFetcherHealth(f *fetcherConn) {
 	} else {
 		f.healthy.Store(true)
 	}
+	if c.ring != nil {
+		c.ring.SetNodeHealth(f.address, f.healthy.Load())
+	}
 }
 
 func (c *Client) affinityUpdateLoop() {
@@ -675,12 +699,15 @@ func (c *Client) updateCachedSources() {
 		f.cachedSourcesMu.Unlock()
 	}
 
-	// Update affinity based on cached sources
+	// Update affinity based on cached sources.
 	c.affinityMu.Lock()
 	for source, info := range sourceCounts {
 		if info.count == 1 {
-			// Source only on one fetcher, strong affinity
-			c.affinity[source] = info.fetcherIdx
+			// Source only on one fetcher, strong affinity. The blob backend
+			// publishes "storage:<id>" stats, while fetch/store routing uses
+			// the bare storage ID, so normalize before recording affinity.
+			key := strings.TrimPrefix(source, "storage:")
+			c.affinity[key] = info.fetcherIdx
 		}
 	}
 	c.affinityMu.Unlock()
@@ -824,17 +851,23 @@ func (c *Client) AllFetchers() []string {
 }
 
 // FetchBlobSimple is a convenience wrapper for FetchBlob.
-func (c *Client) FetchBlobSimple(ctx context.Context, sourceURL, blobHash, filePath, branch string, sourceType SourceType) ([]byte, error) {
+// sourceKey is the stable routing key (storage ID for blob content, repo URL
+// for Git content); sourceURL remains the backend-specific source locator.
+func (c *Client) FetchBlobSimple(ctx context.Context, sourceKey, sourceURL, blobHash, filePath, branch string, sourceType SourceType) ([]byte, error) {
+	if strings.TrimSpace(sourceKey) == "" {
+		sourceKey = sourceURL
+	}
 	sourceConfig := map[string]string{
 		"repo_url":     sourceURL,
 		"branch":       branch,
 		"display_path": filePath,
 		"file_path":    filePath,
+		"storage_id":   sourceKey,
 	}
 
 	req := &FetchRequest{
 		ContentID:    blobHash,
-		SourceKey:    sourceURL,
+		SourceKey:    sourceKey,
 		SourceConfig: sourceConfig,
 		Priority:     5,
 	}
@@ -1245,9 +1278,9 @@ func (c *Client) GetClusterStats(ctx context.Context, includeSourceStats bool) (
 	return stats, nil
 }
 
-// StoreBlob stores a blob on a fetcher instance.
-func (c *Client) StoreBlob(ctx context.Context, blobHash string, content []byte) error {
-	fetcher := c.selectFetcher("blob")
+// StoreBlob stores a blob on the fetcher that owns sourceKey.
+func (c *Client) StoreBlob(ctx context.Context, sourceKey, blobHash string, content []byte) error {
+	fetcher := c.selectFetcher(sourceKey)
 	if fetcher == nil {
 		return fmt.Errorf("no healthy fetchers available")
 	}
@@ -1290,7 +1323,7 @@ const maxStreamChunkSize = 64 * 1024 * 1024 // 64 MB
 // can pack them into large (~512 MB) archives without gRPC message size limits.
 // Blobs larger than maxStreamChunkSize are automatically chunked across
 // multiple stream messages.
-func (c *Client) StoreBlobBatch(ctx context.Context, blobs map[string][]byte) (stored int, failed int, err error) {
+func (c *Client) StoreBlobBatch(ctx context.Context, sourceKey string, blobs map[string][]byte) (stored int, failed int, err error) {
 	if len(blobs) == 0 {
 		return 0, 0, nil
 	}
@@ -1299,7 +1332,7 @@ func (c *Client) StoreBlobBatch(ctx context.Context, blobs map[string][]byte) (s
 	if len(blobs) == 1 {
 		for hash, content := range blobs {
 			if len(content) <= maxUnaryBlobSize {
-				if storeErr := c.StoreBlob(ctx, hash, content); storeErr != nil {
+				if storeErr := c.StoreBlob(ctx, sourceKey, hash, content); storeErr != nil {
 					return 0, 1, storeErr
 				}
 				return 1, 0, nil
@@ -1309,7 +1342,7 @@ func (c *Client) StoreBlobBatch(ctx context.Context, blobs map[string][]byte) (s
 	}
 
 	// Multiple blobs or oversized single blob — stream them
-	fetcher := c.selectFetcher("blob")
+	fetcher := c.selectFetcher(sourceKey)
 	if fetcher == nil {
 		return 0, len(blobs), fmt.Errorf("no healthy fetchers available")
 	}
@@ -1326,7 +1359,7 @@ func (c *Client) StoreBlobBatch(ctx context.Context, blobs map[string][]byte) (s
 		// Fallback to individual calls
 		var firstErr error
 		for hash, content := range blobs {
-			if fallbackErr := c.StoreBlob(ctx, hash, content); fallbackErr != nil {
+			if fallbackErr := c.StoreBlob(ctx, sourceKey, hash, content); fallbackErr != nil {
 				failed++
 				if firstErr == nil {
 					firstErr = fallbackErr
@@ -1365,7 +1398,7 @@ func (c *Client) StoreBlobBatch(ctx context.Context, blobs map[string][]byte) (s
 		// Fallback to individual calls
 		var firstErr error
 		for hash, content := range blobs {
-			if fallbackErr := c.StoreBlob(ctx, hash, content); fallbackErr != nil {
+			if fallbackErr := c.StoreBlob(ctx, sourceKey, hash, content); fallbackErr != nil {
 				failed++
 				if firstErr == nil {
 					firstErr = fallbackErr
@@ -1441,36 +1474,61 @@ func (c *Client) sendBlobChunked(stream pb.BlobFetcher_StoreBlobBatchStreamClien
 	return nil
 }
 
-// DeleteBlobs asks a fetcher to remove blobs from its index.
-// If compact is true, archive files that become empty are deleted from disk.
+// DeleteBlobs asks every healthy fetcher to remove blobs from its index.
+// Fan-out is required for cache invalidation: a blob may be cached on more
+// than one fetcher, even though writes are sharded to one owner.
 func (c *Client) DeleteBlobs(ctx context.Context, blobHashes []string, compact bool) (deleted int, notFound int, err error) {
 	if len(blobHashes) == 0 {
 		return 0, 0, nil
 	}
 
-	fetcher := c.selectFetcher("blob")
-	if fetcher == nil {
+	c.mu.RLock()
+	fetchers := append([]*fetcherConn(nil), c.fetchers...)
+	c.mu.RUnlock()
+	if len(fetchers) == 0 {
+		return 0, 0, fmt.Errorf("no fetchers available")
+	}
+
+	var firstErr error
+	attempted := 0
+	for _, fetcher := range fetchers {
+		if !fetcher.healthy.Load() {
+			continue
+		}
+		attempted++
+		callCtx, cancel := context.WithTimeout(ctx, c.config.RequestTimeout)
+		resp, callErr := fetcher.client.DeleteBlobs(callCtx, &pb.DeleteBlobsRequest{
+			BlobHashes: blobHashes,
+			Compact:    compact,
+		})
+		cancel()
+		if callErr != nil {
+			fetcher.recordError()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("DeleteBlobs RPC failed on %s: %w", fetcher.address, callErr)
+			}
+			continue
+		}
+		if !resp.Success {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("DeleteBlobs failed on %s: %s", fetcher.address, resp.ErrorMessage)
+			}
+			continue
+		}
+		fetcher.healthy.Store(true)
+		// Each fetcher reports on the same logical blob set. Use the maximum
+		// rather than summing so a fan-out does not report 2x deletions.
+		if d := int(resp.Deleted); d > deleted {
+			deleted = d
+		}
+		if nf := int(resp.NotFound); nf > notFound {
+			notFound = nf
+		}
+	}
+	if attempted == 0 {
 		return 0, 0, fmt.Errorf("no healthy fetchers available")
 	}
-
-	callCtx, cancel := context.WithTimeout(ctx, c.config.RequestTimeout)
-	defer cancel()
-
-	resp, err := fetcher.client.DeleteBlobs(callCtx, &pb.DeleteBlobsRequest{
-		BlobHashes: blobHashes,
-		Compact:    compact,
-	})
-	if err != nil {
-		fetcher.recordError()
-		return 0, 0, fmt.Errorf("DeleteBlobs RPC failed: %w", err)
-	}
-
-	if !resp.Success {
-		return 0, 0, fmt.Errorf("DeleteBlobs failed: %s", resp.ErrorMessage)
-	}
-
-	fetcher.healthy.Store(true)
-	return int(resp.Deleted), int(resp.NotFound), nil
+	return deleted, notFound, firstErr
 }
 
 // StoreArchive streams a packager archive to a fetcher.

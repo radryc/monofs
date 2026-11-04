@@ -80,8 +80,9 @@ type Server struct {
 
 	// Optional DuckDB query sidecar. When configured, read queries are routed
 	// to it and ingest/stats remain on the local logengine.
-	logQuerySidecar         pb.MonoFSClient
-	logQuerySidecarFallback bool
+	logQuerySidecar            pb.MonoFSClient
+	logQuerySidecarFallback    bool
+	logQuerySidecarProxyTraces bool
 
 	// Phase 1B/6: node-owned ledger (WAL-backed when initialization succeeds).
 	workspaceStore *workspacestore.Store
@@ -1280,7 +1281,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 		if len(blobsToForward) > 0 {
 			fwdCtx, fwdCancel := context.WithTimeout(ctx, 120*time.Second)
 			defer fwdCancel()
-			stored, failed, fwdErr := s.fetcherClient.StoreBlobBatch(fwdCtx, blobsToForward)
+			stored, failed, fwdErr := s.fetcherClient.StoreBlobBatch(fwdCtx, storageID, blobsToForward)
 			if fwdErr != nil {
 				s.logger.Error("failed to forward blobs to fetcher",
 					"error", fwdErr,

@@ -28,6 +28,10 @@ type telemetryTestNodeServer struct {
 	metricResults []byte
 	traceResults  []byte
 	aggregateRows []byte
+
+	streamGateOnce sync.Once
+	streamBlocked  chan struct{}
+	streamRelease  <-chan struct{}
 }
 
 type queryResultItemCollector struct {
@@ -97,10 +101,30 @@ func (s *telemetryTestNodeServer) QueryLogs(context.Context, *pb.QueryLogsReques
 	return &pb.QueryLogsResponse{ResultsJson: append([]byte(nil), s.logResults...)}, nil
 }
 
+func (s *telemetryTestNodeServer) blockStream(streamCtx context.Context) error {
+	s.streamGateOnce.Do(func() {
+		if s.streamBlocked != nil {
+			close(s.streamBlocked)
+		}
+	})
+	if s.streamRelease == nil {
+		return nil
+	}
+	select {
+	case <-s.streamRelease:
+		return nil
+	case <-streamCtx.Done():
+		return streamCtx.Err()
+	}
+}
+
 func (s *telemetryTestNodeServer) StreamQueryLogs(_ *pb.QueryLogsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
 	s.mu.Lock()
 	results := append([]byte(nil), s.logResults...)
 	s.mu.Unlock()
+	if err := s.blockStream(stream.Context()); err != nil {
+		return err
+	}
 	return streamTelemetryResults(results, stream.Send)
 }
 
@@ -114,6 +138,9 @@ func (s *telemetryTestNodeServer) StreamQueryMetrics(_ *pb.QueryMetricsRequest, 
 	s.mu.Lock()
 	results := append([]byte(nil), s.metricResults...)
 	s.mu.Unlock()
+	if err := s.blockStream(stream.Context()); err != nil {
+		return err
+	}
 	return streamTelemetryResults(results, stream.Send)
 }
 
@@ -133,6 +160,9 @@ func (s *telemetryTestNodeServer) StreamQueryTraces(_ *pb.QueryTracesRequest, st
 	s.mu.Lock()
 	results := append([]byte(nil), s.traceResults...)
 	s.mu.Unlock()
+	if err := s.blockStream(stream.Context()); err != nil {
+		return err
+	}
 	return streamTelemetryResults(results, stream.Send)
 }
 
@@ -275,6 +305,86 @@ func TestTelemetryIngestUsesStableShardPerSignalAndChunk(t *testing.T) {
 		if got != 0 {
 			t.Fatalf("non-owner node %s got %d trace requests, want 0", nodeID, got)
 		}
+	}
+}
+
+func TestQueryLogsUsesSingleNodeForSharedBackend(t *testing.T) {
+	router, servers, cleanup := newTelemetryRouterHarness(t, "node-a", "node-b")
+	defer cleanup()
+	router.config.SpanEngine = "clickhouse"
+
+	servers["node-a"].logResults = []byte(`[{"body":"a"}]`)
+	servers["node-b"].logResults = []byte(`[{"body":"a"}]`)
+
+	resp, err := router.QueryLogs(context.Background(), &pb.QueryLogsRequest{Query: `{service="x"}`, Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	var records []map[string]any
+	if err := json.Unmarshal(resp.GetResultsJson(), &records); err != nil {
+		t.Fatalf("unmarshal logs: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("log count = %d, want one result from one shared backend", len(records))
+	}
+}
+
+func TestQueryMetricsUsesSingleNodeForSharedBackend(t *testing.T) {
+	router, servers, cleanup := newTelemetryRouterHarness(t, "node-a", "node-b")
+	defer cleanup()
+	router.config.SpanEngine = "clickhouse"
+
+	servers["node-a"].metricResults = []byte(`[{"metric_name":"requests","value":1}]`)
+	servers["node-b"].metricResults = []byte(`[{"metric_name":"requests","value":1}]`)
+
+	resp, err := router.QueryMetrics(context.Background(), &pb.QueryMetricsRequest{MetricName: "requests"})
+	if err != nil {
+		t.Fatalf("QueryMetrics() error = %v", err)
+	}
+	var records []map[string]any
+	if err := json.Unmarshal(resp.GetResultsJson(), &records); err != nil {
+		t.Fatalf("unmarshal metrics: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("metric count = %d, want one result from one shared backend", len(records))
+	}
+}
+
+func TestQueryTracesUsesSingleNodeForSharedBackend(t *testing.T) {
+	router, servers, cleanup := newTelemetryRouterHarness(t, "node-a", "node-b")
+	defer cleanup()
+	router.config.SpanEngine = "clickhouse"
+
+	servers["node-a"].traceResults = []byte(`[{"trace_id":"t1","span_id":"s1","service":"api"}]`)
+	servers["node-b"].traceResults = []byte(`[{"trace_id":"t1","span_id":"s1","service":"api"}]`)
+
+	resp, err := router.QueryTraces(context.Background(), &pb.QueryTracesRequest{TraceId: "t1", Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryTraces() error = %v", err)
+	}
+	var records []map[string]any
+	if err := json.Unmarshal(resp.GetResultsJson(), &records); err != nil {
+		t.Fatalf("unmarshal traces: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("trace count = %d, want one result from one shared backend", len(records))
+	}
+}
+
+func TestStreamQueryTracesUsesSingleNodeForSharedBackend(t *testing.T) {
+	router, servers, cleanup := newTelemetryRouterHarness(t, "node-a", "node-b")
+	defer cleanup()
+	router.config.SpanEngine = "clickhouse"
+
+	servers["node-a"].traceResults = []byte(`[{"trace_id":"t1","span_id":"s1"}]`)
+	servers["node-b"].traceResults = []byte(`[{"trace_id":"t1","span_id":"s1"}]`)
+
+	collector := &queryResultItemCollector{ctx: context.Background()}
+	if err := router.StreamQueryTraces(&pb.QueryTracesRequest{TraceId: "t1", Limit: 10}, collector); err != nil {
+		t.Fatalf("StreamQueryTraces() error = %v", err)
+	}
+	if len(collector.items) != 1 {
+		t.Fatalf("streamed item count = %d, want 1", len(collector.items))
 	}
 }
 

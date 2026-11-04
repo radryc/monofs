@@ -24,6 +24,7 @@ import (
 	"github.com/radryc/monofs/internal/diagnostics"
 	"github.com/radryc/monofs/internal/fetcher"
 	"github.com/radryc/monofs/internal/server"
+	"github.com/radryc/monofs/internal/storage/clickhouse"
 	"github.com/radryc/monofs/internal/storage/logengine"
 	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/pkg/authz"
@@ -59,7 +60,7 @@ type kvsOffloaderAdapter struct {
 }
 
 func (a *kvsOffloaderAdapter) StoreBlob(ctx context.Context, blobHash string, content []byte) error {
-	_, failed, err := a.client.StoreBlobBatch(ctx, map[string][]byte{blobHash: content})
+	_, failed, err := a.client.StoreBlobBatch(ctx, "kvs-archive", map[string][]byte{blobHash: content})
 	if err != nil {
 		return err
 	}
@@ -146,8 +147,25 @@ func main() {
 	logengineDir := flag.String("logengine-dir", "", "Directory for the doctor telemetry log engine (empty disables)")
 	logengineCompactInterval := flag.Duration("logengine-compact-interval", 10*time.Minute, "Interval for background telemetry chunk compaction (0 disables)")
 	logengineCompactAge := flag.Duration("logengine-compact-age", time.Hour, "Only compact telemetry chunks older than this")
+	logengineRetention := flag.Duration("logengine-retention", 0, "Delete telemetry chunks older than this (0 disables)")
+	logengineRetentionInterval := flag.Duration("logengine-retention-interval", time.Hour, "How often to run logengine retention")
 	logQuerySidecar := flag.String("logquery-sidecar", "", "Node-local DuckDB query sidecar address (host:port; empty uses the native scanner)")
 	logQuerySidecarFallback := flag.Bool("logquery-sidecar-fallback", true, "Fall back to the native scanner when the DuckDB sidecar is unavailable")
+
+	// Trace engine selection. Logs and metrics currently always use the local
+	// logengine; only traces can be moved to an external engine.
+	spanEngine := flag.String("spanengine", strings.TrimSpace(os.Getenv("MONOFS_SPANENGINE")), "Telemetry storage engine: logengine or clickhouse (default logengine)")
+	clickhouseURL := flag.String("clickhouse-url", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_URL")), "ClickHouse HTTP URL, e.g. http://clickhouse:8123")
+	clickhouseDatabase := flag.String("clickhouse-database", "strata", "ClickHouse database for telemetry")
+	clickhouseTable := flag.String("clickhouse-table", "spans", "ClickHouse table for spans")
+	clickhouseLogsTable := flag.String("clickhouse-logs-table", "logs", "ClickHouse table for logs")
+	clickhouseMetricsTable := flag.String("clickhouse-metrics-table", "metrics", "ClickHouse table for metrics")
+	clickhouseTenant := flag.String("clickhouse-tenant", "default", "Tenant written to and queried from ClickHouse spans")
+	clickhouseUser := flag.String("clickhouse-user", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_USER")), "ClickHouse HTTP user")
+	clickhousePassword := flag.String("clickhouse-password", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_PASSWORD")), "ClickHouse HTTP password")
+	clickhouseRetention := flag.Duration("clickhouse-retention", 30*24*time.Hour, "ClickHouse span TTL")
+	telemetryMaxQueryChunks := flag.Int("telemetry-max-query-chunks", 20000, "Maximum candidate chunks one telemetry query may inspect")
+	telemetryMaxQueryRecords := flag.Int64("telemetry-max-query-records", 1000000, "Maximum records one telemetry streaming query may yield")
 
 	// Metrics
 	metricsAddr := flag.String("metrics-addr", ":9100", "Listen address for Prometheus /metrics endpoint (empty disables)")
@@ -391,16 +409,63 @@ func main() {
 		}
 	}
 
-	// Initialize doctor telemetry log engine if configured.
+	// Initialize the telemetry backend. Logs and metrics always use the local
+	// logengine; spans can optionally be routed to ClickHouse.
+	traceEngine, err := server.ParseSpanEngine(*spanEngine)
+	if err != nil {
+		logger.Error("invalid span engine", "value", *spanEngine, "error", err)
+		os.Exit(1)
+	}
+	var clickhouseStore *clickhouse.TraceStore
+	if traceEngine == server.SpanEngineClickHouse {
+		store, err := clickhouse.New(clickhouse.Config{
+			URL:          *clickhouseURL,
+			Database:     *clickhouseDatabase,
+			Table:        *clickhouseTable,
+			LogsTable:    *clickhouseLogsTable,
+			MetricsTable: *clickhouseMetricsTable,
+			Tenant:       *clickhouseTenant,
+			User:         *clickhouseUser,
+			Password:     *clickhousePassword,
+			Retention:    *clickhouseRetention,
+		})
+		if err != nil {
+			logger.Error("failed to configure ClickHouse trace store", "error", err)
+			os.Exit(1)
+		}
+		bootstrapCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err = store.Bootstrap(bootstrapCtx)
+		cancel()
+		if err != nil {
+			logger.Error("failed to bootstrap ClickHouse trace schema", "error", err)
+			os.Exit(1)
+		}
+		clickhouseStore = store
+		defer clickhouseStore.Close()
+		logger.Info("doctor telemetry uses ClickHouse",
+			"url", *clickhouseURL,
+			"database", *clickhouseDatabase,
+			"spans_table", *clickhouseTable,
+			"logs_table", *clickhouseLogsTable,
+			"metrics_table", *clickhouseMetricsTable,
+			"tenant", *clickhouseTenant)
+	}
+
 	var stopLogEngine func()
-	if dir := strings.TrimSpace(*logengineDir); dir != "" {
+	var localBackend server.DoctorBackend
+	if dir := strings.TrimSpace(*logengineDir); dir != "" && traceEngine == server.SpanEngineClickHouse {
+		logger.Warn("logengine directory is ignored because --spanengine=clickhouse", "dir", dir)
+	}
+	if dir := strings.TrimSpace(*logengineDir); dir != "" && traceEngine == server.SpanEngineLogEngine {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			logger.Error("failed to create logengine directory", "error", err)
 			os.Exit(1)
 		}
 		le := logengine.New(logengine.NewMockS3Store(dir), logengine.Config{
-			LocalCacheDir: dir,
-			ChunkDuration: 5 * time.Minute,
+			LocalCacheDir:   dir,
+			ChunkDuration:   5 * time.Minute,
+			MaxQueryChunks:  *telemetryMaxQueryChunks,
+			MaxQueryRecords: *telemetryMaxQueryRecords,
 		})
 		compactCtx, compactCancel := context.WithCancel(context.Background())
 		stopLogEngine = compactCancel
@@ -410,7 +475,13 @@ func main() {
 				"interval", logengineCompactInterval.String(),
 				"min_age", logengineCompactAge.String())
 		}
-		srv.SetDoctorBackend(le)
+		if *logengineRetention > 0 {
+			le.RunRetention(compactCtx, *logengineRetentionInterval, *logengineRetention)
+			logger.Info("doctor logengine retention enabled",
+				"max_age", logengineRetention.String(),
+				"interval", logengineRetentionInterval.String())
+		}
+		localBackend = le
 		logger.Info("doctor logengine enabled", "dir", dir)
 
 		if sidecarAddr := strings.TrimSpace(*logQuerySidecar); sidecarAddr != "" {
@@ -420,11 +491,27 @@ func main() {
 				os.Exit(1)
 			}
 			defer conn.Close()
-			srv.SetLogQuerySidecar(pb.NewMonoFSClient(conn), *logQuerySidecarFallback)
+			srv.SetLogQuerySidecar(pb.NewMonoFSClient(conn), *logQuerySidecarFallback, traceEngine == server.SpanEngineLogEngine)
 			logger.Info("doctor DuckDB query sidecar enabled",
 				"addr", sidecarAddr,
-				"fallback", *logQuerySidecarFallback)
+				"fallback", *logQuerySidecarFallback,
+				"proxy_traces", traceEngine == server.SpanEngineLogEngine)
 		}
+	}
+
+	switch traceEngine {
+	case server.SpanEngineLogEngine:
+		if localBackend != nil {
+			srv.SetDoctorBackend(localBackend)
+		}
+	case server.SpanEngineClickHouse:
+		if strings.TrimSpace(*logQuerySidecar) != "" {
+			logger.Warn("logquery sidecar is ignored because telemetry uses ClickHouse", "addr", *logQuerySidecar)
+		}
+		srv.SetDoctorBackend(clickhouseStore)
+	default:
+		logger.Error("unsupported span engine", "value", traceEngine)
+		os.Exit(1)
 	}
 
 	srv.Register(grpcServer)

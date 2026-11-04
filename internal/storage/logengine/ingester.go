@@ -38,6 +38,7 @@ func NewIngester(store ObjectStoreBackend, chunkDur time.Duration) *Ingester {
 type ChunkWriteOptions struct {
 	CompactionSources []string
 	CompactionLevel   int
+	CompactionGroup   string
 }
 
 func validChunkID(chunkID string) bool {
@@ -50,14 +51,15 @@ func validChunkID(chunkID string) bool {
 // Exactly one of logs/metrics/spans should be non-nil; the signal parameter selects
 // the storage path and Parquet schema.
 func (i *Ingester) FlushChunk(ctx context.Context, signal Signal, chunkID string, logs []LogRecord, metrics []MetricRecord, spans []SpanRecord) error {
-	return i.FlushChunkWithOptions(ctx, signal, chunkID, logs, metrics, spans, ChunkWriteOptions{})
+	_, err := i.FlushChunkWithOptions(ctx, signal, chunkID, logs, metrics, spans, ChunkWriteOptions{})
+	return err
 }
 
 // FlushChunkWithOptions writes a chunk and records compaction provenance in
-// its manifest.
-func (i *Ingester) FlushChunkWithOptions(ctx context.Context, signal Signal, chunkID string, logs []LogRecord, metrics []MetricRecord, spans []SpanRecord, opts ChunkWriteOptions) error {
+// its manifest. It returns the chunk path relative to chunks/<signal>/.
+func (i *Ingester) FlushChunkWithOptions(ctx context.Context, signal Signal, chunkID string, logs []LogRecord, metrics []MetricRecord, spans []SpanRecord, opts ChunkWriteOptions) (string, error) {
 	if !validChunkID(chunkID) {
-		return fmt.Errorf("invalid chunk id %q", chunkID)
+		return "", fmt.Errorf("invalid chunk id %q", chunkID)
 	}
 	switch signal {
 	case SignalLogs:
@@ -67,13 +69,13 @@ func (i *Ingester) FlushChunkWithOptions(ctx context.Context, signal Signal, chu
 	case SignalTraces:
 		return i.flushTraces(ctx, chunkID, spans, opts)
 	default:
-		return fmt.Errorf("unknown signal: %s", signal)
+		return "", fmt.Errorf("unknown signal: %s", signal)
 	}
 }
 
-func (i *Ingester) flushLogs(ctx context.Context, chunkID string, logs []LogRecord, opts ChunkWriteOptions) error {
+func (i *Ingester) flushLogs(ctx context.Context, chunkID string, logs []LogRecord, opts ChunkWriteOptions) (string, error) {
 	if len(logs) == 0 {
-		return nil
+		return "", nil
 	}
 	logs = sortLogRecords(logs)
 
@@ -101,26 +103,31 @@ func (i *Ingester) flushLogs(ctx context.Context, chunkID string, logs []LogReco
 		SchemaVersion:     2,
 		CompactionSources: opts.CompactionSources,
 		CompactionLevel:   opts.CompactionLevel,
+		CompactionGroup:   opts.CompactionGroup,
 	}
-	chunkPrefix := filepath.Join("chunks", string(SignalLogs), relativeChunkPath(chunkID, minTime, chunkPartition(manifest.Partitions)))
+	chunkPath := relativeChunkPath(chunkID, minTime, chunkPartition(manifest.Partitions))
+	chunkPrefix := filepath.Join("chunks", string(SignalLogs), chunkPath)
 
 	parquetBytes, rowGroups, err := i.writeLogParquetBatched(ctx, filepath.Join(chunkPrefix, chunkDataFileName), logs)
 	if err != nil {
-		return err
+		return "", err
 	}
 	manifest.ParquetBytes = parquetBytes
 	manifest.RowGroups = rowGroups
 	if err := i.writeBlugeIndex(ctx, filepath.Join(chunkPrefix, "text.index.tar.gz"), logs); err != nil {
-		return err
+		return "", err
 	}
 	// The manifest is the commit marker: write it only after data and indexes
 	// are durable so readers never observe a half-written chunk.
-	return i.writeMetadata(ctx, filepath.Join(chunkPrefix, "metadata.json"), manifest)
+	if err := i.writeMetadata(ctx, filepath.Join(chunkPrefix, "metadata.json"), manifest); err != nil {
+		return "", err
+	}
+	return chunkPath, nil
 }
 
-func (i *Ingester) flushMetrics(ctx context.Context, chunkID string, metrics []MetricRecord, opts ChunkWriteOptions) error {
+func (i *Ingester) flushMetrics(ctx context.Context, chunkID string, metrics []MetricRecord, opts ChunkWriteOptions) (string, error) {
 	if len(metrics) == 0 {
-		return nil
+		return "", nil
 	}
 	metrics = sortMetricRecords(metrics)
 
@@ -134,37 +141,44 @@ func (i *Ingester) flushMetrics(ctx context.Context, chunkID string, metrics []M
 		}
 	}
 
+	metricLabelValues, metricLabelValuesTruncated := collectMetricLabelValues(metrics)
 	manifest := ChunkManifest{
-		ChunkID:           chunkID,
-		Signal:            SignalMetrics,
-		MinTime:           minTime,
-		MaxTime:           maxTime,
-		Services:          collectMetricServices(metrics),
-		MetricNames:       collectMetricNames(metrics),
-		Partitions:        collectMetricPartitions(metrics),
-		MetricLabelValues: collectMetricLabelValues(metrics),
-		RecordCount:       int64(len(metrics)),
-		SchemaVersion:     2,
-		CompactionSources: opts.CompactionSources,
-		CompactionLevel:   opts.CompactionLevel,
+		ChunkID:                    chunkID,
+		Signal:                     SignalMetrics,
+		MinTime:                    minTime,
+		MaxTime:                    maxTime,
+		Services:                   collectMetricServices(metrics),
+		MetricNames:                collectMetricNames(metrics),
+		Partitions:                 collectMetricPartitions(metrics),
+		MetricLabelValues:          metricLabelValues,
+		MetricLabelValuesTruncated: metricLabelValuesTruncated,
+		RecordCount:                int64(len(metrics)),
+		SchemaVersion:              2,
+		CompactionSources:          opts.CompactionSources,
+		CompactionLevel:            opts.CompactionLevel,
+		CompactionGroup:            opts.CompactionGroup,
 	}
-	chunkPrefix := filepath.Join("chunks", string(SignalMetrics), relativeChunkPath(chunkID, minTime, chunkPartition(manifest.Partitions)))
+	chunkPath := relativeChunkPath(chunkID, minTime, chunkPartition(manifest.Partitions))
+	chunkPrefix := filepath.Join("chunks", string(SignalMetrics), chunkPath)
 
 	parquetBytes, rowGroups, err := i.writeMetricParquetBatched(ctx, filepath.Join(chunkPrefix, chunkDataFileName), metrics)
 	if err != nil {
-		return err
+		return "", err
 	}
 	manifest.ParquetBytes = parquetBytes
 	manifest.RowGroups = rowGroups
 	if err := i.writeMetricSeriesIndex(ctx, filepath.Join(chunkPrefix, "series.index.json"), collectMetricSeries(metrics)); err != nil {
-		return err
+		return "", err
 	}
-	return i.writeMetadata(ctx, filepath.Join(chunkPrefix, "metadata.json"), manifest)
+	if err := i.writeMetadata(ctx, filepath.Join(chunkPrefix, "metadata.json"), manifest); err != nil {
+		return "", err
+	}
+	return chunkPath, nil
 }
 
-func (i *Ingester) flushTraces(ctx context.Context, chunkID string, spans []SpanRecord, opts ChunkWriteOptions) error {
+func (i *Ingester) flushTraces(ctx context.Context, chunkID string, spans []SpanRecord, opts ChunkWriteOptions) (string, error) {
 	if len(spans) == 0 {
-		return nil
+		return "", nil
 	}
 	spans = sortSpanRecords(spans)
 
@@ -178,32 +192,44 @@ func (i *Ingester) flushTraces(ctx context.Context, chunkID string, spans []Span
 		}
 	}
 
-	traceTagKeys, traceTagValues := collectTraceDiscovery(spans)
+	traceDiscovery := collectTraceDiscovery(spans)
 	manifest := ChunkManifest{
-		ChunkID:           chunkID,
-		Signal:            SignalTraces,
-		MinTime:           minTime,
-		MaxTime:           maxTime,
-		Services:          collectTraceServices(spans),
-		Partitions:        collectSpanPartitions(spans),
-		TraceBloom:        buildTraceBloom(spans),
-		TraceTagKeys:      traceTagKeys,
-		TraceTagValues:    traceTagValues,
-		RecordCount:       int64(len(spans)),
-		SchemaVersion:     2,
-		CompactionSources: opts.CompactionSources,
-		CompactionLevel:   opts.CompactionLevel,
+		ChunkID:                 chunkID,
+		Signal:                  SignalTraces,
+		MinTime:                 minTime,
+		MaxTime:                 maxTime,
+		Services:                collectTraceServices(spans),
+		Partitions:              collectSpanPartitions(spans),
+		TraceBloom:              buildTraceBloom(spans),
+		TraceTagKeys:            traceDiscovery.Keys,
+		TraceTagValues:          traceDiscovery.Values,
+		TraceTagKeysTruncated:   traceDiscovery.KeysTruncated,
+		TraceTagValuesTruncated: traceDiscovery.ValuesTruncated,
+		RecordCount:             int64(len(spans)),
+		SchemaVersion:           2,
+		CompactionSources:       opts.CompactionSources,
+		CompactionLevel:         opts.CompactionLevel,
+		CompactionGroup:         opts.CompactionGroup,
 	}
-	chunkPrefix := filepath.Join("chunks", string(SignalTraces), relativeChunkPath(chunkID, minTime, chunkPartition(manifest.Partitions)))
+	chunkPath := relativeChunkPath(chunkID, minTime, chunkPartition(manifest.Partitions))
+	chunkPrefix := filepath.Join("chunks", string(SignalTraces), chunkPath)
 
 	parquetBytes, rowGroups, err := i.writeTraceParquetBatched(ctx, filepath.Join(chunkPrefix, chunkDataFileName), spans)
 	if err != nil {
-		return err
+		return "", err
 	}
 	manifest.ParquetBytes = parquetBytes
 	manifest.RowGroups = rowGroups
-	return i.writeMetadata(ctx, filepath.Join(chunkPrefix, "metadata.json"), manifest)
+	if err := i.writeMetadata(ctx, filepath.Join(chunkPrefix, "metadata.json"), manifest); err != nil {
+		return "", err
+	}
+	return chunkPath, nil
 }
+
+// logRowIDField stores the source row ordinal in the Bluge index. Query
+// planning uses it to map full-text matches back to Parquet row positions;
+// DocumentMatch.Number is an internal Bluge document id, not a row ordinal.
+const logRowIDField = "_row_id"
 
 func (i *Ingester) writeBlugeIndex(ctx context.Context, path string, logs []LogRecord) error {
 	// Create a temporary directory for the Bluge index
@@ -221,8 +247,12 @@ func (i *Ingester) writeBlugeIndex(ctx context.Context, path string, logs []LogR
 
 	for idx, log := range logs {
 		doc := bluge.NewDocument(fmt.Sprintf("%d", idx)) // Use row ID as document ID
-		// Index the raw message text
+		// Index the raw message text.
 		doc.AddField(bluge.NewTextField("raw_message", log.RawMessage).StoreValue())
+		// Persist the row ordinal so full-text matches can be mapped back to
+		// the corresponding Parquet row. Bluge document numbers are not stable
+		// row ordinals (documents may be reordered by the index writer).
+		doc.AddField(bluge.NewKeywordField(logRowIDField, fmt.Sprintf("%d", idx)).StoreValue())
 
 		if err := writer.Update(doc.ID(), doc); err != nil {
 			writer.Close()
@@ -481,8 +511,16 @@ func collectMetricNames(metrics []MetricRecord) []string {
 	return sortedKeys(names)
 }
 
-func collectMetricLabelValues(metrics []MetricRecord) map[string][]string {
+// Metric manifest label dictionaries are used for safe positive pruning and
+// label discovery. A single chunk can contain pathological cardinality, so cap
+// the total dictionary size and mark the chunk for sidecar-free discovery
+// fallback instead of writing an unbounded metadata object.
+const maxMetricManifestLabelValues = 4096
+
+func collectMetricLabelValues(metrics []MetricRecord) (map[string][]string, bool) {
 	valuesByName := make(map[string]map[string]struct{})
+	total := 0
+	truncated := false
 	for _, metric := range metrics {
 		for name, value := range metric.Labels {
 			if name == "" || value == "" {
@@ -493,17 +531,28 @@ func collectMetricLabelValues(metrics []MetricRecord) map[string][]string {
 				values = make(map[string]struct{})
 				valuesByName[name] = values
 			}
+			if _, ok := values[value]; ok {
+				continue
+			}
+			if total >= maxMetricManifestLabelValues {
+				truncated = true
+				continue
+			}
 			values[value] = struct{}{}
+			total++
 		}
 	}
+	if truncated {
+		return nil, true
+	}
 	if len(valuesByName) == 0 {
-		return nil
+		return nil, false
 	}
 	out := make(map[string][]string, len(valuesByName))
 	for name, values := range valuesByName {
 		out[name] = sortedKeys(values)
 	}
-	return out
+	return out, false
 }
 
 func collectTraceServices(spans []SpanRecord) []string {
@@ -543,8 +592,20 @@ func buildTraceBloomFromIDs(traceIDs []string) []byte {
 	if len(traceIDs) == 0 {
 		return nil
 	}
-	const bloomBytes = 256
-	const bloomHashes = 4
+	// Size the filter from the number of IDs. A fixed 256-byte filter
+	// saturates after a few hundred IDs and makes trace-id pruning useless.
+	const (
+		minBloomBytes = 256
+		maxBloomBytes = 1 << 20
+		bloomHashes   = 4
+	)
+	bloomBytes := minBloomBytes
+	if wanted := len(traceIDs) * 2; wanted > bloomBytes {
+		bloomBytes = wanted
+	}
+	if bloomBytes > maxBloomBytes {
+		bloomBytes = maxBloomBytes
+	}
 
 	bloom := make([]byte, bloomBytes)
 	for _, traceID := range traceIDs {

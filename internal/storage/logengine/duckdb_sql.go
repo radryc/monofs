@@ -31,6 +31,9 @@ func jsonPathExpr(column, name string) duckSQLExpr {
 	if alt := strings.ReplaceAll(name, "_", "."); alt != name {
 		keys = append(keys, alt)
 	}
+	if alt := strings.ReplaceAll(name, ".", "_"); alt != name {
+		keys = append(keys, alt)
+	}
 	parts := make([]string, 0, len(keys))
 	args := make([]any, 0, len(keys))
 	for _, key := range keys {
@@ -62,24 +65,22 @@ func partitionExpr(partitionColumn, jsonColumn string) duckSQLExpr {
 }
 
 func appendPredicate(where *[]string, args *[]any, expr duckSQLExpr, op string, value string) {
+	valueExpr := "coalesce(" + expr.sql + ", '')"
 	switch op {
 	case "=":
-		*where = append(*where, expr.sql+" = ?")
+		*where = append(*where, valueExpr+" = ?")
 		*args = append(*args, expr.args...)
 		*args = append(*args, value)
 	case "!=":
-		*where = append(*where, "("+expr.sql+" IS NULL OR "+expr.sql+" <> ?)")
-		*args = append(*args, expr.args...)
+		*where = append(*where, valueExpr+" <> ?")
 		*args = append(*args, expr.args...)
 		*args = append(*args, value)
 	case "=~":
-		*where = append(*where, "("+expr.sql+" IS NOT NULL AND regexp_matches("+expr.sql+", ?))")
-		*args = append(*args, expr.args...)
+		*where = append(*where, "regexp_matches("+valueExpr+", ?)")
 		*args = append(*args, expr.args...)
 		*args = append(*args, value)
 	case "!~":
-		*where = append(*where, "("+expr.sql+" IS NULL OR NOT regexp_matches("+expr.sql+", ?))")
-		*args = append(*args, expr.args...)
+		*where = append(*where, "NOT regexp_matches("+valueExpr+", ?)")
 		*args = append(*args, expr.args...)
 		*args = append(*args, value)
 	}
@@ -144,7 +145,11 @@ func buildLogDuckSQL(files []string, query logquery.Query, service string, from,
 		args = append(args, to.UTC().UnixNano())
 	}
 	for _, matcher := range query.Matchers {
-		appendPredicate(&where, &args, logMatcherExpr(matcher.Name), matcher.Op, matcher.Value)
+		value := matcher.Value
+		if matcher.Op == "=~" || matcher.Op == "!~" {
+			value = anchorLabelRegex(value)
+		}
+		appendPredicate(&where, &args, logMatcherExpr(matcher.Name), matcher.Op, value)
 	}
 	for _, filter := range query.LineFilters {
 		expr := duckSQLExpr{sql: "raw_message"}
@@ -216,12 +221,14 @@ func buildMetricDuckSQL(files []string, query MetricQuery, from, to time.Time) (
 		appendPredicate(&where, &args, expr, op, matcher.Value)
 	}
 
+	// Metric consumers (PromQL, dashboards) aggregate by series and do not
+	// depend on row order. Skipping the sort lets DuckDB stream results without
+	// materializing the full match set just to order it.
 	sql := "SELECT timestamp, service, metric_name, value, labels_json, " +
 		part.sql + " AS partition FROM " + duckParquetSource(files)
 	if len(where) > 0 {
 		sql += " WHERE " + strings.Join(where, " AND ")
 	}
-	sql += " ORDER BY timestamp DESC"
 	return sql, args, nil
 }
 
@@ -258,4 +265,101 @@ func buildTraceDuckSQL(files []string, traceID, service string, from, to time.Ti
 		args = append(args, limit)
 	}
 	return sql, args, nil
+}
+
+// buildSQLDataset renders the read-only view exposed to the DuckDB SQL
+// console. The view applies the requested time range and the caller's
+// partition scope so user SQL cannot widen access by writing its own WHERE
+// clause. Empty file sets return a typed empty relation instead of calling
+// read_parquet with an empty list.
+func buildSQLDataset(files []string, dataset string, from, to time.Time, scope QueryScope) (string, []any) {
+	if len(files) == 0 {
+		return emptySQLDataset(dataset), nil
+	}
+	source := duckParquetSource(files)
+	where := make([]string, 0, 4)
+	args := make([]any, 0, 4)
+
+	switch dataset {
+	case "logs":
+		part := partitionExpr("partition", "labels_json")
+		args = append(args, part.args...)
+		if !from.IsZero() {
+			where = append(where, "timestamp >= ?")
+			args = append(args, from.UTC().UnixNano())
+		}
+		if !to.IsZero() {
+			where = append(where, "timestamp <= ?")
+			args = append(args, to.UTC().UnixNano())
+		}
+		appendScope(&where, &args, part, scope)
+		sql := "SELECT timestamp, to_timestamp(timestamp / 1000000000.0) AS time, level, service, trace_id, span_id, raw_message, labels_json, " +
+			part.sql + " AS partition FROM " + source
+		if len(where) > 0 {
+			sql += " WHERE " + strings.Join(where, " AND ")
+		}
+		return sql, args
+
+	case "metrics":
+		part := partitionExpr("partition", "labels_json")
+		args = append(args, part.args...)
+		if !from.IsZero() {
+			where = append(where, "timestamp >= ?")
+			args = append(args, from.UTC().UnixNano())
+		}
+		if !to.IsZero() {
+			where = append(where, "timestamp <= ?")
+			args = append(args, to.UTC().UnixNano())
+		}
+		appendScope(&where, &args, part, scope)
+		sql := "SELECT timestamp, to_timestamp(timestamp / 1000000000.0) AS time, service, metric_name, value, labels_json, " +
+			part.sql + " AS partition FROM " + source
+		if len(where) > 0 {
+			sql += " WHERE " + strings.Join(where, " AND ")
+		}
+		return sql, args
+
+	case "traces":
+		part := partitionExpr("partition", "attributes_json")
+		args = append(args, part.args...)
+		if !from.IsZero() {
+			where = append(where, "timestamp >= ?")
+			args = append(args, from.UTC().UnixNano())
+		}
+		if !to.IsZero() {
+			where = append(where, "timestamp <= ?")
+			args = append(args, to.UTC().UnixNano())
+		}
+		appendScope(&where, &args, part, scope)
+		sql := "SELECT timestamp, to_timestamp(timestamp / 1000000000.0) AS time, end_time, " +
+			"to_timestamp(end_time / 1000000000.0) AS end_time_ts, trace_id, span_id, parent_span_id, service, name, status_code, attributes_json, " +
+			part.sql + " AS partition FROM " + source
+		if len(where) > 0 {
+			sql += " WHERE " + strings.Join(where, " AND ")
+		}
+		return sql, args
+	}
+	return emptySQLDataset(dataset), nil
+}
+
+func emptySQLDataset(dataset string) string {
+	switch dataset {
+	case "logs":
+		return "SELECT CAST(NULL AS BIGINT) AS timestamp, CAST(NULL AS TIMESTAMP) AS time, " +
+			"CAST(NULL AS VARCHAR) AS level, CAST(NULL AS VARCHAR) AS service, CAST(NULL AS VARCHAR) AS trace_id, " +
+			"CAST(NULL AS VARCHAR) AS span_id, CAST(NULL AS VARCHAR) AS raw_message, CAST(NULL AS VARCHAR) AS labels_json, " +
+			"CAST(NULL AS VARCHAR) AS partition WHERE FALSE"
+	case "metrics":
+		return "SELECT CAST(NULL AS BIGINT) AS timestamp, CAST(NULL AS TIMESTAMP) AS time, " +
+			"CAST(NULL AS VARCHAR) AS service, CAST(NULL AS VARCHAR) AS metric_name, CAST(NULL AS DOUBLE) AS value, " +
+			"CAST(NULL AS VARCHAR) AS labels_json, CAST(NULL AS VARCHAR) AS partition WHERE FALSE"
+	case "traces":
+		return "SELECT CAST(NULL AS BIGINT) AS timestamp, CAST(NULL AS TIMESTAMP) AS time, " +
+			"CAST(NULL AS BIGINT) AS end_time, CAST(NULL AS TIMESTAMP) AS end_time_ts, " +
+			"CAST(NULL AS VARCHAR) AS trace_id, CAST(NULL AS VARCHAR) AS span_id, CAST(NULL AS VARCHAR) AS parent_span_id, " +
+			"CAST(NULL AS VARCHAR) AS service, CAST(NULL AS VARCHAR) AS name, CAST(NULL AS VARCHAR) AS status_code, " +
+			"CAST(NULL AS VARCHAR) AS attributes_json, CAST(NULL AS VARCHAR) AS partition WHERE FALSE"
+	default:
+		return "SELECT CAST(NULL AS BIGINT) AS timestamp WHERE FALSE"
+	}
 }

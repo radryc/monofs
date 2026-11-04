@@ -36,5 +36,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /bin/monofs-logquery /usr/local/bin/monofs-logquery
 
+# Keep Go's heap below the usual 2Gi container limit so Go collects before the
+# cgroup OOM killer does. Deployments can override these values.
+ENV GOMEMLIMIT=1200MiB
+ENV GOGC=50
+
 EXPOSE 9101
 ENTRYPOINT ["/usr/local/bin/monofs-logquery"]

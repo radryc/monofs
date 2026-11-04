@@ -286,10 +286,12 @@ func aggregateSpanGroup(record SpanRecord, fields []string) map[string]string {
 func aggregateLabelValue(values map[string]string, field string) string {
 	for _, prefix := range []string{"labels.", "attributes."} {
 		if key, ok := strings.CutPrefix(field, prefix); ok {
-			return values[key]
+			value, _ := lookupLabelValue(values, key)
+			return value
 		}
 	}
-	return values[field]
+	value, _ := lookupLabelValue(values, field)
+	return value
 }
 
 func aggregateGroupField(signal Signal, field string) (string, bool) {

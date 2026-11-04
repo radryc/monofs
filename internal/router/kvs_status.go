@@ -15,12 +15,14 @@ func normalizedKVSNodeStatus(status *pb.KVSNodeStatus) *pb.KVSNodeStatus {
 		role = "disabled"
 	}
 	return &pb.KVSNodeStatus{
-		Enabled:   status.GetEnabled(),
-		Healthy:   status.GetHealthy(),
-		Mode:      mode,
-		Role:      role,
-		LeaderId:  status.GetLeaderId(),
-		PeerCount: status.GetPeerCount(),
-		KeyCount:  status.GetKeyCount(),
+		Enabled:       status.GetEnabled(),
+		Healthy:       status.GetHealthy(),
+		Mode:          mode,
+		Role:          role,
+		LeaderId:      status.GetLeaderId(),
+		LeaderAddress: status.GetLeaderAddress(),
+		Term:          status.GetTerm(),
+		PeerCount:     status.GetPeerCount(),
+		KeyCount:      status.GetKeyCount(),
 	}
 }

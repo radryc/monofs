@@ -54,7 +54,7 @@ func (s *Server) AggregateTelemetry(ctx context.Context, req *pb.AggregateTeleme
 	}
 	rows, err := backend.Aggregate(ctx, query)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "aggregate telemetry failed: %v", err)
+		return nil, telemetryQueryStatus("aggregate telemetry failed", err)
 	}
 	data, err := json.Marshal(rows)
 	if err != nil {
