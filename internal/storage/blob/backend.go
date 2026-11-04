@@ -321,8 +321,12 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 	}
 
 	// Backfill sidecars for archives created before the sidecar format
-	// existed. Run it in the background so startup is not blocked.
-	go bb.backfillCloudArchiveIndexes(context.Background())
+	// existed. Run it in the background so startup is not blocked. Skip the
+	// goroutine entirely when cloud upload is not configured; callers may
+	// enable upload after Initialize in tests.
+	if bb.hasCloudUpload() {
+		go bb.backfillCloudArchiveIndexes(context.Background())
+	}
 
 	return nil
 }
