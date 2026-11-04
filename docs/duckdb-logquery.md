@@ -100,3 +100,33 @@ go test ./internal/storage/logengine/...
 # DuckDB parity tests
 CGO_ENABLED=1 go test -tags duckdb ./internal/storage/logengine/...
 ```
+
+## Doctor SQL console
+
+Doctor exposes a read-only SQL console at `POST /v1/sql/query`. It runs
+`SELECT`/`WITH` statements against one of three views:
+
+- `logs` — `time`, `timestamp`, `level`, `service`, `trace_id`, `span_id`,
+  `raw_message`, `labels_json`, `partition`
+- `metrics` — `time`, `timestamp`, `service`, `metric_name`, `value`,
+  `labels_json`, `partition`
+- `traces` — `time`, `timestamp`, `end_time`, `end_time_ts`, `trace_id`,
+  `span_id`, `parent_span_id`, `service`, `name`, `status_code`,
+  `attributes_json`, `partition`
+
+The query is evaluated on every healthy MonoFS node and the response contains
+one result envelope per node. This is intentional: chunks are shard-local, so
+aggregate queries return per-node partials rather than a misleading global
+total.
+
+Access control is enforced in layers:
+
+1. Doctor resolves the caller's visible partitions for the selected signal and
+   sends them with the request.
+2. The MonoFS router intersects that list with its own policy scope.
+3. The DuckDB view applies the resulting partition predicate before the user's
+   SQL is evaluated.
+
+The console rejects non-`SELECT` statements, multiple statements, external
+file/table functions, direct Parquet/CSV/JSON paths, and redefinition of the
+dataset view. Queries are limited to seven days and 5,000 rows.

@@ -1113,7 +1113,7 @@ func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoUR
 	wasPrefetched = inCache
 
 	// Fetch via fetcher service
-	content, err := s.fetcherClient.FetchBlobSimple(ctx, repoURL, blobHash, filePath, branch, sourceType)
+	content, err := s.fetcherClient.FetchBlobSimple(ctx, storageID, repoURL, blobHash, filePath, branch, sourceType)
 	if err != nil {
 		return nil, false, fmt.Errorf("fetch blob failed: %w", err)
 	}
@@ -1174,7 +1174,7 @@ func (s *Server) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStr
 		queryCtx = logengine.WithQueryScope(queryCtx, requestQueryScope(req.GetVisiblePartitions(), true))
 	}
 	if err := backend.StreamLogs(queryCtx, req.Query, req.Service, from, to, int(req.Limit), yield); err != nil {
-		return status.Errorf(codes.Internal, "query logs failed: %v", err)
+		return telemetryQueryStatus("query logs failed", err)
 	}
 	if batcher != nil {
 		return batcher.flush()
@@ -1203,6 +1203,9 @@ func (s *Server) StreamMetricSeries(req *pb.QueryMetricsRequest, stream grpc.Ser
 	}, from, to, func(meta logengine.MetricSeriesMeta) error {
 		return stream.Send(metricSeriesItemFromMeta(meta))
 	}); err != nil {
+		if errors.Is(err, logengine.ErrMetricSeriesLimit) {
+			return status.Errorf(codes.ResourceExhausted, "query metric series failed: %v", err)
+		}
 		return status.Errorf(codes.Internal, "query metric series failed: %v", err)
 	}
 	return nil
@@ -1237,13 +1240,47 @@ func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 	}
 	records, err := backend.QueryLogs(queryCtx, req.Query, req.Service, from, to, int(req.Limit))
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query logs failed: %v", err)
+		return nil, telemetryQueryStatus("query logs failed", err)
 	}
 	b, err := marshalJSON(records)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
 	return &pb.QueryLogsResponse{ResultsJson: b}, nil
+}
+
+// QueryDuckDBSQL implements the read-only DuckDB SQL console RPC. Partition
+// scope is applied inside the DuckDB view, so the statement itself cannot
+// widen access.
+func (s *Server) QueryDuckDBSQL(ctx context.Context, req *pb.QueryDuckDBSQLRequest) (*pb.QueryDuckDBSQLResponse, error) {
+	backend, err := s.doctorBackendOrErr()
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	from := time.Unix(0, req.GetFromUnixNano()).UTC()
+	to := time.Unix(0, req.GetToUnixNano()).UTC()
+	if req.GetFromUnixNano() == 0 {
+		from = time.Time{}
+	}
+	if req.GetToUnixNano() == 0 {
+		to = time.Time{}
+	}
+	scope := logengine.QueryScope{}
+	if req.GetVisiblePartitionsSet() {
+		scope = requestQueryScope(req.GetVisiblePartitions(), true)
+	}
+	result, err := backend.QueryDuckDBSQL(ctx, req.GetDataset(), req.GetQuery(), from, to, int(req.GetLimit()), scope)
+	if err != nil {
+		if errors.Is(err, logengine.ErrDuckDBUnavailable) {
+			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		}
+		return nil, status.Errorf(codes.Internal, "query duckdb sql failed: %v", err)
+	}
+	data, err := marshalJSON(result)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal duckdb sql: %v", err)
+	}
+	return &pb.QueryDuckDBSQLResponse{ResultsJson: string(data)}, nil
 }
 
 // QueryMetrics implements the Doctor partition metric query.
@@ -1273,7 +1310,7 @@ func (s *Server) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.Ser
 		Service:       req.GetService(),
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
 	}, from, to, yield); err != nil {
-		return status.Errorf(codes.Internal, "query metrics failed: %v", err)
+		return telemetryQueryStatus("query metrics failed", err)
 	}
 	if batcher != nil {
 		return batcher.flush()
@@ -1300,7 +1337,7 @@ func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
 	}, from, to)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query metrics failed: %v", err)
+		return nil, telemetryQueryStatus("query metrics failed", err)
 	}
 	b, err := marshalJSON(records)
 	if err != nil {
@@ -1370,7 +1407,7 @@ func (s *Server) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.Serve
 		yield = func(record logengine.SpanRecord) error { return batcher.add(record) }
 	}
 	if err := backend.StreamTraces(traceCtx, req.TraceId, req.Service, from, to, int(req.Limit), yield); err != nil {
-		return status.Errorf(codes.Internal, "query traces failed: %v", err)
+		return telemetryQueryStatus("query traces failed", err)
 	}
 	if batcher != nil {
 		return batcher.flush()
@@ -1437,7 +1474,7 @@ func (s *Server) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*
 	}
 	records, err := backend.QueryTraces(traceCtx, req.TraceId, req.Service, from, to, int(req.Limit))
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query traces failed: %v", err)
+		return nil, telemetryQueryStatus("query traces failed", err)
 	}
 	b, err := marshalJSON(records)
 	if err != nil {

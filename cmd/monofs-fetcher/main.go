@@ -421,6 +421,12 @@ func main() {
 	serviceConfig.SyncRepoCacheDir = cfg.CacheDir + "/sync"
 	service := fetcher.NewService(fetcherID, registry, serviceConfig, logger)
 
+	// Expose WAL and S3 read-through state to the router UI.
+	diagMux.HandleFunc("/observability", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(service.Observability())
+	})
+
 	// Create gRPC server
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),

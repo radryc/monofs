@@ -9,14 +9,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -37,9 +41,18 @@ func main() {
 	memoryLimit := flag.String("duckdb-memory-limit", "2GB", "DuckDB memory limit")
 	threads := flag.Int("duckdb-threads", 8, "DuckDB worker threads")
 	tempDir := flag.String("duckdb-temp-dir", "", "DuckDB spill directory (defaults to <dir>/duckdb-tmp)")
-	maxTemp := flag.String("duckdb-max-temp-size", "50GB", "DuckDB maximum spill size")
-	maxConns := flag.Int("duckdb-max-conns", 4, "Maximum DuckDB connections")
+	maxTemp := flag.String("duckdb-max-temp-size", "20GB", "DuckDB maximum spill size")
+	maxConns := flag.Int("duckdb-max-conns", 2, "Maximum DuckDB connections")
+	maxConcurrent := flag.Int("duckdb-max-concurrent-queries", 1, "Maximum concurrent DuckDB queries")
+	maxMetricSeries := flag.Int("max-metric-series", 200000, "Maximum distinct metric series merged by a series scan")
+	queryMode := flag.String("query-mode", "auto", "Telemetry query engine: auto, native, or duckdb")
+	nativeMaxLimit := flag.Int("native-max-limit", 500, "Auto mode: largest result limit routed to the native scanner")
+	nativeMaxRange := flag.Duration("native-max-range", 6*time.Hour, "Auto mode: largest time range routed to the native scanner")
+	duckQueueThreshold := flag.Int("duckdb-queue-threshold", 2, "Auto mode: DuckDB queue depth above which small queries prefer native")
 	fallback := flag.Bool("fallback", true, "Fall back to the native scanner when DuckDB cannot run a query")
+	isolateSQL := flag.Bool("isolate-sql-queries", false, "Run DuckDB SQL console queries in a short-lived child process")
+	isolateTimeout := flag.Duration("isolate-sql-timeout", 2*time.Minute, "Timeout for an isolated SQL query")
+	execSQLRequest := flag.Bool("exec-sql-request", false, "internal: execute one SQL request from stdin and exit")
 	selfTest := flag.Bool("self-test", false, "Open DuckDB, run a validation query, and exit")
 	sqlQuery := flag.String("sql", "", "Run an ad-hoc DuckDB SQL query and exit")
 	healthInterval := flag.Duration("health-interval", 30*time.Second, "DuckDB health check interval")
@@ -67,9 +80,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	mode := logengine.ParseQueryMode(*queryMode)
+	logger.Info("telemetry query routing configured",
+		"mode", mode,
+		"native_max_limit", *nativeMaxLimit,
+		"native_max_range", nativeMaxRange.String(),
+		"duckdb_queue_threshold", *duckQueueThreshold)
+
 	engine := logengine.New(logengine.NewMockS3Store(*dir), logengine.Config{
-		LocalCacheDir: *dir,
-		ChunkDuration: 5 * time.Minute,
+		LocalCacheDir:      *dir,
+		ChunkDuration:      5 * time.Minute,
+		MaxMetricSeries:    *maxMetricSeries,
+		QueryMode:          mode,
+		NativeMaxLimit:     *nativeMaxLimit,
+		NativeMaxRange:     *nativeMaxRange,
+		DuckQueueThreshold: *duckQueueThreshold,
 	})
 	defer engine.Close()
 	if err := engine.EnableDuckDB(logengine.DuckDBConfig{
@@ -78,6 +103,7 @@ func main() {
 		TempDir:              *tempDir,
 		MaxTempDirectorySize: *maxTemp,
 		MaxOpenConns:         *maxConns,
+		MaxConcurrentQueries: *maxConcurrent,
 		FallbackOnError:      *fallback,
 	}); err != nil {
 		logger.Error("DuckDB is not available in this build; rebuild with CGO_ENABLED=1 -tags duckdb", "error", err)
@@ -92,6 +118,13 @@ func main() {
 	}
 	if *selfTest {
 		logger.Info("DuckDB self-test passed")
+		return
+	}
+	if *execSQLRequest {
+		if err := runIsolatedSQLRequest(context.Background(), engine); err != nil {
+			logger.Error("isolated SQL request failed", "error", err)
+			os.Exit(1)
+		}
 		return
 	}
 	if strings.TrimSpace(*sqlQuery) != "" {
@@ -113,7 +146,15 @@ func main() {
 		grpc.MaxRecvMsgSize(64<<20),
 		grpc.MaxSendMsgSize(256<<20),
 	)
-	queryServer := &logQueryServer{engine: engine, logger: logger}
+	executable, _ := os.Executable()
+	queryServer := &logQueryServer{
+		engine:         engine,
+		logger:         logger,
+		isolateSQL:     *isolateSQL,
+		isolateTimeout: *isolateTimeout,
+		executable:     executable,
+		isolateArgs:    isolatedSQLChildArgs(*dir, *memoryLimit, *tempDir, *maxTemp, *threads, *maxConns, *fallback, *logLevel),
+	}
 	pb.RegisterMonoFSServer(grpcServer, queryServer)
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
@@ -153,7 +194,11 @@ func main() {
 		"addr", *addr,
 		"dir", *dir,
 		"duckdb_memory_limit", *memoryLimit,
-		"duckdb_threads", *threads)
+		"duckdb_threads", *threads,
+		"duckdb_max_conns", *maxConns,
+		"duckdb_max_concurrent_queries", *maxConcurrent,
+		"max_metric_series", *maxMetricSeries,
+		"isolate_sql_queries", *isolateSQL)
 	if err := grpcServer.Serve(lis); err != nil {
 		logger.Error("serve", "error", err)
 		os.Exit(1)
@@ -164,7 +209,23 @@ type logQueryServer struct {
 	pb.UnimplementedMonoFSServer
 	engine *logengine.LogEngine
 	logger *slog.Logger
+
+	isolateSQL     bool
+	isolateTimeout time.Duration
+	executable     string
+	isolateArgs    []string
 }
+
+const (
+	// Unary RPCs are retained for compatibility, but their responses are
+	// materialized and JSON-encoded in one shot. Streaming RPCs have no such
+	// limit. These budgets keep a legacy caller from turning a large scan into
+	// a second, unbounded copy of the result set.
+	maxUnaryResultRecords = 20_000
+	maxUnaryResultBytes   = 32 << 20
+)
+
+var errUnaryResultTooLarge = errors.New("unary result exceeds the response budget")
 
 func queryRange(fromNS, toNS int64) (time.Time, time.Time) {
 	from := time.Unix(0, fromNS).UTC()
@@ -178,18 +239,208 @@ func queryRange(fromNS, toNS int64) (time.Time, time.Time) {
 	return from, to
 }
 
+// queryStatusError preserves bounded-cardinality failures as ResourceExhausted
+// so callers can narrow the query instead of retrying an internal error.
+func queryStatusError(message string, err error) error {
+	if errors.Is(err, logengine.ErrMetricSeriesLimit) || errors.Is(err, errUnaryResultTooLarge) {
+		return status.Errorf(codes.ResourceExhausted, "%s: %v", message, err)
+	}
+	return status.Errorf(codes.Internal, "%s: %v", message, err)
+}
+
+// collectUnary buffers at most maxUnaryResultRecords. Callers that need more
+// must use the corresponding streaming RPC.
+func collectUnary[T any](stream func(func(T) error) error) ([]T, error) {
+	records := make([]T, 0)
+	if err := stream(func(record T) error {
+		if len(records) >= maxUnaryResultRecords {
+			return errUnaryResultTooLarge
+		}
+		records = append(records, record)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func marshalUnary(value any) ([]byte, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxUnaryResultBytes {
+		return nil, errUnaryResultTooLarge
+	}
+	return data, nil
+}
+
 func (s *logQueryServer) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
 	from, to := queryRange(req.GetFromUnixNano(), req.GetToUnixNano())
 	ctx = logQueryContext(ctx, req.GetVisiblePartitions(), req.GetVisiblePartitionsSet())
-	records, err := s.engine.QueryLogs(ctx, req.GetQuery(), req.GetService(), from, to, int(req.GetLimit()))
+	records, err := collectUnary(func(yield func(logengine.LogRecord) error) error {
+		return s.engine.StreamLogs(ctx, req.GetQuery(), req.GetService(), from, to, int(req.GetLimit()), yield)
+	})
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query logs failed: %v", err)
+		return nil, queryStatusError("query logs failed", err)
 	}
-	data, err := json.Marshal(records)
+	data, err := marshalUnary(records)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "marshal logs: %v", err)
+		return nil, queryStatusError("marshal logs failed", err)
 	}
 	return &pb.QueryLogsResponse{ResultsJson: data}, nil
+}
+
+func (s *logQueryServer) QueryDuckDBSQL(ctx context.Context, req *pb.QueryDuckDBSQLRequest) (*pb.QueryDuckDBSQLResponse, error) {
+	if s != nil && s.isolateSQL {
+		return s.queryDuckDBSQLIsolated(ctx, req)
+	}
+	from, to := queryRange(req.GetFromUnixNano(), req.GetToUnixNano())
+	scope := logengine.QueryScope{}
+	if req.GetVisiblePartitionsSet() {
+		scope = logengine.QueryScope{
+			Partitions: append([]string(nil), req.GetVisiblePartitions()...),
+			Restricted: true,
+		}
+	}
+	result, err := s.engine.QueryDuckDBSQL(ctx, req.GetDataset(), req.GetQuery(), from, to, int(req.GetLimit()), scope)
+	if err != nil {
+		if errors.Is(err, logengine.ErrDuckDBUnavailable) {
+			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		}
+		return nil, status.Errorf(codes.Internal, "query duckdb sql failed: %v", err)
+	}
+	data, err := marshalUnary(result)
+	if err != nil {
+		return nil, queryStatusError("marshal duckdb sql failed", err)
+	}
+	return &pb.QueryDuckDBSQLResponse{ResultsJson: string(data)}, nil
+}
+
+// isolatedSQLRequest is the wire format between the sidecar and its
+// short-lived SQL worker. Queries arrive on stdin so they never appear in the
+// process table.
+type isolatedSQLRequest struct {
+	Dataset              string   `json:"dataset"`
+	Query                string   `json:"query"`
+	FromUnixNano         int64    `json:"from_unix_nano,omitempty"`
+	ToUnixNano           int64    `json:"to_unix_nano,omitempty"`
+	Limit                int32    `json:"limit,omitempty"`
+	VisiblePartitions    []string `json:"visible_partitions,omitempty"`
+	VisiblePartitionsSet bool     `json:"visible_partitions_set,omitempty"`
+}
+
+type isolatedSQLResponse struct {
+	ResultsJSON string `json:"results_json,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+func (s *logQueryServer) queryDuckDBSQLIsolated(ctx context.Context, req *pb.QueryDuckDBSQLRequest) (*pb.QueryDuckDBSQLResponse, error) {
+	if s == nil || s.executable == "" {
+		return nil, status.Error(codes.FailedPrecondition, "isolated SQL execution is not configured")
+	}
+	payload, err := json.Marshal(isolatedSQLRequest{
+		Dataset:              req.GetDataset(),
+		Query:                req.GetQuery(),
+		FromUnixNano:         req.GetFromUnixNano(),
+		ToUnixNano:           req.GetToUnixNano(),
+		Limit:                req.GetLimit(),
+		VisiblePartitions:    append([]string(nil), req.GetVisiblePartitions()...),
+		VisiblePartitionsSet: req.GetVisiblePartitionsSet(),
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal isolated sql request: %v", err)
+	}
+
+	timeout := s.isolateTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	args := append(append([]string(nil), s.isolateArgs...), "--exec-sql-request")
+	cmd := exec.CommandContext(queryCtx, s.executable, args...)
+	cmd.Stdin = bytes.NewReader(payload)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	runErr := cmd.Run()
+	var response isolatedSQLResponse
+	decodeErr := json.Unmarshal(stdout.Bytes(), &response)
+	if decodeErr != nil {
+		if errors.Is(queryCtx.Err(), context.DeadlineExceeded) {
+			return nil, status.Errorf(codes.DeadlineExceeded, "isolated sql query exceeded %s", timeout)
+		}
+		detail := strings.TrimSpace(stderr.String())
+		if len(detail) > 2048 {
+			detail = detail[:2048]
+		}
+		return nil, status.Errorf(codes.Internal, "isolated sql query failed: %v: %s", runErr, detail)
+	}
+	if response.Error != "" {
+		return nil, status.Errorf(codes.Internal, "isolated sql query failed: %s", response.Error)
+	}
+	if runErr != nil {
+		return nil, status.Errorf(codes.Internal, "isolated sql query failed: %v", runErr)
+	}
+	return &pb.QueryDuckDBSQLResponse{ResultsJson: response.ResultsJSON}, nil
+}
+
+// runIsolatedSQLRequest is the child side of queryDuckDBSQLIsolated. It reads a
+// single request from stdin, writes one JSON response to stdout, and exits.
+func runIsolatedSQLRequest(ctx context.Context, engine *logengine.LogEngine) error {
+	var request isolatedSQLRequest
+	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
+		return writeIsolatedSQLResponse(isolatedSQLResponse{Error: "decode request: " + err.Error()})
+	}
+	from, to := queryRange(request.FromUnixNano, request.ToUnixNano)
+	scope := logengine.QueryScope{}
+	if request.VisiblePartitionsSet {
+		scope = logengine.QueryScope{
+			Partitions: append([]string(nil), request.VisiblePartitions...),
+			Restricted: true,
+		}
+	}
+	result, err := engine.QueryDuckDBSQL(ctx, request.Dataset, request.Query, from, to, int(request.Limit), scope)
+	if err != nil {
+		return writeIsolatedSQLResponse(isolatedSQLResponse{Error: err.Error()})
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return writeIsolatedSQLResponse(isolatedSQLResponse{Error: "marshal result: " + err.Error()})
+	}
+	return writeIsolatedSQLResponse(isolatedSQLResponse{ResultsJSON: string(data)})
+}
+
+func writeIsolatedSQLResponse(response isolatedSQLResponse) error {
+	encoder := json.NewEncoder(os.Stdout)
+	if err := encoder.Encode(response); err != nil {
+		return err
+	}
+	if response.Error != "" {
+		return errors.New(response.Error)
+	}
+	return nil
+}
+
+func isolatedSQLChildArgs(dir, memoryLimit, tempDir, maxTemp string, threads, maxConns int, fallback bool, logLevel string) []string {
+	args := []string{
+		"--logengine-dir=" + dir,
+		"--duckdb-memory-limit=" + memoryLimit,
+		"--duckdb-threads=" + strconv.Itoa(threads),
+		"--duckdb-max-conns=" + strconv.Itoa(maxConns),
+		"--duckdb-max-concurrent-queries=1",
+		"--duckdb-max-temp-size=" + maxTemp,
+		"--fallback=" + strconv.FormatBool(fallback),
+		"--log-level=" + logLevel,
+		"--health-interval=0",
+	}
+	if strings.TrimSpace(tempDir) != "" {
+		args = append(args, "--duckdb-temp-dir="+tempDir)
+	}
+	return args
 }
 
 func (s *logQueryServer) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
@@ -207,13 +458,15 @@ func (s *logQueryServer) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.S
 
 func (s *logQueryServer) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
 	from, to := queryRange(req.GetFromUnixNano(), req.GetToUnixNano())
-	records, err := s.engine.QueryMetrics(ctx, metricQuery(req), from, to)
+	records, err := collectUnary(func(yield func(logengine.MetricRecord) error) error {
+		return s.engine.StreamMetrics(ctx, metricQuery(req), from, to, yield)
+	})
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query metrics failed: %v", err)
+		return nil, queryStatusError("query metrics failed", err)
 	}
-	data, err := json.Marshal(records)
+	data, err := marshalUnary(records)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "marshal metrics: %v", err)
+		return nil, queryStatusError("marshal metrics failed", err)
 	}
 	return &pb.QueryMetricsResponse{ResultsJson: data}, nil
 }
@@ -225,14 +478,14 @@ func (s *logQueryServer) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream 
 		return sender.add(record)
 	})
 	if err != nil {
-		return status.Errorf(codes.Internal, "query metrics failed: %v", err)
+		return queryStatusError("query metrics failed", err)
 	}
 	return sender.flush()
 }
 
 func (s *logQueryServer) StreamMetricSeries(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.MetricSeriesItem]) error {
 	from, to := queryRange(req.GetFromUnixNano(), req.GetToUnixNano())
-	return s.engine.StreamMetricSeries(stream.Context(), metricQuery(req), from, to, func(meta logengine.MetricSeriesMeta) error {
+	if err := s.engine.StreamMetricSeries(stream.Context(), metricQuery(req), from, to, func(meta logengine.MetricSeriesMeta) error {
 		return stream.Send(&pb.MetricSeriesItem{
 			MetricName:      meta.MetricName,
 			Service:         meta.Service,
@@ -240,7 +493,10 @@ func (s *logQueryServer) StreamMetricSeries(req *pb.QueryMetricsRequest, stream 
 			MinTimeUnixNano: meta.MinTime.UnixNano(),
 			MaxTimeUnixNano: meta.MaxTime.UnixNano(),
 		})
-	})
+	}); err != nil {
+		return queryStatusError("query metric series failed", err)
+	}
+	return nil
 }
 
 func (s *logQueryServer) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
@@ -258,13 +514,15 @@ func (s *logQueryServer) QueryTraces(ctx context.Context, req *pb.QueryTracesReq
 		}
 		return &pb.QueryTracesResponse{ResultsJson: data}, nil
 	}
-	records, err := s.engine.QueryTraces(ctx, req.GetTraceId(), req.GetService(), from, to, int(req.GetLimit()))
+	records, err := collectUnary(func(yield func(logengine.SpanRecord) error) error {
+		return s.engine.StreamTraces(ctx, req.GetTraceId(), req.GetService(), from, to, int(req.GetLimit()), yield)
+	})
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query traces failed: %v", err)
+		return nil, queryStatusError("query traces failed", err)
 	}
-	data, err := json.Marshal(records)
+	data, err := marshalUnary(records)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "marshal traces: %v", err)
+		return nil, queryStatusError("marshal traces failed", err)
 	}
 	return &pb.QueryTracesResponse{ResultsJson: data}, nil
 }
@@ -419,11 +677,11 @@ func (s *logQueryServer) AggregateTelemetry(ctx context.Context, req *pb.Aggrega
 	}
 	rows, err := s.engine.Aggregate(ctx, query)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "aggregate telemetry failed: %v", err)
+		return nil, queryStatusError("aggregate telemetry failed", err)
 	}
-	data, err := json.Marshal(rows)
+	data, err := marshalUnary(rows)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "marshal aggregate rows: %v", err)
+		return nil, queryStatusError("marshal aggregate rows failed", err)
 	}
 	return &pb.AggregateTelemetryResponse{RowsJson: data}, nil
 }

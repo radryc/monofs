@@ -289,13 +289,15 @@ func (r *Router) buildStatusData() *StatusData {
 			"disk_total": state.diskTotalBytes,
 			"disk_free":  state.diskFreeBytes,
 			"kvs": map[string]interface{}{
-				"enabled":    kvsStatus.GetEnabled(),
-				"healthy":    kvsStatus.GetHealthy(),
-				"mode":       kvsStatus.GetMode(),
-				"role":       kvsStatus.GetRole(),
-				"leader_id":  kvsStatus.GetLeaderId(),
-				"peer_count": kvsStatus.GetPeerCount(),
-				"key_count":  kvsStatus.GetKeyCount(),
+				"enabled":        kvsStatus.GetEnabled(),
+				"healthy":        kvsStatus.GetHealthy(),
+				"mode":           kvsStatus.GetMode(),
+				"role":           kvsStatus.GetRole(),
+				"leader_id":      kvsStatus.GetLeaderId(),
+				"leader_address": kvsStatus.GetLeaderAddress(),
+				"term":           kvsStatus.GetTerm(),
+				"peer_count":     kvsStatus.GetPeerCount(),
+				"key_count":      kvsStatus.GetKeyCount(),
 			},
 		}
 

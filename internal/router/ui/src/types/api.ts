@@ -42,6 +42,8 @@ export interface KVSInfo {
   mode: string      // 'local' | 'raft'
   role: string      // 'leader' | 'follower' | 'disabled' | ...
   leader_id: string
+  leader_address: string
+  term: number
   peer_count: number
   key_count: number
 }
@@ -251,6 +253,56 @@ export interface FetcherInstanceStats {
   storage_error?: string
 }
 
+export interface BlobObservability {
+  wal_path: string
+  wal_pending: number
+  wal_recorded_total: number
+  wal_replayed_total: number
+  wal_upload_failures_total: number
+  cloud_index_loaded: boolean
+  cloud_index_prefixes: number
+  cloud_index_entries: number
+  cloud_index_loads_total: number
+  cloud_lookup_hits: number
+  cloud_lookup_misses: number
+  cloud_lookup_errors: number
+  cloud_downloads_total: number
+  cloud_download_bytes: number
+  archive_deletes_total: number
+  cache_invalidations_total: number
+}
+
+export interface FetcherObservabilityEntry {
+  address: string
+  healthy: boolean
+  error?: string
+  fetcher_id?: string
+  blob?: BlobObservability
+}
+
+export interface FetcherObservabilityTotals {
+  wal_pending: number
+  wal_recorded_total: number
+  wal_replayed_total: number
+  wal_upload_failures_total: number
+  cloud_index_entries: number
+  cloud_index_loads_total: number
+  cloud_lookup_hits: number
+  cloud_lookup_misses: number
+  cloud_lookup_errors: number
+  cloud_downloads_total: number
+  cloud_download_bytes: number
+  archive_deletes_total: number
+  cache_invalidations_total: number
+}
+
+export interface FetcherObservabilityResponse {
+  fetchers: FetcherObservabilityEntry[]
+  totals: FetcherObservabilityTotals
+  healthy: boolean
+  generated_at: number
+}
+
 export interface SyncWorkerStatsInfo {
   total_jobs: number
   active_jobs: number
@@ -377,12 +429,23 @@ export interface LogEngineData {
   log_chunks: number
   metric_chunks: number
   trace_chunks: number
+  log_buckets?: number
+  metric_buckets?: number
+  trace_buckets?: number
+  log_compacted_buckets?: number
+  metric_compacted_buckets?: number
+  trace_compacted_buckets?: number
+  stored_buckets?: number
+  compacted_buckets?: number
   duckdb_nodes?: number
   duckdb_queries?: number
   duckdb_errors?: number
+  duckdb_fallbacks?: number
   compaction_runs?: number
   compaction_input_chunks?: number
   compaction_output_chunks?: number
+  compaction_deleted_chunks?: number
+  compaction_records?: number
   nodes: LogEngineNode[]
 }
 
@@ -393,11 +456,19 @@ export interface LogEngineNode {
   log_chunks: number
   metric_chunks: number
   trace_chunks: number
+  log_buckets?: number
+  metric_buckets?: number
+  trace_buckets?: number
+  log_compacted_buckets?: number
+  metric_compacted_buckets?: number
+  trace_compacted_buckets?: number
   duckdb_enabled?: boolean
   duckdb_memory_limit?: string
   duckdb_threads?: number
   duckdb_queries?: number
   duckdb_errors?: number
+  duckdb_fallbacks?: number
+  duckdb_temp_dir?: string
   compaction_runs?: number
   compaction_input_chunks?: number
   compaction_output_chunks?: number

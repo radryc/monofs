@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ type guardianNodeTarget struct {
 	address   string
 	client    pb.MonoFSClient
 	kvsStatus *pb.KVSNodeStatus
+	healthy   bool
 }
 
 // InjectGuardianPartition stores inline YAML files for a guardian partition
@@ -69,77 +71,151 @@ func (r *Router) InjectGuardianPartition(ctx context.Context, req *pb.InjectGuar
 	}, nil
 }
 
-func (r *Router) collectHealthyGuardianNodes() []guardianNodeTarget {
+func (r *Router) collectGuardianNodes() []guardianNodeTarget {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	nodes := make([]guardianNodeTarget, 0, len(r.nodes))
 	for id, state := range r.nodes {
-		if state.info.Healthy {
-			nodes = append(nodes, guardianNodeTarget{
-				id:        id,
-				address:   state.info.Address,
-				client:    state.client,
-				kvsStatus: normalizedKVSNodeStatus(state.kvsStatus),
-			})
-		}
+		nodes = append(nodes, guardianNodeTarget{
+			id:        id,
+			address:   state.info.Address,
+			client:    state.client,
+			kvsStatus: normalizedKVSNodeStatus(state.kvsStatus),
+			healthy:   state.info.Healthy,
+		})
 	}
 
 	return nodes
 }
 
-func (r *Router) guardianMutationTargets(nodes []guardianNodeTarget, displayPath string) []guardianNodeTarget {
-	if len(nodes) <= 1 {
-		return nodes
+func (r *Router) collectHealthyGuardianNodes() []guardianNodeTarget {
+	all := r.collectGuardianNodes()
+	healthy := all[:0]
+	for _, node := range all {
+		if node.healthy {
+			healthy = append(healthy, node)
+		}
 	}
-	if guardianRepoStorageBackend(displayPath) != "kvs" {
-		rf := r.config.GuardianReplicationFactor
-		if rf <= 0 || len(nodes) <= rf {
-			return nodes
+	return healthy
+}
+
+// refreshGuardianKVSStatuses re-probes nodes after a retryable leadership
+// error. The regular health loop updates KVS status every few seconds, but a
+// mutation should not have to wait for the next tick after an election.
+func (r *Router) refreshGuardianKVSStatuses(ctx context.Context) {
+	type probe struct {
+		id     string
+		client pb.MonoFSClient
+	}
+
+	r.mu.RLock()
+	probes := make([]probe, 0, len(r.nodes))
+	for id, state := range r.nodes {
+		if state.client != nil {
+			probes = append(probes, probe{id: id, client: state.client})
 		}
-		shardNodes := make([]sharding.Node, 0, len(nodes))
-		byID := make(map[string]guardianNodeTarget, len(nodes))
-		for _, n := range nodes {
-			byID[n.id] = n
-			shardNodes = append(shardNodes, sharding.Node{
-				ID:      n.id,
-				Address: n.address,
-				Weight:  100,
-				Healthy: true,
-			})
+	}
+	r.mu.RUnlock()
+
+	for _, item := range probes {
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		info, err := item.client.GetNodeInfo(probeCtx, &pb.NodeInfoRequest{})
+		cancel()
+		if err != nil {
+			continue
 		}
-		storageID := sharding.GenerateStorageID(displayPath)
-		ranked := sharding.NewHRW(shardNodes).GetNodes(storageID, rf)
-		if len(ranked) == 0 {
-			return nodes
+		r.mu.Lock()
+		if state := r.nodes[item.id]; state != nil {
+			state.kvsStatus = normalizedKVSNodeStatus(info.GetKvs())
 		}
-		out := make([]guardianNodeTarget, 0, len(ranked))
-		for _, rn := range ranked {
-			if target, ok := byID[rn.ID]; ok {
-				out = append(out, target)
+		r.mu.Unlock()
+	}
+}
+
+func (r *Router) guardianMutationTargets(nodes []guardianNodeTarget, displayPath string) []guardianNodeTarget {
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	if guardianRepoStorageBackend(displayPath) == "kvs" {
+		// KVS is a single replicated log. Any healthy KVS-enabled node can
+		// accept the write and forward it to the current leader, so do not
+		// make correctness depend on a cached leader or on the generic node
+		// health probe. Prefer the leader when it is reachable, then fall
+		// back to a deterministic peer.
+		kvsNodes := make([]guardianNodeTarget, 0, len(nodes))
+		for _, node := range nodes {
+			status := normalizedKVSNodeStatus(node.kvsStatus)
+			if status.GetEnabled() && status.GetHealthy() {
+				kvsNodes = append(kvsNodes, node)
 			}
 		}
-		return out
+		if len(kvsNodes) == 0 {
+			// Single-node/local deployments do not run raft and may report
+			// KVS as disabled. Let the sole healthy node handle the write;
+			// the local store will return a clear error if it cannot.
+			if len(nodes) == 1 && nodes[0].healthy {
+				return []guardianNodeTarget{nodes[0]}
+			}
+			return nil
+		}
+		if leader, ok := pickGuardianKVSLeader(kvsNodes); ok {
+			return []guardianNodeTarget{leader}
+		}
+		sort.Slice(kvsNodes, func(i, j int) bool {
+			if kvsNodes[i].id != kvsNodes[j].id {
+				return kvsNodes[i].id < kvsNodes[j].id
+			}
+			return kvsNodes[i].address < kvsNodes[j].address
+		})
+		return []guardianNodeTarget{kvsNodes[0]}
 	}
 
-	if leader, ok := pickGuardianKVSLeader(nodes); ok {
-		return []guardianNodeTarget{leader}
-	}
-
-	selected := nodes[0]
-	for _, node := range nodes[1:] {
-		if node.id < selected.id || (node.id == selected.id && node.address < selected.address) {
-			selected = node
+	healthy := make([]guardianNodeTarget, 0, len(nodes))
+	for _, node := range nodes {
+		if node.healthy {
+			healthy = append(healthy, node)
 		}
 	}
-	return []guardianNodeTarget{selected}
+	if len(healthy) <= 1 {
+		return healthy
+	}
+
+	rf := r.config.GuardianReplicationFactor
+	if rf <= 0 || len(healthy) <= rf {
+		return healthy
+	}
+	shardNodes := make([]sharding.Node, 0, len(healthy))
+	byID := make(map[string]guardianNodeTarget, len(healthy))
+	for _, n := range healthy {
+		byID[n.id] = n
+		shardNodes = append(shardNodes, sharding.Node{
+			ID:      n.id,
+			Address: n.address,
+			Weight:  100,
+			Healthy: true,
+		})
+	}
+	storageID := sharding.GenerateStorageID(displayPath)
+	ranked := sharding.NewHRW(shardNodes).GetNodes(storageID, rf)
+	if len(ranked) == 0 {
+		return healthy
+	}
+	out := make([]guardianNodeTarget, 0, len(ranked))
+	for _, rn := range ranked {
+		if target, ok := byID[rn.ID]; ok {
+			out = append(out, target)
+		}
+	}
+	return out
 }
 
 func (r *Router) guardianKVSMutationTarget(displayPath string) (guardianNodeTarget, bool) {
 	if guardianRepoStorageBackend(displayPath) != "kvs" {
 		return guardianNodeTarget{}, false
 	}
-	targets := r.guardianMutationTargets(r.collectHealthyGuardianNodes(), displayPath)
+	targets := r.guardianMutationTargets(r.collectGuardianNodes(), displayPath)
 	if len(targets) != 1 {
 		return guardianNodeTarget{}, false
 	}
@@ -160,7 +236,7 @@ func pickGuardianKVSLeader(nodes []guardianNodeTarget) (guardianNodeTarget, bool
 	leaderID := ""
 	for _, node := range nodes {
 		status := normalizedKVSNodeStatus(node.kvsStatus)
-		if status.GetEnabled() && strings.EqualFold(status.GetRole(), "leader") {
+		if status.GetEnabled() && status.GetHealthy() && strings.EqualFold(status.GetRole(), "leader") {
 			return node, true
 		}
 		if leaderID == "" && status.GetLeaderId() != "" {

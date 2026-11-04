@@ -43,13 +43,15 @@ func (s *Server) currentKVSStatus() *pb.KVSNodeStatus {
 	}
 	status := s.kvsStore.Status()
 	return &pb.KVSNodeStatus{
-		Enabled:   status.Enabled,
-		Healthy:   status.Healthy,
-		Mode:      status.Mode,
-		Role:      status.Role,
-		LeaderId:  status.LeaderID,
-		PeerCount: status.PeerCount,
-		KeyCount:  status.KeyCount,
+		Enabled:       status.Enabled,
+		Healthy:       status.Healthy,
+		Mode:          status.Mode,
+		Role:          status.Role,
+		LeaderId:      status.LeaderID,
+		LeaderAddress: status.LeaderAddress,
+		Term:          status.Term,
+		PeerCount:     status.PeerCount,
+		KeyCount:      status.KeyCount,
 	}
 }
 
@@ -239,13 +241,16 @@ func (s *Server) resolveKVSPath(ctx context.Context, storageID, filePath string)
 	logicalPath := kvsLogicalPath(repo.DisplayPath, filePath)
 	if info, err := s.kvsStore.Stat(ctx, logicalPath); err == nil {
 		return &kvsResolvedPath{logicalPath: logicalPath, isDir: false, size: info.Size, modTime: info.ModTime}, true, nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, true, status.Errorf(codes.Internal, "kvs stat %s: %v", logicalPath, err)
+	} else if !errors.Is(err, fs.ErrNotExist) && status.Code(err) != codes.NotFound {
+		return nil, true, wrapKVSOpError(err, fmt.Sprintf("kvs stat %s", logicalPath))
 	}
 
 	entries, err := s.kvsStore.ListDir(ctx, logicalPath)
 	if err != nil {
-		return nil, true, status.Errorf(codes.Internal, "kvs listdir %s: %v", logicalPath, err)
+		if errors.Is(err, fs.ErrNotExist) || status.Code(err) == codes.NotFound {
+			return nil, true, nil
+		}
+		return nil, true, wrapKVSOpError(err, fmt.Sprintf("kvs listdir %s", logicalPath))
 	}
 	if len(entries) == 0 {
 		return nil, true, nil
@@ -285,10 +290,25 @@ func (s *Server) ingestKVSFiles(ctx context.Context, displayPath string, files [
 			Reason:      "monofs kvs ingest",
 		},
 	}); err != nil {
-		return 0, int64(len(writes)), status.Errorf(codes.Internal, "kvs ingest failed: %v", err)
+		return 0, int64(len(writes)), wrapKVSError(err)
 	}
 	serverKVSWriteOpsTotal.WithLabelValues("upsert").Add(float64(len(writes)))
 	return int64(len(writes)), 0, nil
+}
+
+// wrapKVSError preserves retryable gRPC codes from the KVS layer. Guardian
+// uses codes.Aborted/Unavailable to refresh the leader and retry instead of
+// treating a leadership change as a permanent Internal failure.
+func wrapKVSError(err error) error {
+	return wrapKVSOpError(err, "kvs ingest failed")
+}
+
+func wrapKVSOpError(err error, operation string) error {
+	code := codes.Internal
+	if st, ok := status.FromError(err); ok {
+		code = st.Code()
+	}
+	return status.Errorf(code, "%s: %v", operation, err)
 }
 
 func (s *Server) deleteKVSFile(ctx context.Context, storageID, filePath string) error {
@@ -307,7 +327,7 @@ func (s *Server) deleteKVSFile(ctx context.Context, storageID, filePath string) 
 		Context: kvsapi.MutationContext{PrincipalID: "monofs-node", Reason: "monofs kvs file delete"},
 	})
 	if err != nil {
-		return status.Errorf(codes.Internal, "kvs delete failed: %v", err)
+		return wrapKVSOpError(err, "kvs delete failed")
 	}
 	serverKVSWriteOpsTotal.WithLabelValues("delete").Inc()
 	return nil
@@ -326,7 +346,7 @@ func (s *Server) deleteKVSDirectory(ctx context.Context, storageID, filePath str
 	}
 	files, dirsDeleted, err := s.collectKVSFiles(ctx, resolved.logicalPath)
 	if err != nil {
-		return 0, 0, status.Errorf(codes.Internal, "kvs directory walk failed: %v", err)
+		return 0, 0, wrapKVSOpError(err, "kvs directory walk failed")
 	}
 	if len(files) == 0 {
 		return 0, dirsDeleted, nil
@@ -339,7 +359,7 @@ func (s *Server) deleteKVSDirectory(ctx context.Context, storageID, filePath str
 		Deletes: deletes,
 		Context: kvsapi.MutationContext{PrincipalID: "monofs-node", Reason: "monofs kvs directory delete"},
 	}); err != nil {
-		return 0, 0, status.Errorf(codes.Internal, "kvs directory delete failed: %v", err)
+		return 0, 0, wrapKVSOpError(err, "kvs directory delete failed")
 	}
 	return int64(len(deletes)), dirsDeleted, nil
 }

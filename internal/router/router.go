@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -115,6 +116,18 @@ type RouterConfig struct {
 	// InternalToken is presented on router -> node calls so storage nodes can
 	// treat control-plane traffic as internal when read enforcement is on.
 	InternalToken string
+
+	// Telemetry query fan-out limits. The router fans log/metric/trace queries
+	// out to every healthy node; these bounds stop one slow or wedged node from
+	// stalling the whole query while still returning results from the rest.
+	QueryNodeStartTimeout   time.Duration // Max time to wait for any node to start returning records.
+	QueryNodeStragglerGrace time.Duration // Extra time allowed for the remaining nodes after the first node responds.
+	QueryNodeIdleTimeout    time.Duration // Max gap between records from a node once it has started.
+
+	// SpanEngine selects how trace reads are routed. "logengine" fans out to
+	// every node because trace chunks are shard-local. "clickhouse" reads from
+	// one node because all nodes share the same ClickHouse table.
+	SpanEngine string
 }
 
 // RouterPeer identifies another router instance to aggregate UI data from.
@@ -126,23 +139,27 @@ type RouterPeer struct {
 // DefaultRouterConfig returns default router configuration.
 func DefaultRouterConfig() RouterConfig {
 	return RouterConfig{
-		ClusterID:              "monofs-cluster",
-		HealthCheckInterval:    5 * time.Second,  // Check every 5 seconds (reduced frequency to avoid lock contention)
-		UnhealthyThreshold:     15 * time.Second, // Mark unhealthy after 15 seconds (3 missed checks)
-		PeerRouters:            nil,
-		GuardianStateDir:       "",
-		ReplicationFactor:      2,                // Primary + 1 backup (protects against 1 node failure)
-		RebalanceDelay:         10 * time.Minute, // Wait 10 minutes before permanent rebalancing
-		GracefulFailoverDelay:  60 * time.Second, // 60 seconds for planned restarts
-		GuardianIngestTimeout:  5 * time.Minute,  // 5 minutes for large guardian file batches
-		AllowLocalIngest:       true,             // Local filesystem ingestion is on unless explicitly disabled
-		AutoRefreshInterval:    1 * time.Minute,
-		AutoRefreshMaxInterval: 1 * time.Hour,
-		AutoRefreshConcurrency: 4,
-		AutoRefreshBatchSize:   32,
-		AutoRefreshShards:      1,
-		AutoRefreshStateDir:    ".monofs-repowatch",
-		AutoRefreshLeaseName:   "monofs-repowatch",
+		ClusterID:               "monofs-cluster",
+		HealthCheckInterval:     5 * time.Second,  // Check every 5 seconds (reduced frequency to avoid lock contention)
+		UnhealthyThreshold:      15 * time.Second, // Mark unhealthy after 15 seconds (3 missed checks)
+		PeerRouters:             nil,
+		GuardianStateDir:        "",
+		ReplicationFactor:       2,                // Primary + 1 backup (protects against 1 node failure)
+		RebalanceDelay:          10 * time.Minute, // Wait 10 minutes before permanent rebalancing
+		GracefulFailoverDelay:   60 * time.Second, // 60 seconds for planned restarts
+		GuardianIngestTimeout:   5 * time.Minute,  // 5 minutes for large guardian file batches
+		AllowLocalIngest:        true,             // Local filesystem ingestion is on unless explicitly disabled
+		AutoRefreshInterval:     1 * time.Minute,
+		AutoRefreshMaxInterval:  1 * time.Hour,
+		AutoRefreshConcurrency:  4,
+		AutoRefreshBatchSize:    32,
+		AutoRefreshShards:       1,
+		AutoRefreshStateDir:     ".monofs-repowatch",
+		AutoRefreshLeaseName:    "monofs-repowatch",
+		QueryNodeStartTimeout:   30 * time.Second,
+		QueryNodeStragglerGrace: time.Second,
+		QueryNodeIdleTimeout:    10 * time.Second,
+		SpanEngine:              "logengine",
 	}
 }
 
@@ -479,6 +496,19 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		logger = slog.Default()
 	}
 	logger = logger.With("component", "router")
+	if cfg.QueryNodeStartTimeout <= 0 {
+		cfg.QueryNodeStartTimeout = 30 * time.Second
+	}
+	if cfg.QueryNodeStragglerGrace <= 0 {
+		cfg.QueryNodeStragglerGrace = time.Second
+	}
+	if cfg.QueryNodeIdleTimeout <= 0 {
+		cfg.QueryNodeIdleTimeout = 10 * time.Second
+	}
+	cfg.SpanEngine = strings.ToLower(strings.TrimSpace(cfg.SpanEngine))
+	if cfg.SpanEngine == "" {
+		cfg.SpanEngine = "logengine"
+	}
 	guardianPrincipals, err := newGuardianPrincipalStore(cfg.GuardianStateDir)
 	if err != nil {
 		logger.Error("failed to initialize guardian principal store", "state_dir", cfg.GuardianStateDir, "error", err)
@@ -1087,6 +1117,12 @@ func (r *Router) GetClusterInfo(ctx context.Context, req *pb.ClusterInfoRequest)
 		if kvsStatus.GetLeaderId() != "" {
 			metadata["kvs_leader_id"] = kvsStatus.GetLeaderId()
 		}
+		if kvsStatus.GetLeaderAddress() != "" {
+			metadata["kvs_leader_address"] = kvsStatus.GetLeaderAddress()
+		}
+		if kvsStatus.GetTerm() > 0 {
+			metadata["kvs_term"] = fmt.Sprintf("%d", kvsStatus.GetTerm())
+		}
 		if kvsStatus.GetPeerCount() > 0 {
 			metadata["kvs_peer_count"] = fmt.Sprintf("%d", kvsStatus.GetPeerCount())
 		}
@@ -1305,6 +1341,9 @@ func (r *Router) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 		req.VisiblePartitions = partitions
 		req.VisiblePartitionsSet = true
 	}
+	if r.sharedTelemetryReads() {
+		return r.queryLogsOneNode(ctx, req)
+	}
 	resultsJSON, err := r.fanoutJSONQueryStream(ctx, int(req.GetLimit()), "merge log results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryLogs(callCtx, req)
 	})
@@ -1320,6 +1359,11 @@ func (r *Router) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStr
 		req.VisiblePartitions = partitions
 		req.VisiblePartitionsSet = true
 	}
+	if r.sharedTelemetryReads() {
+		return r.streamQueryItemsOneNode(stream.Context(), "stream log results", func(ctx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
+			return client.StreamQueryLogs(ctx, req)
+		}, stream.Send)
+	}
 	return r.fanoutQueryItems(stream.Context(), int(req.GetLimit()), "stream log results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryLogs(callCtx, req)
 	}, stream.Send)
@@ -1327,6 +1371,9 @@ func (r *Router) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStr
 
 // QueryMetrics implements pb.MonoFSRouterServer.
 func (r *Router) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
+	if r.sharedTelemetryReads() {
+		return r.queryMetricsOneNode(ctx, req)
+	}
 	resultsJSON, err := r.fanoutJSONQueryStream(ctx, 0, "merge metric results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryMetrics(callCtx, req)
 	})
@@ -1338,6 +1385,11 @@ func (r *Router) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 
 // StreamQueryMetrics implements pb.MonoFSRouterServer.
 func (r *Router) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	if r.sharedTelemetryReads() {
+		return r.streamQueryItemsOneNode(stream.Context(), "stream metric results", func(ctx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
+			return client.StreamQueryMetrics(ctx, req)
+		}, stream.Send)
+	}
 	return r.fanoutQueryItems(stream.Context(), 0, "stream metric results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryMetrics(callCtx, req)
 	}, stream.Send)
@@ -1352,6 +1404,9 @@ func (r *Router) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*
 		req.VisiblePartitions = partitions
 		req.VisiblePartitionsSet = true
 	}
+	if r.traceReadsShared() {
+		return r.queryTracesOneNode(ctx, req)
+	}
 	resultsJSON, err := r.fanoutJSONQueryStream(ctx, int(req.GetLimit()), "merge trace results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryTraces(callCtx, req)
 	})
@@ -1361,20 +1416,236 @@ func (r *Router) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*
 	return &pb.QueryTracesResponse{ResultsJson: resultsJSON}, nil
 }
 
+func (r *Router) traceReadsShared() bool {
+	return strings.EqualFold(strings.TrimSpace(r.config.SpanEngine), "clickhouse")
+}
+
+// sharedTelemetryReads reports whether all telemetry signals live in a shared
+// backend (currently ClickHouse). In that mode a query must run on one node,
+// not every node, or results are duplicated.
+func (r *Router) sharedTelemetryReads() bool {
+	return r.traceReadsShared()
+}
+
+func (r *Router) queryLogsOneNode(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
+	targets := r.allHealthyNodeTargets()
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no healthy nodes available")
+	}
+	var firstErr error
+	for _, target := range targets {
+		resp, err := target.client.QueryLogs(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return nil, fmt.Errorf("query logs failed on all nodes: %w", firstErr)
+}
+
+func (r *Router) queryMetricsOneNode(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
+	targets := r.allHealthyNodeTargets()
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no healthy nodes available")
+	}
+	var firstErr error
+	for _, target := range targets {
+		resp, err := target.client.QueryMetrics(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return nil, fmt.Errorf("query metrics failed on all nodes: %w", firstErr)
+}
+
+func (r *Router) queryTracesOneNode(ctx context.Context, req *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
+	targets := r.allHealthyNodeTargets()
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no healthy nodes available")
+	}
+	var firstErr error
+	for _, target := range targets {
+		resp, err := target.client.QueryTraces(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return nil, fmt.Errorf("query traces failed on all nodes: %w", firstErr)
+}
+
+// QueryDuckDBSQL implements pb.MonoFSRouterServer. SQL is evaluated on each
+// healthy node because the Parquet chunks are shard-local; results are
+// returned per node rather than pretending a cross-node aggregate is exact.
+func (r *Router) QueryDuckDBSQL(ctx context.Context, req *pb.QueryDuckDBSQLRequest) (*pb.QueryDuckDBSQLResponse, error) {
+	var signal policy.Signal
+	switch req.GetDataset() {
+	case "logs":
+		signal = policy.SignalLogs
+	case "traces":
+		signal = policy.SignalTraces
+	case "metrics":
+		signal = policy.SignalMetrics
+	default:
+		return nil, fmt.Errorf("unsupported SQL dataset %q", req.GetDataset())
+	}
+	if partitions, restricted := r.queryScope(ctx, signal); restricted {
+		if req.GetVisiblePartitionsSet() {
+			req.VisiblePartitions = intersectPartitions(req.GetVisiblePartitions(), partitions)
+		} else {
+			req.VisiblePartitions = partitions
+		}
+		req.VisiblePartitionsSet = true
+	}
+
+	type nodeClient struct {
+		id      string
+		address string
+		client  pb.MonoFSClient
+	}
+	r.mu.RLock()
+	nodes := make([]nodeClient, 0, len(r.nodes))
+	for nodeID, state := range r.nodes {
+		if state == nil || state.info == nil || !state.info.Healthy || state.status != NodeActive || state.client == nil {
+			continue
+		}
+		nodes = append(nodes, nodeClient{id: nodeID, address: state.externalAddress, client: state.client})
+	}
+	r.mu.RUnlock()
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("no healthy nodes available")
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].id < nodes[j].id })
+
+	type nodeResult struct {
+		NodeID  string          `json:"node_id"`
+		Address string          `json:"address"`
+		Result  json.RawMessage `json:"result,omitempty"`
+		Error   string          `json:"error,omitempty"`
+	}
+	results := make([]nodeResult, len(nodes))
+	var wg sync.WaitGroup
+	for i, node := range nodes {
+		wg.Add(1)
+		go func(i int, node nodeClient) {
+			defer wg.Done()
+			results[i] = nodeResult{NodeID: node.id, Address: node.address}
+			resp, err := node.client.QueryDuckDBSQL(ctx, req)
+			if err != nil {
+				results[i].Error = err.Error()
+				return
+			}
+			results[i].Result = json.RawMessage(resp.GetResultsJson())
+		}(i, node)
+	}
+	wg.Wait()
+
+	data, err := json.Marshal(map[string]any{"nodes": results})
+	if err != nil {
+		return nil, fmt.Errorf("marshal duckdb sql results: %w", err)
+	}
+	return &pb.QueryDuckDBSQLResponse{ResultsJson: string(data)}, nil
+}
+
+func intersectPartitions(left, right []string) []string {
+	if len(left) == 0 || len(right) == 0 {
+		return []string{}
+	}
+	allowed := make(map[string]struct{}, len(right))
+	for _, partition := range right {
+		allowed[partition] = struct{}{}
+	}
+	out := make([]string, 0, len(left))
+	for _, partition := range left {
+		if _, ok := allowed[partition]; ok {
+			out = append(out, partition)
+		}
+	}
+	return out
+}
+
 // StreamQueryTraces implements pb.MonoFSRouterServer.
 func (r *Router) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
 	if partitions, restricted := r.queryScope(stream.Context(), policy.SignalTraces); restricted {
 		req.VisiblePartitions = partitions
 		req.VisiblePartitionsSet = true
 	}
+	if r.traceReadsShared() {
+		return r.streamTracesOneNode(req, stream)
+	}
 	return r.fanoutQueryItems(stream.Context(), int(req.GetLimit()), "stream trace results", func(callCtx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
 		return client.StreamQueryTraces(callCtx, req)
 	}, stream.Send)
 }
 
+func (r *Router) streamTracesOneNode(req *pb.QueryTracesRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	return r.streamQueryItemsOneNode(stream.Context(), "stream trace results", func(ctx context.Context, client pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error) {
+		return client.StreamQueryTraces(ctx, req)
+	}, stream.Send)
+}
+
+func (r *Router) streamQueryItemsOneNode(
+	ctx context.Context,
+	operation string,
+	query func(context.Context, pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error),
+	handle func(*pb.QueryResultItem) error,
+) error {
+	targets := r.allHealthyNodeTargets()
+	if len(targets) == 0 {
+		return fmt.Errorf("no healthy nodes available")
+	}
+	var firstErr error
+	for _, target := range targets {
+		nodeStream, err := query(ctx, target.client)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		sent := false
+		for {
+			item, recvErr := nodeStream.Recv()
+			if recvErr == io.EOF {
+				return nil
+			}
+			if recvErr != nil {
+				if sent {
+					return recvErr
+				}
+				if firstErr == nil {
+					firstErr = recvErr
+				}
+				break
+			}
+			if item == nil {
+				continue
+			}
+			if err := handle(item); err != nil {
+				return err
+			}
+			sent = true
+		}
+	}
+	if firstErr == nil {
+		firstErr = fmt.Errorf("no %s node responded", operation)
+	}
+	return firstErr
+}
+
 // StreamMetricSeries implements pb.MonoFSRouterServer. Series metadata is
 // small and already merged per node, so it is forwarded as-is.
 func (r *Router) StreamMetricSeries(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.MetricSeriesItem]) error {
+	if r.sharedTelemetryReads() {
+		return r.streamMetricSeriesOneNode(req, stream)
+	}
 	clients := r.allHealthyNodeClients()
 	if len(clients) == 0 {
 		return fmt.Errorf("no healthy nodes available")
@@ -1466,6 +1737,50 @@ func (r *Router) IngestTraces(ctx context.Context, req *pb.IngestTracesRequest) 
 		return nil, err
 	}
 	return client.IngestTraces(ctx, req)
+}
+
+func (r *Router) streamMetricSeriesOneNode(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.MetricSeriesItem]) error {
+	targets := r.allHealthyNodeTargets()
+	if len(targets) == 0 {
+		return fmt.Errorf("no healthy nodes available")
+	}
+	var firstErr error
+	for _, target := range targets {
+		nodeStream, err := target.client.StreamMetricSeries(stream.Context(), req)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		sent := false
+		for {
+			item, recvErr := nodeStream.Recv()
+			if recvErr == io.EOF {
+				return nil
+			}
+			if recvErr != nil {
+				if sent {
+					return recvErr
+				}
+				if firstErr == nil {
+					firstErr = recvErr
+				}
+				break
+			}
+			if item == nil {
+				continue
+			}
+			if err := stream.Send(item); err != nil {
+				return err
+			}
+			sent = true
+		}
+	}
+	if firstErr == nil {
+		firstErr = fmt.Errorf("no metric series node responded")
+	}
+	return firstErr
 }
 
 func (r *Router) fanoutJSONQueryStream(ctx context.Context, limit int, mergeErrPrefix string, query func(context.Context, pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error)) ([]byte, error) {
@@ -1582,30 +1897,77 @@ func extractTelemetryRecordTimestamp(raw []byte) int64 {
 }
 
 func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix string, query func(context.Context, pb.MonoFSClient) (grpc.ServerStreamingClient[pb.QueryResultItem], error), handle func(*pb.QueryResultItem) error) error {
-	clients := r.allHealthyNodeClients()
-	if len(clients) == 0 {
+	targets := r.allHealthyNodeTargets()
+	if len(targets) == 0 {
 		return fmt.Errorf("no healthy nodes available")
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	startTimeout := r.config.QueryNodeStartTimeout
+	if startTimeout <= 0 {
+		startTimeout = 30 * time.Second
+	}
+	// Leave room to merge and return partial results before the caller's own
+	// deadline. Without this, a short client deadline (Doctor uses 15s) would
+	// cancel the RPC before the router can shed a straggler.
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining*8/10 < startTimeout {
+			startTimeout = remaining * 8 / 10
+		}
+	}
+	stragglerGrace := r.config.QueryNodeStragglerGrace
+	if stragglerGrace <= 0 {
+		stragglerGrace = time.Second
+	}
+	idleTimeout := r.config.QueryNodeIdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = 10 * time.Second
+	}
+
+	nodeCtxs := make([]context.Context, len(targets))
+	nodeCancels := make([]context.CancelFunc, len(targets))
+	for i := range targets {
+		nodeCtxs[i], nodeCancels[i] = context.WithCancel(ctx)
+	}
+	defer func() {
+		for _, stop := range nodeCancels {
+			stop()
+		}
+	}()
+
 	// When limit > 0 and multiple nodes are queried, merge per-node streams via
 	// a k-way max-heap ordered by record timestamp so that a faster node with
 	// older records never truncates newer records from other nodes.
-	if limit > 0 && len(clients) > 1 {
-		nodeChs := make([]chan kwayNodeEvent, len(clients))
-		for i, c := range clients {
+	//
+	// Initialization is deliberately concurrent. Waiting for every node before
+	// merging means one slow (or wedged) node stalls a query that already has
+	// usable results from the others. The straggler grace timer lets the fast
+	// nodes proceed while giving the rest a short, bounded window to catch up.
+	if limit > 0 && len(targets) > 1 {
+		nodeChs := make([]chan kwayNodeEvent, len(targets))
+		for i := range targets {
 			ch := make(chan kwayNodeEvent, 8)
 			nodeChs[i] = ch
 			go func(nodeIdx int, cl pb.MonoFSClient, out chan<- kwayNodeEvent) {
 				defer close(out)
-				stream, err := query(ctx, cl)
+				nodeCtx := nodeCtxs[nodeIdx]
+				watchdog := time.AfterFunc(startTimeout, nodeCancels[nodeIdx])
+				defer watchdog.Stop()
+				stream, err := query(nodeCtx, cl)
 				if err != nil {
-					out <- kwayNodeEvent{err: err}
+					select {
+					case out <- kwayNodeEvent{err: err}:
+					case <-nodeCtx.Done():
+					}
 					return
 				}
-				out <- kwayNodeEvent{started: true}
+				select {
+				case out <- kwayNodeEvent{started: true}:
+				case <-nodeCtx.Done():
+					return
+				}
 				var seq int64
 				for {
 					item, err := stream.Recv()
@@ -1615,13 +1977,14 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 					if err != nil {
 						select {
 						case out <- kwayNodeEvent{err: err}:
-						case <-ctx.Done():
+						case <-nodeCtx.Done():
 						}
 						return
 					}
 					if item == nil {
 						continue
 					}
+					watchdog.Reset(idleTimeout)
 					records := item.GetItemsJson()
 					if len(records) == 0 && len(item.GetItemJson()) > 0 {
 						records = [][]byte{item.GetItemJson()}
@@ -1641,19 +2004,74 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 						}
 						select {
 						case out <- ev:
-						case <-ctx.Done():
+						case <-nodeCtx.Done():
 							return
 						}
 					}
 				}
-			}(i, c, ch)
+			}(i, targets[i].client, ch)
+		}
+
+		type nodeInit struct {
+			idx     int
+			cur     *kwayNodeStreamCursor
+			started bool
+			done    bool
+			err     error
+		}
+		initCh := make(chan nodeInit, len(targets))
+		for i, ch := range nodeChs {
+			go func(nodeIdx int, ch <-chan kwayNodeEvent) {
+				var (
+					started  bool
+					firstErr error
+				)
+				for ev := range ch {
+					if ev.started {
+						started = true
+						continue
+					}
+					if ev.err != nil {
+						if firstErr == nil {
+							firstErr = ev.err
+						}
+						initCh <- nodeInit{idx: nodeIdx, started: started, err: firstErr}
+						return
+					}
+					if !json.Valid(ev.rec.raw) {
+						if firstErr == nil {
+							firstErr = fmt.Errorf("%s: invalid streamed json item", mergeErrPrefix)
+						}
+						continue
+					}
+					initCh <- nodeInit{
+						idx:     nodeIdx,
+						started: started,
+						cur: &kwayNodeStreamCursor{
+							nodeIdx: nodeIdx,
+							current: ev.rec,
+							ch:      ch,
+						},
+					}
+					return
+				}
+				if firstErr == nil {
+					firstErr = nodeCtxs[nodeIdx].Err()
+				}
+				initCh <- nodeInit{
+					idx:     nodeIdx,
+					started: started,
+					done:    nodeCtxs[nodeIdx].Err() == nil,
+					err:     firstErr,
+				}
+			}(i, ch)
 		}
 
 		var (
 			firstErr error
 			success  bool
 			emitted  int
-			pq       = make(kwayCursorMaxHeap, 0, len(clients))
+			pq       = make(kwayCursorMaxHeap, 0, len(targets))
 		)
 		advanceCursor := func(nodeIdx int, ch <-chan kwayNodeEvent) (*kwayNodeStreamCursor, bool) {
 			for ev := range ch {
@@ -1685,10 +2103,74 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 			return nil, false
 		}
 
-		for i, ch := range nodeChs {
-			if cur, ok := advanceCursor(i, ch); ok {
-				pq = append(pq, cur)
+		responded := make([]bool, len(targets))
+		received := 0
+		gotCursor := false
+		var (
+			graceTimer *time.Timer
+			graceC     <-chan time.Time
+		)
+		startTimer := time.NewTimer(startTimeout)
+		defer startTimer.Stop()
+
+		for received < len(targets) {
+			select {
+			case res := <-initCh:
+				if responded[res.idx] {
+					continue
+				}
+				responded[res.idx] = true
+				received++
+				if res.cur != nil || res.done {
+					success = true
+				}
+				if res.err != nil && firstErr == nil {
+					firstErr = res.err
+				}
+				if res.cur != nil {
+					pq = append(pq, res.cur)
+					if !gotCursor {
+						gotCursor = true
+						graceTimer = time.NewTimer(stragglerGrace)
+						graceC = graceTimer.C
+					}
+				}
+			case <-graceC:
+				for i := range targets {
+					if responded[i] {
+						continue
+					}
+					responded[i] = true
+					received++
+					nodeCancels[i]()
+					r.logger.Warn("telemetry query skipped slow node",
+						"operation", mergeErrPrefix,
+						"node", targets[i].id,
+						"reason", "straggler grace exceeded")
+				}
+				graceC = nil
+			case <-startTimer.C:
+				for i := range targets {
+					if responded[i] {
+						continue
+					}
+					responded[i] = true
+					received++
+					nodeCancels[i]()
+					r.logger.Warn("telemetry query skipped slow node",
+						"operation", mergeErrPrefix,
+						"node", targets[i].id,
+						"reason", "start timeout exceeded")
+				}
+			case <-ctx.Done():
+				return ctx.Err()
 			}
+		}
+		if graceTimer != nil {
+			graceTimer.Stop()
+		}
+		if !success && firstErr == nil && len(pq) == 0 {
+			return fmt.Errorf("%s: no node responded within %s", mergeErrPrefix, startTimeout)
 		}
 		heap.Init(&pq)
 
@@ -1719,37 +2201,64 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 	}
 
 	type streamEvent struct {
+		nodeIdx int
 		item    *pb.QueryResultItem
 		count   int
 		err     error
 		started bool
+		done    bool
 	}
-	events := make(chan streamEvent, len(clients))
+	events := make(chan streamEvent, len(targets))
 	var wg sync.WaitGroup
-	for _, c := range clients {
+	for i := range targets {
 		wg.Add(1)
-		go func(cl pb.MonoFSClient) {
+		go func(nodeIdx int, cl pb.MonoFSClient) {
 			defer wg.Done()
+			nodeCtx := nodeCtxs[nodeIdx]
+			watchdog := time.AfterFunc(startTimeout, nodeCancels[nodeIdx])
+			defer watchdog.Stop()
+			normalEOF := false
+			defer func() {
+				if !normalEOF {
+					return
+				}
+				select {
+				case events <- streamEvent{nodeIdx: nodeIdx, done: true}:
+				case <-nodeCtx.Done():
+				}
+			}()
 
-			stream, err := query(ctx, cl)
+			stream, err := query(nodeCtx, cl)
 			if err != nil {
-				events <- streamEvent{err: err}
+				select {
+				case events <- streamEvent{nodeIdx: nodeIdx, err: err}:
+				case <-nodeCtx.Done():
+				}
 				return
 			}
-			events <- streamEvent{started: true}
+			select {
+			case events <- streamEvent{nodeIdx: nodeIdx, started: true}:
+			case <-nodeCtx.Done():
+				return
+			}
 
 			for {
 				item, err := stream.Recv()
 				if err == io.EOF {
+					normalEOF = true
 					return
 				}
 				if err != nil {
-					events <- streamEvent{err: err}
+					select {
+					case events <- streamEvent{nodeIdx: nodeIdx, err: err}:
+					case <-nodeCtx.Done():
+					}
 					return
 				}
 				if item == nil {
 					continue
 				}
+				watchdog.Reset(idleTimeout)
 				count := len(item.GetItemsJson())
 				if count == 0 && len(item.GetItemJson()) > 0 {
 					count = 1
@@ -1759,12 +2268,12 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 				}
 
 				select {
-				case events <- streamEvent{item: item, count: count}:
-				case <-ctx.Done():
+				case events <- streamEvent{nodeIdx: nodeIdx, item: item, count: count}:
+				case <-nodeCtx.Done():
 					return
 				}
 			}
-		}(c)
+		}(i, targets[i].client)
 	}
 	go func() {
 		wg.Wait()
@@ -1772,47 +2281,93 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 	}()
 
 	var (
-		items    int
-		firstErr error
-		success  bool
+		items     int
+		firstErr  error
+		success   bool
+		itemNodes = make([]bool, len(targets))
+		doneNodes = make([]bool, len(targets))
 	)
-	for event := range events {
-		if event.started {
-			success = true
-			continue
-		}
-		if event.err != nil {
-			if ctx.Err() != nil && limit > 0 && items >= limit {
+	var (
+		graceTimer *time.Timer
+		graceC     <-chan time.Time
+	)
+
+loop:
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				break loop
+			}
+			if event.done {
+				doneNodes[event.nodeIdx] = true
+				success = true
 				continue
 			}
-			if firstErr == nil {
-				firstErr = event.err
+			if event.started {
+				continue
 			}
-			continue
-		}
-		if !queryResultItemValid(event.item) {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("%s: invalid streamed json item", mergeErrPrefix)
+			if event.err != nil {
+				if ctx.Err() != nil && limit > 0 && items >= limit {
+					continue
+				}
+				if firstErr == nil {
+					firstErr = event.err
+				}
+				continue
 			}
-			continue
-		}
+			if !queryResultItemValid(event.item) {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("%s: invalid streamed json item", mergeErrPrefix)
+				}
+				continue
+			}
+			success = true
+			if !itemNodes[event.nodeIdx] {
+				itemNodes[event.nodeIdx] = true
+				if graceTimer == nil {
+					graceTimer = time.NewTimer(stragglerGrace)
+					graceC = graceTimer.C
+				}
+			}
 
-		if limit > 0 && items >= limit {
-			cancel()
-			continue
-		}
-		if err := handle(event.item); err != nil {
-			cancel()
-			return err
-		}
-		items += event.count
-		if limit > 0 && items >= limit {
-			cancel()
+			if limit > 0 && items >= limit {
+				cancel()
+				continue
+			}
+			if err := handle(event.item); err != nil {
+				cancel()
+				return err
+			}
+			items += event.count
+			if limit > 0 && items >= limit {
+				cancel()
+			}
+		case <-graceC:
+			for i := range targets {
+				if itemNodes[i] || doneNodes[i] {
+					continue
+				}
+				nodeCancels[i]()
+				r.logger.Warn("telemetry query skipped slow node",
+					"operation", mergeErrPrefix,
+					"node", targets[i].id,
+					"reason", "straggler grace exceeded")
+			}
+			graceC = nil
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
+	if graceTimer != nil {
+		graceTimer.Stop()
+	}
 
-	if !success && firstErr != nil {
-		return firstErr
+	if !success {
+		if firstErr != nil {
+			return firstErr
+		}
+		return fmt.Errorf("%s: no node produced results", mergeErrPrefix)
 	}
 	return nil
 }
@@ -1947,15 +2502,36 @@ func (r *Router) telemetryNodeClient(signal, chunkID string) (pb.MonoFSClient, e
 	return state.client, nil
 }
 
-// allHealthyNodeClients returns gRPC clients for all healthy active nodes.
-func (r *Router) allHealthyNodeClients() []pb.MonoFSClient {
+type healthyNodeTarget struct {
+	id     string
+	client pb.MonoFSClient
+}
+
+// allHealthyNodeTargets returns the IDs and gRPC clients for all healthy
+// active nodes. The IDs are used for query diagnostics so an operator can tell
+// which shard was skipped when a partial result is returned.
+func (r *Router) allHealthyNodeTargets() []healthyNodeTarget {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	var clients []pb.MonoFSClient
-	for _, state := range r.nodes {
+	targets := make([]healthyNodeTarget, 0, len(r.nodes))
+	for id, state := range r.nodes {
 		if state != nil && state.info != nil && state.info.Healthy && state.status == NodeActive && state.client != nil {
-			clients = append(clients, state.client)
+			nodeID := state.info.NodeId
+			if nodeID == "" {
+				nodeID = id
+			}
+			targets = append(targets, healthyNodeTarget{id: nodeID, client: state.client})
 		}
+	}
+	return targets
+}
+
+// allHealthyNodeClients returns gRPC clients for all healthy active nodes.
+func (r *Router) allHealthyNodeClients() []pb.MonoFSClient {
+	targets := r.allHealthyNodeTargets()
+	clients := make([]pb.MonoFSClient, 0, len(targets))
+	for _, target := range targets {
+		clients = append(clients, target.client)
 	}
 	return clients
 }

@@ -4,11 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/radryc/kvs/pkg/kvsapi"
 	"github.com/radryc/kvs/pkg/localstore"
 	pb "github.com/radryc/monofs/api/proto"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestGetNodeInfoReportsEmbeddedKVSStatus(t *testing.T) {
@@ -59,5 +62,16 @@ func TestGetNodeInfoReportsEmbeddedKVSStatus(t *testing.T) {
 	}
 	if got := resp.GetKvs().GetKeyCount(); got != 1 {
 		t.Fatalf("expected kvs key count 1, got %d", got)
+	}
+}
+
+func TestWrapKVSErrorPreservesRetryableCode(t *testing.T) {
+	original := status.Error(codes.Aborted, "kvsapi: not leader")
+	wrapped := wrapKVSError(original)
+	if got := status.Code(wrapped); got != codes.Aborted {
+		t.Fatalf("wrapKVSError code = %s, want Aborted", got)
+	}
+	if !strings.Contains(wrapped.Error(), "kvs ingest failed") {
+		t.Fatalf("wrapKVSError message = %q, want kvs ingest context", wrapped.Error())
 	}
 }

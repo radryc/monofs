@@ -17,7 +17,7 @@ WORKDIR /app
 RUN apk add --no-cache git ca-certificates
 
 ARG KVS_REPO_URL=https://github.com/radryc/kvs.git
-ARG KVS_REF=1cf406ad1da680ae06e3db84aa3a5aa3e95585b3
+ARG KVS_REF=e1bfc66516aa76d2d28962d231f455321571c34a
 ARG CFG_REPO_URL=https://github.com/radryc/cfg.git
 ARG CFG_REF=1772380a1c25a39e0fe06cd0c4265c5b45fb5930
 

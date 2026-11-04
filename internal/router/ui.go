@@ -26,6 +26,7 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage"
+	"github.com/radryc/monofs/internal/storage/blob"
 	"github.com/radryc/monofs/pkg/authz"
 	"google.golang.org/grpc/metadata"
 )
@@ -155,6 +156,7 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/local-clients", r.handleLocalClientsAPI)
 	mux.HandleFunc("/api/fetchers", r.handleFetchersAPI)
 	mux.HandleFunc("/api/fetchers/storage-objects", r.handleFetcherStorageObjects)
+	mux.HandleFunc("/api/fetchers/observability", r.handleFetcherObservability)
 	mux.HandleFunc("/api/fetcher-key-status", r.handleFetcherKeyStatus)
 	mux.HandleFunc("/api/confirm-fetcher-key", r.handleConfirmFetcherKey)
 	mux.HandleFunc("/api/logengine", r.handleLogEngineAPI)
@@ -1256,6 +1258,135 @@ func (r *Router) queryFetcherStorageObjects(ctx context.Context, client *http.Cl
 	return entry
 }
 
+// fetcherObservabilityEntry is one fetcher's WAL/read-through state.
+type fetcherObservabilityEntry struct {
+	Address   string                  `json:"address"`
+	Healthy   bool                    `json:"healthy"`
+	Error     string                  `json:"error,omitempty"`
+	FetcherID string                  `json:"fetcher_id,omitempty"`
+	Blob      *blob.BlobObservability `json:"blob,omitempty"`
+}
+
+type fetcherObservabilityTotals struct {
+	WALPending              int   `json:"wal_pending"`
+	WALRecordedTotal        int64 `json:"wal_recorded_total"`
+	WALReplayedTotal        int64 `json:"wal_replayed_total"`
+	WALUploadFailuresTotal  int64 `json:"wal_upload_failures_total"`
+	CloudIndexEntries       int   `json:"cloud_index_entries"`
+	CloudIndexLoadsTotal    int64 `json:"cloud_index_loads_total"`
+	CloudLookupHits         int64 `json:"cloud_lookup_hits"`
+	CloudLookupMisses       int64 `json:"cloud_lookup_misses"`
+	CloudLookupErrors       int64 `json:"cloud_lookup_errors"`
+	CloudDownloadsTotal     int64 `json:"cloud_downloads_total"`
+	CloudDownloadBytes      int64 `json:"cloud_download_bytes"`
+	ArchiveDeletesTotal     int64 `json:"archive_deletes_total"`
+	CacheInvalidationsTotal int64 `json:"cache_invalidations_total"`
+}
+
+// handleFetcherObservability aggregates WAL and S3 read-through state from
+// every fetcher diagnostics endpoint.
+func (r *Router) handleFetcherObservability(w http.ResponseWriter, req *http.Request) {
+	ctx, cancel := context.WithTimeout(req.Context(), 15*time.Second)
+	defer cancel()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	var entries []fetcherObservabilityEntry
+
+	addFromConfigured := func(configured []string) {
+		for _, raw := range configured {
+			baseURL, _ := diagnosticsEndpoint(raw)
+			if baseURL == "" {
+				continue
+			}
+			entries = append(entries, r.queryFetcherObservability(ctx, client, baseURL, raw))
+		}
+	}
+
+	r.mu.RLock()
+	configured := r.config.FetcherDiagnostics
+	r.mu.RUnlock()
+
+	if len(configured) > 0 {
+		addFromConfigured(configured)
+	} else if fetcherClient := r.getFetcherClient(); fetcherClient != nil {
+		for _, fetcherAddr := range fetcherClient.AllFetchers() {
+			diagAddr, err := addressWithOffset(fetcherAddr, 1)
+			if err != nil {
+				entries = append(entries, fetcherObservabilityEntry{
+					Address: fetcherAddr,
+					Healthy: false,
+					Error:   fmt.Sprintf("cannot compute diagnostics address: %v", err),
+				})
+				continue
+			}
+			entries = append(entries, r.queryFetcherObservability(ctx, client, "http://"+diagAddr, fetcherAddr))
+		}
+	}
+
+	var totals fetcherObservabilityTotals
+	anyHealthy := false
+	for _, entry := range entries {
+		if entry.Healthy {
+			anyHealthy = true
+		}
+		if entry.Blob == nil {
+			continue
+		}
+		totals.WALPending += entry.Blob.WALPending
+		totals.WALRecordedTotal += entry.Blob.WALRecordedTotal
+		totals.WALReplayedTotal += entry.Blob.WALReplayedTotal
+		totals.WALUploadFailuresTotal += entry.Blob.WALUploadFailuresTotal
+		totals.CloudIndexEntries += entry.Blob.CloudIndexEntries
+		totals.CloudIndexLoadsTotal += entry.Blob.CloudIndexLoadsTotal
+		totals.CloudLookupHits += entry.Blob.CloudLookupHits
+		totals.CloudLookupMisses += entry.Blob.CloudLookupMisses
+		totals.CloudLookupErrors += entry.Blob.CloudLookupErrors
+		totals.CloudDownloadsTotal += entry.Blob.CloudDownloadsTotal
+		totals.CloudDownloadBytes += entry.Blob.CloudDownloadBytes
+		totals.ArchiveDeletesTotal += entry.Blob.ArchiveDeletesTotal
+		totals.CacheInvalidationsTotal += entry.Blob.CacheInvalidationsTotal
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"fetchers":     entries,
+		"totals":       totals,
+		"healthy":      anyHealthy,
+		"generated_at": time.Now().UTC().Unix(),
+	})
+}
+
+func (r *Router) queryFetcherObservability(ctx context.Context, client *http.Client, baseURL, address string) fetcherObservabilityEntry {
+	entry := fetcherObservabilityEntry{Address: address, Healthy: false}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/observability", nil)
+	if err != nil {
+		entry.Error = fmt.Sprintf("build request: %v", err)
+		return entry
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		entry.Error = fmt.Sprintf("connect: %v", err)
+		return entry
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		FetcherID string                  `json:"fetcher_id"`
+		Blob      *blob.BlobObservability `json:"blob"`
+		Error     string                  `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		entry.Error = fmt.Sprintf("decode response: %v", err)
+		return entry
+	}
+	entry.Healthy = resp.StatusCode == http.StatusOK && data.Error == ""
+	entry.Error = data.Error
+	entry.FetcherID = data.FetcherID
+	entry.Blob = data.Blob
+	return entry
+}
+
 // fetcherKeyStatusEntry is the per-fetcher result for /api/fetcher-key-status.
 type fetcherKeyStatusEntry struct {
 	Address     string `json:"address"`
@@ -1636,39 +1767,56 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 	r.mu.RUnlock()
 
 	type nodeLogStats struct {
-		NodeID            string `json:"node_id"`
-		Address           string `json:"address"`
-		Enabled           bool   `json:"enabled"`
-		LogChunks         int64  `json:"log_chunks"`
-		MetricChunks      int64  `json:"metric_chunks"`
-		TraceChunks       int64  `json:"trace_chunks"`
-		DuckDBEnabled     bool   `json:"duckdb_enabled"`
-		DuckDBMemoryLimit string `json:"duckdb_memory_limit,omitempty"`
-		DuckDBThreads     int32  `json:"duckdb_threads,omitempty"`
-		DuckDBQueries     uint64 `json:"duckdb_queries,omitempty"`
-		DuckDBErrors      uint64 `json:"duckdb_errors,omitempty"`
-		CompactionRuns    uint64 `json:"compaction_runs"`
-		CompactionInput   uint64 `json:"compaction_input_chunks"`
-		CompactionOutput  uint64 `json:"compaction_output_chunks"`
-		CompactionDeleted uint64 `json:"compaction_deleted_chunks"`
-		CompactionRecords uint64 `json:"compaction_records"`
-		CompactionRunning bool   `json:"compaction_running"`
-		CompactionTarget  int64  `json:"compaction_target_bytes"`
-		LastCompaction    int64  `json:"last_compaction_unix_nano"`
+		NodeID                 string `json:"node_id"`
+		Address                string `json:"address"`
+		Enabled                bool   `json:"enabled"`
+		LogChunks              int64  `json:"log_chunks"`
+		MetricChunks           int64  `json:"metric_chunks"`
+		TraceChunks            int64  `json:"trace_chunks"`
+		LogBuckets             int64  `json:"log_buckets"`
+		MetricBuckets          int64  `json:"metric_buckets"`
+		TraceBuckets           int64  `json:"trace_buckets"`
+		LogCompactedBuckets    int64  `json:"log_compacted_buckets"`
+		MetricCompactedBuckets int64  `json:"metric_compacted_buckets"`
+		TraceCompactedBuckets  int64  `json:"trace_compacted_buckets"`
+		DuckDBEnabled          bool   `json:"duckdb_enabled"`
+		DuckDBMemoryLimit      string `json:"duckdb_memory_limit,omitempty"`
+		DuckDBThreads          int32  `json:"duckdb_threads,omitempty"`
+		DuckDBQueries          uint64 `json:"duckdb_queries,omitempty"`
+		DuckDBErrors           uint64 `json:"duckdb_errors,omitempty"`
+		DuckDBFallbacks        uint64 `json:"duckdb_fallbacks,omitempty"`
+		DuckDBTempDir          string `json:"duckdb_temp_dir,omitempty"`
+		CompactionRuns         uint64 `json:"compaction_runs"`
+		CompactionInput        uint64 `json:"compaction_input_chunks"`
+		CompactionOutput       uint64 `json:"compaction_output_chunks"`
+		CompactionDeleted      uint64 `json:"compaction_deleted_chunks"`
+		CompactionRecords      uint64 `json:"compaction_records"`
+		CompactionRunning      bool   `json:"compaction_running"`
+		CompactionTarget       int64  `json:"compaction_target_bytes"`
+		LastCompaction         int64  `json:"last_compaction_unix_nano"`
 	}
 
 	var (
-		nodes               []nodeLogStats
-		totalLogs           int64
-		totalMetrics        int64
-		totalTraces         int64
-		totalDuckDBQuery    uint64
-		totalDuckDBErrors   uint64
-		totalCompactionRuns uint64
-		totalCompactionIn   uint64
-		totalCompactionOut  uint64
-		duckDBNodes         int
-		anyEnabled          bool
+		nodes                  []nodeLogStats
+		totalLogs              int64
+		totalMetrics           int64
+		totalTraces            int64
+		totalLogBuckets        int64
+		totalMetricBuckets     int64
+		totalTraceBuckets      int64
+		totalLogCompacted      int64
+		totalMetricCompacted   int64
+		totalTraceCompacted    int64
+		totalDuckDBQuery       uint64
+		totalDuckDBErrors      uint64
+		totalDuckDBFallbacks   uint64
+		totalCompactionRuns    uint64
+		totalCompactionIn      uint64
+		totalCompactionOut     uint64
+		totalCompactionDeleted uint64
+		totalCompactionRecords uint64
+		duckDBNodes            int
+		anyEnabled             bool
 	)
 
 	for nodeID, state := range nodesSnapshot {
@@ -1681,11 +1829,19 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 			ns.LogChunks = le.LogChunks
 			ns.MetricChunks = le.MetricChunks
 			ns.TraceChunks = le.TraceChunks
+			ns.LogBuckets = le.LogBuckets
+			ns.MetricBuckets = le.MetricBuckets
+			ns.TraceBuckets = le.TraceBuckets
+			ns.LogCompactedBuckets = le.LogCompactedBuckets
+			ns.MetricCompactedBuckets = le.MetricCompactedBuckets
+			ns.TraceCompactedBuckets = le.TraceCompactedBuckets
 			ns.DuckDBEnabled = le.DuckdbEnabled
 			ns.DuckDBMemoryLimit = le.DuckdbMemoryLimit
 			ns.DuckDBThreads = le.DuckdbThreads
 			ns.DuckDBQueries = le.DuckdbQueries
 			ns.DuckDBErrors = le.DuckdbErrors
+			ns.DuckDBFallbacks = le.DuckdbFallbacks
+			ns.DuckDBTempDir = le.DuckdbTempDir
 			ns.CompactionRuns = le.CompactionRuns
 			ns.CompactionInput = le.CompactionInputChunks
 			ns.CompactionOutput = le.CompactionOutputChunks
@@ -1699,15 +1855,24 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 				totalLogs += le.LogChunks
 				totalMetrics += le.MetricChunks
 				totalTraces += le.TraceChunks
+				totalLogBuckets += le.LogBuckets
+				totalMetricBuckets += le.MetricBuckets
+				totalTraceBuckets += le.TraceBuckets
+				totalLogCompacted += le.LogCompactedBuckets
+				totalMetricCompacted += le.MetricCompactedBuckets
+				totalTraceCompacted += le.TraceCompactedBuckets
 			}
 			if le.DuckdbEnabled {
 				duckDBNodes++
 				totalDuckDBQuery += le.DuckdbQueries
 				totalDuckDBErrors += le.DuckdbErrors
+				totalDuckDBFallbacks += le.DuckdbFallbacks
 			}
 			totalCompactionRuns += le.CompactionRuns
 			totalCompactionIn += le.CompactionInputChunks
 			totalCompactionOut += le.CompactionOutputChunks
+			totalCompactionDeleted += le.CompactionDeletedChunks
+			totalCompactionRecords += le.CompactionRecords
 		}
 		nodes = append(nodes, ns)
 	}
@@ -1717,14 +1882,28 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"enabled":        anyEnabled,
-		"log_chunks":     totalLogs,
-		"metric_chunks":  totalMetrics,
-		"trace_chunks":   totalTraces,
-		"duckdb_nodes":   duckDBNodes,
-		"duckdb_queries": totalDuckDBQuery,
-		"duckdb_errors":  totalDuckDBErrors,
-		"nodes":          nodes,
+		"enabled":                   anyEnabled,
+		"log_chunks":                totalLogs,
+		"metric_chunks":             totalMetrics,
+		"trace_chunks":              totalTraces,
+		"log_buckets":               totalLogBuckets,
+		"metric_buckets":            totalMetricBuckets,
+		"trace_buckets":             totalTraceBuckets,
+		"log_compacted_buckets":     totalLogCompacted,
+		"metric_compacted_buckets":  totalMetricCompacted,
+		"trace_compacted_buckets":   totalTraceCompacted,
+		"stored_buckets":            totalLogBuckets + totalMetricBuckets + totalTraceBuckets,
+		"compacted_buckets":         totalLogCompacted + totalMetricCompacted + totalTraceCompacted,
+		"duckdb_nodes":              duckDBNodes,
+		"duckdb_queries":            totalDuckDBQuery,
+		"duckdb_errors":             totalDuckDBErrors,
+		"duckdb_fallbacks":          totalDuckDBFallbacks,
+		"compaction_runs":           totalCompactionRuns,
+		"compaction_input_chunks":   totalCompactionIn,
+		"compaction_output_chunks":  totalCompactionOut,
+		"compaction_deleted_chunks": totalCompactionDeleted,
+		"compaction_records":        totalCompactionRecords,
+		"nodes":                     nodes,
 	})
 }
 func (r *Router) handleDependenciesAPI(w http.ResponseWriter, req *http.Request) {

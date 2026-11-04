@@ -21,13 +21,14 @@ import (
 // second API surface.
 type sidecarBackend struct {
 	DoctorBackend
-	client   pb.MonoFSClient
-	logger   *slog.Logger
-	fallback bool
+	client      pb.MonoFSClient
+	logger      *slog.Logger
+	fallback    bool
+	proxyTraces bool
 }
 
-func newSidecarBackend(local DoctorBackend, client pb.MonoFSClient, logger *slog.Logger, fallback bool) *sidecarBackend {
-	return &sidecarBackend{DoctorBackend: local, client: client, logger: logger, fallback: fallback}
+func newSidecarBackend(local DoctorBackend, client pb.MonoFSClient, logger *slog.Logger, fallback, proxyTraces bool) *sidecarBackend {
+	return &sidecarBackend{DoctorBackend: local, client: client, logger: logger, fallback: fallback, proxyTraces: proxyTraces}
 }
 
 func (b *sidecarBackend) StreamLogs(ctx context.Context, query, service string, from, to time.Time, limit int, yield func(logengine.LogRecord) error) error {
@@ -72,7 +73,7 @@ func (b *sidecarBackend) StreamLogs(ctx context.Context, query, service string, 
 
 func shouldFallbackSidecar(err error) bool {
 	switch status.Code(err) {
-	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted:
+	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Unimplemented:
 		return true
 	default:
 		return false
@@ -109,6 +110,33 @@ func (b *sidecarBackend) QueryLogs(ctx context.Context, query, service string, f
 		return nil, fmt.Errorf("decode sidecar log results: %w", err)
 	}
 	return records, nil
+}
+
+func (b *sidecarBackend) QueryDuckDBSQL(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope) (logengine.DuckDBSQLResult, error) {
+	req := &pb.QueryDuckDBSQLRequest{
+		Dataset:      dataset,
+		Query:        query,
+		FromUnixNano: unixNanoOrZero(from),
+		ToUnixNano:   unixNanoOrZero(to),
+		Limit:        int32(limit),
+	}
+	if scope.Restricted {
+		req.VisiblePartitions = append([]string(nil), scope.Partitions...)
+		req.VisiblePartitionsSet = true
+	}
+	resp, err := b.client.QueryDuckDBSQL(ctx, req)
+	if err != nil {
+		if b.fallback && shouldFallbackSidecar(err) {
+			b.logger.Warn("logquery sidecar unavailable, falling back to native DuckDB SQL", "error", err)
+			return b.DoctorBackend.QueryDuckDBSQL(ctx, dataset, query, from, to, limit, scope)
+		}
+		return logengine.DuckDBSQLResult{}, err
+	}
+	var result logengine.DuckDBSQLResult
+	if err := json.Unmarshal([]byte(resp.GetResultsJson()), &result); err != nil {
+		return result, fmt.Errorf("decode sidecar duckdb sql: %w", err)
+	}
+	return result, nil
 }
 
 func (b *sidecarBackend) StreamMetrics(ctx context.Context, query logengine.MetricQuery, from, to time.Time, yield func(logengine.MetricRecord) error) error {
@@ -167,6 +195,9 @@ func (b *sidecarBackend) QueryMetrics(ctx context.Context, query logengine.Metri
 }
 
 func (b *sidecarBackend) StreamTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int, yield func(logengine.SpanRecord) error) error {
+	if !b.proxyTraces {
+		return b.DoctorBackend.StreamTraces(ctx, traceID, service, from, to, limit, yield)
+	}
 	req := &pb.QueryTracesRequest{
 		TraceId:      traceID,
 		Service:      service,
@@ -214,6 +245,9 @@ func (b *sidecarBackend) fallbackTraces(ctx context.Context, err error, traceID,
 }
 
 func (b *sidecarBackend) QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]logengine.SpanRecord, error) {
+	if !b.proxyTraces {
+		return b.DoctorBackend.QueryTraces(ctx, traceID, service, from, to, limit)
+	}
 	req := &pb.QueryTracesRequest{
 		TraceId:      traceID,
 		Service:      service,
@@ -335,7 +369,34 @@ func applyTraceScope(ctx context.Context, req *pb.QueryTracesRequest) {
 	}
 }
 
+func (b *sidecarBackend) DiscoverTraceServices(ctx context.Context, from, to time.Time) ([]string, error) {
+	provider, ok := b.DoctorBackend.(traceDiscoveryBackend)
+	if !ok {
+		return nil, fmt.Errorf("trace discovery is not supported by the local backend")
+	}
+	return provider.DiscoverTraceServices(ctx, from, to)
+}
+
+func (b *sidecarBackend) DiscoverTraceTags(ctx context.Context, from, to time.Time) ([]string, error) {
+	provider, ok := b.DoctorBackend.(traceDiscoveryBackend)
+	if !ok {
+		return nil, fmt.Errorf("trace discovery is not supported by the local backend")
+	}
+	return provider.DiscoverTraceTags(ctx, from, to)
+}
+
+func (b *sidecarBackend) DiscoverTraceTagValues(ctx context.Context, from, to time.Time, tag string) ([]string, error) {
+	provider, ok := b.DoctorBackend.(traceDiscoveryBackend)
+	if !ok {
+		return nil, fmt.Errorf("trace discovery is not supported by the local backend")
+	}
+	return provider.DiscoverTraceTagValues(ctx, from, to, tag)
+}
+
 func (b *sidecarBackend) Aggregate(ctx context.Context, query logengine.AggregateQuery) ([]logengine.AggregateRow, error) {
+	if !b.proxyTraces && query.Signal == logengine.SignalTraces {
+		return b.DoctorBackend.Aggregate(ctx, query)
+	}
 	req := aggregateRequest(query)
 	applyAggregateScope(ctx, req)
 	resp, err := b.client.AggregateTelemetry(ctx, req)

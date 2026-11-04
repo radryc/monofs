@@ -24,6 +24,8 @@ type duckQueryEngine struct {
 	store       *CachedStore
 	config      DuckDBConfig
 	querySlots  chan struct{}
+	active      atomic.Int64
+	waiting     atomic.Int64
 	queries     atomic.Uint64
 	queryErrors atomic.Uint64
 	closed      atomic.Bool
@@ -44,16 +46,23 @@ func newDuckQueryEngine(store *CachedStore, cfg DuckDBConfig) (*duckQueryEngine,
 		cfg.MemoryLimit = "2GB"
 	}
 	if cfg.Threads <= 0 {
-		cfg.Threads = 8
-	}
-	if cfg.MaxOpenConns <= 0 {
-		cfg.MaxOpenConns = 4
+		cfg.Threads = 2
 	}
 	if cfg.MaxConcurrentQueries <= 0 {
-		cfg.MaxConcurrentQueries = cfg.MaxOpenConns
+		// A single heavy query can already use the full DuckDB memory budget.
+		// Queue additional queries instead of multiplying peak memory.
+		cfg.MaxConcurrentQueries = 1
+	}
+	if cfg.MaxOpenConns <= 0 {
+		cfg.MaxOpenConns = 2
+	}
+	// Keep one connection outside the query-slot budget so health checks and
+	// lightweight probes do not queue behind a long-running scan.
+	if cfg.MaxOpenConns <= cfg.MaxConcurrentQueries {
+		cfg.MaxOpenConns = cfg.MaxConcurrentQueries + 1
 	}
 	if cfg.MaxTempDirectorySize == "" {
-		cfg.MaxTempDirectorySize = "50GB"
+		cfg.MaxTempDirectorySize = "20GB"
 	}
 	if cfg.TempDir == "" {
 		if store.localDir == "" {
@@ -121,15 +130,28 @@ func sqlEscape(value string) string {
 }
 
 func (d *duckQueryEngine) acquire(ctx context.Context) error {
+	d.waiting.Add(1)
 	select {
 	case d.querySlots <- struct{}{}:
+		d.waiting.Add(-1)
+		d.active.Add(1)
 		return nil
 	case <-ctx.Done():
+		d.waiting.Add(-1)
 		return ctx.Err()
 	}
 }
 
-func (d *duckQueryEngine) release() { <-d.querySlots }
+func (d *duckQueryEngine) release() {
+	d.active.Add(-1)
+	<-d.querySlots
+}
+
+// QueueDepth reports how many callers are waiting for a DuckDB query slot.
+func (d *duckQueryEngine) QueueDepth() int64 { return d.waiting.Load() }
+
+// ActiveQueries reports how many DuckDB queries currently hold a slot.
+func (d *duckQueryEngine) ActiveQueries() int64 { return d.active.Load() }
 
 func (d *duckQueryEngine) QueryDuckDB(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	d.queries.Add(1)
@@ -141,10 +163,10 @@ func (d *duckQueryEngine) QueryDuckDB(ctx context.Context, query string, args ..
 }
 
 func (d *duckQueryEngine) Ping(ctx context.Context) error {
-	if err := d.acquire(ctx); err != nil {
-		return err
-	}
-	defer d.release()
+	// Deliberately do not acquire a query slot. A health check must be able to
+	// report whether DuckDB is alive even while a heavy query occupies the
+	// single query slot; otherwise a busy-but-healthy engine is marked
+	// unhealthy and every query queues behind the probe.
 	var one int
 	if err := d.db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
 		d.queryErrors.Add(1)
@@ -158,12 +180,14 @@ func (d *duckQueryEngine) Ping(ctx context.Context) error {
 
 func (d *duckQueryEngine) Stats() DuckDBStats {
 	return DuckDBStats{
-		Enabled: true,
-		Memory:  d.config.MemoryLimit,
-		Threads: d.config.Threads,
-		TempDir: d.config.TempDir,
-		Queries: d.queries.Load(),
-		Errors:  d.queryErrors.Load(),
+		Enabled:       true,
+		Memory:        d.config.MemoryLimit,
+		Threads:       d.config.Threads,
+		TempDir:       d.config.TempDir,
+		Queries:       d.queries.Load(),
+		Errors:        d.queryErrors.Load(),
+		ActiveQueries: d.active.Load(),
+		QueuedQueries: d.waiting.Load(),
 	}
 }
 

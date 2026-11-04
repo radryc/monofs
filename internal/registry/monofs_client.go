@@ -378,10 +378,15 @@ func (c *Client) Exists(ctx context.Context, path string) (bool, error) {
 	fullPath := c.dataPath(path)
 	for _, node := range nodes {
 		callCtx, cancel := context.WithTimeout(ctx, c.rpcTimeout)
-		_, err := node.client.GetAttr(callCtx, &pb.GetAttrRequest{Path: fullPath})
+		resp, err := node.client.GetAttr(callCtx, &pb.GetAttrRequest{Path: fullPath})
 		cancel()
 		if err == nil {
-			return true, nil
+			// GetAttr reports a healthy miss as (Found=false, nil), so an
+			// empty response must not be treated as a cache hit.
+			if resp.GetFound() {
+				return true, nil
+			}
+			continue
 		}
 		if status.Code(err) == codes.NotFound {
 			// Not on this node; the file may be sharded to another one.

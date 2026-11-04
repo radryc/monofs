@@ -110,6 +110,9 @@ func main() {
 		serverDiagAddrs        = flag.String("server-diagnostics-addrs", "", "Server diagnostics addresses for pprof collection (e.g., node-a=node-a:9100,node-b=node-b:9100)")
 		healthInt              = flag.Duration("health-interval", 2*time.Second, "Health check interval")
 		unhealthyThr           = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
+		queryNodeStartTimeout  = flag.Duration("query-node-start-timeout", 30*time.Second, "Max time to wait for any node to start returning telemetry query records")
+		queryNodeGrace         = flag.Duration("query-node-straggler-grace", time.Second, "Extra time allowed for remaining nodes after the first node responds to a telemetry query")
+		queryNodeIdleTimeout   = flag.Duration("query-node-idle-timeout", 10*time.Second, "Max gap between records from one node before it is skipped")
 		debug                  = flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
 		logLevel               = flag.String("log-level", "info", "Log level: debug, info, warn, error")
 		guardianStateDir       = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
@@ -160,8 +163,15 @@ func main() {
 		accessEnforce          = flag.Bool("access-enforce", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_ACCESS_ENFORCE")), "true"), "Enforce access policy filtering on reads (default: observe only)")
 		accessPolicyServeToken = flag.String("access-policy-serve-token", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_SERVE_TOKEN")), "Bearer token required by the internal /api/access/policy endpoint (empty allows unauthenticated)")
 		internalToken          = flag.String("internal-token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Cluster-internal token presented on router -> node calls so nodes bypass read enforcement for control-plane traffic (defaults to MONOFS_TOKEN)")
+		spanEngine             = flag.String("spanengine", strings.TrimSpace(os.Getenv("MONOFS_SPANENGINE")), "Telemetry storage engine: logengine (fan out) or clickhouse (shared, one node read)")
 	)
 	flag.Parse()
+	switch strings.ToLower(strings.TrimSpace(*spanEngine)) {
+	case "", "logengine", "clickhouse":
+	default:
+		fmt.Fprintf(os.Stderr, "unsupported --spanengine %q (want logengine or clickhouse)\n", *spanEngine)
+		os.Exit(2)
+	}
 	telemetryCfg, err := telemetry.LoadConfig("monofs-router")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load telemetry config: %v\n", err)
@@ -236,52 +246,56 @@ func main() {
 
 	// Create router
 	cfg := router.RouterConfig{
-		ClusterID:              *clusterID,
-		RouterName:             *routerName,
-		HealthCheckInterval:    *healthInt,
-		UnhealthyThreshold:     *unhealthyThr,
-		PeerRouters:            parsePeerRouters(*peerRouters),
-		SearchDiagnostics:      strings.TrimSpace(*searchDiagAddr),
-		FetcherDiagnostics:     parseCSVAddrs(*fetcherDiagAddrs),
-		ServerDiagnostics:      parseServerDiagnostics(*serverDiagAddrs),
-		RegistryDiagnostics:    strings.TrimSpace(*registryDiagAddr),
-		GuardianStateDir:       *guardianStateDir,
-		WorkspaceStateDir:      *workspaceStateDir,
-		SourcePushMode:         *sourcePushMode,
-		PolicyGateEnabled:      *policyGateEnabled,
-		PolicyConfigPath:       *policyConfigPath,
-		AutoPushEnabled:        *autoPushEnabled,
-		AutoPushInterval:       *autoPushInterval,
-		AutoRefreshEnabled:     *autoRefreshEnabled,
-		AutoRefreshInterval:    *autoRefreshInterval,
-		AutoRefreshMaxInterval: *autoRefreshMaxInterval,
-		AutoRefreshConcurrency: *autoRefreshConcurrency,
-		AutoRefreshBatchSize:   *autoRefreshBatchSize,
-		AutoRefreshShards:      *autoRefreshShards,
-		AutoRefreshShard:       *autoRefreshShard,
-		AutoRefreshStateDir:    strings.TrimSpace(*autoRefreshStateDir),
-		AutoRefreshLease:       *autoRefreshLease,
-		AutoRefreshLeaseName:   strings.TrimSpace(*autoRefreshLeaseName),
-		AutoRefreshLeaseNS:     strings.TrimSpace(*autoRefreshLeaseNS),
-		AutoRefreshOwner:       strings.TrimSpace(*autoRefreshOwner),
-		EncryptionKey:          encryptionKey,
-		ReplicationFactor:      *replicationFactor,
-		RebalanceDelay:         *rebalanceDelay,
-		GracefulFailoverDelay:  *gracefulFailoverDelay,
-		GuardianIngestTimeout:  *guardianIngestTimeout,
-		SearchIndexGuardian:    *searchIndexGuardian,
-		AuthzEnforceIngest:     *authzEnforceIngest,
-		AuthzGrantsPath:        strings.TrimSpace(*authzGrantsPath),
-		AuthzGrantsJSON:        strings.TrimSpace(os.Getenv("MONOFS_AUTHZ_GRANTS_JSON")),
-		OwnershipGateEnabled:   *ownershipGate,
-		AllowLocalIngest:       *localIngestEnabled,
-		AccessPolicyURL:        strings.TrimSpace(*accessPolicyURL),
-		AccessPolicyFile:       strings.TrimSpace(*accessPolicyFile),
-		AccessPolicyToken:      strings.TrimSpace(*accessPolicyToken),
-		AccessPolicyInterval:   *accessPolicyInterval,
-		AccessEnforce:          *accessEnforce,
-		AccessPolicyServeToken: strings.TrimSpace(*accessPolicyServeToken),
-		InternalToken:          strings.TrimSpace(*internalToken),
+		ClusterID:               *clusterID,
+		RouterName:              *routerName,
+		HealthCheckInterval:     *healthInt,
+		UnhealthyThreshold:      *unhealthyThr,
+		QueryNodeStartTimeout:   *queryNodeStartTimeout,
+		QueryNodeStragglerGrace: *queryNodeGrace,
+		QueryNodeIdleTimeout:    *queryNodeIdleTimeout,
+		SpanEngine:              *spanEngine,
+		PeerRouters:             parsePeerRouters(*peerRouters),
+		SearchDiagnostics:       strings.TrimSpace(*searchDiagAddr),
+		FetcherDiagnostics:      parseCSVAddrs(*fetcherDiagAddrs),
+		ServerDiagnostics:       parseServerDiagnostics(*serverDiagAddrs),
+		RegistryDiagnostics:     strings.TrimSpace(*registryDiagAddr),
+		GuardianStateDir:        *guardianStateDir,
+		WorkspaceStateDir:       *workspaceStateDir,
+		SourcePushMode:          *sourcePushMode,
+		PolicyGateEnabled:       *policyGateEnabled,
+		PolicyConfigPath:        *policyConfigPath,
+		AutoPushEnabled:         *autoPushEnabled,
+		AutoPushInterval:        *autoPushInterval,
+		AutoRefreshEnabled:      *autoRefreshEnabled,
+		AutoRefreshInterval:     *autoRefreshInterval,
+		AutoRefreshMaxInterval:  *autoRefreshMaxInterval,
+		AutoRefreshConcurrency:  *autoRefreshConcurrency,
+		AutoRefreshBatchSize:    *autoRefreshBatchSize,
+		AutoRefreshShards:       *autoRefreshShards,
+		AutoRefreshShard:        *autoRefreshShard,
+		AutoRefreshStateDir:     strings.TrimSpace(*autoRefreshStateDir),
+		AutoRefreshLease:        *autoRefreshLease,
+		AutoRefreshLeaseName:    strings.TrimSpace(*autoRefreshLeaseName),
+		AutoRefreshLeaseNS:      strings.TrimSpace(*autoRefreshLeaseNS),
+		AutoRefreshOwner:        strings.TrimSpace(*autoRefreshOwner),
+		EncryptionKey:           encryptionKey,
+		ReplicationFactor:       *replicationFactor,
+		RebalanceDelay:          *rebalanceDelay,
+		GracefulFailoverDelay:   *gracefulFailoverDelay,
+		GuardianIngestTimeout:   *guardianIngestTimeout,
+		SearchIndexGuardian:     *searchIndexGuardian,
+		AuthzEnforceIngest:      *authzEnforceIngest,
+		AuthzGrantsPath:         strings.TrimSpace(*authzGrantsPath),
+		AuthzGrantsJSON:         strings.TrimSpace(os.Getenv("MONOFS_AUTHZ_GRANTS_JSON")),
+		OwnershipGateEnabled:    *ownershipGate,
+		AllowLocalIngest:        *localIngestEnabled,
+		AccessPolicyURL:         strings.TrimSpace(*accessPolicyURL),
+		AccessPolicyFile:        strings.TrimSpace(*accessPolicyFile),
+		AccessPolicyToken:       strings.TrimSpace(*accessPolicyToken),
+		AccessPolicyInterval:    *accessPolicyInterval,
+		AccessEnforce:           *accessEnforce,
+		AccessPolicyServeToken:  strings.TrimSpace(*accessPolicyServeToken),
+		InternalToken:           strings.TrimSpace(*internalToken),
 	}
 	r := router.NewRouter(cfg, logger)
 	r.SetVersion(Version, Commit, BuildTime)

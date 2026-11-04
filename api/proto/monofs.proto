@@ -68,6 +68,7 @@ service MonoFSRouter {
     rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
     rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
     rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
+    rpc QueryDuckDBSQL(QueryDuckDBSQLRequest) returns (QueryDuckDBSQLResponse);
     // AggregateTelemetry performs a shard-local partial aggregation. The
     // router fans this out and merges the partial rows.
     rpc AggregateTelemetry(AggregateTelemetryRequest) returns (AggregateTelemetryResponse);
@@ -174,6 +175,7 @@ service MonoFS {
     rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
     rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
     rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
+    rpc QueryDuckDBSQL(QueryDuckDBSQLRequest) returns (QueryDuckDBSQLResponse);
     // AggregateTelemetry performs a shard-local partial aggregation. The
     // router fans this out and merges the partial rows.
     rpc AggregateTelemetry(AggregateTelemetryRequest) returns (AggregateTelemetryResponse);
@@ -245,6 +247,8 @@ message KVSNodeStatus {
     string leader_id = 5;
     int32 peer_count = 6;
     int64 key_count = 7;
+    string leader_address = 8;
+    uint64 term = 9;
 }
 
 message LookupRequest {
@@ -941,6 +945,14 @@ message LogEngineStats {
     int64 last_compaction_unix_nano = 15;
     bool compaction_running = 16;
     int64 compaction_target_bytes = 17;
+    int64 log_buckets = 18;
+    int64 metric_buckets = 19;
+    int64 trace_buckets = 20;
+    int64 log_compacted_buckets = 21;
+    int64 metric_compacted_buckets = 22;
+    int64 trace_compacted_buckets = 23;
+    string duckdb_temp_dir = 24;
+    uint64 duckdb_fallbacks = 25;
 }
 
 // Cluster maintenance messages
@@ -1567,4 +1579,20 @@ message UpstreamBlameLine {
 
 message UpstreamBlameResponse {
     repeated UpstreamBlameLine lines = 1;
+}
+
+// QueryDuckDBSQLRequest runs a read-only SQL statement against a
+// partition-scoped DuckDB view (logs, metrics, or traces).
+message QueryDuckDBSQLRequest {
+    string dataset = 1;
+    string query = 2;
+    int64 from_unix_nano = 3;
+    int64 to_unix_nano = 4;
+    int32 limit = 5;
+    repeated string visible_partitions = 6;
+    bool visible_partitions_set = 7;
+}
+
+message QueryDuckDBSQLResponse {
+    string results_json = 1;
 }

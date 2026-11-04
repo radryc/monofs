@@ -173,7 +173,7 @@ func (s *Service) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_Fetc
 	// Fetch with streaming
 	reader, size, err := backend.FetchBlobStream(ctx, fetchReq)
 	if err != nil {
-		s.logger.Error("fetch failed", "content_id", req.ContentId, "error", err)
+		s.logger.Warn("fetch failed", "content_id", req.ContentId, "error", err)
 		fetcherBlobErrorsTotal.WithLabelValues(sourceType.String()).Inc()
 		return err
 	}
@@ -395,6 +395,18 @@ func (s *Service) CheckCache(ctx context.Context, req *pb.CheckCacheRequest) (*p
 }
 
 // GetStats returns fetcher statistics.
+// Observability returns WAL and S3 read-through state for the diagnostics API.
+func (s *Service) Observability() map[string]any {
+	result := map[string]any{"fetcher_id": s.fetcherID}
+	if backend, ok := s.registry.Get(SourceTypeBlob); ok {
+		if blobBackend, ok := backend.(*blob.BlobBackend); ok {
+			result["blob"] = blobBackend.Observability()
+		}
+	}
+	return result
+}
+
+// GetStats returns current fetcher statistics.
 func (s *Service) GetStats(ctx context.Context, req *pb.FetcherStatsRequest) (*pb.FetcherStatsResponse, error) {
 	resp := &pb.FetcherStatsResponse{
 		FetcherId:        s.fetcherID,

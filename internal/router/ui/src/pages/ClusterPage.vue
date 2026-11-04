@@ -38,6 +38,8 @@ function kvsStatusDetails(kvs?: NodeStatus['kvs']): string {
   if (kvs.mode === 'local') return `Single-node local store · ${keyCount} keys`
   const parts: string[] = []
   if (kvs.leader_id) parts.push(`Leader ${kvs.leader_id}`)
+  if (kvs.leader_address) parts.push(kvs.leader_address)
+  if (kvs.term) parts.push(`term ${kvs.term}`)
   if (kvs.peer_count) parts.push(`${kvs.peer_count} peers`)
   parts.push(`${keyCount} keys`)
   return parts.join(' · ')

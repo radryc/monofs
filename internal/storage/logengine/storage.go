@@ -43,9 +43,10 @@ const (
 	// maxManifestCacheEntries bounds the in-memory chunk manifest cache.
 	maxManifestCacheEntries = 32768
 	// maxSeriesIndexCacheEntries bounds the in-memory series index cache. Each
-	// entry is a small per-chunk slice (tens of KB); the cap keeps a large
-	// store from pinning hundreds of megabytes.
-	maxSeriesIndexCacheEntries = 512
+	// entry can hold thousands of label maps, so keep this deliberately small;
+	// discovery scans use the uncached reader to avoid retaining every chunk
+	// they touch.
+	maxSeriesIndexCacheEntries = 128
 	// maxLocalIndexDirs bounds the number of extracted Bluge index directories
 	// kept on local disk under CachedStore.localDir.
 	maxLocalIndexDirs = 256
@@ -619,6 +620,24 @@ func (c *CachedStore) ReadSeriesIndex(ctx context.Context, chunkID string) ([]Me
 	c.trimSeriesIndexLocked()
 	c.mu.Unlock()
 
+	return series, nil
+}
+
+// ReadSeriesIndexUncached decodes a chunk's series index without inserting it
+// into the shared cache. Bulk discovery walks every matching chunk, so caching
+// each full label map would pin far more memory than the result requires.
+func (c *CachedStore) ReadSeriesIndexUncached(ctx context.Context, chunkID string) ([]MetricSeriesMeta, error) {
+	path := filepath.ToSlash(filepath.Join("chunks", string(SignalMetrics), chunkID, "series.index.json"))
+	rc, err := c.remote.Read(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	var series []MetricSeriesMeta
+	if err := json.NewDecoder(rc).Decode(&series); err != nil {
+		return nil, err
+	}
 	return series, nil
 }
 
