@@ -20,9 +20,21 @@ import (
 // configured minimum age are compacted, and source chunks are deleted only
 // after a durable completion marker confirms every output is present.
 const (
-	defaultCompactionMaxRecords = 1_000_000
-	defaultCompactionMaxBytes   = 256 << 20
-	defaultCompactionMinAge     = time.Hour
+	// DefaultCompactionStartupDelay keeps the first background compaction from
+	// competing with process startup, logengine recovery, and Raft catch-up. A
+	// cold start can have a large telemetry backlog; compacting it immediately
+	// has historically pushed nodes past their container memory limit.
+	DefaultCompactionStartupDelay = 2 * time.Minute
+	// defaultCompactionMaxBytes bounds both one flush's in-memory record batch
+	// and the resulting output chunk. Keep this conservative: Go string/map
+	// overhead makes the real heap cost several times the estimated payload
+	// bytes, and a cold start may process many windows back-to-back.
+	defaultCompactionMaxBytes   = 64 << 20
+	defaultCompactionMaxRecords = 250_000
+	// Metrics records are smaller than spans, so allow a larger batch while
+	// keeping the same byte ceiling.
+	defaultCompactionMetricMaxRecords = 500_000
+	defaultCompactionMinAge           = time.Hour
 	// maxCompactionCatchUp bounds how far back the background worker looks for
 	// uncompacted chunks on each tick. Older backlog can still be compacted with
 	// monofs-logengine-compact.
@@ -730,7 +742,8 @@ func estimateLogRecordSize(record LogRecord) int {
 }
 
 func estimateMetricRecordSize(record MetricRecord) int {
-	size := len(record.Service) + len(record.MetricName) + 80
+	size := len(record.Service) + len(record.MetricName) + len(record.MetricType) +
+		len(record.Temporality) + len(record.Unit) + len(record.Description) + 96
 	for key, value := range record.Labels {
 		size += len(key) + len(value)
 	}
@@ -751,18 +764,37 @@ func (e *LogEngine) CompactRange(ctx context.Context, signal Signal, from, to ti
 	return e.compactor.CompactRange(ctx, signal, from, to, compactionOptions(signal))
 }
 
-// RunCompactor starts a background loop that compacts complete windows. Only
-// windows whose end is at least minAge in the past are touched. It walks the
-// configured lookback on every tick so a restart or a burst of small files
-// does not strand older chunks forever.
+// RunCompactor starts a background loop that compacts complete windows after
+// DefaultCompactionStartupDelay. Only windows whose end is at least minAge in
+// the past are touched. It walks the configured lookback on every tick so a
+// restart or a burst of small files does not strand older chunks forever.
 func (e *LogEngine) RunCompactor(ctx context.Context, interval, minAge time.Duration) {
+	e.RunCompactorWithStartupDelay(ctx, interval, minAge, DefaultCompactionStartupDelay)
+}
+
+// RunCompactorWithStartupDelay is RunCompactor with a configurable grace period
+// before the first compaction. A non-positive startupDelay compacts as soon as
+// the goroutine is scheduled, which is useful for tests and offline tools.
+func (e *LogEngine) RunCompactorWithStartupDelay(ctx context.Context, interval, minAge, startupDelay time.Duration) {
 	if interval <= 0 {
 		return
 	}
 	if minAge <= 0 {
 		minAge = defaultCompactionMinAge
 	}
+	if startupDelay < 0 {
+		startupDelay = 0
+	}
 	go func() {
+		if startupDelay > 0 {
+			timer := time.NewTimer(startupDelay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+			}
+		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		e.compactRecent(ctx, minAge)
@@ -817,8 +849,8 @@ func compactionWindow(signal Signal) time.Duration {
 func compactionOptions(signal Signal) CompactionOptions {
 	if signal == SignalMetrics {
 		return CompactionOptions{
-			MaxRecords: 2_000_000,
-			MaxBytes:   256 << 20,
+			MaxRecords: defaultCompactionMetricMaxRecords,
+			MaxBytes:   defaultCompactionMaxBytes,
 		}
 	}
 	return CompactionOptions{

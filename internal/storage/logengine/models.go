@@ -1,6 +1,14 @@
 package logengine
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrUnsupportedMetricSchema is returned when a metric chunk was written with
+// an older Parquet schema. Metric chunks are not dual-read; operators must
+// re-ingest or drop old metric chunks during an upgrade.
+var ErrUnsupportedMetricSchema = errors.New("unsupported metric chunk schema")
 
 // MetricMatchType identifies how a metric label matcher should be evaluated.
 type MetricMatchType string
@@ -35,6 +43,11 @@ const (
 	SignalTraces  Signal = "traces"
 )
 
+// MetricSchemaVersion is the current metric Parquet/manifest schema. Metric
+// chunks are not backward compatible: readers reject older schema versions
+// instead of carrying a dual-read path.
+const MetricSchemaVersion = 3
+
 // LogRecord represents a single structured log entry.
 type LogRecord struct {
 	Timestamp  time.Time `json:"timestamp"`
@@ -51,9 +64,19 @@ type LogRecord struct {
 // MetricRecord represents a single metric data point.
 type MetricRecord struct {
 	Timestamp  time.Time
+	StartTime  time.Time
 	Service    string
 	MetricName string
 	Value      float64
+	// MetricType is the OTLP aggregation kind: gauge, counter,
+	// up_down_counter, histogram, exponential_histogram, or summary.
+	MetricType string
+	// Temporality is the OTLP aggregation temporality: cumulative or delta.
+	Temporality string
+	// Unit and Description are metric family metadata. They are stored in the
+	// chunk series index rather than repeated on every sample row.
+	Unit        string
+	Description string
 	// Labels is a flat map of label key→value pairs (e.g. {"env": "prod"}).
 	Labels map[string]string
 }
@@ -112,9 +135,12 @@ type ChunkManifest struct {
 // ingester carry one of these per series in series.index.json so aggregations
 // like `count by (__name__)` and series discovery never scan sample data.
 type MetricSeriesMeta struct {
-	MetricName string            `json:"metric_name"`
-	Service    string            `json:"service,omitempty"`
-	Labels     map[string]string `json:"labels,omitempty"`
-	MinTime    time.Time         `json:"min_time"`
-	MaxTime    time.Time         `json:"max_time"`
+	MetricName  string            `json:"metric_name"`
+	Service     string            `json:"service,omitempty"`
+	MetricType  string            `json:"metric_type,omitempty"`
+	Unit        string            `json:"unit,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	MinTime     time.Time         `json:"min_time"`
+	MaxTime     time.Time         `json:"max_time"`
 }

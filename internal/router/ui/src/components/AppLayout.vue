@@ -9,7 +9,7 @@ import AskDrawer from './AskDrawer.vue'
 import {
   LayoutDashboard, Server, Users, Zap, GitBranch,
   BookOpen, Upload, Search, Layers, Download, Package, Container, SlidersHorizontal,
-  Cpu, Menu, Play, Archive
+  Cpu, Menu, Play, Activity
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -52,7 +52,7 @@ const navItems = [
   { to: '/search',       icon: Search,          label: 'Search' },
   { to: '/indexer',      icon: Layers,          label: 'Indexer' },
   { to: '/fetchers',     icon: Download,        label: 'Fetchers' },
-  { to: '/compactor',    icon: Archive,         label: 'Compactor' },
+  { to: '/span-engine', icon: Activity,        label: 'Span engine' },
   { to: '/dependencies', icon: Package,         label: 'Dependencies' },
   { to: '/registry',     icon: Container,       label: 'Registry' },
 ]

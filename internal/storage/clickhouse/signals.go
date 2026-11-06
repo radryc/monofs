@@ -180,12 +180,17 @@ func (s *TraceStore) IngestMetrics(ctx context.Context, _ string, metrics []loge
 }
 
 type insertMetric struct {
-	Tenant     string            `json:"tenant"`
-	Timestamp  string            `json:"timestamp"`
-	Service    string            `json:"service"`
-	MetricName string            `json:"metric_name"`
-	Value      float64           `json:"value"`
-	Labels     map[string]string `json:"labels"`
+	Tenant      string            `json:"tenant"`
+	Timestamp   string            `json:"timestamp"`
+	StartTime   string            `json:"start_time"`
+	Service     string            `json:"service"`
+	MetricName  string            `json:"metric_name"`
+	Value       float64           `json:"value"`
+	MetricType  string            `json:"metric_type"`
+	Temporality string            `json:"temporality"`
+	Unit        string            `json:"unit"`
+	Description string            `json:"description"`
+	Labels      map[string]string `json:"labels"`
 }
 
 func (s *TraceStore) insertMetricBatch(ctx context.Context, metrics []logengine.MetricRecord) error {
@@ -200,19 +205,28 @@ func (s *TraceStore) insertMetricBatch(ctx context.Context, metrics []logengine.
 		if ts.IsZero() {
 			ts = time.Unix(0, 0)
 		}
+		startTime := record.StartTime
+		if startTime.IsZero() {
+			startTime = time.Unix(0, 0)
+		}
 		if err := encoder.Encode(insertMetric{
-			Tenant:     s.cfg.Tenant,
-			Timestamp:  formatClickHouseTime(ts),
-			Service:    record.Service,
-			MetricName: record.MetricName,
-			Value:      record.Value,
-			Labels:     labels,
+			Tenant:      s.cfg.Tenant,
+			Timestamp:   formatClickHouseTime(ts),
+			StartTime:   formatClickHouseTime(startTime),
+			Service:     record.Service,
+			MetricName:  record.MetricName,
+			Value:       record.Value,
+			MetricType:  record.MetricType,
+			Temporality: record.Temporality,
+			Unit:        record.Unit,
+			Description: record.Description,
+			Labels:      labels,
 		}); err != nil {
 			return fmt.Errorf("encode clickhouse metric: %w", err)
 		}
 	}
 	statement := "INSERT INTO " + s.tableFor(s.cfg.MetricsTable) +
-		" (tenant, timestamp, service, metric_name, value, labels) FORMAT JSONEachRow"
+		" (tenant, timestamp, start_time, service, metric_name, value, metric_type, temporality, unit, description, labels) FORMAT JSONEachRow"
 	if err := s.exec(ctx, statement, nil, &body); err != nil {
 		return fmt.Errorf("insert clickhouse metrics: %w", err)
 	}
@@ -228,7 +242,8 @@ func (s *TraceStore) StreamMetrics(ctx context.Context, query logengine.MetricQu
 	filter := s.newFilter()
 	filter.addTimeRange(from, to)
 	filter.addMetricQuery(query)
-	statement := "SELECT toUnixTimestamp64Nano(timestamp) AS timestamp_ns, service, metric_name, value, toJSONString(labels) AS labels_json FROM " +
+	statement := "SELECT toUnixTimestamp64Nano(timestamp) AS timestamp_ns, toUnixTimestamp64Nano(start_time) AS start_time_ns, " +
+		"service, metric_name, value, metric_type, temporality, unit, description, toJSONString(labels) AS labels_json FROM " +
 		s.tableFor(s.cfg.MetricsTable) + " WHERE " + filter.whereSQL() +
 		" ORDER BY timestamp LIMIT " + strconv.Itoa(maxMetricRows+1) + " FORMAT JSONEachRow"
 	response, err := s.do(ctx, statement, filter.params, nil)
@@ -241,9 +256,14 @@ func (s *TraceStore) StreamMetrics(ctx context.Context, query logengine.MetricQu
 	for {
 		var row struct {
 			TimestampNS int64   `json:"timestamp_ns"`
+			StartTimeNS int64   `json:"start_time_ns"`
 			Service     string  `json:"service"`
 			MetricName  string  `json:"metric_name"`
 			Value       float64 `json:"value"`
+			MetricType  string  `json:"metric_type"`
+			Temporality string  `json:"temporality"`
+			Unit        string  `json:"unit"`
+			Description string  `json:"description"`
 			LabelsJSON  string  `json:"labels_json"`
 		}
 		if err := decoder.Decode(&row); err != nil {
@@ -257,10 +277,17 @@ func (s *TraceStore) StreamMetrics(ctx context.Context, query logengine.MetricQu
 			return fmt.Errorf("%w: more than %d metric samples", logengine.ErrQueryTooBroad, maxMetricRows)
 		}
 		record := logengine.MetricRecord{
-			Timestamp:  time.Unix(0, row.TimestampNS).UTC(),
-			Service:    row.Service,
-			MetricName: row.MetricName,
-			Value:      row.Value,
+			Timestamp:   time.Unix(0, row.TimestampNS).UTC(),
+			Service:     row.Service,
+			MetricName:  row.MetricName,
+			Value:       row.Value,
+			MetricType:  row.MetricType,
+			Temporality: row.Temporality,
+			Unit:        row.Unit,
+			Description: row.Description,
+		}
+		if row.StartTimeNS != 0 {
+			record.StartTime = time.Unix(0, row.StartTimeNS).UTC()
 		}
 		if row.LabelsJSON != "" {
 			_ = json.Unmarshal([]byte(row.LabelsJSON), &record.Labels)
@@ -357,7 +384,8 @@ func (s *TraceStore) StreamMetricSeries(ctx context.Context, query logengine.Met
 	filter := s.newFilter()
 	filter.addTimeRange(from, to)
 	filter.addMetricQuery(query)
-	statement := "SELECT metric_name, service, toJSONString(labels) AS labels_json, " +
+	statement := "SELECT metric_name, service, any(metric_type) AS metric_type, any(unit) AS unit, " +
+		"any(description) AS description, toJSONString(labels) AS labels_json, " +
 		"toUnixTimestamp64Nano(min(timestamp)) AS min_ns, toUnixTimestamp64Nano(max(timestamp)) AS max_ns FROM " +
 		s.tableFor(s.cfg.MetricsTable) + " WHERE " + filter.whereSQL() +
 		" GROUP BY metric_name, service, toJSONString(labels) " +
@@ -371,11 +399,14 @@ func (s *TraceStore) StreamMetricSeries(ctx context.Context, query logengine.Met
 	count := 0
 	for {
 		var row struct {
-			MetricName string `json:"metric_name"`
-			Service    string `json:"service"`
-			LabelsJSON string `json:"labels_json"`
-			MinNS      int64  `json:"min_ns"`
-			MaxNS      int64  `json:"max_ns"`
+			MetricName  string `json:"metric_name"`
+			Service     string `json:"service"`
+			MetricType  string `json:"metric_type"`
+			Unit        string `json:"unit"`
+			Description string `json:"description"`
+			LabelsJSON  string `json:"labels_json"`
+			MinNS       int64  `json:"min_ns"`
+			MaxNS       int64  `json:"max_ns"`
 		}
 		if err := decoder.Decode(&row); err != nil {
 			if err == io.EOF {
@@ -388,10 +419,13 @@ func (s *TraceStore) StreamMetricSeries(ctx context.Context, query logengine.Met
 			return fmt.Errorf("%w: more than %d distinct series", logengine.ErrMetricSeriesLimit, maxMetricSeries)
 		}
 		meta := logengine.MetricSeriesMeta{
-			MetricName: row.MetricName,
-			Service:    row.Service,
-			MinTime:    time.Unix(0, row.MinNS).UTC(),
-			MaxTime:    time.Unix(0, row.MaxNS).UTC(),
+			MetricName:  row.MetricName,
+			Service:     row.Service,
+			MetricType:  row.MetricType,
+			Unit:        row.Unit,
+			Description: row.Description,
+			MinTime:     time.Unix(0, row.MinNS).UTC(),
+			MaxTime:     time.Unix(0, row.MaxNS).UTC(),
 		}
 		if row.LabelsJSON != "" {
 			_ = json.Unmarshal([]byte(row.LabelsJSON), &meta.Labels)
@@ -407,11 +441,6 @@ func (s *TraceStore) StreamMetricSeries(ctx context.Context, query logengine.Met
 // query service; the shard-local aggregate RPC is a follow-up.
 func (s *TraceStore) Aggregate(context.Context, logengine.AggregateQuery) ([]logengine.AggregateRow, error) {
 	return nil, fmt.Errorf("telemetry aggregation is not supported by the ClickHouse backend yet")
-}
-
-// QueryDuckDBSQL is a local-logengine-only SQL console feature today.
-func (s *TraceStore) QueryDuckDBSQL(context.Context, string, string, time.Time, time.Time, int, logengine.QueryScope) (logengine.DuckDBSQLResult, error) {
-	return logengine.DuckDBSQLResult{}, fmt.Errorf("DuckDB SQL is not supported by the ClickHouse backend")
 }
 
 // Stats returns an empty local-chunk snapshot. ClickHouse owns the telemetry

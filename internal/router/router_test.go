@@ -145,6 +145,12 @@ func TestGetClusterInfo(t *testing.T) {
 		t.Errorf("unexpected version: %d", resp.Version)
 	}
 
+	for _, node := range resp.Nodes {
+		if got := node.Metadata["span_engine"]; got != cfg.SpanEngine {
+			t.Errorf("node %s span_engine = %q, want %q", node.NodeId, got, cfg.SpanEngine)
+		}
+	}
+
 	// Verify node details
 	foundNode1 := false
 	foundNode2 := false

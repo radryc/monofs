@@ -1218,6 +1218,9 @@ func metricSeriesItemFromMeta(meta logengine.MetricSeriesMeta) *pb.MetricSeriesI
 		Labels:          meta.Labels,
 		MinTimeUnixNano: meta.MinTime.UnixNano(),
 		MaxTimeUnixNano: meta.MaxTime.UnixNano(),
+		MetricType:      meta.MetricType,
+		Unit:            meta.Unit,
+		Description:     meta.Description,
 	}
 }
 

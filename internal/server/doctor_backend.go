@@ -83,6 +83,44 @@ func (s *Server) logEngineProtoStats(ctx context.Context) *pb.LogEngineStats {
 			out.LastCompactionUnixNano = compaction.LastRun.UnixNano()
 		}
 	}
+	if provider, ok := s.logEngine.(interface {
+		ClickHouseStats(context.Context) logengine.ClickHouseStats
+	}); ok {
+		stats := provider.ClickHouseStats(ctx)
+		out.Clickhouse = clickHouseProtoStats(stats)
+	}
+	return out
+}
+
+func clickHouseProtoStats(stats logengine.ClickHouseStats) *pb.ClickHouseStats {
+	if !stats.Enabled {
+		return nil
+	}
+	out := &pb.ClickHouseStats{
+		Enabled:          stats.Enabled,
+		Healthy:          stats.Healthy,
+		Version:          stats.Version,
+		Url:              stats.URL,
+		Database:         stats.Database,
+		Tenant:           stats.Tenant,
+		DiskTotalBytes:   stats.DiskTotalBytes,
+		DiskFreeBytes:    stats.DiskFreeBytes,
+		DiskUsedBytes:    stats.DiskUsedBytes,
+		TotalBytes:       stats.TotalBytes,
+		TotalRows:        stats.TotalRows,
+		Parts:            stats.Parts,
+		SpansBytes:       stats.SpansBytes,
+		SpansRows:        stats.SpansRows,
+		LogsBytes:        stats.LogsBytes,
+		LogsRows:         stats.LogsRows,
+		MetricsBytes:     stats.MetricsBytes,
+		MetricsRows:      stats.MetricsRows,
+		RetentionSeconds: stats.RetentionSeconds,
+		Error:            stats.Error,
+	}
+	if !stats.Measured.IsZero() {
+		out.MeasuredUnixNano = stats.Measured.UnixNano()
+	}
 	return out
 }
 
@@ -133,13 +171,21 @@ func protoToLogRecords(entries []*pb.LogEntry) []logengine.LogRecord {
 func protoToMetricRecords(entries []*pb.MetricEntry) []logengine.MetricRecord {
 	out := make([]logengine.MetricRecord, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, logengine.MetricRecord{
-			Timestamp:  time.Unix(0, e.TimestampUnixNano),
-			Service:    e.Service,
-			MetricName: e.MetricName,
-			Value:      e.Value,
-			Labels:     e.Labels,
-		})
+		record := logengine.MetricRecord{
+			Timestamp:   time.Unix(0, e.TimestampUnixNano),
+			Service:     e.Service,
+			MetricName:  e.MetricName,
+			Value:       e.Value,
+			MetricType:  e.MetricType,
+			Temporality: e.Temporality,
+			Unit:        e.Unit,
+			Description: e.Description,
+			Labels:      e.Labels,
+		}
+		if e.StartTimeUnixNano != 0 {
+			record.StartTime = time.Unix(0, e.StartTimeUnixNano)
+		}
+		out = append(out, record)
 	}
 	return out
 }

@@ -331,7 +331,77 @@ func TestCompactorStatsTracksLastRun(t *testing.T) {
 	if stats.LastResult.OutputChunks != 1 || stats.InputChunks != 2 {
 		t.Fatalf("compaction totals = %+v", stats)
 	}
-	if stats.TargetBytes != 256<<20 {
+	if stats.TargetBytes != defaultCompactionMaxBytes {
 		t.Fatalf("target bytes = %d", stats.TargetBytes)
+	}
+}
+
+func TestCompactionOptionsBoundColdStartMemory(t *testing.T) {
+	for _, signal := range []Signal{SignalLogs, SignalMetrics, SignalTraces} {
+		t.Run(string(signal), func(t *testing.T) {
+			wantRecords := defaultCompactionMaxRecords
+			if signal == SignalMetrics {
+				wantRecords = defaultCompactionMetricMaxRecords
+			}
+			opts := compactionOptions(signal)
+			if opts.MaxBytes != defaultCompactionMaxBytes {
+				t.Fatalf("MaxBytes = %d, want %d", opts.MaxBytes, defaultCompactionMaxBytes)
+			}
+			if opts.MaxRecords != wantRecords {
+				t.Fatalf("MaxRecords = %d, want %d", opts.MaxRecords, wantRecords)
+			}
+		})
+	}
+	if defaultCompactionMaxBytes > 64<<20 {
+		t.Fatalf("default MaxBytes = %d, want <= 64 MiB", defaultCompactionMaxBytes)
+	}
+	if defaultCompactionMaxRecords > 250_000 {
+		t.Fatalf("default MaxRecords = %d, want <= 250000", defaultCompactionMaxRecords)
+	}
+}
+
+func TestRunCompactorWithStartupDelay(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_compact_startup_delay_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{LocalCacheDir: filepath.Join(tmpDir, "cache")})
+
+	// Put two raw chunks in a completed window so compactRecent can find them.
+	hour := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Hour)
+	for idx := 0; idx < 2; idx++ {
+		start := hour.Add(time.Duration(idx) * time.Minute)
+		if err := engine.IngestLogs(ctx, fmt.Sprintf("chunk-delay-%d-%d", idx, start.UnixNano()), []LogRecord{
+			{Timestamp: start, Service: "payment", Level: "info", RawMessage: "a"},
+		}); err != nil {
+			t.Fatalf("IngestLogs(%d) error = %v", idx, err)
+		}
+	}
+
+	engine.RunCompactorWithStartupDelay(ctx, time.Hour, time.Hour, 250*time.Millisecond)
+
+	// The first compaction must not run during the startup grace period.
+	time.Sleep(50 * time.Millisecond)
+	if stats := engine.CompactionStats(); stats.Runs != 0 || stats.InputChunks != 0 {
+		t.Fatalf("compaction ran before startup delay: %+v", stats)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		stats := engine.CompactionStats()
+		if stats.DeletedChunks >= 2 {
+			if stats.InputChunks < 2 {
+				t.Fatalf("compaction stats = %+v, want at least 2 input chunks", stats)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("compaction did not run after startup delay: %+v", engine.CompactionStats())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

@@ -285,11 +285,14 @@ func (b *sidecarBackend) StreamMetricSeries(ctx context.Context, query logengine
 			return recvErr
 		}
 		if err := yield(logengine.MetricSeriesMeta{
-			MetricName: item.GetMetricName(),
-			Service:    item.GetService(),
-			Labels:     item.GetLabels(),
-			MinTime:    time.Unix(0, item.GetMinTimeUnixNano()).UTC(),
-			MaxTime:    time.Unix(0, item.GetMaxTimeUnixNano()).UTC(),
+			MetricName:  item.GetMetricName(),
+			Service:     item.GetService(),
+			MetricType:  item.GetMetricType(),
+			Unit:        item.GetUnit(),
+			Description: item.GetDescription(),
+			Labels:      item.GetLabels(),
+			MinTime:     time.Unix(0, item.GetMinTimeUnixNano()).UTC(),
+			MaxTime:     time.Unix(0, item.GetMaxTimeUnixNano()).UTC(),
 		}); err != nil {
 			return err
 		}
