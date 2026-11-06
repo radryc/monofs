@@ -1103,6 +1103,7 @@ func (r *Router) GetClusterInfo(ctx context.Context, req *pb.ClusterInfoRequest)
 		// Build metadata map with operational status
 		metadata := make(map[string]string)
 		metadata["status"] = state.status.String()
+		metadata["span_engine"] = r.config.SpanEngine
 		if state.status == NodeSyncing {
 			metadata["sync_progress"] = fmt.Sprintf("%.1f%%", state.syncProgress*100)
 		}
@@ -1529,6 +1530,32 @@ func (r *Router) QueryDuckDBSQL(ctx context.Context, req *pb.QueryDuckDBSQLReque
 		Address string          `json:"address"`
 		Result  json.RawMessage `json:"result,omitempty"`
 		Error   string          `json:"error,omitempty"`
+	}
+	// A shared backend (ClickHouse) already contains every node's data. Run the
+	// statement on one healthy node and return a single result envelope instead
+	// of duplicating the same global result once per node.
+	if r.sharedTelemetryReads() {
+		var firstErr error
+		for _, node := range nodes {
+			resp, err := node.client.QueryDuckDBSQL(ctx, req)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			results := []nodeResult{{
+				NodeID:  node.id,
+				Address: node.address,
+				Result:  json.RawMessage(resp.GetResultsJson()),
+			}}
+			data, err := json.Marshal(map[string]any{"nodes": results})
+			if err != nil {
+				return nil, fmt.Errorf("marshal duckdb sql results: %w", err)
+			}
+			return &pb.QueryDuckDBSQLResponse{ResultsJson: string(data)}, nil
+		}
+		return nil, fmt.Errorf("query duckdb sql failed on all nodes: %w", firstErr)
 	}
 	results := make([]nodeResult, len(nodes))
 	var wg sync.WaitGroup

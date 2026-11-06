@@ -847,3 +847,62 @@ func TestChunkBucketCountsDistinguishCompactedAndRawBuckets(t *testing.T) {
 		t.Fatalf("legacy chunkBucketKey() = %q", got)
 	}
 }
+
+func TestLogEngine_MetricMetadataRoundTrip(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logengine_metric_metadata_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	record := MetricRecord{
+		Timestamp:   base,
+		StartTime:   base.Add(-time.Minute),
+		Service:     "api",
+		MetricName:  "request_duration_seconds_sum",
+		Value:       1.25,
+		MetricType:  "histogram",
+		Temporality: "cumulative",
+		Unit:        "s",
+		Description: "Request duration",
+		Labels:      map[string]string{"env": "prod"},
+	}
+	if err := engine.IngestMetrics(ctx, "chunk-metric-metadata", []MetricRecord{record}); err != nil {
+		t.Fatalf("IngestMetrics() error = %v", err)
+	}
+
+	points, err := engine.QueryMetrics(ctx, MetricQuery{MetricName: record.MetricName}, base.Add(-time.Hour), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("QueryMetrics() error = %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("points = %d, want 1", len(points))
+	}
+	got := points[0]
+	if got.MetricType != "histogram" || got.Temporality != "cumulative" {
+		t.Fatalf("metadata = type %q temporality %q", got.MetricType, got.Temporality)
+	}
+	if got.StartTime.IsZero() || !got.StartTime.Equal(record.StartTime) {
+		t.Fatalf("start time = %v, want %v", got.StartTime, record.StartTime)
+	}
+
+	var series []MetricSeriesMeta
+	if err := engine.StreamMetricSeries(ctx, MetricQuery{MetricName: record.MetricName}, base.Add(-time.Hour), base.Add(time.Hour), func(meta MetricSeriesMeta) error {
+		series = append(series, meta)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamMetricSeries() error = %v", err)
+	}
+	if len(series) != 1 {
+		t.Fatalf("series = %d, want 1", len(series))
+	}
+	if series[0].MetricType != "histogram" || series[0].Unit != "s" || series[0].Description != "Request duration" {
+		t.Fatalf("series metadata = %+v", series[0])
+	}
+}

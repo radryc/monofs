@@ -124,6 +124,9 @@ func writeMetricRowGroup(rgw file.SerialRowGroupWriter, metrics []MetricRecord) 
 	values := make([]float64, n)
 	labels := make([]parquet.ByteArray, n)
 	partitions := make([]parquet.ByteArray, n)
+	metricTypes := make([]parquet.ByteArray, n)
+	temporalities := make([]parquet.ByteArray, n)
+	startTimes := make([]int64, n)
 	for idx, record := range metrics {
 		timestamps[idx] = record.Timestamp.UnixNano()
 		services[idx] = parquet.ByteArray(record.Service)
@@ -132,6 +135,11 @@ func writeMetricRowGroup(rgw file.SerialRowGroupWriter, metrics []MetricRecord) 
 		encoded, _ := json.Marshal(record.Labels)
 		labels[idx] = encoded
 		partitions[idx] = parquet.ByteArray(recordPartition(record.Labels))
+		metricTypes[idx] = parquet.ByteArray(record.MetricType)
+		temporalities[idx] = parquet.ByteArray(record.Temporality)
+		if !record.StartTime.IsZero() {
+			startTimes[idx] = record.StartTime.UnixNano()
+		}
 	}
 	for _, write := range []func() error{
 		func() error { return writeInt64(timestamps) },
@@ -140,6 +148,9 @@ func writeMetricRowGroup(rgw file.SerialRowGroupWriter, metrics []MetricRecord) 
 		func() error { return writeFloat64(values) },
 		func() error { return writeBytes(labels) },
 		func() error { return writeBytes(partitions) },
+		func() error { return writeBytes(metricTypes) },
+		func() error { return writeBytes(temporalities) },
+		func() error { return writeInt64(startTimes) },
 	} {
 		if err := write(); err != nil {
 			return err
@@ -273,6 +284,9 @@ func (i *Ingester) writeMetricParquetBatched(ctx context.Context, path string, m
 		schema.NewFloat64Node("value", parquet.Repetitions.Required, -1),
 		parquetStringNode("labels_json"),
 		parquetStringNode("partition_name"),
+		parquetStringNode("metric_type"),
+		parquetStringNode("temporality"),
+		schema.NewInt64Node("start_time", parquet.Repetitions.Required, -1),
 	}, -1)
 	if err != nil {
 		return 0, 0, err

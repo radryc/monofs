@@ -160,6 +160,7 @@ func (r *Router) ServeHTTP() http.Handler {
 	mux.HandleFunc("/api/fetcher-key-status", r.handleFetcherKeyStatus)
 	mux.HandleFunc("/api/confirm-fetcher-key", r.handleConfirmFetcherKey)
 	mux.HandleFunc("/api/logengine", r.handleLogEngineAPI)
+	mux.HandleFunc("/api/span-engine", r.handleLogEngineAPI)
 	mux.HandleFunc("/api/fs/ls", r.handleFSList)
 	mux.HandleFunc("/api/access/policy", r.handleAccessPolicy)
 
@@ -1764,7 +1765,11 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 	for k, v := range r.nodes {
 		nodesSnapshot[k] = v
 	}
+	spanEngine := strings.ToLower(strings.TrimSpace(r.config.SpanEngine))
 	r.mu.RUnlock()
+	if spanEngine == "" {
+		spanEngine = "logengine"
+	}
 
 	type nodeLogStats struct {
 		NodeID                 string `json:"node_id"`
@@ -1798,6 +1803,8 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 
 	var (
 		nodes                  []nodeLogStats
+		clickHouseRaw          *pb.ClickHouseStats
+		clickHouseNode         string
 		totalLogs              int64
 		totalMetrics           int64
 		totalTraces            int64
@@ -1873,6 +1880,14 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 			totalCompactionOut += le.CompactionOutputChunks
 			totalCompactionDeleted += le.CompactionDeletedChunks
 			totalCompactionRecords += le.CompactionRecords
+			if ch := le.Clickhouse; ch != nil && ch.Enabled {
+				// Every node writes to the same ClickHouse tables, so the
+				// router reports one snapshot instead of summing node stats.
+				if clickHouseRaw == nil || (!clickHouseRaw.Healthy && ch.Healthy) {
+					clickHouseRaw = ch
+					clickHouseNode = nodeID
+				}
+			}
 		}
 		nodes = append(nodes, ns)
 	}
@@ -1880,8 +1895,75 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 	// Sort for stable output.
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID < nodes[j].NodeID })
 
+	// A node-reported ClickHouse snapshot wins over the router flag: the
+	// router and server are deployed independently, and the data path is what
+	// the page should describe.
+	if clickHouseRaw != nil {
+		spanEngine = "clickhouse"
+	}
+
+	type clickHouseStatsResponse struct {
+		Enabled          bool   `json:"enabled"`
+		Healthy          bool   `json:"healthy"`
+		Version          string `json:"version,omitempty"`
+		URL              string `json:"url,omitempty"`
+		Database         string `json:"database,omitempty"`
+		Tenant           string `json:"tenant,omitempty"`
+		DiskTotalBytes   uint64 `json:"disk_total_bytes"`
+		DiskFreeBytes    uint64 `json:"disk_free_bytes"`
+		DiskUsedBytes    uint64 `json:"disk_used_bytes"`
+		TotalBytes       uint64 `json:"total_bytes"`
+		TotalRows        uint64 `json:"total_rows"`
+		Parts            uint64 `json:"parts"`
+		SpansBytes       uint64 `json:"spans_bytes"`
+		SpansRows        uint64 `json:"spans_rows"`
+		LogsBytes        uint64 `json:"logs_bytes"`
+		LogsRows         uint64 `json:"logs_rows"`
+		MetricsBytes     uint64 `json:"metrics_bytes"`
+		MetricsRows      uint64 `json:"metrics_rows"`
+		RetentionSeconds int64  `json:"retention_seconds"`
+		Error            string `json:"error,omitempty"`
+		MeasuredUnixNano int64  `json:"measured_unix_nano"`
+		ReportingNode    string `json:"reporting_node,omitempty"`
+	}
+	var clickHouse *clickHouseStatsResponse
+	if clickHouseRaw != nil {
+		clickHouse = &clickHouseStatsResponse{
+			Enabled:          clickHouseRaw.Enabled,
+			Healthy:          clickHouseRaw.Healthy,
+			Version:          clickHouseRaw.Version,
+			URL:              clickHouseRaw.Url,
+			Database:         clickHouseRaw.Database,
+			Tenant:           clickHouseRaw.Tenant,
+			DiskTotalBytes:   clickHouseRaw.DiskTotalBytes,
+			DiskFreeBytes:    clickHouseRaw.DiskFreeBytes,
+			DiskUsedBytes:    clickHouseRaw.DiskUsedBytes,
+			TotalBytes:       clickHouseRaw.TotalBytes,
+			TotalRows:        clickHouseRaw.TotalRows,
+			Parts:            clickHouseRaw.Parts,
+			SpansBytes:       clickHouseRaw.SpansBytes,
+			SpansRows:        clickHouseRaw.SpansRows,
+			LogsBytes:        clickHouseRaw.LogsBytes,
+			LogsRows:         clickHouseRaw.LogsRows,
+			MetricsBytes:     clickHouseRaw.MetricsBytes,
+			MetricsRows:      clickHouseRaw.MetricsRows,
+			RetentionSeconds: clickHouseRaw.RetentionSeconds,
+			Error:            clickHouseRaw.Error,
+			MeasuredUnixNano: clickHouseRaw.MeasuredUnixNano,
+			ReportingNode:    clickHouseNode,
+		}
+	} else if spanEngine == "clickhouse" {
+		clickHouse = &clickHouseStatsResponse{
+			Enabled: true,
+			Healthy: false,
+			Error:   "No node has reported ClickHouse statistics yet",
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
+		"span_engine":               spanEngine,
+		"clickhouse":                clickHouse,
 		"enabled":                   anyEnabled,
 		"log_chunks":                totalLogs,
 		"metric_chunks":             totalMetrics,

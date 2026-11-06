@@ -953,6 +953,34 @@ message LogEngineStats {
     int64 trace_compacted_buckets = 23;
     string duckdb_temp_dir = 24;
     uint64 duckdb_fallbacks = 25;
+    ClickHouseStats clickhouse = 26;
+}
+
+// ClickHouseStats reports the shared ClickHouse telemetry backend as seen by a
+// node. Every node writes to the same tables, so the router uses one snapshot
+// rather than summing across nodes.
+message ClickHouseStats {
+    bool enabled = 1;
+    bool healthy = 2;
+    string version = 3;
+    string url = 4;
+    string database = 5;
+    string tenant = 6;
+    uint64 disk_total_bytes = 7;
+    uint64 disk_free_bytes = 8;
+    uint64 disk_used_bytes = 9;
+    uint64 total_bytes = 10;
+    uint64 total_rows = 11;
+    uint64 parts = 12;
+    uint64 spans_bytes = 13;
+    uint64 spans_rows = 14;
+    uint64 logs_bytes = 15;
+    uint64 logs_rows = 16;
+    uint64 metrics_bytes = 17;
+    uint64 metrics_rows = 18;
+    int64 retention_seconds = 19;
+    string error = 20;
+    int64 measured_unix_nano = 21;
 }
 
 // Cluster maintenance messages
@@ -1381,6 +1409,9 @@ message MetricSeriesItem {
     map<string, string> labels = 3;
     int64 min_time_unix_nano = 4;
     int64 max_time_unix_nano = 5;
+    string metric_type = 6;
+    string unit = 7;
+    string description = 8;
 }
 
 // LogEntry is a single log record for ingest.
@@ -1411,6 +1442,11 @@ message MetricEntry {
     string metric_name = 3;
     double value = 4;
     map<string, string> labels = 5;
+    int64 start_time_unix_nano = 6;
+    string metric_type = 7;
+    string temporality = 8;
+    string unit = 9;
+    string description = 10;
 }
 
 message IngestMetricsRequest {

@@ -14,7 +14,8 @@ const routes = [
   { path: '/search', component: () => import('../pages/SearchPage.vue'), meta: { title: 'Search' } },
   { path: '/indexer', component: () => import('../pages/IndexerPage.vue'), meta: { title: 'Indexer' } },
   { path: '/fetchers', component: () => import('../pages/FetchersPage.vue'), meta: { title: 'Fetchers' } },
-  { path: '/compactor', component: () => import('../pages/CompactorPage.vue'), meta: { title: 'Compactor' } },
+  { path: '/span-engine', component: () => import('../pages/SpanEnginePage.vue'), meta: { title: 'Span engine' } },
+  { path: '/compactor', redirect: '/span-engine' },
   { path: '/dependencies', component: () => import('../pages/DependenciesPage.vue'), meta: { title: 'Dependencies' } },
   { path: '/registry', component: () => import('../pages/RegistryPage.vue'), meta: { title: 'Registry' } },
 ]

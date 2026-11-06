@@ -148,7 +148,12 @@ func (b *HybridBackend) Aggregate(ctx context.Context, query logengine.Aggregate
 
 func (b *HybridBackend) QueryDuckDBSQL(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope) (logengine.DuckDBSQLResult, error) {
 	if strings.EqualFold(strings.TrimSpace(dataset), "traces") {
-		return logengine.DuckDBSQLResult{}, fmt.Errorf("trace SQL is not supported by the ClickHouse backend yet")
+		if sqlStore, ok := b.traces.(interface {
+			QueryDuckDBSQL(context.Context, string, string, time.Time, time.Time, int, logengine.QueryScope) (logengine.DuckDBSQLResult, error)
+		}); ok {
+			return sqlStore.QueryDuckDBSQL(ctx, dataset, query, from, to, limit, scope)
+		}
+		return logengine.DuckDBSQLResult{}, fmt.Errorf("trace SQL is not supported by the configured trace backend")
 	}
 	base, err := b.baseOrErr()
 	if err != nil {
@@ -181,6 +186,21 @@ func (b *HybridBackend) CompactionStats() logengine.CompactionStats {
 		return provider.CompactionStats()
 	}
 	return logengine.CompactionStats{}
+}
+
+// ClickHouseStats forwards the optional shared ClickHouse backend snapshot.
+func (b *HybridBackend) ClickHouseStats(ctx context.Context) logengine.ClickHouseStats {
+	if provider, ok := b.traces.(interface {
+		ClickHouseStats(context.Context) logengine.ClickHouseStats
+	}); ok {
+		return provider.ClickHouseStats(ctx)
+	}
+	if provider, ok := b.base.(interface {
+		ClickHouseStats(context.Context) logengine.ClickHouseStats
+	}); ok {
+		return provider.ClickHouseStats(ctx)
+	}
+	return logengine.ClickHouseStats{}
 }
 
 func (b *HybridBackend) DiscoverTraceServices(ctx context.Context, from, to time.Time) ([]string, error) {

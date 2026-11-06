@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   BookOpen, Container, Cpu, Download, Layers, LayoutDashboard, Package, Play,
-  Search, Server, SlidersHorizontal, Upload, Users, Zap, GitBranch,
+  Search, Server, SlidersHorizontal, Upload, Users, Zap, GitBranch, Activity,
 } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -27,6 +27,7 @@ const items = [
   { to: '/search', label: 'Search', icon: Search },
   { to: '/indexer', label: 'Indexer', icon: Layers },
   { to: '/fetchers', label: 'Fetchers', icon: Download },
+  { to: '/span-engine', label: 'Span engine', icon: Activity },
   { to: '/dependencies', label: 'Dependencies', icon: Package },
   { to: '/registry', label: 'Registry', icon: Container },
 ]

@@ -153,7 +153,7 @@ func (i *Ingester) flushMetrics(ctx context.Context, chunkID string, metrics []M
 		MetricLabelValues:          metricLabelValues,
 		MetricLabelValuesTruncated: metricLabelValuesTruncated,
 		RecordCount:                int64(len(metrics)),
-		SchemaVersion:              2,
+		SchemaVersion:              MetricSchemaVersion,
 		CompactionSources:          opts.CompactionSources,
 		CompactionLevel:            opts.CompactionLevel,
 		CompactionGroup:            opts.CompactionGroup,
@@ -355,14 +355,26 @@ func collectMetricSeries(metrics []MetricRecord) []MetricSeriesMeta {
 				labels[name] = value
 			}
 			entry = &seriesEntry{meta: MetricSeriesMeta{
-				MetricName: metric.MetricName,
-				Service:    metric.Service,
-				Labels:     labels,
-				MinTime:    metric.Timestamp,
-				MaxTime:    metric.Timestamp,
+				MetricName:  metric.MetricName,
+				Service:     metric.Service,
+				MetricType:  metric.MetricType,
+				Unit:        metric.Unit,
+				Description: metric.Description,
+				Labels:      labels,
+				MinTime:     metric.Timestamp,
+				MaxTime:     metric.Timestamp,
 			}}
 			byKey[key] = entry
 			continue
+		}
+		if entry.meta.MetricType == "" {
+			entry.meta.MetricType = metric.MetricType
+		}
+		if entry.meta.Unit == "" {
+			entry.meta.Unit = metric.Unit
+		}
+		if entry.meta.Description == "" {
+			entry.meta.Description = metric.Description
 		}
 		if metric.Timestamp.Before(entry.meta.MinTime) {
 			entry.meta.MinTime = metric.Timestamp

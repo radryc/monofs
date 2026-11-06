@@ -60,6 +60,7 @@ type TraceStore struct {
 	baseURL   string
 	client    *http.Client
 	transport *http.Transport
+	stats     clickHouseStatsCache
 }
 
 // New creates a ClickHouse trace store. Call Bootstrap before serving traffic.
@@ -203,9 +204,14 @@ func (s *TraceStore) Bootstrap(ctx context.Context) error {
 			sql: "CREATE TABLE IF NOT EXISTS " + s.tableFor(s.cfg.MetricsTable) + ` (
 		tenant LowCardinality(String),
 		timestamp DateTime64(9, 'UTC'),
+		start_time DateTime64(9, 'UTC'),
 		service LowCardinality(String),
 		metric_name String,
 		value Float64,
+		metric_type LowCardinality(String),
+		temporality LowCardinality(String),
+		unit String,
+		description String,
 		labels Map(String, String)
 	) ENGINE = MergeTree
 	PARTITION BY toYYYYMMDD(timestamp)

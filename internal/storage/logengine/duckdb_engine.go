@@ -395,22 +395,30 @@ func (d *duckQueryEngine) StreamMetrics(ctx context.Context, query MetricQuery, 
 
 	for rows.Next() {
 		var (
-			timestamp  int64
-			service    sql.NullString
-			metricName sql.NullString
-			value      sql.NullFloat64
-			labels     sql.NullString
-			partition  sql.NullString
+			timestamp   int64
+			startTime   sql.NullInt64
+			service     sql.NullString
+			metricName  sql.NullString
+			value       sql.NullFloat64
+			metricType  sql.NullString
+			temporality sql.NullString
+			labels      sql.NullString
+			partition   sql.NullString
 		)
-		if err := rows.Scan(&timestamp, &service, &metricName, &value, &labels, &partition); err != nil {
+		if err := rows.Scan(&timestamp, &startTime, &service, &metricName, &value, &metricType, &temporality, &labels, &partition); err != nil {
 			d.queryErrors.Add(1)
 			return fmt.Errorf("scan duckdb metric row: %w", err)
 		}
 		record := MetricRecord{
-			Timestamp:  time.Unix(0, timestamp).UTC(),
-			Service:    service.String,
-			MetricName: metricName.String,
-			Value:      value.Float64,
+			Timestamp:   time.Unix(0, timestamp).UTC(),
+			Service:     service.String,
+			MetricName:  metricName.String,
+			Value:       value.Float64,
+			MetricType:  metricType.String,
+			Temporality: temporality.String,
+		}
+		if startTime.Valid && startTime.Int64 != 0 {
+			record.StartTime = time.Unix(0, startTime.Int64).UTC()
 		}
 		if labels.Valid && labels.String != "" {
 			_ = json.Unmarshal([]byte(labels.String), &record.Labels)

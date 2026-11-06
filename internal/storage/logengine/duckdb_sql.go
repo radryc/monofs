@@ -19,11 +19,25 @@ func sqlQuote(value string) string {
 }
 
 func duckParquetSource(files []string) string {
+	return duckParquetSourceWithUnion(files, true)
+}
+
+// duckMetricParquetSource omits union_by_name because every metric chunk uses
+// the current metric schema. This avoids per-file schema unification cost.
+func duckMetricParquetSource(files []string) string {
+	return duckParquetSourceWithUnion(files, false)
+}
+
+func duckParquetSourceWithUnion(files []string, unionByName bool) string {
 	quoted := make([]string, 0, len(files))
 	for _, file := range files {
 		quoted = append(quoted, sqlQuote(file))
 	}
-	return "read_parquet([" + strings.Join(quoted, ", ") + "], union_by_name = true, hive_partitioning = true)"
+	options := "hive_partitioning = true"
+	if unionByName {
+		options = "union_by_name = true, " + options
+	}
+	return "read_parquet([" + strings.Join(quoted, ", ") + "], " + options + ")"
 }
 
 func jsonPathExpr(column, name string) duckSQLExpr {
@@ -224,8 +238,8 @@ func buildMetricDuckSQL(files []string, query MetricQuery, from, to time.Time) (
 	// Metric consumers (PromQL, dashboards) aggregate by series and do not
 	// depend on row order. Skipping the sort lets DuckDB stream results without
 	// materializing the full match set just to order it.
-	sql := "SELECT timestamp, service, metric_name, value, labels_json, " +
-		part.sql + " AS partition FROM " + duckParquetSource(files)
+	sql := "SELECT timestamp, start_time, service, metric_name, value, metric_type, temporality, labels_json, " +
+		part.sql + " AS partition FROM " + duckMetricParquetSource(files)
 	if len(where) > 0 {
 		sql += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -301,6 +315,7 @@ func buildSQLDataset(files []string, dataset string, from, to time.Time, scope Q
 		return sql, args
 
 	case "metrics":
+		source = duckMetricParquetSource(files)
 		part := partitionExpr("partition", "labels_json")
 		args = append(args, part.args...)
 		if !from.IsZero() {
@@ -312,7 +327,7 @@ func buildSQLDataset(files []string, dataset string, from, to time.Time, scope Q
 			args = append(args, to.UTC().UnixNano())
 		}
 		appendScope(&where, &args, part, scope)
-		sql := "SELECT timestamp, to_timestamp(timestamp / 1000000000.0) AS time, service, metric_name, value, labels_json, " +
+		sql := "SELECT timestamp, to_timestamp(timestamp / 1000000000.0) AS time, start_time, service, metric_name, value, metric_type, temporality, labels_json, " +
 			part.sql + " AS partition FROM " + source
 		if len(where) > 0 {
 			sql += " WHERE " + strings.Join(where, " AND ")
@@ -350,8 +365,9 @@ func emptySQLDataset(dataset string) string {
 			"CAST(NULL AS VARCHAR) AS span_id, CAST(NULL AS VARCHAR) AS raw_message, CAST(NULL AS VARCHAR) AS labels_json, " +
 			"CAST(NULL AS VARCHAR) AS partition WHERE FALSE"
 	case "metrics":
-		return "SELECT CAST(NULL AS BIGINT) AS timestamp, CAST(NULL AS TIMESTAMP) AS time, " +
+		return "SELECT CAST(NULL AS BIGINT) AS timestamp, CAST(NULL AS TIMESTAMP) AS time, CAST(NULL AS BIGINT) AS start_time, " +
 			"CAST(NULL AS VARCHAR) AS service, CAST(NULL AS VARCHAR) AS metric_name, CAST(NULL AS DOUBLE) AS value, " +
+			"CAST(NULL AS VARCHAR) AS metric_type, CAST(NULL AS VARCHAR) AS temporality, " +
 			"CAST(NULL AS VARCHAR) AS labels_json, CAST(NULL AS VARCHAR) AS partition WHERE FALSE"
 	case "traces":
 		return "SELECT CAST(NULL AS BIGINT) AS timestamp, CAST(NULL AS TIMESTAMP) AS time, " +

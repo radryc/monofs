@@ -1174,6 +1174,15 @@ func mergeMetricSeriesMeta(merged map[string]*MetricSeriesMeta, order *[]string,
 		*order = append(*order, key)
 		return nil
 	}
+	if existing.MetricType == "" {
+		existing.MetricType = meta.MetricType
+	}
+	if existing.Unit == "" {
+		existing.Unit = meta.Unit
+	}
+	if existing.Description == "" {
+		existing.Description = meta.Description
+	}
 	if meta.MinTime.Before(existing.MinTime) {
 		existing.MinTime = meta.MinTime
 	}
@@ -1396,9 +1405,12 @@ func (q *QueryEngine) metricSeriesForChunk(ctx context.Context, candidate candid
 	collected := make([]MetricSeriesMeta, 0, len(candidate.manifest.MetricNames))
 	if err := q.scanMetricParquet(ctx, path, MetricQuery{}, nil, time.Time{}, time.Time{}, observer, func(record MetricRecord) error {
 		collected = append(collected, MetricSeriesMeta{
-			MetricName: record.MetricName,
-			Service:    record.Service,
-			Labels:     record.Labels,
+			MetricName:  record.MetricName,
+			Service:     record.Service,
+			MetricType:  record.MetricType,
+			Unit:        record.Unit,
+			Description: record.Description,
+			Labels:      record.Labels,
 		})
 		return nil
 	}); err != nil {
@@ -1587,6 +1599,9 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 		if n == 0 {
 			continue
 		}
+		if rg.NumColumns() < 9 {
+			return fmt.Errorf("%w: chunk has %d columns, want at least 9", ErrUnsupportedMetricSchema, rg.NumColumns())
+		}
 
 		// Phase 1: Read filter columns (timestamp, service, metric_name) first.
 		tsBuf, err := readInt64Column(rg, 0, n)
@@ -1636,6 +1651,19 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 			return err
 		}
 
+		typeBuf, err := readByteArrayColumn(rg, 6, n)
+		if err != nil {
+			return err
+		}
+		temporalityBuf, err := readByteArrayColumn(rg, 7, n)
+		if err != nil {
+			return err
+		}
+		startTimes, err := readInt64Column(rg, 8, n)
+		if err != nil {
+			return err
+		}
+
 		for _, i := range candidateIdxs {
 			ts := time.Unix(0, tsBuf[i])
 			svc := string(svcBuf[i])
@@ -1647,13 +1675,19 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 			if !metricLabelsMatch(name, svc, labels, matchers) {
 				continue
 			}
-			if err := yield(MetricRecord{
-				Timestamp:  ts,
-				Service:    svc,
-				MetricName: name,
-				Value:      valBuf[i],
-				Labels:     labels,
-			}); err != nil {
+			record := MetricRecord{
+				Timestamp:   ts,
+				Service:     svc,
+				MetricName:  name,
+				Value:       valBuf[i],
+				MetricType:  string(typeBuf[i]),
+				Temporality: string(temporalityBuf[i]),
+				Labels:      labels,
+			}
+			if startTimes[i] != 0 {
+				record.StartTime = time.Unix(0, startTimes[i])
+			}
+			if err := yield(record); err != nil {
 				return err
 			}
 		}

@@ -147,6 +147,7 @@ func main() {
 	logengineDir := flag.String("logengine-dir", "", "Directory for the doctor telemetry log engine (empty disables)")
 	logengineCompactInterval := flag.Duration("logengine-compact-interval", 10*time.Minute, "Interval for background telemetry chunk compaction (0 disables)")
 	logengineCompactAge := flag.Duration("logengine-compact-age", time.Hour, "Only compact telemetry chunks older than this")
+	logengineCompactStartupDelay := flag.Duration("logengine-compact-startup-delay", logengine.DefaultCompactionStartupDelay, "Delay before the first background telemetry compaction after startup (0 disables the delay)")
 	logengineRetention := flag.Duration("logengine-retention", 0, "Delete telemetry chunks older than this (0 disables)")
 	logengineRetentionInterval := flag.Duration("logengine-retention-interval", time.Hour, "How often to run logengine retention")
 	logQuerySidecar := flag.String("logquery-sidecar", "", "Node-local DuckDB query sidecar address (host:port; empty uses the native scanner)")
@@ -470,10 +471,11 @@ func main() {
 		compactCtx, compactCancel := context.WithCancel(context.Background())
 		stopLogEngine = compactCancel
 		if *logengineCompactInterval > 0 {
-			le.RunCompactor(compactCtx, *logengineCompactInterval, *logengineCompactAge)
+			le.RunCompactorWithStartupDelay(compactCtx, *logengineCompactInterval, *logengineCompactAge, *logengineCompactStartupDelay)
 			logger.Info("doctor logengine compaction enabled",
 				"interval", logengineCompactInterval.String(),
-				"min_age", logengineCompactAge.String())
+				"min_age", logengineCompactAge.String(),
+				"startup_delay", logengineCompactStartupDelay.String())
 		}
 		if *logengineRetention > 0 {
 			le.RunRetention(compactCtx, *logengineRetentionInterval, *logengineRetention)
