@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/internal/storage/logengine"
+	"github.com/radryc/monofs/internal/telemetrycrypto"
 )
 
 const (
@@ -49,6 +50,9 @@ type Config struct {
 	Timeout time.Duration
 	// HTTPClient is optional and primarily used by tests.
 	HTTPClient *http.Client
+	// Encryption optionally seals sensitive payload columns. Filter columns
+	// (tenant, time, service, trace/span id, level, metrics) stay plaintext.
+	Encryption *telemetrycrypto.Provider
 }
 
 // TraceStore implements MonoFS telemetry ingest and query over ClickHouse's
@@ -283,6 +287,10 @@ func (s *TraceStore) insertBatch(ctx context.Context, spans []logengine.SpanReco
 		if duration < 0 {
 			duration = 0
 		}
+		name, err := s.encryptField(partitionFor(attributes), "spans.name", span.Name)
+		if err != nil {
+			return err
+		}
 		if err := encoder.Encode(insertSpan{
 			Tenant:       s.cfg.Tenant,
 			Timestamp:    formatClickHouseTime(start),
@@ -292,7 +300,7 @@ func (s *TraceStore) insertBatch(ctx context.Context, spans []logengine.SpanReco
 			SpanID:       span.SpanID,
 			ParentSpanID: span.ParentSpanID,
 			Service:      span.Service,
-			Name:         span.Name,
+			Name:         name,
 			StatusCode:   span.StatusCode,
 			Attributes:   attributes,
 		}); err != nil {
@@ -338,7 +346,11 @@ func (s *TraceStore) StreamTraces(ctx context.Context, traceID, service string, 
 			}
 			return fmt.Errorf("decode clickhouse span: %w", err)
 		}
-		if err := yield(row.record()); err != nil {
+		record, err := row.record(s.encryption())
+		if err != nil {
+			return err
+		}
+		if err := yield(record); err != nil {
 			return err
 		}
 	}
@@ -356,7 +368,15 @@ type traceRow struct {
 	Attributes   string `json:"attributes_json"`
 }
 
-func (r traceRow) record() logengine.SpanRecord {
+func (r traceRow) record(enc *telemetrycrypto.Provider) (logengine.SpanRecord, error) {
+	name := r.Name
+	if enc != nil {
+		decrypted, err := enc.DecryptField(r.Name, "spans.name")
+		if err != nil {
+			return logengine.SpanRecord{}, err
+		}
+		name = decrypted
+	}
 	record := logengine.SpanRecord{
 		Timestamp:    time.Unix(0, r.TimestampNS).UTC(),
 		EndTime:      time.Unix(0, r.EndTimeNS).UTC(),
@@ -364,13 +384,13 @@ func (r traceRow) record() logengine.SpanRecord {
 		SpanID:       r.SpanID,
 		ParentSpanID: r.ParentSpanID,
 		Service:      r.Service,
-		Name:         r.Name,
+		Name:         name,
 		StatusCode:   r.StatusCode,
 	}
 	if strings.TrimSpace(r.Attributes) != "" {
 		_ = json.Unmarshal([]byte(r.Attributes), &record.Attributes)
 	}
-	return record
+	return record, nil
 }
 
 func (s *TraceStore) traceQuery(traceID, service string, from, to time.Time, limit int) (string, url.Values) {

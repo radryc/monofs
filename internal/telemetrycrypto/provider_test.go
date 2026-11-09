@@ -1,0 +1,219 @@
+package telemetrycrypto
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func testKey(t *testing.T, fill byte) string {
+	t.Helper()
+	key := bytes.Repeat([]byte{fill}, 32)
+	return base64.StdEncoding.EncodeToString(key)
+}
+
+func TestDerivedPartitionKeysAreStableAndDistinct(t *testing.T) {
+	cfg, err := ParseKeyFile([]byte(`{
+		"version": 1,
+		"tenant": "acme",
+		"root_key_id": "root-v1",
+		"root_key": "` + testKey(t, 1) + `"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	idA, keyA, err := p.KeyFor("acme", "diva-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idB, keyB, err := p.KeyFor("acme", "diva-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idA != idB || !bytes.Equal(keyA, keyB) {
+		t.Fatal("partition key is not stable")
+	}
+	idC, keyC, err := p.KeyFor("acme", "divb-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idA == idC || bytes.Equal(keyA, keyC) {
+		t.Fatal("different partitions must get different subkeys")
+	}
+	if !strings.HasPrefix(idA, "acme/diva-shared/") {
+		t.Fatalf("key id %q does not contain tenant/partition", idA)
+	}
+}
+
+func TestExplicitPartitionKeyWins(t *testing.T) {
+	cfg, err := ParseKeyFile([]byte(`{
+		"version": 1,
+		"tenant": "acme",
+		"root_key": "` + testKey(t, 1) + `",
+		"partitions": {
+			"diva-shared": {"key_id": "custom/key", "key": "` + testKey(t, 9) + `"}
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, key, err := p.KeyFor("acme", "diva-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "custom/key" {
+		t.Fatalf("key id = %q, want custom/key", id)
+	}
+	if want := bytes.Repeat([]byte{9}, 32); !bytes.Equal(key, want) {
+		t.Fatal("explicit partition key was not used")
+	}
+}
+
+func TestEnvelopeRoundTripAndAAD(t *testing.T) {
+	p := newTestProvider(t)
+	sealed, err := p.Seal([]byte("secret body"), "acme", "diva-shared", "chunks/logs/partition=diva-shared/segment.parquet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsEnvelope(sealed) {
+		t.Fatal("sealed value is not an envelope")
+	}
+	if bytes.Contains(sealed, []byte("secret body")) {
+		t.Fatal("ciphertext contains plaintext")
+	}
+	plain, err := p.Open(sealed, "chunks/logs/partition=diva-shared/segment.parquet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(plain) != "secret body" {
+		t.Fatalf("plaintext = %q", plain)
+	}
+	if _, err := p.Open(sealed, "chunks/logs/partition=divb-shared/segment.parquet"); err == nil {
+		t.Fatal("AAD mismatch must fail")
+	}
+}
+
+func TestObserveAllowsPlaintextEnforceRejects(t *testing.T) {
+	p := newTestProvider(t)
+	got, err := p.Open([]byte("legacy plaintext"), "path")
+	if err != nil || string(got) != "legacy plaintext" {
+		t.Fatalf("observe plaintext = %q, %v", got, err)
+	}
+
+	cfg := testConfig(t)
+	cfg.Mode = ModeEnforce
+	strict, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := strict.Open([]byte("legacy plaintext"), "path"); err == nil {
+		t.Fatal("enforce mode must reject plaintext")
+	}
+}
+
+func TestFieldRoundTrip(t *testing.T) {
+	p := newTestProvider(t)
+	value, err := p.EncryptField("payment declined", "acme", "diva-shared", "logs.raw_message")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsEncryptedField(value) {
+		t.Fatalf("field value %q is not marked encrypted", value)
+	}
+	if strings.Contains(value, "payment declined") {
+		t.Fatal("field contains plaintext")
+	}
+	plain, err := p.DecryptField(value, "logs.raw_message")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain != "payment declined" {
+		t.Fatalf("plaintext = %q", plain)
+	}
+	if _, err := p.DecryptField(value, "traces.name"); err == nil {
+		t.Fatal("field name is part of the AAD and must not be interchangeable")
+	}
+}
+
+func TestWrongKeyFails(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.RootKey = bytes.Repeat([]byte{2}, 32)
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := p.Seal([]byte("secret"), "acme", "diva-shared", "path")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.RootKey = bytes.Repeat([]byte{3}, 32)
+	wrong, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrong.Open(sealed, "path"); err == nil {
+		t.Fatal("wrong key must fail")
+	}
+}
+
+func TestParseKeyFileRejectsShortKey(t *testing.T) {
+	_, err := ParseKeyFile([]byte(`{"version":1,"root_key":"` + base64.StdEncoding.EncodeToString([]byte("short")) + `"}`))
+	if err == nil {
+		t.Fatal("short root key must fail")
+	}
+}
+
+func TestLoadProviderPrefersJSON(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"version":     1,
+		"tenant":      "acme",
+		"root_key_id": "root-v1",
+		"root_key":    testKey(t, 4),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := LoadProvider(Config{Enabled: true, KeysFile: "/does/not/exist", KeysJSON: string(raw)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := p.KeyFor("acme", "diva-shared"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newTestProvider(t *testing.T) *Provider {
+	t.Helper()
+	p, err := NewProvider(testConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func testConfig(t *testing.T) Config {
+	t.Helper()
+	key, err := decodeKey(testKey(t, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Config{
+		Enabled:   true,
+		Mode:      ModeObserve,
+		Tenant:    "acme",
+		RootKeyID: "root-v1",
+		RootKey:   key,
+	}
+}

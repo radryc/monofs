@@ -27,6 +27,7 @@ import (
 	"github.com/radryc/monofs/internal/storage/clickhouse"
 	"github.com/radryc/monofs/internal/storage/logengine"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/internal/telemetrycrypto"
 	"github.com/radryc/monofs/pkg/authz"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -167,6 +168,11 @@ func main() {
 	clickhouseRetention := flag.Duration("clickhouse-retention", 30*24*time.Hour, "ClickHouse span TTL")
 	telemetryMaxQueryChunks := flag.Int("telemetry-max-query-chunks", 20000, "Maximum candidate chunks one telemetry query may inspect")
 	telemetryMaxQueryRecords := flag.Int64("telemetry-max-query-records", 1000000, "Maximum records one telemetry streaming query may yield")
+	telemetryEncryption := flag.String("telemetry-encryption", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION")), "Telemetry encryption: off or envelope (default off)")
+	telemetryEncryptionMode := flag.String("telemetry-encryption-mode", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_MODE")), "Telemetry encryption read policy: observe or enforce (default observe)")
+	telemetryEncryptionKeysFile := flag.String("telemetry-encryption-keys-file", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_FILE")), "Path to the telemetry encryption key file")
+	telemetryEncryptionKeysJSON := flag.String("telemetry-encryption-keys-json", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_JSON")), "Inline telemetry encryption key JSON")
+	telemetryEncryptionTenant := flag.String("telemetry-encryption-tenant", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_TENANT")), "Tenant used for telemetry encryption keys (default default)")
 
 	// Metrics
 	metricsAddr := flag.String("metrics-addr", ":9100", "Listen address for Prometheus /metrics endpoint (empty disables)")
@@ -417,6 +423,37 @@ func main() {
 		logger.Error("invalid span engine", "value", *spanEngine, "error", err)
 		os.Exit(1)
 	}
+
+	var telemetryEnc *telemetrycrypto.Provider
+	switch strings.ToLower(strings.TrimSpace(*telemetryEncryption)) {
+	case "", "off", "false", "disabled":
+		// Default: no telemetry encryption.
+	case "envelope", "on", "true", "enabled":
+		mode := telemetrycrypto.Mode(strings.ToLower(strings.TrimSpace(*telemetryEncryptionMode)))
+		if mode == "" {
+			mode = telemetrycrypto.ModeObserve
+		}
+		provider, err := telemetrycrypto.LoadProvider(telemetrycrypto.Config{
+			Enabled:  true,
+			Mode:     mode,
+			Tenant:   strings.TrimSpace(*telemetryEncryptionTenant),
+			KeysFile: *telemetryEncryptionKeysFile,
+			KeysJSON: *telemetryEncryptionKeysJSON,
+		})
+		if err != nil {
+			logger.Error("invalid telemetry encryption configuration", "error", err)
+			os.Exit(1)
+		}
+		telemetryEnc = provider
+		logger.Info("telemetry encryption enabled",
+			"mode", provider.Mode(),
+			"tenant", provider.Tenant(),
+			"root_key_id", provider.RootKeyID())
+	default:
+		logger.Error("invalid telemetry encryption mode", "value", *telemetryEncryption, "want", "off or envelope")
+		os.Exit(1)
+	}
+
 	var clickhouseStore *clickhouse.TraceStore
 	if traceEngine == server.SpanEngineClickHouse {
 		store, err := clickhouse.New(clickhouse.Config{
@@ -429,6 +466,7 @@ func main() {
 			User:         *clickhouseUser,
 			Password:     *clickhousePassword,
 			Retention:    *clickhouseRetention,
+			Encryption:   telemetryEnc,
 		})
 		if err != nil {
 			logger.Error("failed to configure ClickHouse trace store", "error", err)
@@ -467,6 +505,7 @@ func main() {
 			ChunkDuration:   5 * time.Minute,
 			MaxQueryChunks:  *telemetryMaxQueryChunks,
 			MaxQueryRecords: *telemetryMaxQueryRecords,
+			Encryption:      telemetryEnc,
 		})
 		compactCtx, compactCancel := context.WithCancel(context.Background())
 		stopLogEngine = compactCancel

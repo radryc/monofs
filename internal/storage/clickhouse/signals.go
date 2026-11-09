@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -63,6 +64,10 @@ func (s *TraceStore) insertLogBatch(ctx context.Context, logs []logengine.LogRec
 		if ts.IsZero() {
 			ts = time.Unix(0, 0)
 		}
+		message, err := s.encryptField(partitionFor(labels), "logs.raw_message", record.RawMessage)
+		if err != nil {
+			return err
+		}
 		if err := encoder.Encode(insertLog{
 			Tenant:     s.cfg.Tenant,
 			Timestamp:  formatClickHouseTime(ts),
@@ -70,7 +75,7 @@ func (s *TraceStore) insertLogBatch(ctx context.Context, logs []logengine.LogRec
 			Service:    record.Service,
 			TraceID:    record.TraceID,
 			SpanID:     record.SpanID,
-			RawMessage: record.RawMessage,
+			RawMessage: message,
 			Labels:     labels,
 		}); err != nil {
 			return fmt.Errorf("encode clickhouse log: %w", err)
@@ -101,8 +106,16 @@ func (s *TraceStore) StreamLogs(ctx context.Context, queryStr, service string, f
 	for _, matcher := range parsed.Matchers {
 		filter.addLogMatcher(matcher.Name, matcher.Op, matcher.Value)
 	}
-	for _, lineFilter := range parsed.LineFilters {
-		filter.addLineFilter(lineFilter)
+	// Line filters cannot be pushed into ClickHouse when raw_message is
+	// ciphertext. Evaluate them after decryption instead.
+	postLineFilters := parsed.LineFilters
+	if s.encryption() != nil {
+		postLineFilters = parsed.LineFilters
+	} else {
+		for _, lineFilter := range parsed.LineFilters {
+			filter.addLineFilter(lineFilter)
+		}
+		postLineFilters = nil
 	}
 	if limit <= 0 {
 		limit = maxLogRows
@@ -110,9 +123,18 @@ func (s *TraceStore) StreamLogs(ctx context.Context, queryStr, service string, f
 	if limit > maxLogRows {
 		return fmt.Errorf("%w: log limit %d exceeds %d", logengine.ErrQueryTooBroad, limit, maxLogRows)
 	}
+	fetchLimit := limit
+	if len(postLineFilters) > 0 {
+		// Decryption reduces the matching set, so over-fetch a bounded batch
+		// before applying the filters in Go.
+		fetchLimit = limit * 8
+		if fetchLimit > maxLogRows {
+			fetchLimit = maxLogRows
+		}
+	}
 	statement := "SELECT toUnixTimestamp64Nano(timestamp) AS timestamp_ns, level, service, trace_id, span_id, raw_message, toJSONString(labels) AS labels_json FROM " +
 		s.tableFor(s.cfg.LogsTable) + " WHERE " + filter.whereSQL() +
-		" ORDER BY timestamp DESC LIMIT " + strconv.Itoa(limit) + " FORMAT JSONEachRow"
+		" ORDER BY timestamp DESC LIMIT " + strconv.Itoa(fetchLimit) + " FORMAT JSONEachRow"
 	response, err := s.do(ctx, statement, filter.params, nil)
 	if err != nil {
 		return err
@@ -135,21 +157,66 @@ func (s *TraceStore) StreamLogs(ctx context.Context, queryStr, service string, f
 			}
 			return fmt.Errorf("decode clickhouse log: %w", err)
 		}
+		message, err := s.decryptField(row.RawMessage, "logs.raw_message")
+		if err != nil {
+			return err
+		}
 		record := logengine.LogRecord{
 			Timestamp:  time.Unix(0, row.TimestampNS).UTC(),
 			Level:      row.Level,
 			Service:    row.Service,
 			TraceID:    row.TraceID,
 			SpanID:     row.SpanID,
-			RawMessage: row.RawMessage,
+			RawMessage: message,
 		}
 		if row.LabelsJSON != "" {
 			_ = json.Unmarshal([]byte(row.LabelsJSON), &record.Labels)
+		}
+		if len(postLineFilters) > 0 {
+			matched, matchErr := lineFiltersMatch(postLineFilters, message)
+			if matchErr != nil {
+				return matchErr
+			}
+			if !matched {
+				continue
+			}
 		}
 		if err := yield(record); err != nil {
 			return err
 		}
 	}
+}
+
+func lineFiltersMatch(filters []logquery.LineFilter, message string) (bool, error) {
+	for _, filter := range filters {
+		switch filter.Op {
+		case "|=":
+			if !strings.Contains(message, filter.Value) {
+				return false, nil
+			}
+		case "!=":
+			if strings.Contains(message, filter.Value) {
+				return false, nil
+			}
+		case "|~":
+			re, err := regexp.Compile(filter.Value)
+			if err != nil {
+				return false, fmt.Errorf("invalid line filter regex %q: %w", filter.Value, err)
+			}
+			if !re.MatchString(message) {
+				return false, nil
+			}
+		case "!~":
+			re, err := regexp.Compile(filter.Value)
+			if err != nil {
+				return false, fmt.Errorf("invalid line filter regex %q: %w", filter.Value, err)
+			}
+			if re.MatchString(message) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
 }
 
 // QueryLogs collects logs from ClickHouse.
