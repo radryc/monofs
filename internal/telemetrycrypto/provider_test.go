@@ -80,6 +80,33 @@ func TestExplicitPartitionKeyWins(t *testing.T) {
 	}
 }
 
+func TestTenantPrefixedExplicitPartitionKey(t *testing.T) {
+	cfg, err := ParseKeyFile([]byte(`{
+		"version": 1,
+		"tenant": "acme",
+		"partitions": {
+			"acme/diva-shared": {"key_id": "acme/diva-shared/custom", "key": "` + testKey(t, 11) + `"}
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, key, err := p.KeyFor("acme", "diva-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "acme/diva-shared/custom" {
+		t.Fatalf("key id = %q", id)
+	}
+	if want := bytes.Repeat([]byte{11}, 32); !bytes.Equal(key, want) {
+		t.Fatal("tenant-prefixed explicit key was not used")
+	}
+}
+
 func TestEnvelopeRoundTripAndAAD(t *testing.T) {
 	p := newTestProvider(t)
 	sealed, err := p.Seal([]byte("secret body"), "acme", "diva-shared", "chunks/logs/partition=diva-shared/segment.parquet")
