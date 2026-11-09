@@ -173,6 +173,7 @@ func main() {
 	telemetryEncryptionKeysFile := flag.String("telemetry-encryption-keys-file", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_FILE")), "Path to the telemetry encryption key file")
 	telemetryEncryptionKeysJSON := flag.String("telemetry-encryption-keys-json", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_JSON")), "Inline telemetry encryption key JSON")
 	telemetryEncryptionTenant := flag.String("telemetry-encryption-tenant", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_TENANT")), "Tenant used for telemetry encryption keys (default default)")
+	clickhouseEncryption := flag.String("clickhouse-encryption", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_ENCRYPTION")), "ClickHouse encryption: inherit, off, or envelope (default inherit)")
 
 	// Metrics
 	metricsAddr := flag.String("metrics-addr", ":9100", "Listen address for Prometheus /metrics endpoint (empty disables)")
@@ -424,11 +425,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	var telemetryEnc *telemetrycrypto.Provider
-	switch strings.ToLower(strings.TrimSpace(*telemetryEncryption)) {
-	case "", "off", "false", "disabled":
-		// Default: no telemetry encryption.
+	parseEncryptionEnabled := func(name, value string) (bool, bool) {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "", "off", "false", "disabled":
+			return false, true
+		case "envelope", "on", "true", "enabled":
+			return true, true
+		default:
+			logger.Error("invalid encryption mode", "flag", name, "value", value, "want", "off or envelope")
+			return false, false
+		}
+	}
+
+	globalEncryption, ok := parseEncryptionEnabled("telemetry-encryption", *telemetryEncryption)
+	if !ok {
+		os.Exit(1)
+	}
+	clickhouseMode := strings.ToLower(strings.TrimSpace(*clickhouseEncryption))
+	if clickhouseMode == "" {
+		clickhouseMode = "inherit"
+	}
+	clickhouseEncryptionEnabled := false
+	switch clickhouseMode {
+	case "inherit":
+		clickhouseEncryptionEnabled = globalEncryption
+	case "off", "false", "disabled":
 	case "envelope", "on", "true", "enabled":
+		clickhouseEncryptionEnabled = true
+	default:
+		logger.Error("invalid ClickHouse encryption mode", "value", *clickhouseEncryption, "want", "inherit, off or envelope")
+		os.Exit(1)
+	}
+
+	var encryptionProvider *telemetrycrypto.Provider
+	if globalEncryption || clickhouseEncryptionEnabled {
 		mode := telemetrycrypto.Mode(strings.ToLower(strings.TrimSpace(*telemetryEncryptionMode)))
 		if mode == "" {
 			mode = telemetrycrypto.ModeObserve
@@ -444,14 +474,24 @@ func main() {
 			logger.Error("invalid telemetry encryption configuration", "error", err)
 			os.Exit(1)
 		}
-		telemetryEnc = provider
-		logger.Info("telemetry encryption enabled",
-			"mode", provider.Mode(),
-			"tenant", provider.Tenant(),
-			"root_key_id", provider.RootKeyID())
-	default:
-		logger.Error("invalid telemetry encryption mode", "value", *telemetryEncryption, "want", "off or envelope")
-		os.Exit(1)
+		encryptionProvider = provider
+	}
+	var telemetryEnc *telemetrycrypto.Provider
+	if globalEncryption {
+		telemetryEnc = encryptionProvider
+	}
+	var clickhouseEnc *telemetrycrypto.Provider
+	if clickhouseEncryptionEnabled {
+		clickhouseEnc = encryptionProvider
+	}
+	if encryptionProvider != nil {
+		logger.Info("telemetry encryption configured",
+			"global", globalEncryption,
+			"clickhouse", clickhouseEncryptionEnabled,
+			"clickhouse_mode", clickhouseMode,
+			"mode", encryptionProvider.Mode(),
+			"tenant", encryptionProvider.Tenant(),
+			"root_key_id", encryptionProvider.RootKeyID())
 	}
 
 	var clickhouseStore *clickhouse.TraceStore
@@ -466,7 +506,7 @@ func main() {
 			User:         *clickhouseUser,
 			Password:     *clickhousePassword,
 			Retention:    *clickhouseRetention,
-			Encryption:   telemetryEnc,
+			Encryption:   clickhouseEnc,
 		})
 		if err != nil {
 			logger.Error("failed to configure ClickHouse trace store", "error", err)
@@ -487,7 +527,8 @@ func main() {
 			"spans_table", *clickhouseTable,
 			"logs_table", *clickhouseLogsTable,
 			"metrics_table", *clickhouseMetricsTable,
-			"tenant", *clickhouseTenant)
+			"tenant", *clickhouseTenant,
+			"encryption", clickhouseEncryptionEnabled)
 	}
 
 	var stopLogEngine func()

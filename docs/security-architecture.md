@@ -120,7 +120,7 @@ This means bearer tokens, session cookies, Guardian tokens, internal tokens, Git
 
 - Blob archives are encrypted at rest with the shared encryption key.
 - Metadata (Pebble), workspace WAL/snapshots, log-engine Parquet/manifests, cache DBs, and registry manifests/tags are **plaintext** by default.
-- Optional telemetry encryption (`MONOFS_TELEMETRY_ENCRYPTION=envelope`) seals logengine chunk objects and sensitive ClickHouse payload columns with tenant/partition subkeys. It is off by default, writes new data encrypted, and reads legacy plaintext only in `observe` mode. `enforce` rejects plaintext. The key file is supplied by the operator (Guardian Secret or inline JSON for the demo); keys are never logged.
+- Optional telemetry encryption (`MONOFS_TELEMETRY_ENCRYPTION=envelope`) seals logengine chunk objects and sensitive ClickHouse payload columns with tenant/partition subkeys. ClickHouse can override the global setting with `MONOFS_CLICKHOUSE_ENCRYPTION=inherit|off|envelope`. It is off by default, writes new data encrypted, and reads legacy plaintext only in `observe` mode. `enforce` rejects plaintext. The key file is supplied by the operator (Guardian Secret or inline JSON for the demo); keys are never logged.
 - There is no tenant identifier in paths, storage IDs, metadata keys, blob indexes, log chunks, workspace jobs, or cache keys. A single cluster is one trust domain.
 - Blob indexes are keyed only by content hash; any caller who knows a hash can fetch that content regardless of repository/tenant.
 - Registry blobs are global by digest; cross-repository blob reads and deletes are possible.
