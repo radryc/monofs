@@ -464,7 +464,20 @@ func (s *TraceStore) DiscoverTraceTagValues(ctx context.Context, from, to time.T
 		return s.DiscoverTraceServices(ctx, from, to)
 	}
 	query, params := s.discoveryQuery(tag, from, to, tag)
-	return s.queryStrings(ctx, query, params)
+	values, err := s.queryStrings(ctx, query, params)
+	if err != nil {
+		return nil, err
+	}
+	if tag == "name" && s.encryption() != nil {
+		for i, value := range values {
+			decrypted, decErr := s.decryptField(value, "spans.name")
+			if decErr != nil {
+				return nil, decErr
+			}
+			values[i] = decrypted
+		}
+	}
+	return values, nil
 }
 
 func (s *TraceStore) discoveryQuery(kind string, from, to time.Time, tag string) (string, url.Values) {
