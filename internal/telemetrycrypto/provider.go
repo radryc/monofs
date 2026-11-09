@@ -293,7 +293,11 @@ func (p *Provider) KeyFor(tenant, partition string) (string, []byte, error) {
 	}
 	p.mu.RUnlock()
 
-	if explicit, ok := p.partitions[partition]; ok && len(explicit.Key) == 32 {
+	explicit, ok := p.partitions[tenant+"/"+partition]
+	if !ok {
+		explicit, ok = p.partitions[partition]
+	}
+	if ok && len(explicit.Key) == 32 {
 		keyID := explicit.KeyID
 		if keyID == "" {
 			keyID = tenant + "/" + partition + "/" + p.RootKeyID()
