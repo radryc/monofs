@@ -110,21 +110,23 @@ var (
 		Help:      "Total bytes returned by NativeRead operations through the router.",
 	})
 
-	// routerGuardianVersionStoreWriteBytesTotal counts bytes written to the guardian_versions.json snapshot file.
-	// Each full-file rewrite adds len(serialized snapshot) bytes — exposes write amplification.
+	// routerGuardianVersionStoreWriteBytesTotal counts bytes written to the
+	// Guardian version store.
 	routerGuardianVersionStoreWriteBytesTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "monofs",
 		Subsystem: "router",
 		Name:      "guardian_version_store_write_bytes_total",
-		Help:      "Total bytes written to the guardian_versions.json state snapshot (full rewrites).",
+		Help:      "Total bytes written to the Guardian version store.",
 	})
 
-	// routerGuardianVersionStoreFileBytes tracks the current on-disk size of guardian_versions.json.
+	// routerGuardianVersionStoreFileBytes tracks the last observed on-disk
+	// state size. The Pebble store does not rewrite a single snapshot file, so
+	// this gauge is only updated when a size sample is available.
 	routerGuardianVersionStoreFileBytes = promauto.NewGauge(prometheus.GaugeOpts{
 		Namespace: "monofs",
 		Subsystem: "router",
 		Name:      "guardian_version_store_file_bytes",
-		Help:      "Current size in bytes of the guardian_versions.json state snapshot file.",
+		Help:      "Last observed on-disk size in bytes of the Guardian version store.",
 	})
 
 	routerWorkspaceSyncJobsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -260,4 +262,23 @@ var (
 		Name:      "auto_refresh_next_probe_timestamp_seconds",
 		Help:      "Unix timestamp of the next due probe for this shard (0 when idle).",
 	}, []string{"shard"})
+	guardianCoordinatorLeader = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "guardian_coordinator_leader",
+		Help:      "1 when this router holds the guardian mutation coordinator lease.",
+	})
+	guardianVersionStoreRecoveriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "guardian_version_store_recoveries_total",
+		Help:      "Guardian version records recovered from node content or conflicting writers.",
+	}, []string{"result"})
+
+	guardianVersionStoreCASConflictsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "guardian_version_store_cas_conflicts_total",
+		Help:      "Guardian version compare-and-swap conflicts.",
+	})
 )

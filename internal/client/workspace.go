@@ -65,55 +65,50 @@ func (sc *ShardedClient) ListWorkspaceRepositories(ctx context.Context) ([]Works
 		go func(nodeID string, nodeClient pb.MonoFSClient) {
 			defer wg.Done()
 
-			listCtx, listCancel := context.WithTimeout(ctx, callTimeout)
-			listResp, err := nodeClient.ListRepositories(listCtx, &pb.ListRepositoriesRequest{})
-			listCancel()
-			if err != nil {
-				firstErrMu.Lock()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("list repositories from %s: %w", nodeID, err)
-				}
-				firstErrMu.Unlock()
-				return
-			}
-
-			successfulNodes.Add(1)
-
-			for _, storageID := range listResp.RepositoryIds {
-				discoveredMu.Lock()
-				_, exists := discovered[storageID]
-				discoveredMu.Unlock()
-				if exists {
-					continue
-				}
-
-				infoCtx, infoCancel := context.WithTimeout(ctx, callTimeout)
-				infoResp, err := nodeClient.GetRepositoryInfo(infoCtx, &pb.GetRepositoryInfoRequest{
-					StorageId: storageID,
+			pageToken := ""
+			for page := 0; page < 1000; page++ {
+				listCtx, listCancel := context.WithTimeout(ctx, callTimeout)
+				listResp, err := nodeClient.ListRepositories(listCtx, &pb.ListRepositoriesRequest{
+					PageSize:       5000,
+					PageToken:      pageToken,
+					IncludeDetails: true,
 				})
-				infoCancel()
+				listCancel()
 				if err != nil {
 					firstErrMu.Lock()
 					if firstErr == nil {
-						firstErr = fmt.Errorf("get repository info for %s from %s: %w", storageID, nodeID, err)
+						firstErr = fmt.Errorf("list repositories from %s: %w", nodeID, err)
 					}
 					firstErrMu.Unlock()
-					continue
+					return
+				}
+				if page == 0 {
+					successfulNodes.Add(1)
 				}
 
-				discoveredMu.Lock()
-				if _, exists := discovered[storageID]; !exists {
-					discovered[storageID] = WorkspaceRepository{
-						StorageID:     storageID,
-						DisplayPath:   infoResp.DisplayPath,
-						Source:        infoResp.Source,
-						Ref:           infoResp.Ref,
-						CommitHash:    infoResp.CommitHash,
-						CommitTime:    infoResp.CommitTime,
-						CommitMessage: infoResp.CommitMessage,
+				for _, record := range listResp.GetRepositories() {
+					storageID := record.GetStorageId()
+					if storageID == "" {
+						continue
 					}
+					discoveredMu.Lock()
+					if _, exists := discovered[storageID]; !exists {
+						discovered[storageID] = WorkspaceRepository{
+							StorageID:     storageID,
+							DisplayPath:   record.GetDisplayPath(),
+							Source:        record.GetSource(),
+							Ref:           record.GetRef(),
+							CommitHash:    record.GetCommitHash(),
+							CommitTime:    record.GetCommitTime(),
+							CommitMessage: record.GetCommitMessage(),
+						}
+					}
+					discoveredMu.Unlock()
 				}
-				discoveredMu.Unlock()
+				pageToken = listResp.GetNextPageToken()
+				if pageToken == "" {
+					break
+				}
 			}
 		}(nodeID, nodeClient)
 	}

@@ -34,6 +34,9 @@ func TestDefaultRouterConfig(t *testing.T) {
 	if cfg.UnhealthyThreshold != 15*time.Second {
 		t.Errorf("unexpected UnhealthyThreshold: %v", cfg.UnhealthyThreshold)
 	}
+	if cfg.HealthProbeTimeout != 2*time.Second {
+		t.Errorf("unexpected HealthProbeTimeout: %v", cfg.HealthProbeTimeout)
+	}
 }
 
 func TestNewRouter(t *testing.T) {

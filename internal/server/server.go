@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -139,12 +140,24 @@ const (
 	bucketRepos            = "repos"             // Repository information (key: storageID)
 	bucketPathIndex        = "pathindex"         // Path to hash mapping (key: "storageID:filePath", value: SHA-256 hash)
 	bucketRepoLookup       = "repolookup"        // Display path to storageID mapping (key: displayPath, value: storageID)
+	bucketRepoPrefixes     = "repoprefixes"      // Intermediate display-path prefixes (key: path, value: refcount)
+	bucketRepoChildren     = "repochidren"       // Namespace children (key: "parent\x00child", value: refcount)
+	bucketSchema           = "schema"            // Internal schema/version markers
 	bucketDirMeta          = "dirmeta"           // Canonical directory metadata (key: "storageID:dirPath", value: dirMetadata)
 	bucketDirEntries       = "direntry"          // One record per directory child (see direntry.go)
 	bucketOwnedFiles       = "ownedfiles"        // Files owned by this node (key: "storageID:filePath", value: "1")
 	bucketReplicaFiles     = "replicafiles"      // Replica file tracking (key: "storageID:filePath", value: ownerNodeID)
 	bucketOnboardingStatus = "onboarding_status" // Repository onboarding status (key: storage_id, value: "true"/"false")
 	bucketNodeCounters     = "nodecounters"      // Persisted node usage counters (key: "usage")
+)
+
+const (
+	// repoNamespaceIndexVersion is bumped when the repository namespace index
+	// layout changes. On mismatch the index is rebuilt from bucketRepoLookup.
+	repoNamespaceIndexVersion = "1"
+	repoNamespaceIndexKey     = "repo_namespace_index"
+	// repoNamespaceIndexChunk bounds rebuild memory and transaction size.
+	repoNamespaceIndexChunk = 10000
 )
 
 // makeStorageKey generates a SHA-256 hash key for database storage.
@@ -365,6 +378,11 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, dbSync bool, logger 
 		ledger:       workspaceledger.New(),
 	}
 
+	if err := s.ensureRepoNamespaceIndex(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("build repository namespace index: %w", err)
+	}
+
 	workspaceStateDir := filepath.Join(dbPath, "workspace-ledger")
 	wsCfg := workspacestore.DefaultStoreConfig(workspaceStateDir)
 	ws, wsErr := workspacestore.New(wsCfg, logger)
@@ -548,10 +566,195 @@ func (s *Server) repoExists(displayPath string) bool {
 	return s.repoExistsByStorageID(storageID)
 }
 
-// isIntermediateDir checks if a path is an intermediate directory (prefix of any repo)
-// Results are cached in memory to avoid repeated database scans
+func encodeRefCount(value uint64) []byte {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], value)
+	return buf[:]
+}
+
+func decodeRefCount(value []byte) uint64 {
+	if len(value) != 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint64(value)
+}
+
+func incrementRepoIndexRef(tx metastore.Tx, bucket string, key []byte) error {
+	value, err := tx.Get(bucket, key)
+	switch {
+	case err == nil:
+		return tx.Put(bucket, key, encodeRefCount(decodeRefCount(value)+1), 0)
+	case errors.Is(err, metastore.ErrKeyNotFound):
+		return tx.Put(bucket, key, encodeRefCount(1), 0)
+	default:
+		return err
+	}
+}
+
+func decrementRepoIndexRef(tx metastore.Tx, bucket string, key []byte) error {
+	value, err := tx.Get(bucket, key)
+	if errors.Is(err, metastore.ErrKeyNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	count := decodeRefCount(value)
+	if count <= 1 {
+		return tx.Delete(bucket, key)
+	}
+	return tx.Put(bucket, key, encodeRefCount(count-1), 0)
+}
+
+// addRepositoryNamespaceIndexTx records the display-path hierarchy for a
+// repository so lookups and directory listings never have to scan all repos.
+func addRepositoryNamespaceIndexTx(tx metastore.Tx, displayPath string) error {
+	displayPath = strings.Trim(displayPath, "/")
+	if displayPath == "" {
+		return nil
+	}
+	parts := strings.Split(displayPath, "/")
+
+	// Every ancestor prefix is an intermediate directory.
+	for i := 1; i < len(parts); i++ {
+		prefix := strings.Join(parts[:i], "/")
+		if err := incrementRepoIndexRef(tx, bucketRepoPrefixes, []byte(prefix)); err != nil {
+			return err
+		}
+	}
+
+	// Every parent/child pair is a namespace edge.
+	for i := 0; i < len(parts); i++ {
+		parent := strings.Join(parts[:i], "/")
+		key := parent + "\x00" + parts[i]
+		if err := incrementRepoIndexRef(tx, bucketRepoChildren, []byte(key)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeRepositoryNamespaceIndexTx removes a repository's hierarchy entries.
+func removeRepositoryNamespaceIndexTx(tx metastore.Tx, displayPath string) error {
+	displayPath = strings.Trim(displayPath, "/")
+	if displayPath == "" {
+		return nil
+	}
+	parts := strings.Split(displayPath, "/")
+
+	for i := 1; i < len(parts); i++ {
+		prefix := strings.Join(parts[:i], "/")
+		if err := decrementRepoIndexRef(tx, bucketRepoPrefixes, []byte(prefix)); err != nil {
+			return err
+		}
+	}
+	for i := 0; i < len(parts); i++ {
+		parent := strings.Join(parts[:i], "/")
+		key := parent + "\x00" + parts[i]
+		if err := decrementRepoIndexRef(tx, bucketRepoChildren, []byte(key)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureRepoNamespaceIndex builds the namespace index once when it is missing
+// or stale. The rebuild is a single pass over bucketRepoLookup, so it is safe
+// to run on an existing database.
+func (s *Server) ensureRepoNamespaceIndex() error {
+	var current string
+	if err := s.db.View(func(tx metastore.Tx) error {
+		value, err := tx.Get(bucketSchema, []byte(repoNamespaceIndexKey))
+		if err != nil {
+			if errors.Is(err, metastore.ErrKeyNotFound) {
+				return nil
+			}
+			return err
+		}
+		current = string(value)
+		return nil
+	}); err != nil {
+		return err
+	}
+	if current == repoNamespaceIndexVersion {
+		return nil
+	}
+
+	// Clear the index in bounded chunks so a large existing database does not
+	// require one enormous write batch at startup.
+	for _, bucket := range []string{bucketRepoPrefixes, bucketRepoChildren} {
+		for {
+			cleared := 0
+			if err := s.db.Update(func(tx metastore.Tx) error {
+				var keys [][]byte
+				if err := tx.ScanPrefix(bucket, nil, func(key, _ []byte) error {
+					keys = append(keys, append([]byte(nil), key...))
+					if len(keys) >= repoNamespaceIndexChunk {
+						return metastore.ErrStopIteration
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+				for _, key := range keys {
+					if err := tx.Delete(bucket, key); err != nil && err != metastore.ErrKeyNotFound {
+						return err
+					}
+				}
+				cleared = len(keys)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if cleared == 0 {
+				break
+			}
+		}
+	}
+
+	// Rebuild from bucketRepoLookup in chunks. The schema marker is written
+	// last, so a crash mid-rebuild simply restarts the rebuild on next start.
+	var lower []byte
+	for {
+		displayPaths := make([]string, 0, repoNamespaceIndexChunk)
+		var lastKey []byte
+		if err := s.db.View(func(tx metastore.Tx) error {
+			return tx.ScanRange(bucketRepoLookup, lower, nil, func(key, _ []byte) error {
+				displayPaths = append(displayPaths, string(key))
+				lastKey = append(lastKey[:0], key...)
+				if len(displayPaths) >= repoNamespaceIndexChunk {
+					return metastore.ErrStopIteration
+				}
+				return nil
+			})
+		}); err != nil {
+			return err
+		}
+		if len(displayPaths) == 0 {
+			break
+		}
+		if err := s.db.Update(func(tx metastore.Tx) error {
+			for _, displayPath := range displayPaths {
+				if err := addRepositoryNamespaceIndexTx(tx, displayPath); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		lower = append(append([]byte(nil), lastKey...), 0x00)
+	}
+
+	return s.db.Update(func(tx metastore.Tx) error {
+		return tx.Put(bucketSchema, []byte(repoNamespaceIndexKey), []byte(repoNamespaceIndexVersion), 0)
+	})
+}
+
+// isIntermediateDir checks if a path is an intermediate directory (prefix of any repo).
+// Results are cached in memory to avoid repeated database lookups.
 //
-// CRITICAL: This function MUST scan bucketRepoLookup (not bucketRepos) because:
+// CRITICAL: This function MUST use bucketRepoPrefixes (not bucketRepos) because:
 // - bucketRepoLookup: key = display_path (e.g., "github.com/user/repo")
 // - bucketRepos: key = storage_id (SHA256 hash, e.g., "a7f3b2c...")
 // When checking if "github_com" is a prefix, we need to compare against display paths,
@@ -559,32 +762,26 @@ func (s *Server) repoExists(displayPath string) bool {
 //
 // Test coverage: See TestIsIntermediateDir in lookup_test.go
 func (s *Server) isIntermediateDir(path string) bool {
-	// Check cache first
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return false
+	}
+	// Check cache first. Only positive results are cached: negative results
+	// are per-file and would otherwise grow without bound.
 	if cached, ok := s.intermediateDirCache.Load(path); ok {
 		return cached.(bool)
 	}
 
-	// Check database - scan bucketRepoLookup for display paths that start with this prefix
-	pathPrefix := path + "/"
 	isIntermediate := false
 	s.db.View(func(tx metastore.Tx) error {
-		// Use GetKeys to get only keys (lighter than GetAll), then check prefixes
-		keys, err := tx.GetKeys(bucketRepoLookup)
-		if err != nil {
-			return nil
-		}
-		for _, key := range keys {
-			displayPath := string(key)
-			if strings.HasPrefix(displayPath, pathPrefix) {
-				isIntermediate = true
-				return nil // Early exit on first match
-			}
-		}
+		_, err := tx.Get(bucketRepoPrefixes, []byte(path))
+		isIntermediate = err == nil
 		return nil
 	})
 
-	// Cache the result
-	s.intermediateDirCache.Store(path, isIntermediate)
+	if isIntermediate {
+		s.intermediateDirCache.Store(path, true)
+	}
 	return isIntermediate
 }
 
@@ -684,6 +881,9 @@ func (s *Server) RegisterRepository(ctx context.Context, req *pb.RegisterReposit
 		lookupKey := []byte(req.DisplayPath)
 		if err := tx.Put(bucketRepoLookup, lookupKey, []byte(req.StorageId), 0); err != nil {
 			return fmt.Errorf("store path lookup: %w", err)
+		}
+		if err := addRepositoryNamespaceIndexTx(tx, req.DisplayPath); err != nil {
+			return fmt.Errorf("index repository namespace: %w", err)
 		}
 
 		s.logger.Info("repository registered successfully",
@@ -897,6 +1097,9 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 			// 5. Store display path lookup mapping for new repos
 			lookupKey := []byte(displayPath)
 			if err := tx.Put(bucketRepoLookup, lookupKey, []byte(storageID), 0); err != nil {
+				return err
+			}
+			if err := addRepositoryNamespaceIndexTx(tx, displayPath); err != nil {
 				return err
 			}
 
@@ -1148,6 +1351,9 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 			lookupKey := []byte(displayPath)
 			if err := tx.Put(bucketRepoLookup, lookupKey, []byte(storageID), 0); err != nil {
 				return fmt.Errorf("store repo lookup: %w", err)
+			}
+			if err := addRepositoryNamespaceIndexTx(tx, displayPath); err != nil {
+				return fmt.Errorf("index repository namespace: %w", err)
 			}
 
 			// Mark as pending onboarding
@@ -1426,6 +1632,9 @@ func (s *Server) IngestReplicaBatch(ctx context.Context, req *pb.IngestReplicaBa
 			if err := tx.Put(bucketRepoLookup, lookupKey, []byte(storageID), 0); err != nil {
 				return fmt.Errorf("store repo lookup: %w", err)
 			}
+			if err := addRepositoryNamespaceIndexTx(tx, displayPath); err != nil {
+				return fmt.Errorf("index repository namespace: %w", err)
+			}
 		}
 
 		// Store replica metadata
@@ -1545,33 +1754,199 @@ func (s *Server) GetPredictorStats(ctx context.Context, req *pb.PredictorStatsRe
 	return resp, nil
 }
 
-// ListRepositories returns all repository IDs stored on this node.
-func (s *Server) ListRepositories(ctx context.Context, req *pb.ListRepositoriesRequest) (*pb.ListRepositoriesResponse, error) {
-	var repoIDs []string
+func repositoryRecordFromInfo(info repoInfo) *pb.RepositoryRecord {
+	return &pb.RepositoryRecord{
+		StorageId:     info.StorageID,
+		DisplayPath:   info.DisplayPath,
+		Source:        info.RepoURL,
+		Ref:           info.Branch,
+		CommitHash:    info.CommitHash,
+		CommitTime:    info.CommitTime,
+		CommitMessage: info.CommitMessage,
+		GuardianUrl:   info.GuardianURL,
+	}
+}
 
+func guardianPartitionRecordFromInfo(info repoInfo) *pb.GuardianPartitionRecord {
+	return &pb.GuardianPartitionRecord{
+		StorageId:     info.StorageID,
+		DisplayPath:   info.DisplayPath,
+		GuardianUrl:   info.GuardianURL,
+		Source:        info.RepoURL,
+		Ref:           info.Branch,
+		CommitHash:    info.CommitHash,
+		CommitTime:    info.CommitTime,
+		CommitMessage: info.CommitMessage,
+	}
+}
+
+func normalizeListPageSize(value int32, fallback, max int) int {
+	size := int(value)
+	if size <= 0 {
+		return fallback
+	}
+	if max > 0 && size > max {
+		return max
+	}
+	return size
+}
+
+// ListRepositories returns repository IDs, optionally with full records,
+// filtered by display-path prefix and paginated by display path.
+func (s *Server) ListRepositories(ctx context.Context, req *pb.ListRepositoriesRequest) (*pb.ListRepositoriesResponse, error) {
+	prefix := req.GetPrefix()
+	pageSize := int(req.GetPageSize())
+	if pageSize < 0 {
+		pageSize = 0
+	}
+	const maxPageSize = 5000
+	if pageSize > maxPageSize {
+		pageSize = maxPageSize
+	}
+
+	lower := []byte(prefix)
+	var upper []byte
+	if prefix != "" {
+		upper = prefixUpperBound(lower)
+	}
+	// total is only known on the first page. Counting the remainder on every
+	// page turns pagination into O(n^2) for the caller.
+	includeTotal := req.GetPageToken() == ""
+	if token := req.GetPageToken(); token != "" {
+		lower = append([]byte(token), 0x00)
+	}
+
+	var (
+		repoIDs  []string
+		records  []*pb.RepositoryRecord
+		total    int64
+		pageFull bool
+		hasMore  bool
+		lastKey  string
+	)
+	if !includeTotal {
+		total = -1
+	}
 	err := s.db.View(func(tx metastore.Tx) error {
-		keys, err := tx.GetKeys(bucketRepos)
-		if err != nil {
-			if err == metastore.ErrBucketNotFound || err == metastore.ErrNotFoundKey {
+		return tx.ScanRange(bucketRepoLookup, lower, upper, func(key, value []byte) error {
+			displayPath := string(key)
+			if prefix != "" && !strings.HasPrefix(displayPath, prefix) {
 				return nil
 			}
-			return err
-		}
+			if includeTotal {
+				total++
+			}
+			if pageSize > 0 && pageFull {
+				hasMore = true
+				if !includeTotal {
+					return metastore.ErrStopIteration
+				}
+				return nil
+			}
 
-		for _, key := range keys {
-			repoIDs = append(repoIDs, string(key))
-		}
-		return nil
+			repoIDs = append(repoIDs, string(value))
+			if req.GetIncludeDetails() {
+				raw, getErr := tx.Get(bucketRepos, value)
+				if getErr == nil {
+					var info repoInfo
+					if json.Unmarshal(raw, &info) == nil {
+						records = append(records, repositoryRecordFromInfo(info))
+					}
+				}
+			}
+			lastKey = displayPath
+			if pageSize > 0 && len(repoIDs) >= pageSize {
+				pageFull = true
+			}
+			return nil
+		})
 	})
-
 	if err != nil {
 		s.logger.Error("failed to list repositories", "error", err)
 		return nil, fmt.Errorf("failed to list repositories: %w", err)
 	}
 
-	s.logger.Debug("listed repositories", "count", len(repoIDs))
+	next := ""
+	if hasMore {
+		next = lastKey
+	}
+	s.logger.Debug("listed repositories", "count", len(repoIDs), "total", total, "prefix", prefix)
 	return &pb.ListRepositoriesResponse{
 		RepositoryIds: repoIDs,
+		Repositories:  records,
+		NextPageToken: next,
+		Total:         total,
+	}, nil
+}
+
+// ListGuardianPartitions returns Guardian partition records using the sorted
+// repository display-path index. It never scans unrelated repositories.
+func (s *Server) ListGuardianPartitions(ctx context.Context, req *pb.ListGuardianPartitionsRequest) (*pb.ListGuardianPartitionsResponse, error) {
+	pageSize := normalizeListPageSize(req.GetPageSize(), 1000, 5000)
+	lower := []byte("guardian")
+	upper := prefixUpperBound(lower)
+	includeTotal := req.GetPageToken() == ""
+	if token := req.GetPageToken(); token != "" {
+		lower = append([]byte(token), 0x00)
+	}
+
+	var (
+		partitions []*pb.GuardianPartitionRecord
+		total      int64
+		pageFull   bool
+		hasMore    bool
+		lastKey    string
+	)
+	if !includeTotal {
+		total = -1
+	}
+	err := s.db.View(func(tx metastore.Tx) error {
+		return tx.ScanRange(bucketRepoLookup, lower, upper, func(key, value []byte) error {
+			displayPath := string(key)
+			isPartition := strings.HasPrefix(displayPath, "guardian/")
+			if !isPartition && !(req.GetIncludeSystem() && displayPath == "guardian-system") {
+				return nil
+			}
+			if includeTotal {
+				total++
+			}
+			if pageFull {
+				hasMore = true
+				if !includeTotal {
+					return metastore.ErrStopIteration
+				}
+				return nil
+			}
+
+			raw, getErr := tx.Get(bucketRepos, value)
+			if getErr != nil {
+				return nil
+			}
+			var info repoInfo
+			if json.Unmarshal(raw, &info) != nil {
+				return nil
+			}
+			partitions = append(partitions, guardianPartitionRecordFromInfo(info))
+			lastKey = displayPath
+			if len(partitions) >= pageSize {
+				pageFull = true
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		s.logger.Error("failed to list guardian partitions", "error", err)
+		return nil, fmt.Errorf("failed to list guardian partitions: %w", err)
+	}
+
+	next := ""
+	if hasMore {
+		next = lastKey
+	}
+	return &pb.ListGuardianPartitionsResponse{
+		Partitions:    partitions,
+		NextPageToken: next,
+		Total:         total,
 	}, nil
 }
 

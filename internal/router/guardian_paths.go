@@ -130,18 +130,16 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 		return nil, status.Error(codes.InvalidArgument, "at least one write is required")
 	}
 
-	now := time.Now()
-	batchRevisionID := guardianBatchRevisionID(now)
-	committedAt := now.Unix()
-	correlationID := ""
-	reason := ""
-	if req.GetContext() != nil {
-		correlationID = req.GetContext().GetCorrelationId()
-		reason = req.GetContext().GetReason()
+	if err := r.requireGuardianCoordinator(); err != nil {
+		return nil, err
 	}
 
-	plans := make([]guardianUpsertPlan, 0, len(req.GetWrites()))
-	groups := make(map[string]*guardianUpsertGroup)
+	type pendingWrite struct {
+		write  *pb.GuardianPathWrite
+		mapped guardianPhysicalPath
+	}
+	pending := make([]pendingWrite, 0, len(req.GetWrites()))
+	displayPaths := make([]string, 0, len(req.GetWrites()))
 	for _, write := range req.GetWrites() {
 		mapped, err := mapGuardianLogicalPath(write.GetLogicalPath())
 		if err != nil {
@@ -153,9 +151,40 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 		if err := authorizeGuardianMutation(principal, mapped.LogicalPath, false); err != nil {
 			return nil, status.Error(codes.PermissionDenied, err.Error())
 		}
+		pending = append(pending, pendingWrite{write: write, mapped: mapped})
+		displayPaths = append(displayPaths, mapped.DisplayPath)
+	}
 
-		current, exists := r.guardianVersions.currentVersion(mapped.LogicalPath)
-		exists = exists && !current.Tombstone
+	// Serialize check -> node apply -> version commit for the affected
+	// display paths only. Cross-router serialization is handled by the
+	// coordinator lease and the KVS-backed version store.
+	unlockMutations := r.lockGuardianMutations(displayPaths...)
+	defer unlockMutations()
+	if err := r.requireGuardianCoordinator(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	batchRevisionID := guardianBatchRevisionID(now)
+	committedAt := now.Unix()
+	correlationID := ""
+	reason := ""
+	if req.GetContext() != nil {
+		correlationID = req.GetContext().GetCorrelationId()
+		reason = req.GetContext().GetReason()
+	}
+
+	plans := make([]guardianUpsertPlan, 0, len(pending))
+	groups := make(map[string]*guardianUpsertGroup)
+	for _, item := range pending {
+		write := item.write
+		mapped := item.mapped
+
+		current, exists, currentErr := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		if currentErr != nil {
+			return nil, status.Errorf(codes.Unavailable, "guardian version store unavailable: %v", currentErr)
+		}
+		exists = exists && current != nil && !current.Tombstone
 		switch expected := strings.TrimSpace(write.GetExpectedVersionId()); expected {
 		case "":
 		case "absent":
@@ -223,25 +252,28 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 		}
 	}
 
-	versions := make([]*pb.GuardianFileVersion, 0, len(plans))
+	changes := make([]guardianVersionCommit, 0, len(plans))
 	for _, plan := range plans {
-		version, err := r.guardianVersions.commit(guardianVersionCommit{
-			LogicalPath:     plan.mapped.LogicalPath,
-			DisplayPath:     plan.mapped.DisplayPath,
-			StorageID:       plan.mapped.StorageID,
-			BatchRevisionID: batchRevisionID,
-			PrincipalID:     principal.PrincipalID,
-			Reason:          reason,
-			CorrelationID:   correlationID,
-			Content:         plan.write.GetContent(),
-			Tombstone:       false,
-			CommittedAt:     committedAt,
+		changes = append(changes, guardianVersionCommit{
+			LogicalPath:       plan.mapped.LogicalPath,
+			DisplayPath:       plan.mapped.DisplayPath,
+			StorageID:         plan.mapped.StorageID,
+			BatchRevisionID:   batchRevisionID,
+			PrincipalID:       principal.PrincipalID,
+			Reason:            reason,
+			CorrelationID:     correlationID,
+			Content:           plan.write.GetContent(),
+			ExpectedVersionID: plan.write.GetExpectedVersionId(),
+			Tombstone:         false,
+			CommittedAt:       committedAt,
 		})
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "record guardian version: %v", err)
-		}
-		versions = append(versions, version)
-		event := buildGuardianChangeEvent(version, plan.mapped.LogicalPath, plan.changeType, correlationID, plan.write.GetContent())
+	}
+	versions, err := r.guardianVersions.commitBatch(changes)
+	if err != nil {
+		return nil, guardianVersionCommitStatus(err)
+	}
+	for i, plan := range plans {
+		event := buildGuardianChangeEvent(versions[i], plan.mapped.LogicalPath, plan.changeType, correlationID, plan.write.GetContent())
 		r.publishGuardianLogicalChange(event)
 		r.publishLegacyGuardianChange(event)
 	}
@@ -276,6 +308,30 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 		return nil, status.Error(codes.InvalidArgument, "at least one delete is required")
 	}
 
+	type pendingDelete struct {
+		deleteReq *pb.GuardianPathDelete
+		mapped    guardianPhysicalPath
+	}
+	pending := make([]pendingDelete, 0, len(req.GetDeletes()))
+	displayPaths := make([]string, 0, len(req.GetDeletes()))
+	for _, deleteReq := range req.GetDeletes() {
+		mapped, err := mapGuardianLogicalPath(deleteReq.GetLogicalPath())
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid logical path %q: %v", deleteReq.GetLogicalPath(), err)
+		}
+		if err := authorizeGuardianMutation(principal, mapped.LogicalPath, true); err != nil {
+			return nil, status.Error(codes.PermissionDenied, err.Error())
+		}
+		pending = append(pending, pendingDelete{deleteReq: deleteReq, mapped: mapped})
+		displayPaths = append(displayPaths, mapped.DisplayPath)
+	}
+
+	unlockMutations := r.lockGuardianMutations(displayPaths...)
+	defer unlockMutations()
+	if err := r.requireGuardianCoordinator(); err != nil {
+		return nil, err
+	}
+
 	now := time.Now()
 	batchRevisionID := guardianBatchRevisionID(now)
 	committedAt := now.Unix()
@@ -296,20 +352,26 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 	}
 	defer closeConn()
 
-	plans := make([]guardianDeletePlan, 0, len(req.GetDeletes()))
-	for _, deleteReq := range req.GetDeletes() {
-		mapped, err := mapGuardianLogicalPath(deleteReq.GetLogicalPath())
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "invalid logical path %q: %v", deleteReq.GetLogicalPath(), err)
-		}
-		if err := authorizeGuardianMutation(principal, mapped.LogicalPath, true); err != nil {
-			return nil, status.Error(codes.PermissionDenied, err.Error())
-		}
+	plans := make([]guardianDeletePlan, 0, len(pending))
+	for _, item := range pending {
+		deleteReq := item.deleteReq
+		mapped := item.mapped
 
-		current, exists := r.guardianVersions.currentVersion(mapped.LogicalPath)
+		current, exists, currentErr := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		if currentErr != nil {
+			return nil, status.Errorf(codes.Unavailable, "guardian version store unavailable: %v", currentErr)
+		}
+		exists = exists && current != nil
 		if expected := strings.TrimSpace(deleteReq.GetExpectedVersionId()); expected != "" {
-			if !exists || current.VersionID != expected {
-				return nil, status.Errorf(codes.FailedPrecondition, "logical path %q current version mismatch", mapped.LogicalPath)
+			switch expected {
+			case "absent":
+				if exists && !current.Tombstone {
+					return nil, status.Errorf(codes.AlreadyExists, "logical path %q already exists", mapped.LogicalPath)
+				}
+			default:
+				if !exists || current.VersionID != expected {
+					return nil, status.Errorf(codes.FailedPrecondition, "logical path %q current version mismatch", mapped.LogicalPath)
+				}
 			}
 		}
 
@@ -376,25 +438,28 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 		}
 	}
 
-	tombstones := make([]*pb.GuardianFileVersion, 0, len(plans))
+	changes := make([]guardianVersionCommit, 0, len(plans))
 	for _, plan := range plans {
-		version, err := r.guardianVersions.commit(guardianVersionCommit{
-			LogicalPath:     plan.mapped.LogicalPath,
-			DisplayPath:     plan.mapped.DisplayPath,
-			StorageID:       plan.mapped.StorageID,
-			BatchRevisionID: batchRevisionID,
-			PrincipalID:     principal.PrincipalID,
-			Reason:          reason,
-			CorrelationID:   correlationID,
-			Content:         plan.content,
-			Tombstone:       true,
-			CommittedAt:     committedAt,
+		changes = append(changes, guardianVersionCommit{
+			LogicalPath:       plan.mapped.LogicalPath,
+			DisplayPath:       plan.mapped.DisplayPath,
+			StorageID:         plan.mapped.StorageID,
+			BatchRevisionID:   batchRevisionID,
+			PrincipalID:       principal.PrincipalID,
+			Reason:            reason,
+			CorrelationID:     correlationID,
+			Content:           plan.content,
+			ExpectedVersionID: plan.deleteReq.GetExpectedVersionId(),
+			Tombstone:         true,
+			CommittedAt:       committedAt,
 		})
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "record guardian tombstone: %v", err)
-		}
-		tombstones = append(tombstones, version)
-		event := buildGuardianChangeEvent(version, plan.mapped.LogicalPath, plan.changeType, correlationID, nil)
+	}
+	tombstones, err := r.guardianVersions.commitBatch(changes)
+	if err != nil {
+		return nil, guardianVersionCommitStatus(err)
+	}
+	for i, plan := range plans {
+		event := buildGuardianChangeEvent(tombstones[i], plan.mapped.LogicalPath, plan.changeType, correlationID, nil)
 		r.publishGuardianLogicalChange(event)
 		r.publishLegacyGuardianChange(event)
 	}
@@ -523,13 +588,17 @@ func (r *Router) GetGuardianVersion(ctx context.Context, req *pb.GetGuardianVers
 		return nil, status.Error(codes.InvalidArgument, "version_id is required")
 	}
 
-	version, content, ok := r.guardianVersions.get(logicalPath, req.GetVersionId())
+	version, content, contentAvailable, ok, versionErr := r.guardianVersions.get(logicalPath, req.GetVersionId())
+	if versionErr != nil {
+		return nil, status.Errorf(codes.Unavailable, "guardian version store unavailable: %v", versionErr)
+	}
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "version %q not found for %q", req.GetVersionId(), logicalPath)
 	}
 	return &pb.GetGuardianVersionResponse{
-		Version: version,
-		Content: content,
+		Version:          version,
+		Content:          content,
+		ContentAvailable: contentAvailable,
 	}, nil
 }
 
@@ -712,8 +781,24 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guard
 	}
 	r.mu.Unlock()
 	r.bumpNativeNamespaceGeneration("guardian upsert")
+	r.invalidateGuardianPartitions()
 
 	return nil
+}
+
+// guardianVersionCommitStatus maps version-store conflicts to gRPC statuses
+// that Guardian understands as CAS conflicts.
+func guardianVersionCommitStatus(err error) error {
+	switch {
+	case errors.Is(err, errGuardianVersionExists):
+		guardianVersionStoreCASConflictsTotal.Inc()
+		return status.Errorf(codes.AlreadyExists, "guardian version: %v", err)
+	case errors.Is(err, errGuardianVersionConflict):
+		guardianVersionStoreCASConflictsTotal.Inc()
+		return status.Errorf(codes.FailedPrecondition, "guardian version: %v", err)
+	default:
+		return status.Errorf(codes.Internal, "record guardian version: %v", err)
+	}
 }
 
 func grpcCode(err error) codes.Code {

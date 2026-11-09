@@ -908,6 +908,32 @@ func (sc *ShardedClient) GetAttr(ctx context.Context, path string) (*pb.GetAttrR
 	return &pb.GetAttrResponse{Found: false}, nil
 }
 
+// namespaceAuthorityPath reports whether directory entries for path live on
+// every node as replicated repository metadata. Guardian partition roots are
+// registered on all nodes, so listing them from one node is authoritative and
+// avoids multiplying a 10K-entry listing by the node count.
+func namespaceAuthorityPath(path string) bool {
+	cleaned := strings.Trim(path, "/")
+	// guardian-system is KVS-backed and its repository registration is only
+	// guaranteed on the KVS leader, so it must not use the single-node fast
+	// path. guardian/<name> repository roots are replicated to all healthy
+	// nodes by default.
+	return cleaned == "guardian" || cleaned == "guardian/partitions"
+}
+
+func singleNodeListing(clients []pb.MonoFSClient, nodeIDs []string) ([]pb.MonoFSClient, []string) {
+	if len(clients) <= 1 {
+		return clients, nodeIDs
+	}
+	idx := 0
+	for i := 1; i < len(nodeIDs); i++ {
+		if nodeIDs[i] < nodeIDs[idx] {
+			idx = i
+		}
+	}
+	return []pb.MonoFSClient{clients[idx]}, []string{nodeIDs[idx]}
+}
+
 // ReadDir performs a readdir operation across all healthy nodes in parallel.
 // Files are sharded across nodes, so every healthy node must be queried and
 // results merged to produce a complete directory listing.
@@ -918,6 +944,10 @@ func (sc *ShardedClient) GetAttr(ctx context.Context, path string) (*pb.GetAttrR
 // readdir → filepath.Walk in go mod verify) see an error rather than
 // computing a hash over an incomplete file list.
 func (sc *ShardedClient) ReadDir(ctx context.Context, path string) ([]*pb.DirEntry, error) {
+	return sc.readDir(ctx, path, true)
+}
+
+func (sc *ShardedClient) readDir(ctx context.Context, path string, allowAuthority bool) ([]*pb.DirEntry, error) {
 	// Check if context is already canceled before starting
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -949,6 +979,11 @@ func (sc *ShardedClient) ReadDir(ctx context.Context, path string) ([]*pb.DirEnt
 			sc.logger.Debug("readdir: no healthy clients available", "path", path)
 		}
 		return nil, fmt.Errorf("no healthy nodes available")
+	}
+
+	authority := allowAuthority && namespaceAuthorityPath(path)
+	if authority {
+		clients, nodeIDs = singleNodeListing(clients, nodeIDs)
 	}
 
 	if sc.logger != nil {
@@ -1031,6 +1066,11 @@ func (sc *ShardedClient) ReadDir(ctx context.Context, path string) ([]*pb.DirEnt
 						"node_id", r.nodeID,
 						"error", r.err)
 				}
+				if authority {
+					// The single-node authority fast path can fail on a node
+					// that has not yet received replicated repository metadata.
+					return sc.readDir(ctx, path, false)
+				}
 				return nil, fmt.Errorf("readdir incomplete: node %s failed: %w", r.nodeID, r.err)
 			}
 			for _, entry := range r.entries {
@@ -1058,6 +1098,12 @@ func (sc *ShardedClient) ReadDir(ctx context.Context, path string) ([]*pb.DirEnt
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Name < entries[j].Name
 	})
+
+	if authority && len(entries) == 0 {
+		// An empty listing from the single authority node may mean its
+		// repository metadata is incomplete. Fall back to the full fan-out.
+		return sc.readDir(ctx, path, false)
+	}
 
 	return entries, nil
 }
@@ -1115,6 +1161,23 @@ func (sc *ShardedClient) readDirFromNode(ctx context.Context, client pb.MonoFSCl
 // k-way merge, so memory is O(healthy nodes) rather than O(entries). It returns
 // an error instead of a partial listing if any node stream fails.
 func (sc *ShardedClient) ReadDirStream(ctx context.Context, path string, fn func(*pb.DirEntry) error) error {
+	emitted := 0
+	counting := func(entry *pb.DirEntry) error {
+		emitted++
+		return fn(entry)
+	}
+	err := sc.readDirStream(ctx, path, true, counting)
+	if emitted == 0 && ctx.Err() == nil && namespaceAuthorityPath(path) {
+		// Fall back to the full fan-out when the authority node fails or has
+		// not received replicated repository metadata yet. An empty successful
+		// listing is also retried: the extra fan-out is cheap for the small
+		// guardian root directory and avoids silently hiding partitions.
+		return sc.readDirStream(ctx, path, false, fn)
+	}
+	return err
+}
+
+func (sc *ShardedClient) readDirStream(ctx context.Context, path string, allowAuthority bool, fn func(*pb.DirEntry) error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -1136,6 +1199,10 @@ func (sc *ShardedClient) ReadDirStream(ctx context.Context, path string, fn func
 
 	if len(clients) == 0 {
 		return fmt.Errorf("no healthy nodes available")
+	}
+
+	if allowAuthority && namespaceAuthorityPath(path) {
+		clients, nodeIDs = singleNodeListing(clients, nodeIDs)
 	}
 
 	type nodeStream struct {

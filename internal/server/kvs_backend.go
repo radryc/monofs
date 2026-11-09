@@ -150,9 +150,23 @@ func (s *Server) ensureRepositoryRegistration(storageID, displayPath, repoURL, b
 			if err := tx.Put(bucketRepoLookup, lookupKey, []byte(storageID), 0); err != nil {
 				return err
 			}
+			if err := addRepositoryNamespaceIndexTx(tx, displayPath); err != nil {
+				return err
+			}
 			onboardKey := []byte(storageID)
 			if err := tx.Put(bucketOnboardingStatus, onboardKey, []byte("false"), 0); err != nil {
 				return err
+			}
+		} else if existsErr == nil && displayPath != "" {
+			// Repair an existing repository whose lookup or namespace index is
+			// missing (for example an old database or a partially failed write).
+			if _, lookupErr := tx.Get(bucketRepoLookup, []byte(displayPath)); errors.Is(lookupErr, metastore.ErrKeyNotFound) {
+				if err := tx.Put(bucketRepoLookup, []byte(displayPath), []byte(storageID), 0); err != nil {
+					return err
+				}
+				if err := addRepositoryNamespaceIndexTx(tx, displayPath); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

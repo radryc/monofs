@@ -1761,10 +1761,7 @@ func (r *Router) proxyRegistryGET(parentCtx context.Context, endpoint string) ([
 // handleLogEngineAPI returns per-node doctor telemetry logengine stats.
 func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 	r.mu.RLock()
-	nodesSnapshot := make(map[string]*nodeState, len(r.nodes))
-	for k, v := range r.nodes {
-		nodesSnapshot[k] = v
-	}
+	nodesSnapshot := r.snapshotUINodesLocked()
 	spanEngine := strings.ToLower(strings.TrimSpace(r.config.SpanEngine))
 	r.mu.RUnlock()
 	if spanEngine == "" {
@@ -1826,9 +1823,9 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 		anyEnabled             bool
 	)
 
-	for nodeID, state := range nodesSnapshot {
+	for _, state := range nodesSnapshot {
 		ns := nodeLogStats{
-			NodeID:  nodeID,
+			NodeID:  state.id,
 			Address: state.externalAddress,
 		}
 		if le := state.logEngineStats; le != nil {
@@ -1885,7 +1882,7 @@ func (r *Router) handleLogEngineAPI(w http.ResponseWriter, _ *http.Request) {
 				// router reports one snapshot instead of summing node stats.
 				if clickHouseRaw == nil || (!clickHouseRaw.Healthy && ch.Healthy) {
 					clickHouseRaw = ch
-					clickHouseNode = nodeID
+					clickHouseNode = state.id
 				}
 			}
 		}
@@ -2014,10 +2011,7 @@ func (r *Router) handleDependenciesAPI(w http.ResponseWriter, req *http.Request)
 // handlePredictorAPI returns predictor statistics from all storage nodes.
 func (r *Router) handlePredictorAPI(w http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
-	nodesSnapshot := make(map[string]*nodeState, len(r.nodes))
-	for k, v := range r.nodes {
-		nodesSnapshot[k] = v
-	}
+	nodesSnapshot := r.snapshotUINodesLocked()
 	staleThreshold := r.config.UnhealthyThreshold
 	r.mu.RUnlock()
 
@@ -2042,8 +2036,7 @@ func (r *Router) handlePredictorAPI(w http.ResponseWriter, req *http.Request) {
 	)
 
 	for _, state := range nodesSnapshot {
-		state := state
-		if state.client == nil || !state.info.Healthy {
+		if state.client == nil || !state.healthy {
 			continue
 		}
 		if staleThreshold > 0 && time.Since(state.lastSeen) > staleThreshold {
@@ -2062,8 +2055,8 @@ func (r *Router) handlePredictorAPI(w http.ResponseWriter, req *http.Request) {
 
 			if err != nil {
 				results = append(results, nodePredictorStats{
-					NodeID:  state.info.NodeId,
-					Address: state.info.Address,
+					NodeID:  state.nodeID,
+					Address: state.address,
 					Error:   err.Error(),
 				})
 				return
@@ -2071,7 +2064,7 @@ func (r *Router) handlePredictorAPI(w http.ResponseWriter, req *http.Request) {
 
 			results = append(results, nodePredictorStats{
 				NodeID:         resp.NodeId,
-				Address:        state.info.Address,
+				Address:        state.address,
 				Enabled:        resp.Enabled,
 				MarkovChains:   resp.MarkovChains,
 				DirectoryMaps:  resp.DirectoryMaps,
@@ -2182,29 +2175,7 @@ func (r *Router) handleGuardianInject(w http.ResponseWriter, req *http.Request) 
 
 // handleGuardianPartitions handles GET /api/guardian/partitions — list guardian partitions
 func (r *Router) handleGuardianPartitions(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	data := r.buildRepositoriesData()
-	id, _ := authz.IdentityFromContext(req.Context())
-	var guardianRepos []map[string]interface{}
-	for _, repo := range data.Repositories {
-		if isGuardian, ok := repo["is_guardian"].(bool); ok && isGuardian {
-			repoID, _ := repo["repo_id"].(string)
-			if repoID != "" && !r.canReadGuardianRepo(id, repoID) {
-				continue
-			}
-			guardianRepos = append(guardianRepos, repo)
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":    true,
-		"partitions": guardianRepos,
-	})
+	r.handleGuardianPartitionsPage(w, req)
 }
 
 // handleGuardianPartition handles DELETE /api/guardian/partitions/{name}[/files?path=...][/dirs?path=...]

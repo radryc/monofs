@@ -163,7 +163,13 @@ func looksLikeTransientLeaderError(message string) bool {
 	message = strings.ToLower(strings.TrimSpace(message))
 	return strings.Contains(message, "not leader") ||
 		strings.Contains(message, "is not the leader") ||
-		strings.Contains(message, "leadership lost")
+		strings.Contains(message, "leadership lost") ||
+		// A single-node raft store elects itself after the heartbeat timeout.
+		// The first write can legitimately hit the per-attempt deadline while
+		// that election is still in progress.
+		strings.Contains(message, "deadline exceeded") ||
+		strings.Contains(message, "unavailable") ||
+		strings.Contains(message, "connection refused")
 }
 
 func readAllFromMonoFSStream(t *testing.T, client pb.MonoFSClient, fullPath string) []byte {

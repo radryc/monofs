@@ -487,7 +487,7 @@ DeleteGuardianPaths
 
 ### 8.4 Version storage
 
-Asset paths (no dot-prefixed segment) keep up to 50 in-memory versions plus a persisted metadata snapshot; content is not persisted. Machinery paths (any dot-prefixed segment: `/.pipelines`, `/.queues`, `/.scans`, `/.registry`, `.guardian/OWNERS`) are ephemeral and disappear on restart. Directory/prefix listing is not implemented; listing looks up one exact path.
+Asset paths (no dot-prefixed segment) keep up to 50 versions in a Pebble-backed store; content is held only in a bounded in-memory cache and is not persisted. Machinery paths (any dot-prefixed segment: `/.pipelines`, `/.queues`, `/.scans`, `/.registry`, `.guardian/OWNERS`) are ephemeral and disappear on restart. Current-version and history listings use prefix scans over the store instead of loading a single snapshot file.
 
 ## 9. Pipeline flow
 

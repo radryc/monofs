@@ -150,6 +150,37 @@ func (r *Router) canReadGuardianRepo(id authz.Identity, displayPath string) bool
 	return r.canReadDisplayPath(id, displayPath)
 }
 
+// guardianPartitionVisibility returns a request-scoped predicate for Guardian
+// partition names. It evaluates the policy and grant matching once, then
+// answers each partition in O(1).
+func (r *Router) guardianPartitionVisibility(id authz.Identity) func(displayPath string) bool {
+	st := r.accessPolicySnapshot()
+	if st == nil {
+		return func(string) bool { return true }
+	}
+	if r.accessAdmin(id) {
+		return func(string) bool { return true }
+	}
+	visibility := policy.PartitionVisibility{}
+	if p := st.loader.Get(); p != nil {
+		visibility = p.PartitionVisibility(id)
+	}
+	return func(displayPath string) bool {
+		if displayPath == "guardian-system" {
+			return false
+		}
+		partition, ok := strings.CutPrefix(displayPath, "guardian/")
+		if !ok {
+			return true
+		}
+		allowed := visibility.CanSee(partition)
+		if st.enforce {
+			return allowed
+		}
+		return true
+	}
+}
+
 func (r *Router) logAccessDenied(st *accessPolicyState, id authz.Identity, scope, target string) {
 	key := scope + "|" + target + "|" + id.PrincipalID()
 	st.mu.Lock()

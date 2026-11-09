@@ -56,6 +56,9 @@ service MonoFSRouter {
     rpc DeleteGuardianPaths(DeleteGuardianPathsRequest) returns (DeleteGuardianPathsResponse);
     rpc ListGuardianVersions(ListGuardianVersionsRequest) returns (ListGuardianVersionsResponse);
     rpc GetGuardianVersion(GetGuardianVersionRequest) returns (GetGuardianVersionResponse);
+    // ReadGuardianPath returns a consistent content+version pair. It verifies
+    // the content hash against the authoritative version record.
+    rpc ReadGuardianPath(ReadGuardianPathRequest) returns (ReadGuardianPathResponse);
     rpc SubscribeGuardianChanges(SubscribeGuardianChangesRequest) returns (stream GuardianChangeEvent);
 
     // Doctor Partition operations — telemetry ingest and query
@@ -145,6 +148,8 @@ service MonoFS {
     // Repository discovery
     rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
     rpc GetRepositoryInfo(GetRepositoryInfoRequest) returns (GetRepositoryInfoResponse);
+    // Guardian partition listing (prefix-indexed, paginated)
+    rpc ListGuardianPartitions(ListGuardianPartitionsRequest) returns (ListGuardianPartitionsResponse);
     
     // Onboarding status tracking
     rpc GetOnboardingStatus(OnboardingStatusRequest) returns (OnboardingStatusResponse);
@@ -524,10 +529,29 @@ message ClearFailoverCacheResponse {
     string message = 3;
 }
 
-message ListRepositoriesRequest {}
+message ListRepositoriesRequest {
+    string prefix = 1;          // Optional display-path prefix filter
+    int32 page_size = 2;        // 0 = no pagination
+    string page_token = 3;      // Opaque resume token (last display path)
+    bool include_details = 4;   // Populate repositories in addition to repository_ids
+}
+
+message RepositoryRecord {
+    string storage_id = 1;
+    string display_path = 2;
+    string source = 3;
+    string ref = 4;
+    string commit_hash = 5;
+    int64 commit_time = 6;
+    string commit_message = 7;
+    string guardian_url = 8;
+}
 
 message ListRepositoriesResponse {
     repeated string repository_ids = 1;
+    repeated RepositoryRecord repositories = 2;
+    string next_page_token = 3;
+    int64 total = 4;
 }
 
 message GetRepositoryInfoRequest {
@@ -543,6 +567,29 @@ message GetRepositoryInfoResponse {
     int64 commit_time = 6;
     string commit_message = 7;
     string guardian_url = 8;   // Guardian partition URL (set for guardian repos)
+}
+
+message ListGuardianPartitionsRequest {
+    int32 page_size = 1;        // 0 = server default
+    string page_token = 2;      // Opaque resume token (last display path)
+    bool include_system = 3;    // Include guardian-system alongside guardian/<name>
+}
+
+message GuardianPartitionRecord {
+    string storage_id = 1;
+    string display_path = 2;    // guardian/<name> or guardian-system
+    string guardian_url = 3;
+    string source = 4;
+    string ref = 5;
+    string commit_hash = 6;
+    int64 commit_time = 7;
+    string commit_message = 8;
+}
+
+message ListGuardianPartitionsResponse {
+    repeated GuardianPartitionRecord partitions = 1;
+    string next_page_token = 2;
+    int64 total = 3;
 }
 
 // Onboarding status messages
@@ -1256,6 +1303,22 @@ message GetGuardianVersionRequest {
 message GetGuardianVersionResponse {
     GuardianFileVersion version = 1;
     bytes content = 2;
+    // content_available is false when the router only has the version metadata
+    // (for example after a restart or after the bounded content cache evicted
+    // the version). Clients must not treat an empty content field as a real
+    // empty file when this is false.
+    bool content_available = 3;
+}
+
+message ReadGuardianPathRequest {
+    string guardian_token = 1;
+    string logical_path = 2;
+}
+
+message ReadGuardianPathResponse {
+    bool found = 1;
+    bytes content = 2;
+    GuardianFileVersion version = 3;
 }
 
 message SubscribeGuardianChangesRequest {

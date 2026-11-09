@@ -241,6 +241,61 @@ func (p *Policy) CanSeePartition(id authz.Identity, partition string) bool {
 	return p.can(id, ScopePartitions, partition)
 }
 
+// PartitionVisibility precomputes the partition decision for one identity so
+// large partition listings do not re-evaluate every grant per partition.
+type PartitionVisibility struct {
+	admin          bool
+	denied         bool
+	wildcard       bool
+	defaultAllowed bool
+	allowed        map[string]struct{}
+}
+
+// PartitionVisibility builds a request-scoped visibility evaluator.
+func (p *Policy) PartitionVisibility(id authz.Identity) PartitionVisibility {
+	if p == nil || id.IsAnonymous() {
+		return PartitionVisibility{}
+	}
+	if p.IsAdmin(id) {
+		return PartitionVisibility{admin: true}
+	}
+	if p.denied(id, ScopePartitions) {
+		return PartitionVisibility{denied: true}
+	}
+	visibility := PartitionVisibility{
+		allowed:        make(map[string]struct{}),
+		defaultAllowed: p.bundle.Defaults.allows(ScopePartitions),
+	}
+	for _, g := range p.matching(id) {
+		if g.deniesScope(ScopePartitions) {
+			continue
+		}
+		for _, name := range g.Partitions {
+			if name == "*" {
+				visibility.wildcard = true
+				return visibility
+			}
+			visibility.allowed[name] = struct{}{}
+		}
+	}
+	return visibility
+}
+
+// CanSee reports whether the partition is visible under the precomputed
+// policy. It is equivalent to Policy.CanSeePartition.
+func (v PartitionVisibility) CanSee(partition string) bool {
+	if v.admin || v.wildcard {
+		return true
+	}
+	if v.denied {
+		return false
+	}
+	if _, ok := v.allowed[partition]; ok {
+		return true
+	}
+	return v.defaultAllowed
+}
+
 // CanReadSignal reports whether the identity may read a telemetry signal for a
 // partition. Metrics are always visible.
 func (p *Policy) CanReadSignal(id authz.Identity, partition string, signal Signal) bool {

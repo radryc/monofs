@@ -117,6 +117,10 @@ Doctor exposes a read-only SQL console at `POST /v1/sql/query`. It runs
   `span_id`, `parent_span_id`, `service`, `name`, `status_code`,
   `attributes_json`, `partition`
 
+Query syntax, quoting rules (including the double-quote `UNKNOWN_IDENTIFIER`
+pitfall), label filters, and limits are documented in
+[`doctor/docs/sql-console-syntax.md`](../../doctor/docs/sql-console-syntax.md).
+
 The query is evaluated on every healthy MonoFS node and the response contains
 one result envelope per node. This is intentional: chunks are shard-local, so
 aggregate queries return per-node partials rather than a misleading global

@@ -1426,6 +1426,41 @@ func (s *guardianTestNodeServer) RegisterRepository(_ context.Context, req *pb.R
 	return &pb.RegisterRepositoryResponse{Success: true, Message: "ok"}, nil
 }
 
+func (s *guardianTestNodeServer) ListGuardianPartitions(_ context.Context, req *pb.ListGuardianPartitionsRequest) (*pb.ListGuardianPartitionsResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pageSize := int(req.GetPageSize())
+	if pageSize <= 0 {
+		pageSize = 1000
+	}
+	startAfter := req.GetPageToken()
+	ids := make([]string, 0, len(s.repos))
+	for storageID, displayPath := range s.repos {
+		if displayPath != "guardian-system" && !strings.HasPrefix(displayPath, "guardian/") {
+			continue
+		}
+		ids = append(ids, storageID)
+	}
+	sort.Slice(ids, func(i, j int) bool { return s.repos[ids[i]] < s.repos[ids[j]] })
+	resp := &pb.ListGuardianPartitionsResponse{}
+	for _, storageID := range ids {
+		displayPath := s.repos[storageID]
+		if startAfter != "" && displayPath <= startAfter {
+			continue
+		}
+		if len(resp.Partitions) >= pageSize {
+			resp.NextPageToken = resp.Partitions[len(resp.Partitions)-1].GetDisplayPath()
+			break
+		}
+		resp.Partitions = append(resp.Partitions, &pb.GuardianPartitionRecord{
+			StorageId:   storageID,
+			DisplayPath: displayPath,
+		})
+	}
+	resp.Total = int64(len(ids))
+	return resp, nil
+}
+
 func (s *guardianTestNodeServer) IngestFileBatch(_ context.Context, req *pb.IngestFileBatchRequest) (*pb.IngestFileBatchResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

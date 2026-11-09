@@ -26,6 +26,7 @@ func (r *Router) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryR
 		delete(r.ingestedRepos, storageID)
 	}
 	r.mu.Unlock()
+	r.invalidateGuardianPartitions()
 
 	if exists {
 		r.logger.Info("removed repository from router memory", "storage_id", storageID, "files_count", filesCount)
