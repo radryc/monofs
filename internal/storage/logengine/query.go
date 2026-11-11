@@ -368,6 +368,12 @@ func (q *QueryEngine) StreamLogs(ctx context.Context, queryStr, service string, 
 
 			parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, chunkDataFileName)
 			if err := q.scanLogParquet(ctx, parquetPath, validRows, compiled, from, to, observer, func(record LogRecord) error {
+				// Apply the caller's partition scope before the top-N
+				// selection. Filtering only at emit time let a restricted
+				// caller's batch be consumed entirely by other partitions.
+				if scope.Restricted && !scope.allowsLog(record) {
+					return nil
+				}
 				if top.Len() < limit {
 					heap.Push(&top, record)
 					return nil
@@ -843,6 +849,7 @@ func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, serv
 	pruneStart := time.Now()
 	defer observer.observeStage("manifest_pruning", pruneStart)
 
+	scope, _ := QueryScopeFromContext(ctx)
 	remaining := make([]string, 0, len(chunkIDs))
 	for _, chunkID := range chunkIDs {
 		if minT, maxT, ok := ParseChunkTimeRangeFromID(chunkID); ok {
@@ -886,6 +893,10 @@ func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, serv
 		}
 		if !manifestMatchesLogQuery(manifest, compiled) {
 			observer.addChunksPruned("label_mismatch", 1)
+			continue
+		}
+		if !manifestMatchesScope(manifest, scope) {
+			observer.addChunksPruned("scope_mismatch", 1)
 			continue
 		}
 		candidates = append(candidates, candidateChunk{chunkID: chunkID, manifest: manifest, cutoffMax: manifest.MaxTime})
@@ -1752,6 +1763,10 @@ func (q *QueryEngine) StreamTraces(ctx context.Context, traceID, service string,
 			}
 
 			if err := q.scanTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, chunkDataFileName), traceID, service, from, to, observer, func(record SpanRecord) error {
+				// Scope before the top-N selection; see StreamLogs.
+				if scope.Restricted && !scope.allowsSpan(record) {
+					return nil
+				}
 				if top.Len() < limit {
 					heap.Push(&top, record)
 					return nil
@@ -1789,6 +1804,7 @@ func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, tr
 	pruneStart := time.Now()
 	defer observer.observeStage("manifest_pruning", pruneStart)
 
+	scope, _ := QueryScopeFromContext(ctx)
 	remaining := make([]string, 0, len(chunkIDs))
 	for _, chunkID := range chunkIDs {
 		if minT, maxT, ok := ParseChunkTimeRangeFromID(chunkID); ok {
@@ -1832,6 +1848,10 @@ func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, tr
 		}
 		if traceID != "" && !traceBloomMayContain(manifest.TraceBloom, traceID) {
 			observer.addChunksPruned("trace_bloom_miss", 1)
+			continue
+		}
+		if !manifestMatchesScope(manifest, scope) {
+			observer.addChunksPruned("scope_mismatch", 1)
 			continue
 		}
 		candidates = append(candidates, candidateChunk{chunkID: chunkID, manifest: manifest, cutoffMax: manifest.MaxTime})

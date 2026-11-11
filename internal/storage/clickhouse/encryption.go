@@ -6,7 +6,7 @@ import (
 )
 
 func (s *TraceStore) encryption() *telemetrycrypto.Provider {
-	if s == nil || s.cfg.Encryption == nil || !s.cfg.Encryption.Enabled() {
+	if s == nil || s.cfg.Encryption == nil || !s.cfg.Encryption.Active() {
 		return nil
 	}
 	return s.cfg.Encryption

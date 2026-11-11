@@ -239,7 +239,7 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 	}
 
 	if err := r.applyGuardianUpsertGroups(ctx, groups, principal); err != nil {
-		return nil, status.Errorf(codes.Internal, "upsert guardian paths: %v", err)
+		return nil, guardianUpsertStatus(err)
 	}
 
 	// Re-index search for affected guardian partitions, debounced per
@@ -639,58 +639,155 @@ func (r *Router) SubscribeGuardianChanges(req *pb.SubscribeGuardianChangesReques
 	}
 }
 
+const (
+	guardianWriteMaxAttempts = 3
+	// guardianWriteRetryBackoff is the delay before each retry attempt. It is
+	// deliberately short: Guardian already retries with a longer budget, while
+	// this loop is meant to catch a same-request peer failover (KVS) or a
+	// transient dial error.
+	guardianWriteRetryBackoff = 250 * time.Millisecond
+)
+
+// guardianNodeFailure records which node rejected a Guardian mutation so the
+// retry loop can quarantine it and pick a different target.
+type guardianNodeFailure struct {
+	nodeID string
+	err    error
+}
+
+type guardianWriteError struct {
+	failures []guardianNodeFailure
+}
+
+func (e *guardianWriteError) Error() string {
+	if len(e.failures) == 0 {
+		return "guardian write failed"
+	}
+	return e.failures[0].err.Error()
+}
+
+func (e *guardianWriteError) Unwrap() []error {
+	out := make([]error, 0, len(e.failures))
+	for _, failure := range e.failures {
+		out = append(out, failure.err)
+	}
+	return out
+}
+
+// isGuardianTransportError reports whether err is a node-level transport
+// failure (dial/refused/stream reset) rather than a data or validation error.
+func isGuardianTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch grpcCode(err) {
+	case codes.Unavailable, codes.DeadlineExceeded:
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "transport is closing") ||
+		strings.Contains(message, "error reading server preface") ||
+		strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "connection reset by peer")
+}
+
+func isRetryableGuardianWriteError(err error) bool {
+	return isRetryableKVSError(err) || isGuardianTransportError(err)
+}
+
+// guardianUpsertStatus keeps infra failures retryable for clients. Previously
+// any node dial error was wrapped as Internal, which Guardian does not retry.
+func guardianUpsertStatus(err error) error {
+	if err == nil {
+		return nil
+	}
+	if isGuardianTransportError(err) || isRetryableKVSError(err) {
+		return status.Errorf(codes.Unavailable, "upsert guardian paths: %v", err)
+	}
+	return status.Errorf(codes.Internal, "upsert guardian paths: %v", err)
+}
+
 func (r *Router) applyGuardianUpsertGroups(ctx context.Context, groups map[string]*guardianUpsertGroup, principal *guardianPrincipal) error {
 	if len(groups) == 0 {
 		return nil
 	}
-	nodes := r.collectGuardianNodes()
-	if len(nodes) == 0 {
-		return fmt.Errorf("no healthy nodes available")
+	if len(r.collectGuardianNodes()) == 0 {
+		return status.Error(codes.Unavailable, "no healthy monofs nodes available")
 	}
 
 	for _, group := range groups {
-		if err := r.applyGuardianUpsertGroup(ctx, nodes, group, principal); err != nil {
+		if err := r.applyGuardianUpsertGroup(ctx, group, principal); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianNodeTarget, group *guardianUpsertGroup, principal *guardianPrincipal) error {
-	err := r.applyGuardianUpsertGroupOnce(ctx, nodes, group, principal)
-	if err == nil || !isRetryableKVSError(err) {
-		return err
-	}
-	if guardianRepoStorageBackend(group.displayPath) != "kvs" {
-		return err
-	}
+func (r *Router) applyGuardianUpsertGroup(ctx context.Context, group *guardianUpsertGroup, principal *guardianPrincipal) error {
+	isKVS := guardianRepoStorageBackend(group.displayPath) == "kvs"
+	baseTargets := r.guardianMutationTargets(r.collectGuardianNodes(), group.displayPath)
 
-	// A leadership change can happen between the role check and the write.
-	// Re-probe KVS roles and retry once against the refreshed target.
-	r.logger.Info("retrying guardian kvs write after leadership error",
-		"display_path", group.displayPath,
-		"error", err)
-	r.refreshGuardianKVSStatuses(ctx)
-	return r.applyGuardianUpsertGroupOnce(ctx, r.collectGuardianNodes(), group, principal)
+	var lastErr error
+	for attempt := 0; attempt < guardianWriteMaxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(guardianWriteRetryBackoff * time.Duration(attempt)):
+			}
+		}
+
+		targets := baseTargets
+		if isKVS && attempt > 0 {
+			// Any healthy KVS node forwards to the current leader. After a
+			// failure, re-read topology and roles so the retry targets a peer
+			// instead of the dead address that was cached a moment ago.
+			r.refreshGuardianKVSStatuses(ctx)
+			targets = r.guardianMutationTargets(r.collectGuardianNodes(), group.displayPath)
+		}
+		if len(targets) == 0 {
+			lastErr = status.Errorf(codes.Unavailable, "no healthy guardian node available for %s", group.displayPath)
+			continue
+		}
+
+		failures, err := r.applyGuardianUpsertGroupOnce(ctx, targets, group, principal)
+		if err == nil {
+			for _, target := range targets {
+				r.clearGuardianNodeFailure(target.id)
+			}
+			return nil
+		}
+		lastErr = err
+		for _, failure := range failures {
+			if isGuardianTransportError(failure.err) {
+				r.markGuardianNodeUnhealthy(failure.nodeID, failure.err.Error())
+			}
+		}
+		if !isRetryableGuardianWriteError(err) {
+			return err
+		}
+	}
+	return lastErr
 }
 
-func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guardianNodeTarget, group *guardianUpsertGroup, principal *guardianPrincipal) error {
+func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, targets []guardianNodeTarget, group *guardianUpsertGroup, principal *guardianPrincipal) ([]guardianNodeFailure, error) {
 	var (
-		wg      sync.WaitGroup
-		errMu   sync.Mutex
-		errs    []error
-		repoURL string
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		failures []guardianNodeFailure
+		repoURL  string
 	)
 	if principal != nil && strings.TrimSpace(principal.BaseURL) != "" {
 		repoURL = strings.TrimRight(strings.TrimSpace(principal.BaseURL), "/")
 	}
 	batchFiles := appendGuardianDirHints(group.files)
-	targetNodes := r.guardianMutationTargets(nodes, group.displayPath)
+	targetNodes := targets
 	if len(targetNodes) == 0 {
 		if guardianRepoStorageBackend(group.displayPath) == "kvs" {
-			return fmt.Errorf("no healthy kvs node available for %s", group.displayPath)
+			return nil, fmt.Errorf("no healthy kvs node available for %s", group.displayPath)
 		}
-		return fmt.Errorf("no healthy guardian node available for %s", group.displayPath)
+		return nil, fmt.Errorf("no healthy guardian node available for %s", group.displayPath)
 	}
 
 	for _, node := range targetNodes {
@@ -702,7 +799,7 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guard
 			nodeClient, closeConn, err := r.guardianNodeClient(node)
 			if err != nil {
 				errMu.Lock()
-				errs = append(errs, fmt.Errorf("node %s connect: %w", node.id, err))
+				failures = append(failures, guardianNodeFailure{nodeID: node.id, err: fmt.Errorf("node %s connect: %w", node.id, err)})
 				errMu.Unlock()
 				return
 			}
@@ -746,7 +843,7 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guard
 			if err != nil {
 				r.guardianRegisteredNodeRepos.Delete(regKey)
 				errMu.Lock()
-				errs = append(errs, fmt.Errorf("node %s ingest %s: %w", node.id, group.displayPath, err))
+				failures = append(failures, guardianNodeFailure{nodeID: node.id, err: fmt.Errorf("node %s ingest %s: %w", node.id, group.displayPath, err)})
 				errMu.Unlock()
 				return
 			}
@@ -757,14 +854,14 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guard
 					message = resp.GetErrorMessage()
 				}
 				errMu.Lock()
-				errs = append(errs, fmt.Errorf("node %s ingest %s failed: %s", node.id, group.displayPath, message))
+				failures = append(failures, guardianNodeFailure{nodeID: node.id, err: fmt.Errorf("node %s ingest %s failed: %s", node.id, group.displayPath, message)})
 				errMu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
-	if len(errs) > 0 {
-		return errs[0]
+	if len(failures) > 0 {
+		return failures, &guardianWriteError{failures: failures}
 	}
 
 	r.mu.Lock()
@@ -783,7 +880,7 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guard
 	r.bumpNativeNamespaceGeneration("guardian upsert")
 	r.invalidateGuardianPartitions()
 
-	return nil
+	return nil, nil
 }
 
 // guardianVersionCommitStatus maps version-store conflicts to gRPC statuses

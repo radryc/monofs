@@ -12,14 +12,24 @@ import (
 // File is a parsed raw access policy document (access.yaml) before selectors
 // are resolved against a partition catalog.
 type File struct {
-	Version     int
-	Imports     []string
-	Defaults    map[string]string
-	Selectors   map[string]Selector
-	Groups      map[string]Subject
-	Users       map[string]Subject
-	Clients     map[string]Subject
-	AWSBindings []AWSBinding
+	Version       int
+	Imports       []string
+	Defaults      map[string]string
+	Selectors     map[string]Selector
+	Groups        map[string]Subject
+	Users         map[string]Subject
+	Clients       map[string]Subject
+	AWSBindings   []AWSBinding
+	QuotaProfiles map[string]Quota
+	QuotaDefaults *Quota
+	Quotas        *QuotaSubjects
+}
+
+// QuotaSubjects holds the platform-owned per-subject quotas.
+type QuotaSubjects struct {
+	Groups  map[string]Quota
+	Users   map[string]Quota
+	Clients map[string]Quota
 }
 
 // Selector matches partitions by label equality (all labels must match).
@@ -39,14 +49,23 @@ type Subject struct {
 }
 
 type rawFile struct {
-	Version     int                    `yaml:"version"`
-	Imports     []string               `yaml:"imports"`
-	Defaults    map[string]string      `yaml:"defaults"`
-	Selectors   map[string]rawSelector `yaml:"selectors"`
-	Groups      map[string]rawSubject  `yaml:"groups"`
-	Users       map[string]rawSubject  `yaml:"users"`
-	Clients     map[string]rawSubject  `yaml:"clients"`
-	AWSBindings []AWSBinding           `yaml:"aws_bindings"`
+	Version       int                    `yaml:"version"`
+	Imports       []string               `yaml:"imports"`
+	Defaults      map[string]string      `yaml:"defaults"`
+	Selectors     map[string]rawSelector `yaml:"selectors"`
+	Groups        map[string]rawSubject  `yaml:"groups"`
+	Users         map[string]rawSubject  `yaml:"users"`
+	Clients       map[string]rawSubject  `yaml:"clients"`
+	AWSBindings   []AWSBinding           `yaml:"aws_bindings"`
+	QuotaProfiles map[string]Quota       `yaml:"quota_profiles"`
+	QuotaDefaults *Quota                 `yaml:"quota_defaults"`
+	Quotas        *rawQuotas             `yaml:"quotas"`
+}
+
+type rawQuotas struct {
+	Groups  map[string]Quota `yaml:"groups"`
+	Users   map[string]Quota `yaml:"users"`
+	Clients map[string]Quota `yaml:"clients"`
 }
 
 type rawSelector struct {
@@ -80,10 +99,19 @@ func ParseFile(data []byte) (*File, error) {
 		}
 	}
 	file := &File{
-		Version:     doc.Version,
-		Imports:     doc.Imports,
-		Defaults:    doc.Defaults,
-		AWSBindings: doc.AWSBindings,
+		Version:       doc.Version,
+		Imports:       doc.Imports,
+		Defaults:      doc.Defaults,
+		AWSBindings:   doc.AWSBindings,
+		QuotaProfiles: doc.QuotaProfiles,
+		QuotaDefaults: doc.QuotaDefaults,
+	}
+	if doc.Quotas != nil {
+		file.Quotas = &QuotaSubjects{
+			Groups:  doc.Quotas.Groups,
+			Users:   doc.Quotas.Users,
+			Clients: doc.Quotas.Clients,
+		}
 	}
 	if len(doc.Selectors) > 0 {
 		file.Selectors = make(map[string]Selector, len(doc.Selectors))
@@ -211,6 +239,42 @@ func mergeFiles(base, child *File) *File {
 	} else {
 		out.AWSBindings = base.AWSBindings
 	}
+	out.QuotaProfiles = map[string]Quota{}
+	for k, v := range base.QuotaProfiles {
+		out.QuotaProfiles[k] = v
+	}
+	for k, v := range child.QuotaProfiles {
+		out.QuotaProfiles[k] = v
+	}
+	switch {
+	case base.QuotaDefaults != nil && child.QuotaDefaults != nil:
+		merged := MergeQuota(*base.QuotaDefaults, *child.QuotaDefaults)
+		out.QuotaDefaults = &merged
+	case child.QuotaDefaults != nil:
+		out.QuotaDefaults = child.QuotaDefaults
+	default:
+		out.QuotaDefaults = base.QuotaDefaults
+	}
+	out.Quotas = &QuotaSubjects{
+		Groups:  map[string]Quota{},
+		Users:   map[string]Quota{},
+		Clients: map[string]Quota{},
+	}
+	mergeQuotaSubjects := func(dst map[string]Quota, src map[string]Quota) {
+		for k, v := range src {
+			dst[k] = v
+		}
+	}
+	if base.Quotas != nil {
+		mergeQuotaSubjects(out.Quotas.Groups, base.Quotas.Groups)
+		mergeQuotaSubjects(out.Quotas.Users, base.Quotas.Users)
+		mergeQuotaSubjects(out.Quotas.Clients, base.Quotas.Clients)
+	}
+	if child.Quotas != nil {
+		mergeQuotaSubjects(out.Quotas.Groups, child.Quotas.Groups)
+		mergeQuotaSubjects(out.Quotas.Users, child.Quotas.Users)
+		mergeQuotaSubjects(out.Quotas.Clients, child.Quotas.Clients)
+	}
 	if len(out.Defaults) == 0 {
 		out.Defaults = nil
 	}
@@ -225,6 +289,12 @@ func mergeFiles(base, child *File) *File {
 	}
 	if len(out.Clients) == 0 {
 		out.Clients = nil
+	}
+	if len(out.QuotaProfiles) == 0 {
+		out.QuotaProfiles = nil
+	}
+	if len(out.Quotas.Groups) == 0 && len(out.Quotas.Users) == 0 && len(out.Quotas.Clients) == 0 {
+		out.Quotas = nil
 	}
 	return out
 }

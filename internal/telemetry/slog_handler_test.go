@@ -75,3 +75,26 @@ func TestShouldInstrumentGRPCServerRPCExcludesDoctorIngestMethods(t *testing.T) 
 		t.Fatal("ShouldInstrumentGRPCServerRPC(nil) = false, want true")
 	}
 }
+
+func TestShouldInstrumentGRPCRPCExcludesLongLivedStreams(t *testing.T) {
+	t.Parallel()
+
+	excluded := []string{
+		pb.MonoFSRouter_SubscribeGuardianChanges_FullMethodName,
+		pb.MonoFSRouter_SubscribeToChanges_FullMethodName,
+	}
+	for _, fullMethod := range excluded {
+		info := &stats.RPCTagInfo{FullMethodName: fullMethod}
+		if ShouldInstrumentGRPCServerRPC(info) {
+			t.Fatalf("ShouldInstrumentGRPCServerRPC(%q) = true, want false", fullMethod)
+		}
+		if ShouldInstrumentGRPCClientRPC(info) {
+			t.Fatalf("ShouldInstrumentGRPCClientRPC(%q) = true, want false", fullMethod)
+		}
+	}
+
+	info := &stats.RPCTagInfo{FullMethodName: pb.MonoFS_Read_FullMethodName}
+	if !ShouldInstrumentGRPCClientRPC(info) {
+		t.Fatal("ShouldInstrumentGRPCClientRPC(unary read) = false, want true")
+	}
+}

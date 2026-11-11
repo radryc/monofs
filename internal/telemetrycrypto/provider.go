@@ -48,8 +48,12 @@ var ErrPlaintextRejected = errors.New("telemetry encryption is enforced but plai
 
 // Config describes the key material and reader policy.
 type Config struct {
-	// Enabled turns the feature on. Disabled providers never encrypt.
+	// Enabled turns write encryption on. Disabled providers never encrypt new
+	// data unless DecryptOnly is set (which still enables reads).
 	Enabled bool
+	// DecryptOnly loads keys for reading existing envelopes while new writes
+	// stay plaintext. It is ignored when Enabled is true.
+	DecryptOnly bool
 	// Mode controls plaintext handling. Empty defaults to observe.
 	Mode Mode
 	// Tenant is the deployment-level tenant when one is not supplied.
@@ -85,12 +89,13 @@ type keyFilePart struct {
 
 // Provider resolves partition keys and seals/opens telemetry values.
 type Provider struct {
-	enabled    bool
-	mode       Mode
-	tenant     string
-	rootKeyID  string
-	rootKey    []byte
-	partitions map[string]PartitionKey
+	enabled     bool
+	decryptOnly bool
+	mode        Mode
+	tenant      string
+	rootKeyID   string
+	rootKey     []byte
+	partitions  map[string]PartitionKey
 
 	mu    sync.RWMutex
 	cache map[string]cachedKey
@@ -105,13 +110,14 @@ type cachedKey struct {
 // A disabled provider is valid and never encrypts.
 func NewProvider(cfg Config) (*Provider, error) {
 	p := &Provider{
-		enabled:    cfg.Enabled,
-		mode:       cfg.Mode,
-		tenant:     strings.TrimSpace(cfg.Tenant),
-		rootKeyID:  strings.TrimSpace(cfg.RootKeyID),
-		rootKey:    append([]byte(nil), cfg.RootKey...),
-		partitions: map[string]PartitionKey{},
-		cache:      map[string]cachedKey{},
+		enabled:     cfg.Enabled,
+		decryptOnly: cfg.DecryptOnly && !cfg.Enabled,
+		mode:        cfg.Mode,
+		tenant:      strings.TrimSpace(cfg.Tenant),
+		rootKeyID:   strings.TrimSpace(cfg.RootKeyID),
+		rootKey:     append([]byte(nil), cfg.RootKey...),
+		partitions:  map[string]PartitionKey{},
+		cache:       map[string]cachedKey{},
 	}
 	if p.mode == "" {
 		p.mode = ModeObserve
@@ -132,18 +138,42 @@ func NewProvider(cfg Config) (*Provider, error) {
 		}
 		p.partitions[name] = PartitionKey{KeyID: strings.TrimSpace(key.KeyID), Key: append([]byte(nil), key.Key...)}
 	}
-	if p.enabled || len(p.rootKey) > 0 || len(p.partitions) > 0 {
+	if p.enabled || p.decryptOnly || len(p.rootKey) > 0 || len(p.partitions) > 0 {
 		if len(p.rootKey) > 0 && len(p.rootKey) != 32 {
 			return nil, fmt.Errorf("telemetrycrypto: root key must be 32 bytes, got %d", len(p.rootKey))
 		}
-		if p.enabled && len(p.rootKey) == 0 && len(p.partitions) == 0 {
+		if (p.enabled || p.decryptOnly) && len(p.rootKey) == 0 && len(p.partitions) == 0 {
 			return nil, errors.New("telemetrycrypto: envelope encryption requires a root key or explicit partition keys")
 		}
+
 		if p.rootKeyID == "" {
 			p.rootKeyID = RootKeyVersion
 		}
 	}
 	return p, nil
+}
+
+// Setting describes whether telemetry encryption is enabled for writes and/or
+// reads. "read" allows a deployment to stop encrypting new data while still
+// decrypting existing envelopes.
+type Setting struct {
+	Write bool
+	Read  bool
+}
+
+// ParseSetting parses the MONOFS_TELEMETRY_ENCRYPTION style value.
+// Accepted values: off, read/decrypt, envelope/on.
+func ParseSetting(value string) (Setting, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "off", "false", "disabled":
+		return Setting{}, nil
+	case "read", "decrypt", "decrypt-only", "read-only":
+		return Setting{Read: true}, nil
+	case "envelope", "on", "true", "enabled":
+		return Setting{Write: true, Read: true}, nil
+	default:
+		return Setting{}, fmt.Errorf("telemetrycrypto: unsupported encryption setting %q (want off, read, or envelope)", value)
+	}
 }
 
 // LoadProvider reads KeysFile or KeysJSON when configured. keysJSON wins over
@@ -162,9 +192,8 @@ func LoadProvider(cfg Config) (*Provider, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !cfg.Enabled {
-			cfg.Enabled = parsed.Enabled
-		}
+		// The key file always advertises Enabled; the flags are authoritative
+		// so "read" and "off" are not silently upgraded.
 		if cfg.Mode == "" {
 			cfg.Mode = parsed.Mode
 		}
@@ -247,6 +276,14 @@ func decodeKey(value string) ([]byte, error) {
 // Enabled reports whether new values are encrypted.
 func (p *Provider) Enabled() bool { return p != nil && p.enabled }
 
+// DecryptOnly reports that the provider reads envelopes but does not encrypt
+// new data.
+func (p *Provider) DecryptOnly() bool { return p != nil && p.decryptOnly }
+
+// Active reports whether the provider participates in storage at all. It is
+// true when it can write or read encrypted data.
+func (p *Provider) Active() bool { return p != nil && (p.enabled || p.decryptOnly) }
+
 // Mode returns the plaintext policy.
 func (p *Provider) Mode() Mode {
 	if p == nil || p.mode == "" {
@@ -273,7 +310,7 @@ func (p *Provider) RootKeyID() string {
 
 // KeyFor returns the subkey and stable key ID for a tenant/partition.
 func (p *Provider) KeyFor(tenant, partition string) (string, []byte, error) {
-	if p == nil || !p.enabled {
+	if p == nil || (!p.enabled && !p.decryptOnly) {
 		return "", nil, errors.New("telemetrycrypto: encryption is disabled")
 	}
 	tenant = strings.TrimSpace(tenant)

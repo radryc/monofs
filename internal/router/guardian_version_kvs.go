@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,7 @@ import (
 
 	kvsv1 "github.com/radryc/kvs/api/proto/kvs/v1"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -83,64 +86,136 @@ type kvsGuardianVersionBackend struct {
 	store  *guardianVersionStore
 
 	mu      sync.Mutex
+	conns   map[string]*grpc.ClientConn
+	clients map[string]kvsv1.KVStoreClient
+}
+
+type kvsGuardianCandidate struct {
+	nodeID  string
 	address string
-	conn    *grpc.ClientConn
-	client  kvsv1.KVStoreClient
 }
 
 func newKVSGuardianVersionBackend(router *Router, store *guardianVersionStore) *kvsGuardianVersionBackend {
 	return &kvsGuardianVersionBackend{router: router, store: store}
 }
 
-func (b *kvsGuardianVersionBackend) leaderAddress() string {
+// candidates returns healthy KVS-enabled nodes ordered with the current leader
+// first. Every KVS member forwards reads and writes to the leader, so any
+// healthy candidate is a valid failover target. Nodes recently marked
+// unhealthy or in cooldown are excluded.
+func (b *kvsGuardianVersionBackend) candidates() []kvsGuardianCandidate {
 	b.router.mu.RLock()
 	defer b.router.mu.RUnlock()
-	var fallback string
-	for _, state := range b.router.nodes {
-		if state == nil || state.info == nil {
+
+	now := time.Now()
+	all := make([]kvsGuardianCandidate, 0, len(b.router.nodes))
+	kvsNodes := make([]kvsGuardianCandidate, 0, len(b.router.nodes))
+	var leader *kvsGuardianCandidate
+
+	for id, state := range b.router.nodes {
+		if state == nil || state.info == nil || state.info.Address == "" {
 			continue
 		}
-		if state.kvsStatus != nil {
-			if addr := strings.TrimSpace(state.kvsStatus.GetLeaderAddress()); addr != "" {
-				return addr
-			}
-			if fallback == "" && state.kvsStatus.GetEnabled() && state.kvsStatus.GetHealthy() {
-				fallback = state.info.Address
-			}
+		if !state.guardianFailedUntil.IsZero() && now.Before(state.guardianFailedUntil) {
+			continue
 		}
-		if fallback == "" && state.info.Healthy {
-			fallback = state.info.Address
+		candidate := kvsGuardianCandidate{nodeID: id, address: state.info.Address}
+		all = append(all, candidate)
+
+		status := normalizedKVSNodeStatus(state.kvsStatus)
+		if !status.GetEnabled() || !status.GetHealthy() {
+			continue
+		}
+		kvsNodes = append(kvsNodes, candidate)
+		if strings.EqualFold(status.GetRole(), "leader") {
+			leaderCopy := candidate
+			leader = &leaderCopy
 		}
 	}
-	return fallback
+
+	out := kvsNodes
+	if len(out) == 0 {
+		// KVS status may be unknown right after startup or after a failure.
+		// Any healthy cluster node can still forward to the leader, so fall
+		// back to every non-cooling node rather than failing the operation.
+		out = all
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].nodeID != out[j].nodeID {
+			return out[i].nodeID < out[j].nodeID
+		}
+		return out[i].address < out[j].address
+	})
+	if leader != nil {
+		ordered := make([]kvsGuardianCandidate, 0, len(out))
+		ordered = append(ordered, *leader)
+		for _, candidate := range out {
+			if candidate.nodeID != leader.nodeID {
+				ordered = append(ordered, candidate)
+			}
+		}
+		return ordered
+	}
+	return out
 }
 
-func (b *kvsGuardianVersionBackend) clientForLeader(ctx context.Context) (kvsv1.KVStoreClient, error) {
-	address := b.leaderAddress()
-	if address == "" {
-		return nil, fmt.Errorf("no KVS leader address available")
-	}
+func (b *kvsGuardianVersionBackend) clientFor(candidate kvsGuardianCandidate) (kvsv1.KVStoreClient, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.client != nil && b.address == address {
-		return b.client, nil
+	if client := b.clients[candidate.address]; client != nil {
+		return client, nil
 	}
-	if b.conn != nil {
-		_ = b.conn.Close()
-		b.conn = nil
-		b.client = nil
-	}
-	conn, err := grpc.NewClient(address, append([]grpc.DialOption{
+	conn, err := grpc.NewClient(candidate.address, append([]grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpcx.IPv4DialerOption(),
+		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 	}, b.router.internalDialOptions()...)...)
 	if err != nil {
-		return nil, fmt.Errorf("dial KVS leader %s: %w", address, err)
+		return nil, fmt.Errorf("dial KVS node %s: %w", candidate.address, err)
 	}
-	b.conn = conn
-	b.client = kvsv1.NewKVStoreClient(conn)
-	b.address = address
-	return b.client, nil
+	if b.conns == nil {
+		b.conns = make(map[string]*grpc.ClientConn)
+	}
+	if b.clients == nil {
+		b.clients = make(map[string]kvsv1.KVStoreClient)
+	}
+	client := kvsv1.NewKVStoreClient(conn)
+	b.conns[candidate.address] = conn
+	b.clients[candidate.address] = client
+	return client, nil
+}
+
+// withClient runs fn against a healthy KVS node, rotating to a peer on
+// transport failures. Non-transport errors (CAS conflicts, not-found) are
+// returned unchanged so callers can handle them.
+func (b *kvsGuardianVersionBackend) withClient(ctx context.Context, fn func(kvsv1.KVStoreClient) error) error {
+	candidates := b.candidates()
+	if len(candidates) == 0 {
+		return fmt.Errorf("no healthy KVS node available")
+	}
+	var lastErr error
+	for _, candidate := range candidates {
+		client, err := b.clientFor(candidate)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		err = fn(client)
+		if err == nil {
+			b.router.clearGuardianNodeFailure(candidate.nodeID)
+			return nil
+		}
+		lastErr = err
+		if !isGuardianTransportError(err) {
+			return err
+		}
+		b.router.markGuardianNodeUnhealthy(candidate.nodeID, err.Error())
+		b.dropClient(candidate.address)
+	}
+	return lastErr
 }
 
 func guardianKVSRecordPath(logicalPath string) string {
@@ -149,17 +224,19 @@ func guardianKVSRecordPath(logicalPath string) string {
 }
 
 func (b *kvsGuardianVersionBackend) readRecord(ctx context.Context, logicalPath string) (*kvsGuardianVersionRecord, string, bool, error) {
-	client, err := b.clientForLeader(ctx)
-	if err != nil {
-		return nil, "", false, err
-	}
-	resp, err := client.ReadFile(ctx, &kvsv1.ReadFileRequest{LogicalPath: guardianKVSRecordPath(logicalPath)})
+	var resp *kvsv1.ReadFileResponse
+	err := b.withClient(ctx, func(client kvsv1.KVStoreClient) error {
+		var callErr error
+		resp, callErr = client.ReadFile(ctx, &kvsv1.ReadFileRequest{LogicalPath: guardianKVSRecordPath(logicalPath)})
+		return callErr
+	})
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return nil, "", false, nil
 		}
 		return nil, "", false, err
 	}
+
 	var record kvsGuardianVersionRecord
 	if err := json.Unmarshal(resp.GetContent(), &record); err != nil {
 		return nil, "", false, fmt.Errorf("decode guardian version record for %s: %w", logicalPath, err)
@@ -285,24 +362,22 @@ func (b *kvsGuardianVersionBackend) commitBatch(ctx context.Context, changes []g
 			entry.expected = expected
 		}
 
-		client, err := b.clientForLeader(ctx)
-		if err != nil {
-			return nil, err
-		}
-		_, err = client.UpsertFiles(ctx, &kvsv1.UpsertFilesRequest{
-			Writes: writes,
-			Context: &kvsv1.MutationContext{
-				PrincipalId:   "monofs-router",
-				Reason:        "guardian version record",
-				CorrelationId: changes[0].CorrelationID,
-			},
+		err := b.withClient(ctx, func(client kvsv1.KVStoreClient) error {
+			_, callErr := client.UpsertFiles(ctx, &kvsv1.UpsertFilesRequest{
+				Writes: writes,
+				Context: &kvsv1.MutationContext{
+					PrincipalId:   "monofs-router",
+					Reason:        "guardian version record",
+					CorrelationId: changes[0].CorrelationID,
+				},
+			})
+			return callErr
 		})
 		if err != nil {
 			if status.Code(err) == codes.Aborted && strings.Contains(err.Error(), "version conflict") {
 				continue // retry the whole batch with fresh versions
 			}
 			if status.Code(err) == codes.Aborted || status.Code(err) == codes.Unavailable {
-				b.resetClient()
 				if attempt+1 < guardianKVSRetryLimit {
 					time.Sleep(time.Duration(attempt+1) * 25 * time.Millisecond)
 					continue
@@ -407,25 +482,29 @@ func (b *kvsGuardianVersionBackend) get(ctx context.Context, logicalPath, versio
 	return nil, nil, false, false, nil
 }
 
-func (b *kvsGuardianVersionBackend) resetClient() {
+// dropClient closes one cached connection after a transport failure. The node
+// is already in cooldown, so this only affects the failed address; other
+// connections are kept for reuse.
+func (b *kvsGuardianVersionBackend) dropClient(address string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.conn != nil {
-		_ = b.conn.Close()
+	if conn := b.conns[address]; conn != nil {
+		_ = conn.Close()
 	}
-	b.conn = nil
-	b.client = nil
-	b.address = ""
+	delete(b.conns, address)
+	delete(b.clients, address)
 }
 
 func (b *kvsGuardianVersionBackend) close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.conn != nil {
-		err := b.conn.Close()
-		b.conn = nil
-		b.client = nil
-		return err
+	var errs []error
+	for address, conn := range b.conns {
+		if err := conn.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close KVS node %s: %w", address, err))
+		}
+		delete(b.conns, address)
+		delete(b.clients, address)
 	}
-	return nil
+	return errors.Join(errs...)
 }

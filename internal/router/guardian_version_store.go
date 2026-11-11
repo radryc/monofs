@@ -309,16 +309,29 @@ func (s *guardianVersionStore) close() {
 
 // isGuardianAssetPath reports whether logicalPath is a user-managed asset
 // (intent YAML, partition config, etc.) rather than guardian's internal
-// machinery (task queue files, claim files, result files, state snapshots,
-// archive logs).
+// machinery (task queue files, claim files, result files, archive logs).
+//
+// Partition state snapshots and the registry/access control-plane documents
+// are special: every Guardian replica reads and writes them, so their version
+// records must live in the shared KVS backend. Keeping them router-local makes
+// a read that lands on the other router see a different version, which makes
+// every optimistic CAS update fail.
 func isGuardianAssetPath(logicalPath string) bool {
 	if strings.HasPrefix(logicalPath, "/.queues/") || strings.HasPrefix(logicalPath, "/.archive/") {
 		return false
 	}
-	for _, seg := range strings.Split(logicalPath, "/") {
-		if len(seg) > 0 && seg[0] == '.' {
-			return false
+	parts := strings.Split(strings.TrimPrefix(logicalPath, "/"), "/")
+	if len(parts) > 0 && (parts[0] == ".registry" || parts[0] == ".access") {
+		return true
+	}
+	for i, seg := range parts {
+		if len(seg) == 0 || seg[0] != '.' {
+			continue
 		}
+		if seg == ".state" && i == 2 && parts[0] == "partitions" {
+			continue
+		}
+		return false
 	}
 	return true
 }

@@ -25,6 +25,10 @@ const (
 	manifestCacheTTL    = 30 * time.Minute
 	seriesIndexCacheTTL = 5 * time.Minute
 	cacheSweepInterval  = 30 * time.Second
+	// parquetCacheTTL bounds decrypted DuckDB materialisations on the local
+	// cache. Encryption-aware stores cannot expose the original object path,
+	// so DuckDB reads a decrypted copy; stale copies are removed periodically.
+	parquetCacheTTL = time.Hour
 	// chunkTimeBucketDuration is the directory bucket used for newly written
 	// chunks. Queries list only the buckets overlapping their time range instead
 	// of the flat chunks/<signal>/ directory, which grows with retention.
@@ -115,6 +119,7 @@ func (c *CachedStore) EnsureLocalParquet(ctx context.Context, path string) (stri
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return "", err
 	}
+	c.sweepParquetCache(cacheDir)
 	sum := sha256.Sum256([]byte(cleaned))
 	localPath := filepath.Join(cacheDir, fmt.Sprintf("%x.parquet", sum[:16]))
 
@@ -153,19 +158,51 @@ func (c *CachedStore) EnsureLocalParquet(ctx context.Context, path string) (stri
 	return localPath, nil
 }
 
+// sweepParquetCache removes decrypted DuckDB materialisations older than
+// parquetCacheTTL. The check is rate-limited so it does not walk the directory
+// on every query.
+func (c *CachedStore) sweepParquetCache(cacheDir string) {
+	now := time.Now()
+	c.mu.Lock()
+	if !c.nextParquetSweep.IsZero() && now.Before(c.nextParquetSweep) {
+		c.mu.Unlock()
+		return
+	}
+	c.nextParquetSweep = now.Add(cacheSweepInterval)
+	c.mu.Unlock()
+
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > parquetCacheTTL {
+			_ = os.Remove(filepath.Join(cacheDir, entry.Name()))
+		}
+	}
+}
+
 // CachedStore implements a caching decorator around a remote ObjectStoreBackend.
 // It caches index files to a local NVMe drive and uses singleflight to
 // prevent cache stampedes.
 type CachedStore struct {
-	remote       ObjectStoreBackend
-	localDir     string
-	sf           singleflight.Group
-	mu           sync.RWMutex
-	chunks       map[string]chunkListCacheEntry
-	manifests    map[string]manifestCacheEntry
-	series       map[string]seriesIndexCacheEntry
-	localIndexes map[string]time.Time
-	nextSweep    time.Time
+	remote           ObjectStoreBackend
+	localDir         string
+	sf               singleflight.Group
+	mu               sync.RWMutex
+	chunks           map[string]chunkListCacheEntry
+	manifests        map[string]manifestCacheEntry
+	series           map[string]seriesIndexCacheEntry
+	localIndexes     map[string]time.Time
+	nextSweep        time.Time
+	nextParquetSweep time.Time
 }
 
 // NewCachedStore creates a new CachedStore.

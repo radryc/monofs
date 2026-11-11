@@ -57,6 +57,13 @@ func (s QueryScope) allowsSpan(record SpanRecord) bool {
 	return s.AllowsPartition(recordPartition(record.Attributes))
 }
 
+// AllowsPartitionLabels reports whether the scope permits the partition label
+// carried by a log labels or span attributes map. Backends that push the scope
+// into their query language still use this as a per-row guard.
+func (s QueryScope) AllowsPartitionLabels(labels map[string]string) bool {
+	return s.AllowsPartition(recordPartition(labels))
+}
+
 // manifestMatchesScope prunes chunks when the manifest carries a complete
 // partition dictionary. Legacy manifests without partitions are kept and
 // filtered row-by-row.

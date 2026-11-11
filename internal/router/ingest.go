@@ -17,6 +17,7 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage"
+	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -441,6 +442,7 @@ initComplete:
 				append([]grpc.DialOption{
 					grpc.WithTransportCredentials(insecure.NewCredentials()),
 					grpcx.IPv4DialerOption(),
+					grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 				}, r.internalDialOptions()...)...,
 			)
 			if err != nil {
@@ -527,6 +529,7 @@ initComplete:
 				append([]grpc.DialOption{
 					grpc.WithTransportCredentials(insecure.NewCredentials()),
 					grpcx.IPv4DialerOption(),
+					grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 				}, r.internalDialOptions()...)...,
 			)
 			if err != nil {

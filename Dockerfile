@@ -216,6 +216,11 @@ FROM alpine:3.19 AS router
 
 RUN apk add --no-cache ca-certificates
 
+# The router instruments its HTTP server (otelhttp) and gRPC clients (internal/router)
+# manually. otelc's gRPC client instrumentation leaks long-lived subscription
+# spans into goroutine-local storage, so disable it just like guardiand does.
+ENV OTEL_GO_DISABLED_INSTRUMENTATIONS=nethttp,grpc
+
 COPY --from=router-builder /bin/monofs-router /usr/local/bin/monofs-router
 
 EXPOSE 9090

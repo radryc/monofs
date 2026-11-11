@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 
@@ -11,6 +12,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// errGuardianContentUnreachable reports that no replica could be read. Unlike a
+// missing or mismatched file this is transient, so callers should retry instead
+// of treating the path as absent.
+var errGuardianContentUnreachable = errors.New("guardian content is temporarily unreadable")
 
 // ReadGuardianPath returns a consistent content+version pair. The content is
 // read from a healthy replica and verified against the authoritative version
@@ -52,9 +58,36 @@ func (r *Router) ReadGuardianPath(ctx context.Context, req *pb.ReadGuardianPathR
 		}, nil
 	}
 
-	content, ok := r.readGuardianContentVerified(ctx, mapped, current.ContentSHA256)
+	content, ok, conclusive := r.readGuardianContentVerified(ctx, mapped, current.ContentSHA256)
 	if !ok {
-		return nil, status.Errorf(codes.Unavailable, "guardian content for %q does not match version %s", logicalPath, current.VersionID)
+		// The version record and node content disagree (a write applied
+		// content but its version commit was lost, or replicas diverged).
+		// Serve the content that is actually present together with the current
+		// version instead of committing a repair version here. The next CAS
+		// write uses that version, applies content, and commits a matching
+		// version — healing the pair without churning versions on every read.
+		if repairedContent, found, _ := r.readGuardianContentVerified(ctx, mapped, ""); found {
+			return &pb.ReadGuardianPathResponse{
+				Found:   true,
+				Content: repairedContent,
+				Version: current.toProto(),
+			}, nil
+		}
+		if !conclusive {
+			// At least one replica failed to answer. Do not mistake an outage
+			// for a deleted file: report the read as transient so the caller
+			// retries.
+			return nil, status.Errorf(codes.Unavailable, "guardian content for %q is temporarily unreadable", logicalPath)
+		}
+		// At least one replica answered and none has the content. The version
+		// record is stale; tombstone it so the next CAS write with expected
+		// version "absent" can recreate the file instead of conflicting
+		// forever on a version that can never be read.
+		if err := r.tombstoneMissingGuardianVersionLocked(mapped); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "guardian version repair for %q failed: %v", logicalPath, err)
+		}
+		guardianVersionStoreRecoveriesTotal.WithLabelValues("content-missing").Inc()
+		return &pb.ReadGuardianPathResponse{Found: false}, nil
 	}
 	return &pb.ReadGuardianPathResponse{
 		Found:   true,
@@ -63,12 +96,50 @@ func (r *Router) ReadGuardianPath(ctx context.Context, req *pb.ReadGuardianPathR
 	}, nil
 }
 
+// tombstoneMissingGuardianVersionLocked retires a version record whose content
+// no longer exists on any replica. A tombstone keeps the history but allows the
+// next CAS write (expected version "absent") to create the file again.
+func (r *Router) tombstoneMissingGuardianVersionLocked(mapped guardianPhysicalPath) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		latest, exists, err := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		if err != nil {
+			return err
+		}
+		if !exists || latest == nil || latest.Tombstone {
+			// Another writer or reader already retired the record.
+			return nil
+		}
+		_, err = r.guardianVersions.commit(guardianVersionCommit{
+			LogicalPath:       mapped.LogicalPath,
+			DisplayPath:       mapped.DisplayPath,
+			StorageID:         mapped.StorageID,
+			ExpectedVersionID: latest.VersionID,
+			Tombstone:         true,
+			PrincipalID:       "monofs-repair",
+			Reason:            "content missing",
+			CommittedAt:       time.Now().Unix(),
+		})
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !errors.Is(err, errGuardianVersionConflict) && !errors.Is(err, errGuardianVersionExists) {
+			return err
+		}
+	}
+	return lastErr
+}
+
 // recoverGuardianVersionLocked synthesizes a version record from node content
 // when the authoritative record is missing (for example after a router
 // failover with an empty local state directory).
 func (r *Router) recoverGuardianVersionLocked(ctx context.Context, mapped guardianPhysicalPath) (*storedGuardianFileVersion, []byte, bool, error) {
-	content, ok := r.readGuardianContentVerified(ctx, mapped, "")
+	content, ok, conclusive := r.readGuardianContentVerified(ctx, mapped, "")
 	if !ok {
+		if !conclusive {
+			return nil, nil, false, errGuardianContentUnreachable
+		}
 		return nil, nil, false, nil
 	}
 	sum := sha256.Sum256(content)
@@ -113,26 +184,40 @@ func (r *Router) recoverGuardianVersionLocked(ctx context.Context, mapped guardi
 
 // readGuardianContentVerified reads a path from healthy replicas and returns
 // the first content whose SHA-256 matches expectedSHA. An empty expectedSHA
-// accepts any successfully read content.
-func (r *Router) readGuardianContentVerified(ctx context.Context, mapped guardianPhysicalPath, expectedSHA string) ([]byte, bool) {
+// accepts any successfully read content. The third result reports whether every
+// healthy replica answered (content or NotFound). Only then is "no content" a
+// conclusive statement about the cluster; a transport failure is retryable.
+func (r *Router) readGuardianContentVerified(ctx context.Context, mapped guardianPhysicalPath, expectedSHA string) ([]byte, bool, bool) {
 	nodes := r.collectHealthyGuardianNodes()
+	answered := 0
 	for _, node := range nodes {
 		nodeClient, closeConn, err := r.guardianNodeClient(node)
 		if err != nil {
 			continue
 		}
-		content, err := readGuardianFileContent(ctx, nodeClient, mapped.RelativePath)
+		content, err := readGuardianFileContent(ctx, nodeClient, guardianDisplayPathJoin(mapped.DisplayPath, mapped.RelativePath))
+		if err != nil {
+			// Older nodes resolve guardian reads relative to the last
+			// registered repo; fall back to the relative path for them.
+			content, err = readGuardianFileContent(ctx, nodeClient, mapped.RelativePath)
+		}
 		closeConn()
 		if err != nil {
+			// A NotFound answer still proves the replica is reachable and does
+			// not have the file; only transport failures are inconclusive.
+			if status.Code(err) == codes.NotFound {
+				answered++
+			}
 			continue
 		}
+		answered++
 		if expectedSHA == "" {
-			return content, true
+			return content, true, true
 		}
 		sum := sha256.Sum256(content)
 		if strings.EqualFold(hex.EncodeToString(sum[:]), expectedSHA) {
-			return content, true
+			return content, true, true
 		}
 	}
-	return nil, false
+	return nil, false, len(nodes) > 0 && answered == len(nodes)
 }

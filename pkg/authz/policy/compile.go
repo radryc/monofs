@@ -13,10 +13,12 @@ import (
 	"github.com/radryc/monofs/pkg/authz"
 )
 
-// Partition is one catalog entry: a Guardian partition with its labels.
+// Partition is one catalog entry: a Guardian partition with its labels and
+// optional quota envelope.
 type Partition struct {
 	Name   string            `json:"name"`
 	Labels map[string]string `json:"labels,omitempty"`
+	Quota  *Quota            `json:"quota,omitempty"`
 }
 
 // Catalog is the partition catalog selectors are resolved against.
@@ -120,7 +122,67 @@ func validate(file *File, catalog *Catalog) []Issue {
 			}
 		}
 	}
+	ctx.validateQuotas()
 	return ctx.issues
+}
+
+func (c *compileCtx) validateQuotas() {
+	for name, quota := range c.file.QuotaProfiles {
+		if strings.TrimSpace(name) == "" {
+			c.errorf("quota_profiles: profile name is required")
+			continue
+		}
+		if strings.TrimSpace(quota.Profile) != "" {
+			c.errorf("quota_profiles.%s must not reference another profile", name)
+		}
+		if err := ValidateQuota(quota); err != nil {
+			c.errorf("quota_profiles.%s: %v", name, err)
+		}
+	}
+	if c.file.QuotaDefaults != nil {
+		if strings.TrimSpace(c.file.QuotaDefaults.Profile) != "" {
+			c.errorf("quota_defaults must not reference a profile")
+		}
+		if err := ValidateQuota(*c.file.QuotaDefaults); err != nil {
+			c.errorf("quota_defaults: %v", err)
+		}
+	}
+	if c.file.Quotas != nil {
+		for kind, subjects := range map[string]map[string]Quota{
+			"groups":  c.file.Quotas.Groups,
+			"users":   c.file.Quotas.Users,
+			"clients": c.file.Quotas.Clients,
+		} {
+			for name, quota := range subjects {
+				if strings.TrimSpace(name) == "" {
+					c.errorf("quotas.%s: name is required", kind)
+					continue
+				}
+				if _, err := ResolveQuota(quota, c.file.QuotaProfiles); err != nil {
+					c.errorf("quotas.%s.%s: %v", kind, name, err)
+					continue
+				}
+				if err := ValidateQuota(quota); err != nil {
+					c.errorf("quotas.%s.%s: %v", kind, name, err)
+				}
+			}
+		}
+	}
+	if c.catalog == nil {
+		return
+	}
+	for _, partition := range c.catalog.Partitions {
+		if partition.Quota == nil {
+			continue
+		}
+		if _, err := ResolveQuota(*partition.Quota, c.file.QuotaProfiles); err != nil {
+			c.errorf("partition %q quota: %v", partition.Name, err)
+			continue
+		}
+		if err := ValidateQuota(*partition.Quota); err != nil {
+			c.errorf("partition %q quota: %v", partition.Name, err)
+		}
+	}
 }
 
 func (c *compileCtx) validateSubjects(kind string, subjects map[string]Subject) {
@@ -296,8 +358,70 @@ func build(file *File, catalog *Catalog, now time.Time) (*Bundle, error) {
 
 	bundle.CatalogDigest = catalogDigest(catalog)
 	bundle.AWSBindings = compileAWSBindings(file, catalog)
+	bundle.Quotas = buildQuotaBundle(file, catalog)
 	bundle.Version = computeVersion(bundle)
 	return bundle, nil
+}
+
+// buildQuotaBundle resolves profiles and partition overrides into effective
+// quotas. Partitions that match the defaults are omitted to keep the bundle
+// small for large catalogs.
+func buildQuotaBundle(file *File, catalog *Catalog) *QuotaBundle {
+	defaults := Quota{}
+	if file.QuotaDefaults != nil {
+		resolved, err := ResolveQuota(*file.QuotaDefaults, file.QuotaProfiles)
+		if err == nil {
+			defaults = resolved
+		}
+	}
+	out := &QuotaBundle{Defaults: defaults}
+	if catalog != nil {
+		out.KnownPartitions = make([]string, 0, len(catalog.Partitions))
+		for _, partition := range catalog.Partitions {
+			out.KnownPartitions = append(out.KnownPartitions, partition.Name)
+			if partition.Quota == nil {
+				continue
+			}
+			resolved, err := ResolveQuota(*partition.Quota, file.QuotaProfiles)
+			if err != nil {
+				continue
+			}
+			effective := MergeQuota(defaults, resolved)
+			if !effective.IsZero() {
+				if out.Partitions == nil {
+					out.Partitions = map[string]Quota{}
+				}
+				out.Partitions[partition.Name] = effective
+			}
+		}
+		sort.Strings(out.KnownPartitions)
+	}
+	if file.Quotas != nil {
+		addSubjects := func(kind string, subjects map[string]Quota) {
+			for name, quota := range subjects {
+				resolved, err := ResolveQuota(quota, file.QuotaProfiles)
+				if err != nil || resolved.IsZero() {
+					continue
+				}
+				if out.Subjects == nil {
+					out.Subjects = map[string]Quota{}
+				}
+				out.Subjects[kind+":"+name] = resolved
+			}
+		}
+		addSubjects("group", file.Quotas.Groups)
+		addSubjects("user", file.Quotas.Users)
+		addSubjects("client", file.Quotas.Clients)
+	}
+	if out.IsEmpty() {
+		return nil
+	}
+	return out
+}
+
+// IsEmpty reports whether the quota bundle carries no information.
+func (q *QuotaBundle) IsEmpty() bool {
+	return q == nil || (q.Defaults.IsZero() && len(q.Partitions) == 0 && len(q.Subjects) == 0 && len(q.KnownPartitions) == 0)
 }
 
 // resolveScope resolves one scope list: "*" stays, selector refs and globs are

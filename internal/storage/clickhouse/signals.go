@@ -98,8 +98,12 @@ func (s *TraceStore) StreamLogs(ctx context.Context, queryStr, service string, f
 	if err != nil {
 		return fmt.Errorf("failed to parse log query: %w", err)
 	}
+	scope, _ := logengine.QueryScopeFromContext(ctx)
 	filter := s.newFilter()
 	filter.addTimeRange(from, to)
+	if scope.Restricted {
+		filter.addPartitionScope("labels", scope)
+	}
 	if service != "" {
 		filter.addLogMatcher("service", "=", service)
 	}
@@ -171,6 +175,11 @@ func (s *TraceStore) StreamLogs(ctx context.Context, queryStr, service string, f
 		}
 		if row.LabelsJSON != "" {
 			_ = json.Unmarshal([]byte(row.LabelsJSON), &record.Labels)
+		}
+		// Match the Parquet engine's scope semantics; the SQL predicate is an
+		// optimisation and the record-level scope remains authoritative.
+		if scope.Restricted && !scope.AllowsPartitionLabels(record.Labels) {
+			continue
 		}
 		if len(postLineFilters) > 0 {
 			matched, matchErr := lineFiltersMatch(postLineFilters, message)
@@ -612,6 +621,32 @@ func (f *signalFilter) labelKeys(name string) []string {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+// addPartitionScope pushes a restricted log query's partition scope into SQL
+// before ORDER BY/LIMIT, so a scoped caller's page is not consumed by rows
+// from partitions they cannot read.
+func (f *signalFilter) addPartitionScope(column string, scope logengine.QueryScope) {
+	if !scope.Restricted {
+		return
+	}
+	placeholders := make([]string, 0, len(scope.Partitions))
+	for _, partition := range scope.Partitions {
+		partition = strings.TrimSpace(partition)
+		if partition == "" {
+			continue
+		}
+		placeholders = append(placeholders, f.param(partition))
+	}
+	if len(placeholders) == 0 {
+		f.where = append(f.where, "0")
+		return
+	}
+	list := strings.Join(placeholders, ", ")
+	f.where = append(f.where, "("+
+		"coalesce("+column+"['guardian_partition'], '') IN ("+list+") OR "+
+		"coalesce("+column+"['guardian.partition'], '') IN ("+list+")"+
+		")")
 }
 
 func (f *signalFilter) addPredicate(expr, op, value string) {

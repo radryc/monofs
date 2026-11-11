@@ -24,7 +24,7 @@ type EncryptedStore struct {
 // NewEncryptedStore wraps backend when provider is enabled. It returns backend
 // unchanged when encryption is off.
 func NewEncryptedStore(backend ObjectStoreBackend, provider *telemetrycrypto.Provider) ObjectStoreBackend {
-	if backend == nil || provider == nil || !provider.Enabled() {
+	if backend == nil || provider == nil || !provider.Active() {
 		return backend
 	}
 	return &EncryptedStore{inner: backend, provider: provider, tenant: provider.Tenant()}

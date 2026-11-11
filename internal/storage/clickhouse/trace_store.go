@@ -330,7 +330,8 @@ func (s *TraceStore) QueryTraces(ctx context.Context, traceID, service string, f
 
 // StreamTraces streams spans from ClickHouse in newest-first order.
 func (s *TraceStore) StreamTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int, yield func(logengine.SpanRecord) error) error {
-	query, params := s.traceQuery(traceID, service, from, to, limit)
+	scope, _ := logengine.QueryScopeFromContext(ctx)
+	query, params := s.traceQuery(ctx, traceID, service, from, to, limit)
 	response, err := s.do(ctx, query, params, nil)
 	if err != nil {
 		return err
@@ -349,6 +350,11 @@ func (s *TraceStore) StreamTraces(ctx context.Context, traceID, service string, 
 		record, err := row.record(s.encryption())
 		if err != nil {
 			return err
+		}
+		// The SQL predicate is the efficient path; keep the record-level guard
+		// so the scope stays authoritative even if the predicate is changed.
+		if scope.Restricted && !scope.AllowsPartitionLabels(record.Attributes) {
+			continue
 		}
 		if err := yield(record); err != nil {
 			return err
@@ -393,7 +399,7 @@ func (r traceRow) record(enc *telemetrycrypto.Provider) (logengine.SpanRecord, e
 	return record, nil
 }
 
-func (s *TraceStore) traceQuery(traceID, service string, from, to time.Time, limit int) (string, url.Values) {
+func (s *TraceStore) traceQuery(ctx context.Context, traceID, service string, from, to time.Time, limit int) (string, url.Values) {
 	params := url.Values{}
 	params.Set("param_tenant", s.cfg.Tenant)
 	where := []string{"tenant = {tenant:String}"}
@@ -413,6 +419,9 @@ func (s *TraceStore) traceQuery(traceID, service string, from, to time.Time, lim
 		params.Set("param_service", service)
 		where = append(where, "service = {service:String}")
 	}
+	if scope, ok := logengine.QueryScopeFromContext(ctx); ok && scope.Restricted {
+		where = append(where, traceScopePredicate("attributes", scope, params))
+	}
 	if limit <= 0 {
 		limit = 1000
 	}
@@ -426,6 +435,31 @@ func (s *TraceStore) traceQuery(traceID, service string, from, to time.Time, lim
 		"FROM " + s.table() + " WHERE " + strings.Join(where, " AND ") +
 		" ORDER BY timestamp DESC LIMIT " + strconv.Itoa(limit) + " FORMAT JSONEachRow"
 	return query, params
+}
+
+// traceScopePredicate pushes the caller's partition scope into the span query.
+// The predicate must be applied before ORDER BY/LIMIT: scanning the newest
+// rows globally and then dropping the invisible ones leaves a scoped caller
+// with an empty page while their own data sits further back in the window.
+func traceScopePredicate(column string, scope logengine.QueryScope, params url.Values) string {
+	placeholders := make([]string, 0, len(scope.Partitions))
+	for _, partition := range scope.Partitions {
+		partition = strings.TrimSpace(partition)
+		if partition == "" {
+			continue
+		}
+		name := "scope_" + strconv.Itoa(len(placeholders))
+		params.Set("param_"+name, partition)
+		placeholders = append(placeholders, "{"+name+":String}")
+	}
+	if len(placeholders) == 0 {
+		return "0"
+	}
+	list := strings.Join(placeholders, ", ")
+	return "(" +
+		"coalesce(" + column + "['guardian_partition'], '') IN (" + list + ") OR " +
+		"coalesce(" + column + "['guardian.partition'], '') IN (" + list + ")" +
+		")"
 }
 
 // DiscoverTraceServices returns distinct services in the time window.

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 type fakeClickHouse struct {
 	mu         sync.Mutex
 	statements []string
+	params     []url.Values
 	databases  []string
 	inserts    []string
 	sqlAST     string
@@ -27,6 +29,7 @@ func (f *fakeClickHouse) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	f.statements = append(f.statements, statement)
+	f.params = append(f.params, r.URL.Query())
 	f.databases = append(f.databases, r.URL.Query().Get("database"))
 	if strings.HasPrefix(strings.TrimSpace(statement), "INSERT") {
 		f.inserts = append(f.inserts, string(body))
@@ -411,6 +414,75 @@ func TestTraceStoreMarshalsBatchJSONL(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &row); err != nil {
 			t.Fatalf("insert line is not JSON: %v (%q)", err, line)
 		}
+	}
+}
+
+func TestTraceStorePushesPartitionScopeToSQL(t *testing.T) {
+	store, fake := newFakeStore(t)
+	base := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	ctx := logengine.WithQueryScope(context.Background(), logengine.QueryScope{
+		Restricted: true,
+		Partitions: []string{"match"},
+	})
+
+	returned := 0
+	err := store.StreamTraces(ctx, "", "", base, base.Add(time.Hour), 10, func(logengine.SpanRecord) error {
+		returned++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamTraces() error = %v", err)
+	}
+	// The fake row has no partition label. The SQL predicate over-fetches it
+	// deliberately; the record guard must drop it.
+	if returned != 0 {
+		t.Fatalf("returned %d unpartitioned spans, want 0", returned)
+	}
+
+	fake.mu.Lock()
+	statement := fake.statements[len(fake.statements)-1]
+	params := fake.params[len(fake.params)-1]
+	fake.mu.Unlock()
+	if !strings.Contains(statement, "guardian_partition") || !strings.Contains(statement, "guardian.partition") {
+		t.Fatalf("span query missing partition predicate: %s", statement)
+	}
+	if !strings.Contains(statement, "IN ({scope_0:String})") {
+		t.Fatalf("span query missing scope parameter: %s", statement)
+	}
+	if params.Get("param_scope_0") != "match" {
+		t.Fatalf("scope parameter = %q, want match", params.Get("param_scope_0"))
+	}
+}
+
+func TestLogStorePushesPartitionScopeToSQL(t *testing.T) {
+	store, fake := newFakeStore(t)
+	base := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	ctx := logengine.WithQueryScope(context.Background(), logengine.QueryScope{
+		Restricted: true,
+		Partitions: []string{"match"},
+	})
+
+	returned := 0
+	err := store.StreamLogs(ctx, `{service=~".+"}`, "", base, base.Add(time.Hour), 10, func(logengine.LogRecord) error {
+		returned++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamLogs() error = %v", err)
+	}
+	if returned != 0 {
+		t.Fatalf("returned %d unpartitioned logs, want 0", returned)
+	}
+
+	fake.mu.Lock()
+	statement := fake.statements[len(fake.statements)-1]
+	params := fake.params[len(fake.params)-1]
+	fake.mu.Unlock()
+	if !strings.Contains(statement, "labels['guardian_partition']") || !strings.Contains(statement, "labels['guardian.partition']") {
+		t.Fatalf("log query missing partition predicate: %s", statement)
+	}
+	if params.Get("param_p0") != "match" {
+		t.Fatalf("scope parameter = %q, want match", params.Get("param_p0"))
 	}
 }
 

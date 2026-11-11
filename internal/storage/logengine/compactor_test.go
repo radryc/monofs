@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/radryc/monofs/internal/telemetrycrypto"
 )
 
 func TestCompactorMergesLogChunksAndRemovesSources(t *testing.T) {
@@ -69,6 +71,44 @@ func TestCompactorMergesLogChunksAndRemovesSources(t *testing.T) {
 	}
 	if again.InputChunks != 0 || again.OutputChunks != 0 {
 		t.Fatalf("second compaction result = %+v, want no-op", again)
+	}
+}
+
+func TestCompactorRoundTripsEncryptedChunks(t *testing.T) {
+	tmpDir := t.TempDir()
+	ctx := context.Background()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+		Encryption:    testEncryptionProvider(t, telemetrycrypto.ModeObserve, 3),
+	})
+	defer engine.Close()
+
+	hour := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	for idx := 0; idx < 2; idx++ {
+		records := []LogRecord{
+			{Timestamp: hour.Add(time.Duration(idx*10+1) * time.Minute), Level: "info", Service: "payment", RawMessage: fmt.Sprintf("encrypted-%d", idx), Labels: map[string]string{"guardian.partition": "payments"}},
+		}
+		chunkID := fmt.Sprintf("chunk-encrypted-%d", idx)
+		if err := engine.IngestLogs(ctx, chunkID, records); err != nil {
+			t.Fatalf("IngestLogs(%d) error = %v", idx, err)
+		}
+	}
+
+	result, err := engine.CompactRange(ctx, SignalLogs, hour, hour.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CompactRange() error = %v", err)
+	}
+	if result.InputChunks != 2 || result.OutputChunks != 1 {
+		t.Fatalf("compaction result = %+v, want 2 inputs and 1 output", result)
+	}
+
+	records, err := engine.QueryLogs(ctx, `{service="payment"}`, "", hour, hour.Add(time.Hour), 0)
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("QueryLogs() returned %d records, want 2", len(records))
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
+	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/radryc/monofs/pkg/grpcx"
@@ -395,6 +396,10 @@ type nodeState struct {
 	kvsStatus                *pb.KVSNodeStatus
 	lastHealthCheckError     string
 	healthCheckFailureLogged bool
+	// guardianFailedUntil excludes the node from Guardian mutation targets for
+	// a short cooldown after a transport failure. The connection is kept alive
+	// so gRPC can reconnect in the background instead of redialing per request.
+	guardianFailedUntil time.Time
 
 	// NEW: Staging and failover state
 	status           NodeStatus
@@ -837,6 +842,7 @@ func (r *Router) SetSearchClient(addr string) error {
 	// Try initial connection
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
 	)
 	if err != nil {
@@ -892,6 +898,7 @@ func (r *Router) retrySearchConnection(addr string) {
 
 		conn, err := grpc.NewClient(addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
 		)
 		if err != nil {
@@ -1074,6 +1081,7 @@ func (r *Router) RegisterNode(nodeID, address string, weight uint32) error {
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpcx.IPv4DialerOption(),
+		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 	)
 	if err != nil {
 		return fmt.Errorf("connect to node %s: %w", nodeID, err)
@@ -2910,13 +2918,9 @@ func (r *Router) checkAllNodes() {
 					"last_seen", timeSinceLastSeen,
 					"status", state.status.String())
 				state.info.Healthy = false
+				state.kvsStatus = nil
+				state.guardianFailedUntil = now.Add(guardianNodeFailureCooldown)
 				r.version.Add(1)
-
-				if state.conn != nil {
-					state.conn.Close()
-					state.conn = nil
-					state.client = nil
-				}
 
 				if state.status == NodeActive && !r.IsDrained() {
 					r.assignFailoverNodeLocked(nodeID)
@@ -2929,6 +2933,7 @@ func (r *Router) checkAllNodes() {
 				append([]grpc.DialOption{
 					grpc.WithTransportCredentials(insecure.NewCredentials()),
 					grpcx.IPv4DialerOption(),
+					grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 				}, r.internalDialOptions()...)...,
 			)
 			if err != nil {
@@ -2996,11 +3001,13 @@ func (r *Router) checkAllNodes() {
 				state.healthCheckFailureLogged = true
 				state.lastHealthCheckError = errText
 			}
-			if state.conn != nil {
-				state.conn.Close()
-				state.conn = nil
-				state.client = nil
-			}
+			// Keep the connection: gRPC reconnects with its own backoff.
+			// Closing it here would force a fresh dial on every request
+			// while the node is restarting.
+			// Immediately exclude the node from Guardian mutations and drop
+			// cached KVS roles, which are stale while the node is unreachable.
+			state.kvsStatus = nil
+			state.guardianFailedUntil = now.Add(guardianNodeFailureCooldown)
 			if timeSinceLastSeen > r.config.UnhealthyThreshold/2 && state.info.Healthy {
 				r.logger.Warn("node became unhealthy (health check failed), assigning failover",
 					"node_id", nodeID,
@@ -3018,6 +3025,7 @@ func (r *Router) checkAllNodes() {
 		state.healthCheckFailureLogged = false
 		state.lastHealthCheckError = ""
 		state.lastSeen = now
+		state.guardianFailedUntil = time.Time{}
 
 		state.ownedFilesCount = nodeInfo.TotalFiles
 		state.diskUsedBytes = nodeInfo.DiskUsedBytes

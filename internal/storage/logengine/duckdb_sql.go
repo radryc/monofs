@@ -33,7 +33,7 @@ func duckParquetSourceWithUnion(files []string, unionByName bool) string {
 	for _, file := range files {
 		quoted = append(quoted, sqlQuote(file))
 	}
-	options := "hive_partitioning = true"
+	options := "filename = true, hive_partitioning = true"
 	if unionByName {
 		options = "union_by_name = true, " + options
 	}
@@ -65,10 +65,13 @@ func jsonPathKey(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `\"`) + `"`
 }
 
-func partitionExpr(partitionColumn, jsonColumn string) duckSQLExpr {
+func partitionExpr(jsonColumn string) duckSQLExpr {
 	parts := []string{
 		"nullif(partition_name, '')",
-		"nullif(" + partitionColumn + ", '')",
+		// Use the file path rather than the Hive "partition" column: encrypted
+		// chunks are materialized into a flat cache, where hive_partitioning
+		// cannot derive the column. filename is always available.
+		"nullif(regexp_extract(filename, 'partition=([^/]+)', 1), '')",
 		"nullif(json_extract_string(" + jsonColumn + `, ?), '')`,
 		"nullif(json_extract_string(" + jsonColumn + `, ?), '')`,
 	}
@@ -147,7 +150,7 @@ func withServiceMatcher(query logquery.Query, service string) logquery.Query {
 func buildLogDuckSQL(files []string, query logquery.Query, service string, from, to time.Time, limit int, scope QueryScope) (string, []any, error) {
 	query = withServiceMatcher(query, service)
 	where := make([]string, 0, len(query.Matchers)+len(query.LineFilters)+2)
-	part := partitionExpr("partition", "labels_json")
+	part := partitionExpr("labels_json")
 	args := append([]any(nil), part.args...)
 
 	if !from.IsZero() {
@@ -182,7 +185,7 @@ func buildLogDuckSQL(files []string, query logquery.Query, service string, from,
 			args = append(args, filter.Value)
 		}
 	}
-	appendScope(&where, &args, partitionExpr("partition", "labels_json"), scope)
+	appendScope(&where, &args, partitionExpr("labels_json"), scope)
 
 	sql := "SELECT timestamp, level, service, trace_id, span_id, raw_message, labels_json, " +
 		part.sql + " AS partition FROM " + duckParquetSource(files)
@@ -199,7 +202,7 @@ func buildLogDuckSQL(files []string, query logquery.Query, service string, from,
 
 func buildMetricDuckSQL(files []string, query MetricQuery, from, to time.Time) (string, []any, error) {
 	where := make([]string, 0, len(query.LabelMatchers)+4)
-	part := partitionExpr("partition", "labels_json")
+	part := partitionExpr("labels_json")
 	args := append([]any(nil), part.args...)
 	if !from.IsZero() {
 		where = append(where, "timestamp >= ?")
@@ -248,7 +251,7 @@ func buildMetricDuckSQL(files []string, query MetricQuery, from, to time.Time) (
 
 func buildTraceDuckSQL(files []string, traceID, service string, from, to time.Time, limit int, scope QueryScope) (string, []any, error) {
 	where := make([]string, 0, 6)
-	part := partitionExpr("partition", "attributes_json")
+	part := partitionExpr("attributes_json")
 	args := append([]any(nil), part.args...)
 	if !from.IsZero() {
 		where = append(where, "timestamp >= ?")
@@ -266,7 +269,7 @@ func buildTraceDuckSQL(files []string, traceID, service string, from, to time.Ti
 		where = append(where, "service = ?")
 		args = append(args, service)
 	}
-	appendScope(&where, &args, partitionExpr("partition", "attributes_json"), scope)
+	appendScope(&where, &args, partitionExpr("attributes_json"), scope)
 
 	sql := "SELECT timestamp, end_time, trace_id, span_id, parent_span_id, service, name, status_code, attributes_json, " +
 		part.sql + " AS partition FROM " + duckParquetSource(files)
@@ -296,7 +299,7 @@ func buildSQLDataset(files []string, dataset string, from, to time.Time, scope Q
 
 	switch dataset {
 	case "logs":
-		part := partitionExpr("partition", "labels_json")
+		part := partitionExpr("labels_json")
 		args = append(args, part.args...)
 		if !from.IsZero() {
 			where = append(where, "timestamp >= ?")
@@ -316,7 +319,7 @@ func buildSQLDataset(files []string, dataset string, from, to time.Time, scope Q
 
 	case "metrics":
 		source = duckMetricParquetSource(files)
-		part := partitionExpr("partition", "labels_json")
+		part := partitionExpr("labels_json")
 		args = append(args, part.args...)
 		if !from.IsZero() {
 			where = append(where, "timestamp >= ?")
@@ -335,7 +338,7 @@ func buildSQLDataset(files []string, dataset string, from, to time.Time, scope Q
 		return sql, args
 
 	case "traces":
-		part := partitionExpr("partition", "attributes_json")
+		part := partitionExpr("attributes_json")
 		args = append(args, part.args...)
 		if !from.IsZero() {
 			where = append(where, "timestamp >= ?")

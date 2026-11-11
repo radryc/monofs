@@ -87,6 +87,10 @@ type Bundle struct {
 	Grants        []Grant      `json:"grants"`
 	AWSBindings   []AWSBinding `json:"aws_bindings,omitempty"`
 	CatalogDigest string       `json:"catalog_digest,omitempty"`
+	// Quotas is optional. Keeping FormatVersion at 1 means older consumers
+	// ignore the field during a rolling upgrade instead of rejecting the
+	// whole policy bundle.
+	Quotas *QuotaBundle `json:"quotas,omitempty"`
 }
 
 // Policy is a parsed bundle with evaluation helpers. It is immutable.

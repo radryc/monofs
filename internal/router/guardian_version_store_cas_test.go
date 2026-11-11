@@ -71,3 +71,25 @@ func TestGuardianVersionStoreExpectedVersionCAS(t *testing.T) {
 		t.Fatalf("absent create after tombstone: %v", err)
 	}
 }
+
+func TestIsGuardianAssetPathUsesSharedBackendForControlPlaneState(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/partitions/demo/config.yaml", true},
+		{"/partitions/demo/intents/app.yaml", true},
+		{"/partitions/demo/.state/intents/app.json", true},
+		{"/partitions/demo/.state/partition.json", true},
+		{"/.registry/pushers/aws-1.json", true},
+		{"/.access/envs/dev.yaml", true},
+		{"/.queues/k8s-main/task_1.json", false},
+		{"/.queues/k8s-main/.claims/task_1.json", false},
+		{"/.archive/demo/app/rev_1/manifest.yaml", false},
+	}
+	for _, tc := range cases {
+		if got := isGuardianAssetPath(tc.path); got != tc.want {
+			t.Errorf("isGuardianAssetPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}

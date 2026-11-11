@@ -168,12 +168,12 @@ func main() {
 	clickhouseRetention := flag.Duration("clickhouse-retention", 30*24*time.Hour, "ClickHouse span TTL")
 	telemetryMaxQueryChunks := flag.Int("telemetry-max-query-chunks", 20000, "Maximum candidate chunks one telemetry query may inspect")
 	telemetryMaxQueryRecords := flag.Int64("telemetry-max-query-records", 1000000, "Maximum records one telemetry streaming query may yield")
-	telemetryEncryption := flag.String("telemetry-encryption", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION")), "Telemetry encryption: off or envelope (default off)")
+	telemetryEncryption := flag.String("telemetry-encryption", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION")), "Telemetry encryption: off, read, or envelope (default off)")
 	telemetryEncryptionMode := flag.String("telemetry-encryption-mode", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_MODE")), "Telemetry encryption read policy: observe or enforce (default observe)")
 	telemetryEncryptionKeysFile := flag.String("telemetry-encryption-keys-file", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_FILE")), "Path to the telemetry encryption key file")
 	telemetryEncryptionKeysJSON := flag.String("telemetry-encryption-keys-json", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_JSON")), "Inline telemetry encryption key JSON")
 	telemetryEncryptionTenant := flag.String("telemetry-encryption-tenant", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_TENANT")), "Tenant used for telemetry encryption keys (default default)")
-	clickhouseEncryption := flag.String("clickhouse-encryption", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_ENCRYPTION")), "ClickHouse encryption: inherit, off, or envelope (default inherit)")
+	clickhouseEncryption := flag.String("clickhouse-encryption", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_ENCRYPTION")), "ClickHouse encryption: inherit, off, read, or envelope (default inherit)")
 
 	// Metrics
 	metricsAddr := flag.String("metrics-addr", ":9100", "Listen address for Prometheus /metrics endpoint (empty disables)")
@@ -425,73 +425,77 @@ func main() {
 		os.Exit(1)
 	}
 
-	parseEncryptionEnabled := func(name, value string) (bool, bool) {
-		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "", "off", "false", "disabled":
-			return false, true
-		case "envelope", "on", "true", "enabled":
-			return true, true
-		default:
-			logger.Error("invalid encryption mode", "flag", name, "value", value, "want", "off or envelope")
-			return false, false
-		}
-	}
-
-	globalEncryption, ok := parseEncryptionEnabled("telemetry-encryption", *telemetryEncryption)
-	if !ok {
+	globalSetting, err := telemetrycrypto.ParseSetting(*telemetryEncryption)
+	if err != nil {
+		logger.Error("invalid telemetry encryption setting", "value", *telemetryEncryption, "error", err)
 		os.Exit(1)
 	}
+
 	clickhouseMode := strings.ToLower(strings.TrimSpace(*clickhouseEncryption))
 	if clickhouseMode == "" {
 		clickhouseMode = "inherit"
 	}
-	clickhouseEncryptionEnabled := false
+	var clickhouseSetting telemetrycrypto.Setting
 	switch clickhouseMode {
 	case "inherit":
-		clickhouseEncryptionEnabled = globalEncryption
+		clickhouseSetting = globalSetting
 	case "off", "false", "disabled":
+	case "read", "decrypt", "decrypt-only", "read-only":
+		clickhouseSetting = telemetrycrypto.Setting{Read: true}
 	case "envelope", "on", "true", "enabled":
-		clickhouseEncryptionEnabled = true
+		clickhouseSetting = telemetrycrypto.Setting{Write: true, Read: true}
 	default:
-		logger.Error("invalid ClickHouse encryption mode", "value", *clickhouseEncryption, "want", "inherit, off or envelope")
+		logger.Error("invalid ClickHouse encryption mode", "value", *clickhouseEncryption, "want", "inherit, off, read or envelope")
 		os.Exit(1)
 	}
 
-	var encryptionProvider *telemetrycrypto.Provider
-	if globalEncryption || clickhouseEncryptionEnabled {
-		mode := telemetrycrypto.Mode(strings.ToLower(strings.TrimSpace(*telemetryEncryptionMode)))
-		if mode == "" {
-			mode = telemetrycrypto.ModeObserve
-		}
-		provider, err := telemetrycrypto.LoadProvider(telemetrycrypto.Config{
-			Enabled:  true,
-			Mode:     mode,
-			Tenant:   strings.TrimSpace(*telemetryEncryptionTenant),
-			KeysFile: *telemetryEncryptionKeysFile,
-			KeysJSON: *telemetryEncryptionKeysJSON,
-		})
-		if err != nil {
-			logger.Error("invalid telemetry encryption configuration", "error", err)
-			os.Exit(1)
-		}
-		encryptionProvider = provider
+	encryptionMode := telemetrycrypto.Mode(strings.ToLower(strings.TrimSpace(*telemetryEncryptionMode)))
+	if encryptionMode == "" {
+		encryptionMode = telemetrycrypto.ModeObserve
 	}
-	var telemetryEnc *telemetrycrypto.Provider
-	if globalEncryption {
-		telemetryEnc = encryptionProvider
+	newEncryptionProvider := func(setting telemetrycrypto.Setting) (*telemetrycrypto.Provider, error) {
+		if !setting.Write && !setting.Read {
+			return nil, nil
+		}
+		return telemetrycrypto.LoadProvider(telemetrycrypto.Config{
+			Enabled:     setting.Write,
+			DecryptOnly: setting.Read && !setting.Write,
+			Mode:        encryptionMode,
+			Tenant:      strings.TrimSpace(*telemetryEncryptionTenant),
+			KeysFile:    *telemetryEncryptionKeysFile,
+			KeysJSON:    *telemetryEncryptionKeysJSON,
+		})
+	}
+	telemetryEnc, err := newEncryptionProvider(globalSetting)
+	if err != nil {
+		logger.Error("invalid telemetry encryption configuration", "error", err)
+		os.Exit(1)
 	}
 	var clickhouseEnc *telemetrycrypto.Provider
-	if clickhouseEncryptionEnabled {
-		clickhouseEnc = encryptionProvider
+	if clickhouseSetting == globalSetting {
+		clickhouseEnc = telemetryEnc
+	} else {
+		clickhouseEnc, err = newEncryptionProvider(clickhouseSetting)
+		if err != nil {
+			logger.Error("invalid ClickHouse encryption configuration", "error", err)
+			os.Exit(1)
+		}
 	}
-	if encryptionProvider != nil {
+	if telemetryEnc != nil {
 		logger.Info("telemetry encryption configured",
-			"global", globalEncryption,
-			"clickhouse", clickhouseEncryptionEnabled,
-			"clickhouse_mode", clickhouseMode,
-			"mode", encryptionProvider.Mode(),
-			"tenant", encryptionProvider.Tenant(),
-			"root_key_id", encryptionProvider.RootKeyID())
+			"write", globalSetting.Write,
+			"read", globalSetting.Read,
+			"mode", telemetryEnc.Mode(),
+			"tenant", telemetryEnc.Tenant(),
+			"root_key_id", telemetryEnc.RootKeyID())
+	}
+	if clickhouseEnc != nil && clickhouseEnc != telemetryEnc {
+		logger.Info("ClickHouse encryption configured",
+			"write", clickhouseSetting.Write,
+			"read", clickhouseSetting.Read,
+			"mode", clickhouseEnc.Mode(),
+			"tenant", clickhouseEnc.Tenant(),
+			"root_key_id", clickhouseEnc.RootKeyID())
 	}
 
 	var clickhouseStore *clickhouse.TraceStore
@@ -528,7 +532,7 @@ func main() {
 			"logs_table", *clickhouseLogsTable,
 			"metrics_table", *clickhouseMetricsTable,
 			"tenant", *clickhouseTenant,
-			"encryption", clickhouseEncryptionEnabled)
+			"encryption", clickhouseEnc != nil)
 	}
 
 	var stopLogEngine func()

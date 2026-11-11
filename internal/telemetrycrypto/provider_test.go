@@ -221,6 +221,112 @@ func TestLoadProviderPrefersJSON(t *testing.T) {
 	}
 }
 
+func TestParseSetting(t *testing.T) {
+	cases := map[string]struct {
+		want Setting
+		ok   bool
+	}{
+		"":            {Setting{}, true},
+		"off":         {Setting{}, true},
+		"disabled":    {Setting{}, true},
+		"read":        {Setting{Read: true}, true},
+		"decrypt":     {Setting{Read: true}, true},
+		"envelope":    {Setting{Write: true, Read: true}, true},
+		"on":          {Setting{Write: true, Read: true}, true},
+		"not-a-valid": {Setting{}, false},
+	}
+	for input, tc := range cases {
+		got, err := ParseSetting(input)
+		if tc.ok && err != nil {
+			t.Fatalf("ParseSetting(%q) error = %v", input, err)
+		}
+		if !tc.ok && err == nil {
+			t.Fatalf("ParseSetting(%q) expected an error", input)
+		}
+		if got != tc.want {
+			t.Fatalf("ParseSetting(%q) = %+v, want %+v", input, got, tc.want)
+		}
+	}
+}
+
+func TestDecryptOnlyProviderReadsEnvelopeButWritesPlaintext(t *testing.T) {
+	raw := []byte(`{
+		"version": 1,
+		"tenant": "default",
+		"root_key_id": "root-v1",
+		"root_key": "` + testKey(t, 5) + `"
+	}`)
+	writerCfg, err := ParseKeyFile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writerCfg.Enabled = true
+	writer, err := NewProvider(writerCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := writer.Seal([]byte("historical secret"), "default", "guardian-configs", "ctx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsEnvelope(sealed) {
+		t.Fatal("writer did not produce an envelope")
+	}
+
+	readerCfg, err := ParseKeyFile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerCfg.Enabled = false
+	readerCfg.DecryptOnly = true
+	reader, err := NewProvider(readerCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reader.Active() || reader.Enabled() || !reader.DecryptOnly() {
+		t.Fatalf("decrypt-only provider state = active:%v enabled:%v decryptOnly:%v", reader.Active(), reader.Enabled(), reader.DecryptOnly())
+	}
+	got, err := reader.Open(sealed, "ctx")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if string(got) != "historical secret" {
+		t.Fatalf("Open() = %q", got)
+	}
+
+	plain, err := reader.Seal([]byte("new plaintext"), "default", "guardian-configs", "ctx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if IsEnvelope(plain) {
+		t.Fatal("decrypt-only provider must not encrypt new writes")
+	}
+	if string(plain) != "new plaintext" {
+		t.Fatalf("Seal() = %q", plain)
+	}
+}
+
+func TestDecryptOnlyRequiresKeys(t *testing.T) {
+	_, err := NewProvider(Config{DecryptOnly: true})
+	if err == nil {
+		t.Fatal("expected decrypt-only without keys to fail")
+	}
+}
+
+func TestDecryptOnlyEnforceRejectsPlaintext(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Enabled = false
+	cfg.DecryptOnly = true
+	cfg.Mode = ModeEnforce
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Open([]byte("legacy plaintext"), "ctx"); err == nil {
+		t.Fatal("expected enforce mode to reject plaintext")
+	}
+}
+
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
 	p, err := NewProvider(testConfig(t))
