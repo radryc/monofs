@@ -1,6 +1,6 @@
 # Security Architecture
 
-**Scope:** code-derived security architecture and assessment. Prior documentation was moved to `docs_backup/` and was not used. Findings are based on the current code and checked-in deployment files, not on an assumed production hardening layer that is absent from the repository.
+**Scope:** code-derived security architecture and assessment. Findings are based on the current code and checked-in deployment files, not on an assumed production hardening layer that is absent from the repository.
 
 ## 1. Method and severity
 
@@ -13,7 +13,9 @@ Severity reflects impact in the checked-in default deployment and the likely pro
 
 The code has several “controls” that are disabled by default or only active when an operator supplies a policy source. Those are treated as absent for the default posture, with the condition stated.
 
-**Remediation status:** this document is the baseline assessment. Decisions and the fixes already applied in the working tree are tracked in [internal/remediation-decisions.md](internal/remediation-decisions.md). Do not treat every finding here as still open.
+**Remediation status:** this document describes the current controls and the
+remaining risks. Treat the risk sections as current behavior, not as a snapshot
+of an older tree.
 
 ## 2. Assets
 
@@ -120,7 +122,7 @@ This means bearer tokens, session cookies, Guardian tokens, internal tokens, Git
 
 - Blob archives are encrypted at rest with the shared encryption key.
 - Metadata (Pebble), workspace WAL/snapshots, log-engine Parquet/manifests, cache DBs, and registry manifests/tags are **plaintext** by default.
-- Optional telemetry encryption (`MONOFS_TELEMETRY_ENCRYPTION=envelope`) seals logengine chunk objects and sensitive ClickHouse payload columns with tenant/partition subkeys. ClickHouse can override the global setting with `MONOFS_CLICKHOUSE_ENCRYPTION=inherit|off|envelope`. It is off by default, writes new data encrypted, and reads legacy plaintext only in `observe` mode. `enforce` rejects plaintext. The key file is supplied by the operator (Guardian Secret or inline JSON for the demo); keys are never logged.
+- Optional telemetry encryption (`MONOFS_TELEMETRY_ENCRYPTION=envelope`) seals logengine chunk objects and sensitive ClickHouse payload columns with tenant/partition subkeys. ClickHouse can override the global setting with `MONOFS_CLICKHOUSE_ENCRYPTION=inherit|off|read|envelope`. It is off by default. `envelope` writes new data encrypted and reads legacy plaintext only in `observe` mode; `read` stops encrypting new writes but still decrypts existing envelopes so a deployment can be toggled off without stranding historical data; `enforce` rejects plaintext. The DuckDB query sidecar (`monofs-logquery`) and the offline `monofs-logengine-compact` command consume the same settings, so the node and sidecar always decrypt with the same keys. The key file is supplied by the operator (Guardian Secret or inline JSON for the demo); keys are never logged. DuckDB cannot read envelope-encrypted objects directly, so the query sidecar materialises decrypted Parquet under `<logengine-dir>/parquet` for queries; those copies are swept after one hour. Mount that cache on an ephemeral volume if plaintext on the node disk violates the threat model.
 - There is no tenant identifier in paths, storage IDs, metadata keys, blob indexes, log chunks, workspace jobs, or cache keys. A single cluster is one trust domain.
 - Blob indexes are keyed only by content hash; any caller who knows a hash can fetch that content regardless of repository/tenant.
 - Registry blobs are global by digest; cross-repository blob reads and deletes are possible.

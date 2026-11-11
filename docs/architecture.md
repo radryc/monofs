@@ -1,6 +1,6 @@
 # MonoFS Architecture
 
-**Scope:** code-derived architecture of the MonoFS monorepo. The prior documentation was moved to `docs_backup/` and was not used. References are to source files and symbols; line numbers are navigation aids.
+**Scope:** code-derived architecture of the MonoFS monorepo. References are to source files and symbols; line numbers are navigation aids.
 
 ## 1. What MonoFS is
 
@@ -243,9 +243,9 @@ Guardian principals are persisted in `guardian_principals.json` (tokens hashed w
 Doctor is the observability namespace:
 
 - Services export OTLP traces/metrics/logs (or direct ingest) to storage nodes or the router.
-- Storage nodes use `internal/storage/logengine` to write Parquet chunks, manifests, text indexes, and series indexes.
-- The router fans out `QueryLogs`, `QueryMetrics`, `QueryTraces`, `StreamQuery*`, and `StreamMetricSeries` to nodes, merges results, and proxies ingest.
-- `internal/storage/logquery` parses a log query language.
+- Storage nodes use `internal/storage/logengine` to write Parquet chunks, manifests, text indexes, and series indexes, or `internal/storage/clickhouse` to write shared ClickHouse tables when `--spanengine=clickhouse`.
+- The router fans out `QueryLogs`, `QueryMetrics`, `QueryTraces`, `StreamQuery*`, and `StreamMetricSeries` to nodes, merges results, and proxies ingest. In ClickHouse mode the router still fans out but the tables are shared, so the SQL console executes on one healthy node to avoid duplicate results.
+- `internal/storage/logquery` parses a log query language; `monofs-logquery` exposes the same data through DuckDB SQL views.
 - `monofs-logengine-compact` compacts ranges offline.
 
 ### 4.8 Pipeline orchestration
@@ -440,9 +440,12 @@ Writable mounts create a session automatically. Writes go to ordinary files unde
 
 - `internal/telemetry` configures OTLP exporters, trace/metric/log providers, and a `slog` bridge.
 - The default endpoint mode is insecure; `https://` schemes are stripped and not re-applied unless `insecure=false`.
-- `internal/storage/logengine` stores Parquet chunks plus manifests/indexes; query execution prunes by time, labels, partitions, and manifests.
+- **Span engine selection.** `--spanengine` (or `MONOFS_SPANENGINE`) chooses the telemetry backend:
+  - `logengine` (default) keeps logs, metrics, and traces in local Parquet chunks plus manifests/indexes; query execution prunes by time, labels, partitions, and manifests.
+  - `clickhouse` writes all three signals to shared ClickHouse tables. `internal/server.HybridBackend` keeps the signal switch in one place, so the router, Doctor APIs, and SQL console do not need engine-specific code. The node exposes ClickHouse table and disk statistics to the span-engine UI; the data is shared across nodes.
 - `internal/storage/logquery` implements the query language (filters, regex, pipes; unknown pipes are silently ignored).
-- `cmd/monofs-logquery` is an optional DuckDB sidecar on each storage node. `monofs-server --logquery-sidecar=...` proxies telemetry read RPCs to it and keeps ingest/compaction local. See `docs/duckdb-logquery.md`.
+- `cmd/monofs-logquery` is an optional DuckDB sidecar on each storage node. `monofs-server --logquery-sidecar=...` proxies telemetry read RPCs to it and keeps ingest/compaction local. The sidecar renders `logs`, `metrics`, and `traces` views over Parquet or ClickHouse and enforces partition scope. See `docs/duckdb-logquery.md`.
+- **Optional telemetry encryption.** `MONOFS_TELEMETRY_ENCRYPTION=envelope` seals logengine chunk objects and sensitive ClickHouse payload columns with tenant/partition subkeys (`internal/telemetrycrypto`). `MONOFS_CLICKHOUSE_ENCRYPTION=inherit|off|read|envelope` overrides the mode for ClickHouse only: `read` stops encrypting new writes while still decrypting historical envelopes, so encryption can be turned off without stranding data. `MONOFS_TELEMETRY_ENCRYPTION_MODE=observe|enforce` controls whether legacy plaintext is accepted or rejected. The node, the DuckDB sidecar, and the offline compactor share the same key configuration.
 
 ### 8.5 Bazel
 
@@ -498,7 +501,7 @@ The checked-in `docker-compose.yml` describes a 14-service development cluster:
 
 The `Dockerfile` is a 19-stage multi-target build for UI, Go builders, and runtime images. `Dockerfile.search` duplicates the search image with a different base and healthcheck. `Dockerfile.pipeline-worker` and `Dockerfile.guardianctl` require an external `guardian` build context that is not in this repository.
 
-Deployment defects identified in the baseline analysis (status and fixes in [internal/remediation-decisions.md](internal/remediation-decisions.md)):
+Deployment guarantees verified in the current tree:
 
 - **[fixed]** Compose used `context: ..` while the Dockerfile expects the repository root.
 - **[fixed]** Routers required auth config that Compose did not pass; `MONOFS_TOKEN` is now required.
@@ -540,7 +543,7 @@ Deployment defects identified in the baseline analysis (status and fixes in [int
 | Binary | Main inputs |
 |---|---|
 | Router | ~70 flags; `MONOFS_TOKEN`, OIDC variables, access-policy URL/file/token, authz grants JSON, encryption key, peer/registry tokens, state dirs |
-| Server | node ID, address, DB/Git paths, fetcher addresses, KVS peers/raft, access policy, OIDC, internal token, log engine, router for forwarding |
+| Server | node ID, address, DB/Git paths, fetcher addresses, KVS peers/raft, access policy, OIDC, internal token, log engine, span engine (`logengine`/`clickhouse`), telemetry encryption, router for forwarding |
 | Fetcher | JSON config (`/etc/monofs/fetcher.json`), env, flags; encryption key; S3/GCS settings; cache limits |
 | Client | router, mount, cache, overlay, writable, virtual monorepo, token, external addresses |
 | Search | port, index/cache dirs, router address, token, OIDC, authz enforce, guardian index flag |
@@ -555,6 +558,7 @@ Deployment defects identified in the baseline analysis (status and fixes in [int
 - Git tokens are static environment PATs; there is no token minting, scope, expiry, or revocation.
 - Browser sessions store the raw ID token in a cookie; the persistent session store is unused.
 - Registry upstream username/password flags exist but are never read.
+- Telemetry encryption keys are loaded from a key file or inline JSON (`MONOFS_TELEMETRY_ENCRYPTION_KEYS_FILE` / `_KEYS_JSON`). The tenant root key never leaves the process; only per-object data keys are stored beside the ciphertext.
 
 ## 13. Cross-cutting concerns
 
@@ -597,7 +601,7 @@ Most handlers return plain `fmt.Errorf` errors, which become gRPC `Unknown`; onl
 
 ## 14. Where to find what
 
-This is a coarse map; the complete file-by-file inventory is in [internal/code-inventory.md](internal/code-inventory.md).
+This is a coarse map of the main areas.
 
 | Area | Key files |
 |---|---|
