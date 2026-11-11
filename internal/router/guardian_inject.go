@@ -11,16 +11,39 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 type guardianNodeTarget struct {
-	id        string
-	address   string
-	client    pb.MonoFSClient
-	kvsStatus *pb.KVSNodeStatus
-	healthy   bool
+	id          string
+	address     string
+	client      pb.MonoFSClient
+	kvsStatus   *pb.KVSNodeStatus
+	healthy     bool
+	failedUntil time.Time
+}
+
+const guardianNodeFailureCooldown = 15 * time.Second
+
+// guardianNodeAvailable reports whether the node may be used for a Guardian
+// mutation right now. A node is unavailable when the router marked it
+// unhealthy or when a recent transport failure put it in cooldown.
+func (t guardianNodeTarget) available(now time.Time) bool {
+	if !t.healthy {
+		return false
+	}
+	return !t.coolingDown(now)
+}
+
+// coolingDown reports whether a recent transport failure quarantined the node.
+// KVS nodes are selected from their own KVS health even when the generic probe
+// is failing (a slow probe must not hide a healthy leader), so they only need
+// to respect the transport-failure cooldown.
+func (t guardianNodeTarget) coolingDown(now time.Time) bool {
+	return !t.failedUntil.IsZero() && now.Before(t.failedUntil)
 }
 
 // InjectGuardianPartition stores inline YAML files for a guardian partition
@@ -78,15 +101,57 @@ func (r *Router) collectGuardianNodes() []guardianNodeTarget {
 	nodes := make([]guardianNodeTarget, 0, len(r.nodes))
 	for id, state := range r.nodes {
 		nodes = append(nodes, guardianNodeTarget{
-			id:        id,
-			address:   state.info.Address,
-			client:    state.client,
-			kvsStatus: normalizedKVSNodeStatus(state.kvsStatus),
-			healthy:   state.info.Healthy,
+			id:          id,
+			address:     state.info.Address,
+			client:      state.client,
+			kvsStatus:   normalizedKVSNodeStatus(state.kvsStatus),
+			healthy:     state.info.Healthy,
+			failedUntil: state.guardianFailedUntil,
 		})
 	}
 
 	return nodes
+}
+
+// markGuardianNodeUnhealthy excludes a node from Guardian mutations for a
+// cooldown window. The existing gRPC connection is intentionally preserved so
+// the transport can reconnect in the background; closing it would discard
+// gRPC's backoff state and force a fresh dial on every request.
+func (r *Router) markGuardianNodeUnhealthy(nodeID, reason string) {
+	if nodeID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := r.nodes[nodeID]
+	if state == nil {
+		return
+	}
+	now := time.Now()
+	wasHealthy := state.info.Healthy
+	state.info.Healthy = false
+	state.kvsStatus = nil
+	state.guardianFailedUntil = now.Add(guardianNodeFailureCooldown)
+	if wasHealthy {
+		r.version.Add(1)
+	}
+	r.logger.Warn("guardian node marked unhealthy after mutation failure",
+		"node_id", nodeID,
+		"reason", reason,
+		"cooldown", guardianNodeFailureCooldown)
+}
+
+// clearGuardianNodeFailure resets the post-failure cooldown after a successful
+// health probe or mutation.
+func (r *Router) clearGuardianNodeFailure(nodeID string) {
+	if nodeID == "" {
+		return
+	}
+	r.mu.Lock()
+	if state := r.nodes[nodeID]; state != nil {
+		state.guardianFailedUntil = time.Time{}
+	}
+	r.mu.Unlock()
 }
 
 func (r *Router) collectHealthyGuardianNodes() []guardianNodeTarget {
@@ -123,6 +188,13 @@ func (r *Router) refreshGuardianKVSStatuses(ctx context.Context) {
 		info, err := item.client.GetNodeInfo(probeCtx, &pb.NodeInfoRequest{})
 		cancel()
 		if err != nil {
+			// A failed re-probe means the cached role is stale and must not be
+			// used to target a mutation. Only quarantine on transport errors;
+			// application errors (e.g. unimplemented probing) leave health
+			// untouched.
+			if isGuardianTransportError(err) {
+				r.markGuardianNodeUnhealthy(item.id, "KVS status probe failed: "+err.Error())
+			}
 			continue
 		}
 		r.mu.Lock()
@@ -144,19 +216,36 @@ func (r *Router) guardianMutationTargets(nodes []guardianNodeTarget, displayPath
 		// make correctness depend on a cached leader or on the generic node
 		// health probe. Prefer the leader when it is reachable, then fall
 		// back to a deterministic peer.
+		now := time.Now()
 		kvsNodes := make([]guardianNodeTarget, 0, len(nodes))
 		for _, node := range nodes {
+			if node.coolingDown(now) {
+				continue
+			}
 			status := normalizedKVSNodeStatus(node.kvsStatus)
 			if status.GetEnabled() && status.GetHealthy() {
 				kvsNodes = append(kvsNodes, node)
 			}
 		}
 		if len(kvsNodes) == 0 {
-			// Single-node/local deployments do not run raft and may report
-			// KVS as disabled. Let the sole healthy node handle the write;
-			// the local store will return a clear error if it cannot.
-			if len(nodes) == 1 && nodes[0].healthy {
-				return []guardianNodeTarget{nodes[0]}
+			// KVS roles may not be known yet (router just started, status was
+			// cleared after a failure). Any healthy cluster node can forward
+			// to the leader, so fall back to one available node instead of
+			// failing the write.
+			available := make([]guardianNodeTarget, 0, len(nodes))
+			for _, node := range nodes {
+				if node.available(now) {
+					available = append(available, node)
+				}
+			}
+			if len(available) > 0 {
+				sort.Slice(available, func(i, j int) bool {
+					if available[i].id != available[j].id {
+						return available[i].id < available[j].id
+					}
+					return available[i].address < available[j].address
+				})
+				return []guardianNodeTarget{available[0]}
 			}
 			return nil
 		}
@@ -172,9 +261,10 @@ func (r *Router) guardianMutationTargets(nodes []guardianNodeTarget, displayPath
 		return []guardianNodeTarget{kvsNodes[0]}
 	}
 
+	now := time.Now()
 	healthy := make([]guardianNodeTarget, 0, len(nodes))
 	for _, node := range nodes {
-		if node.healthy {
+		if node.available(now) {
 			healthy = append(healthy, node)
 		}
 	}
@@ -259,7 +349,11 @@ func (r *Router) guardianNodeClient(target guardianNodeTarget) (pb.MonoFSClient,
 		return target.client, func() {}, nil
 	}
 
-	conn, err := grpc.NewClient(target.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(target.address, append([]grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpcx.IPv4DialerOption(),
+		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
+	}, r.internalDialOptions()...)...)
 	if err != nil {
 		return nil, nil, err
 	}

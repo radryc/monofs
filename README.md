@@ -9,16 +9,16 @@ MonoFS is a distributed filesystem and workspace service for large monorepos. It
 
 ## Documentation
 
-The documentation in this repository was regenerated from the source code. The previous docs were moved to `docs_backup/` and are not used as input.
+The documentation in this repository is derived from the source code and is
+updated with the code.
 
 | Document | Contents |
 |---|---|
 | [docs/README.md](docs/README.md) | Documentation index and one-page architecture |
 | [docs/architecture.md](docs/architecture.md) | Components, data model, deployment, consistency, boundaries |
 | [docs/logical-flows.md](docs/logical-flows.md) | Ingestion, reads, writes, publish/push, auth, pipelines, search, registry, telemetry |
-| [docs/security-architecture.md](docs/security-architecture.md) | Assets, threat model, trust boundaries, controls, findings, remediation |
-| [docs/internal/README.md](docs/internal/README.md) | Internal assessment: missing functionality, duplication, overcomplexity, simplification plan, and code inventory |
-| [docs/internal/code-inventory.md](docs/internal/code-inventory.md) | Every tracked code file with purpose and key symbols |
+| [docs/security-architecture.md](docs/security-architecture.md) | Assets, threat model, trust boundaries, controls, telemetry encryption |
+| [docs/duckdb-logquery.md](docs/duckdb-logquery.md) | DuckDB sidecar, SQL views, limits, ClickHouse parity |
 
 ## Repository map
 

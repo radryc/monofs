@@ -8,9 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/radryc/monofs/internal/storage/logengine"
+	"github.com/radryc/monofs/internal/telemetrycrypto"
 )
 
 func main() {
@@ -19,6 +21,11 @@ func main() {
 	fromRaw := flag.String("from", "", "Start time in RFC3339 (required)")
 	toRaw := flag.String("to", "", "End time in RFC3339 (required)")
 	window := flag.Duration("window", 0, "Compaction window; 0 uses 1h for logs, 30m for traces, 15m for metrics")
+	telemetryEncryption := flag.String("telemetry-encryption", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION")), "Telemetry encryption: off, read, or envelope (default off)")
+	telemetryEncryptionMode := flag.String("telemetry-encryption-mode", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_MODE")), "Telemetry encryption read policy: observe or enforce (default observe)")
+	telemetryEncryptionKeysFile := flag.String("telemetry-encryption-keys-file", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_FILE")), "Path to the telemetry encryption key file")
+	telemetryEncryptionKeysJSON := flag.String("telemetry-encryption-keys-json", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_JSON")), "Inline telemetry encryption key JSON")
+	telemetryEncryptionTenant := flag.String("telemetry-encryption-tenant", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_TENANT")), "Tenant used for telemetry encryption keys (default default)")
 	flag.Parse()
 
 	if *dir == "" || *fromRaw == "" || *toRaw == "" {
@@ -47,9 +54,37 @@ func main() {
 		os.Exit(2)
 	}
 
+	encryptionSetting, err := telemetrycrypto.ParseSetting(*telemetryEncryption)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid telemetry encryption setting: %v\n", err)
+		os.Exit(2)
+	}
+	var encryption *telemetrycrypto.Provider
+	if encryptionSetting.Write || encryptionSetting.Read {
+		encryptionMode := telemetrycrypto.Mode(strings.ToLower(strings.TrimSpace(*telemetryEncryptionMode)))
+		if encryptionMode == "" {
+			encryptionMode = telemetrycrypto.ModeObserve
+		}
+		encryption, err = telemetrycrypto.LoadProvider(telemetrycrypto.Config{
+			Enabled:     encryptionSetting.Write,
+			DecryptOnly: encryptionSetting.Read && !encryptionSetting.Write,
+			Mode:        encryptionMode,
+			Tenant:      strings.TrimSpace(*telemetryEncryptionTenant),
+			KeysFile:    *telemetryEncryptionKeysFile,
+			KeysJSON:    *telemetryEncryptionKeysJSON,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid telemetry encryption configuration: %v\n", err)
+			os.Exit(2)
+		}
+		fmt.Fprintf(os.Stderr, "telemetry encryption: write=%t read=%t mode=%s\n",
+			encryptionSetting.Write, encryptionSetting.Read, encryption.Mode())
+	}
+
 	engine := logengine.New(logengine.NewMockS3Store(*dir), logengine.Config{
 		LocalCacheDir: *dir,
 		ChunkDuration: 5 * time.Minute,
+		Encryption:    encryption,
 	})
 	defer engine.Close()
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/internal/storage"
+	"github.com/radryc/monofs/internal/telemetrycrypto"
 )
 
 // QueryMode controls which telemetry query engine services read queries.
@@ -89,10 +90,14 @@ type Config struct {
 	// MaxQueryRecords bounds how many records one streaming query may yield.
 	// Zero uses the engine default. Compaction scans are not affected.
 	MaxQueryRecords int64
+	// Encryption enables transparent per-partition encryption of chunk objects.
+	// It is optional and nil/disabled by default.
+	Encryption *telemetrycrypto.Provider
 }
 
 // New creates a new LogEngine instance with the given storage backend and configuration.
 func New(backend ObjectStoreBackend, cfg Config) *LogEngine {
+	backend = NewEncryptedStore(backend, cfg.Encryption)
 	cachedStore := NewCachedStore(backend, cfg.LocalCacheDir)
 	ingester := NewIngester(cachedStore, cfg.ChunkDuration)
 	query := NewQueryEngine(cachedStore)

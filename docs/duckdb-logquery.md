@@ -87,9 +87,12 @@ apply the final limit, so groups cannot be lost before the coordinator merge.
 
 ## Compaction
 
-`logengine` compacts raw chunks into larger outputs targeting 256 MB with
-multiple row groups. The background worker looks back up to 24 hours; older
-backfill is available through `monofs-logengine-compact`.
+`logengine` compacts raw chunks into larger outputs targeting 64 MB with
+multiple row groups. The first background compaction starts after a 2 minute
+startup grace period (`--logengine-compact-startup-delay`), so a cold start
+does not compete with recovery and Raft catch-up. The background worker looks
+back up to 24 hours; older backfill is available through
+`monofs-logengine-compact`.
 
 ## Tests
 
@@ -108,11 +111,15 @@ Doctor exposes a read-only SQL console at `POST /v1/sql/query`. It runs
 
 - `logs` — `time`, `timestamp`, `level`, `service`, `trace_id`, `span_id`,
   `raw_message`, `labels_json`, `partition`
-- `metrics` — `time`, `timestamp`, `service`, `metric_name`, `value`,
-  `labels_json`, `partition`
+- `metrics` — `time`, `timestamp`, `start_time`, `service`, `metric_name`,
+  `value`, `metric_type`, `temporality`, `labels_json`, `partition`
 - `traces` — `time`, `timestamp`, `end_time`, `end_time_ts`, `trace_id`,
   `span_id`, `parent_span_id`, `service`, `name`, `status_code`,
   `attributes_json`, `partition`
+
+Query syntax, quoting rules (including the double-quote `UNKNOWN_IDENTIFIER`
+pitfall), label filters, and limits are documented in
+[`doctor/docs/sql-console-syntax.md`](../../doctor/docs/sql-console-syntax.md).
 
 The query is evaluated on every healthy MonoFS node and the response contains
 one result envelope per node. This is intentional: chunks are shard-local, so
@@ -130,3 +137,19 @@ Access control is enforced in layers:
 The console rejects non-`SELECT` statements, multiple statements, external
 file/table functions, direct Parquet/CSV/JSON paths, and redefinition of the
 dataset view. Queries are limited to seven days and 5,000 rows.
+
+When MonoFS uses `--spanengine=clickhouse`, the same `logs`, `metrics`, and
+`traces` views are rendered over the ClickHouse tables and the same partition
+scope is applied before the user's SQL runs. The router executes the statement
+on one healthy node in that mode because the ClickHouse tables are shared.
+
+## Metric schema v3 migration
+
+Metric chunks now store `metric_type`, `temporality`, and `start_time` columns and a
+schema version of `3`; series-index entries also carry `metric_type`, `unit`, and
+`description`. There is intentionally no dual-read path for older metric chunks.
+
+Before deploying this schema, wipe or re-ingest `chunks/metrics/` in object storage. Native metric
+scans return `ErrUnsupportedMetricSchema` for any remaining older metric chunk, and DuckDB scans
+fail because the new columns are missing. A ClickHouse metric table created by an older build must
+also be recreated (or altered) before ingest.

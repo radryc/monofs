@@ -34,6 +34,9 @@ func TestDefaultRouterConfig(t *testing.T) {
 	if cfg.UnhealthyThreshold != 15*time.Second {
 		t.Errorf("unexpected UnhealthyThreshold: %v", cfg.UnhealthyThreshold)
 	}
+	if cfg.HealthProbeTimeout != 2*time.Second {
+		t.Errorf("unexpected HealthProbeTimeout: %v", cfg.HealthProbeTimeout)
+	}
 }
 
 func TestNewRouter(t *testing.T) {
@@ -143,6 +146,12 @@ func TestGetClusterInfo(t *testing.T) {
 
 	if resp.Version < 1 {
 		t.Errorf("unexpected version: %d", resp.Version)
+	}
+
+	for _, node := range resp.Nodes {
+		if got := node.Metadata["span_engine"]; got != cfg.SpanEngine {
+			t.Errorf("node %s span_engine = %q, want %q", node.NodeId, got, cfg.SpanEngine)
+		}
 	}
 
 	// Verify node details

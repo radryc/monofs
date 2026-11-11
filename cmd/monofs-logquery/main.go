@@ -28,6 +28,7 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/storage/logengine"
+	"github.com/radryc/monofs/internal/telemetrycrypto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -57,6 +58,11 @@ func main() {
 	sqlQuery := flag.String("sql", "", "Run an ad-hoc DuckDB SQL query and exit")
 	healthInterval := flag.Duration("health-interval", 30*time.Second, "DuckDB health check interval")
 	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	telemetryEncryption := flag.String("telemetry-encryption", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION")), "Telemetry encryption: off, read, or envelope (default off)")
+	telemetryEncryptionMode := flag.String("telemetry-encryption-mode", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_MODE")), "Telemetry encryption read policy: observe or enforce (default observe)")
+	telemetryEncryptionKeysFile := flag.String("telemetry-encryption-keys-file", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_FILE")), "Path to the telemetry encryption key file")
+	telemetryEncryptionKeysJSON := flag.String("telemetry-encryption-keys-json", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_JSON")), "Inline telemetry encryption key JSON")
+	telemetryEncryptionTenant := flag.String("telemetry-encryption-tenant", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_TENANT")), "Tenant used for telemetry encryption keys (default default)")
 	flag.Parse()
 
 	level := slog.LevelInfo
@@ -80,6 +86,37 @@ func main() {
 		os.Exit(1)
 	}
 
+	encryptionSetting, err := telemetrycrypto.ParseSetting(*telemetryEncryption)
+	if err != nil {
+		logger.Error("invalid telemetry encryption setting", "value", *telemetryEncryption, "error", err)
+		os.Exit(1)
+	}
+	var encryption *telemetrycrypto.Provider
+	if encryptionSetting.Write || encryptionSetting.Read {
+		encryptionMode := telemetrycrypto.Mode(strings.ToLower(strings.TrimSpace(*telemetryEncryptionMode)))
+		if encryptionMode == "" {
+			encryptionMode = telemetrycrypto.ModeObserve
+		}
+		encryption, err = telemetrycrypto.LoadProvider(telemetrycrypto.Config{
+			Enabled:     encryptionSetting.Write,
+			DecryptOnly: encryptionSetting.Read && !encryptionSetting.Write,
+			Mode:        encryptionMode,
+			Tenant:      strings.TrimSpace(*telemetryEncryptionTenant),
+			KeysFile:    *telemetryEncryptionKeysFile,
+			KeysJSON:    *telemetryEncryptionKeysJSON,
+		})
+		if err != nil {
+			logger.Error("invalid telemetry encryption configuration", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("telemetry encryption configured",
+			"write", encryptionSetting.Write,
+			"read", encryptionSetting.Read,
+			"mode", encryption.Mode(),
+			"tenant", encryption.Tenant(),
+			"root_key_id", encryption.RootKeyID())
+	}
+
 	mode := logengine.ParseQueryMode(*queryMode)
 	logger.Info("telemetry query routing configured",
 		"mode", mode,
@@ -95,6 +132,7 @@ func main() {
 		NativeMaxLimit:     *nativeMaxLimit,
 		NativeMaxRange:     *nativeMaxRange,
 		DuckQueueThreshold: *duckQueueThreshold,
+		Encryption:         encryption,
 	})
 	defer engine.Close()
 	if err := engine.EnableDuckDB(logengine.DuckDBConfig{
@@ -147,6 +185,17 @@ func main() {
 		grpc.MaxSendMsgSize(256<<20),
 	)
 	executable, _ := os.Executable()
+	encryptionEnv := []string{
+		"MONOFS_TELEMETRY_ENCRYPTION=" + strings.TrimSpace(*telemetryEncryption),
+		"MONOFS_TELEMETRY_ENCRYPTION_MODE=" + strings.TrimSpace(*telemetryEncryptionMode),
+		"MONOFS_TELEMETRY_ENCRYPTION_TENANT=" + strings.TrimSpace(*telemetryEncryptionTenant),
+	}
+	if strings.TrimSpace(*telemetryEncryptionKeysFile) != "" {
+		encryptionEnv = append(encryptionEnv, "MONOFS_TELEMETRY_ENCRYPTION_KEYS_FILE="+strings.TrimSpace(*telemetryEncryptionKeysFile))
+	}
+	if strings.TrimSpace(*telemetryEncryptionKeysJSON) != "" {
+		encryptionEnv = append(encryptionEnv, "MONOFS_TELEMETRY_ENCRYPTION_KEYS_JSON="+strings.TrimSpace(*telemetryEncryptionKeysJSON))
+	}
 	queryServer := &logQueryServer{
 		engine:         engine,
 		logger:         logger,
@@ -154,6 +203,7 @@ func main() {
 		isolateTimeout: *isolateTimeout,
 		executable:     executable,
 		isolateArgs:    isolatedSQLChildArgs(*dir, *memoryLimit, *tempDir, *maxTemp, *threads, *maxConns, *fallback, *logLevel),
+		encryptionEnv:  encryptionEnv,
 	}
 	pb.RegisterMonoFSServer(grpcServer, queryServer)
 	healthServer := health.NewServer()
@@ -214,6 +264,7 @@ type logQueryServer struct {
 	isolateTimeout time.Duration
 	executable     string
 	isolateArgs    []string
+	encryptionEnv  []string
 }
 
 const (
@@ -361,6 +412,7 @@ func (s *logQueryServer) queryDuckDBSQLIsolated(ctx context.Context, req *pb.Que
 
 	args := append(append([]string(nil), s.isolateArgs...), "--exec-sql-request")
 	cmd := exec.CommandContext(queryCtx, s.executable, args...)
+	cmd.Env = mergeEnv(os.Environ(), s.encryptionEnv)
 	cmd.Stdin = bytes.NewReader(payload)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -441,6 +493,39 @@ func isolatedSQLChildArgs(dir, memoryLimit, tempDir, maxTemp string, threads, ma
 		args = append(args, "--duckdb-temp-dir="+tempDir)
 	}
 	return args
+}
+
+// mergeEnv overlays overrides on top of base while avoiding duplicate keys.
+// It lets the isolated SQL child inherit the exact telemetry encryption config
+// even when it was supplied via flags rather than the parent environment.
+func mergeEnv(base, overrides []string) []string {
+	values := make(map[string]string, len(base)+len(overrides))
+	order := make([]string, 0, len(base)+len(overrides))
+	for _, entry := range base {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, seen := values[key]; !seen {
+			order = append(order, key)
+		}
+		values[key] = value
+	}
+	for _, entry := range overrides {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, seen := values[key]; !seen {
+			order = append(order, key)
+		}
+		values[key] = value
+	}
+	out := make([]string, 0, len(order))
+	for _, key := range order {
+		out = append(out, key+"="+values[key])
+	}
+	return out
 }
 
 func (s *logQueryServer) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {

@@ -100,6 +100,12 @@ RUN apk add --no-cache \
     curl \
     jq
 
+# The worker instruments its MonoFS gRPC clients manually
+# (internal/telemetry.NewGRPCClientStatsHandler). otelc's auto gRPC client
+# instrumentation keeps the long-lived change-subscription span in
+# goroutine-local storage, which makes every later span join that trace.
+ENV OTEL_GO_DISABLED_INSTRUMENTATIONS=grpc
+
 COPY --from=pipeline-worker-builder /bin/monofs-pipeline-worker /usr/local/bin/monofs-pipeline-worker
 COPY --from=pipeline-worker-guardianctl-builder /bin/guardianctl /usr/local/bin/guardianctl
 

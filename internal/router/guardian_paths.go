@@ -130,18 +130,16 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 		return nil, status.Error(codes.InvalidArgument, "at least one write is required")
 	}
 
-	now := time.Now()
-	batchRevisionID := guardianBatchRevisionID(now)
-	committedAt := now.Unix()
-	correlationID := ""
-	reason := ""
-	if req.GetContext() != nil {
-		correlationID = req.GetContext().GetCorrelationId()
-		reason = req.GetContext().GetReason()
+	if err := r.requireGuardianCoordinator(); err != nil {
+		return nil, err
 	}
 
-	plans := make([]guardianUpsertPlan, 0, len(req.GetWrites()))
-	groups := make(map[string]*guardianUpsertGroup)
+	type pendingWrite struct {
+		write  *pb.GuardianPathWrite
+		mapped guardianPhysicalPath
+	}
+	pending := make([]pendingWrite, 0, len(req.GetWrites()))
+	displayPaths := make([]string, 0, len(req.GetWrites()))
 	for _, write := range req.GetWrites() {
 		mapped, err := mapGuardianLogicalPath(write.GetLogicalPath())
 		if err != nil {
@@ -153,9 +151,40 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 		if err := authorizeGuardianMutation(principal, mapped.LogicalPath, false); err != nil {
 			return nil, status.Error(codes.PermissionDenied, err.Error())
 		}
+		pending = append(pending, pendingWrite{write: write, mapped: mapped})
+		displayPaths = append(displayPaths, mapped.DisplayPath)
+	}
 
-		current, exists := r.guardianVersions.currentVersion(mapped.LogicalPath)
-		exists = exists && !current.Tombstone
+	// Serialize check -> node apply -> version commit for the affected
+	// display paths only. Cross-router serialization is handled by the
+	// coordinator lease and the KVS-backed version store.
+	unlockMutations := r.lockGuardianMutations(displayPaths...)
+	defer unlockMutations()
+	if err := r.requireGuardianCoordinator(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	batchRevisionID := guardianBatchRevisionID(now)
+	committedAt := now.Unix()
+	correlationID := ""
+	reason := ""
+	if req.GetContext() != nil {
+		correlationID = req.GetContext().GetCorrelationId()
+		reason = req.GetContext().GetReason()
+	}
+
+	plans := make([]guardianUpsertPlan, 0, len(pending))
+	groups := make(map[string]*guardianUpsertGroup)
+	for _, item := range pending {
+		write := item.write
+		mapped := item.mapped
+
+		current, exists, currentErr := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		if currentErr != nil {
+			return nil, status.Errorf(codes.Unavailable, "guardian version store unavailable: %v", currentErr)
+		}
+		exists = exists && current != nil && !current.Tombstone
 		switch expected := strings.TrimSpace(write.GetExpectedVersionId()); expected {
 		case "":
 		case "absent":
@@ -210,7 +239,7 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 	}
 
 	if err := r.applyGuardianUpsertGroups(ctx, groups, principal); err != nil {
-		return nil, status.Errorf(codes.Internal, "upsert guardian paths: %v", err)
+		return nil, guardianUpsertStatus(err)
 	}
 
 	// Re-index search for affected guardian partitions, debounced per
@@ -223,25 +252,28 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 		}
 	}
 
-	versions := make([]*pb.GuardianFileVersion, 0, len(plans))
+	changes := make([]guardianVersionCommit, 0, len(plans))
 	for _, plan := range plans {
-		version, err := r.guardianVersions.commit(guardianVersionCommit{
-			LogicalPath:     plan.mapped.LogicalPath,
-			DisplayPath:     plan.mapped.DisplayPath,
-			StorageID:       plan.mapped.StorageID,
-			BatchRevisionID: batchRevisionID,
-			PrincipalID:     principal.PrincipalID,
-			Reason:          reason,
-			CorrelationID:   correlationID,
-			Content:         plan.write.GetContent(),
-			Tombstone:       false,
-			CommittedAt:     committedAt,
+		changes = append(changes, guardianVersionCommit{
+			LogicalPath:       plan.mapped.LogicalPath,
+			DisplayPath:       plan.mapped.DisplayPath,
+			StorageID:         plan.mapped.StorageID,
+			BatchRevisionID:   batchRevisionID,
+			PrincipalID:       principal.PrincipalID,
+			Reason:            reason,
+			CorrelationID:     correlationID,
+			Content:           plan.write.GetContent(),
+			ExpectedVersionID: plan.write.GetExpectedVersionId(),
+			Tombstone:         false,
+			CommittedAt:       committedAt,
 		})
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "record guardian version: %v", err)
-		}
-		versions = append(versions, version)
-		event := buildGuardianChangeEvent(version, plan.mapped.LogicalPath, plan.changeType, correlationID, plan.write.GetContent())
+	}
+	versions, err := r.guardianVersions.commitBatch(changes)
+	if err != nil {
+		return nil, guardianVersionCommitStatus(err)
+	}
+	for i, plan := range plans {
+		event := buildGuardianChangeEvent(versions[i], plan.mapped.LogicalPath, plan.changeType, correlationID, plan.write.GetContent())
 		r.publishGuardianLogicalChange(event)
 		r.publishLegacyGuardianChange(event)
 	}
@@ -276,6 +308,30 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 		return nil, status.Error(codes.InvalidArgument, "at least one delete is required")
 	}
 
+	type pendingDelete struct {
+		deleteReq *pb.GuardianPathDelete
+		mapped    guardianPhysicalPath
+	}
+	pending := make([]pendingDelete, 0, len(req.GetDeletes()))
+	displayPaths := make([]string, 0, len(req.GetDeletes()))
+	for _, deleteReq := range req.GetDeletes() {
+		mapped, err := mapGuardianLogicalPath(deleteReq.GetLogicalPath())
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid logical path %q: %v", deleteReq.GetLogicalPath(), err)
+		}
+		if err := authorizeGuardianMutation(principal, mapped.LogicalPath, true); err != nil {
+			return nil, status.Error(codes.PermissionDenied, err.Error())
+		}
+		pending = append(pending, pendingDelete{deleteReq: deleteReq, mapped: mapped})
+		displayPaths = append(displayPaths, mapped.DisplayPath)
+	}
+
+	unlockMutations := r.lockGuardianMutations(displayPaths...)
+	defer unlockMutations()
+	if err := r.requireGuardianCoordinator(); err != nil {
+		return nil, err
+	}
+
 	now := time.Now()
 	batchRevisionID := guardianBatchRevisionID(now)
 	committedAt := now.Unix()
@@ -296,20 +352,26 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 	}
 	defer closeConn()
 
-	plans := make([]guardianDeletePlan, 0, len(req.GetDeletes()))
-	for _, deleteReq := range req.GetDeletes() {
-		mapped, err := mapGuardianLogicalPath(deleteReq.GetLogicalPath())
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "invalid logical path %q: %v", deleteReq.GetLogicalPath(), err)
-		}
-		if err := authorizeGuardianMutation(principal, mapped.LogicalPath, true); err != nil {
-			return nil, status.Error(codes.PermissionDenied, err.Error())
-		}
+	plans := make([]guardianDeletePlan, 0, len(pending))
+	for _, item := range pending {
+		deleteReq := item.deleteReq
+		mapped := item.mapped
 
-		current, exists := r.guardianVersions.currentVersion(mapped.LogicalPath)
+		current, exists, currentErr := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		if currentErr != nil {
+			return nil, status.Errorf(codes.Unavailable, "guardian version store unavailable: %v", currentErr)
+		}
+		exists = exists && current != nil
 		if expected := strings.TrimSpace(deleteReq.GetExpectedVersionId()); expected != "" {
-			if !exists || current.VersionID != expected {
-				return nil, status.Errorf(codes.FailedPrecondition, "logical path %q current version mismatch", mapped.LogicalPath)
+			switch expected {
+			case "absent":
+				if exists && !current.Tombstone {
+					return nil, status.Errorf(codes.AlreadyExists, "logical path %q already exists", mapped.LogicalPath)
+				}
+			default:
+				if !exists || current.VersionID != expected {
+					return nil, status.Errorf(codes.FailedPrecondition, "logical path %q current version mismatch", mapped.LogicalPath)
+				}
 			}
 		}
 
@@ -376,25 +438,28 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 		}
 	}
 
-	tombstones := make([]*pb.GuardianFileVersion, 0, len(plans))
+	changes := make([]guardianVersionCommit, 0, len(plans))
 	for _, plan := range plans {
-		version, err := r.guardianVersions.commit(guardianVersionCommit{
-			LogicalPath:     plan.mapped.LogicalPath,
-			DisplayPath:     plan.mapped.DisplayPath,
-			StorageID:       plan.mapped.StorageID,
-			BatchRevisionID: batchRevisionID,
-			PrincipalID:     principal.PrincipalID,
-			Reason:          reason,
-			CorrelationID:   correlationID,
-			Content:         plan.content,
-			Tombstone:       true,
-			CommittedAt:     committedAt,
+		changes = append(changes, guardianVersionCommit{
+			LogicalPath:       plan.mapped.LogicalPath,
+			DisplayPath:       plan.mapped.DisplayPath,
+			StorageID:         plan.mapped.StorageID,
+			BatchRevisionID:   batchRevisionID,
+			PrincipalID:       principal.PrincipalID,
+			Reason:            reason,
+			CorrelationID:     correlationID,
+			Content:           plan.content,
+			ExpectedVersionID: plan.deleteReq.GetExpectedVersionId(),
+			Tombstone:         true,
+			CommittedAt:       committedAt,
 		})
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "record guardian tombstone: %v", err)
-		}
-		tombstones = append(tombstones, version)
-		event := buildGuardianChangeEvent(version, plan.mapped.LogicalPath, plan.changeType, correlationID, nil)
+	}
+	tombstones, err := r.guardianVersions.commitBatch(changes)
+	if err != nil {
+		return nil, guardianVersionCommitStatus(err)
+	}
+	for i, plan := range plans {
+		event := buildGuardianChangeEvent(tombstones[i], plan.mapped.LogicalPath, plan.changeType, correlationID, nil)
 		r.publishGuardianLogicalChange(event)
 		r.publishLegacyGuardianChange(event)
 	}
@@ -523,13 +588,17 @@ func (r *Router) GetGuardianVersion(ctx context.Context, req *pb.GetGuardianVers
 		return nil, status.Error(codes.InvalidArgument, "version_id is required")
 	}
 
-	version, content, ok := r.guardianVersions.get(logicalPath, req.GetVersionId())
+	version, content, contentAvailable, ok, versionErr := r.guardianVersions.get(logicalPath, req.GetVersionId())
+	if versionErr != nil {
+		return nil, status.Errorf(codes.Unavailable, "guardian version store unavailable: %v", versionErr)
+	}
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "version %q not found for %q", req.GetVersionId(), logicalPath)
 	}
 	return &pb.GetGuardianVersionResponse{
-		Version: version,
-		Content: content,
+		Version:          version,
+		Content:          content,
+		ContentAvailable: contentAvailable,
 	}, nil
 }
 
@@ -570,58 +639,155 @@ func (r *Router) SubscribeGuardianChanges(req *pb.SubscribeGuardianChangesReques
 	}
 }
 
+const (
+	guardianWriteMaxAttempts = 3
+	// guardianWriteRetryBackoff is the delay before each retry attempt. It is
+	// deliberately short: Guardian already retries with a longer budget, while
+	// this loop is meant to catch a same-request peer failover (KVS) or a
+	// transient dial error.
+	guardianWriteRetryBackoff = 250 * time.Millisecond
+)
+
+// guardianNodeFailure records which node rejected a Guardian mutation so the
+// retry loop can quarantine it and pick a different target.
+type guardianNodeFailure struct {
+	nodeID string
+	err    error
+}
+
+type guardianWriteError struct {
+	failures []guardianNodeFailure
+}
+
+func (e *guardianWriteError) Error() string {
+	if len(e.failures) == 0 {
+		return "guardian write failed"
+	}
+	return e.failures[0].err.Error()
+}
+
+func (e *guardianWriteError) Unwrap() []error {
+	out := make([]error, 0, len(e.failures))
+	for _, failure := range e.failures {
+		out = append(out, failure.err)
+	}
+	return out
+}
+
+// isGuardianTransportError reports whether err is a node-level transport
+// failure (dial/refused/stream reset) rather than a data or validation error.
+func isGuardianTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch grpcCode(err) {
+	case codes.Unavailable, codes.DeadlineExceeded:
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "transport is closing") ||
+		strings.Contains(message, "error reading server preface") ||
+		strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "connection reset by peer")
+}
+
+func isRetryableGuardianWriteError(err error) bool {
+	return isRetryableKVSError(err) || isGuardianTransportError(err)
+}
+
+// guardianUpsertStatus keeps infra failures retryable for clients. Previously
+// any node dial error was wrapped as Internal, which Guardian does not retry.
+func guardianUpsertStatus(err error) error {
+	if err == nil {
+		return nil
+	}
+	if isGuardianTransportError(err) || isRetryableKVSError(err) {
+		return status.Errorf(codes.Unavailable, "upsert guardian paths: %v", err)
+	}
+	return status.Errorf(codes.Internal, "upsert guardian paths: %v", err)
+}
+
 func (r *Router) applyGuardianUpsertGroups(ctx context.Context, groups map[string]*guardianUpsertGroup, principal *guardianPrincipal) error {
 	if len(groups) == 0 {
 		return nil
 	}
-	nodes := r.collectGuardianNodes()
-	if len(nodes) == 0 {
-		return fmt.Errorf("no healthy nodes available")
+	if len(r.collectGuardianNodes()) == 0 {
+		return status.Error(codes.Unavailable, "no healthy monofs nodes available")
 	}
 
 	for _, group := range groups {
-		if err := r.applyGuardianUpsertGroup(ctx, nodes, group, principal); err != nil {
+		if err := r.applyGuardianUpsertGroup(ctx, group, principal); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (r *Router) applyGuardianUpsertGroup(ctx context.Context, nodes []guardianNodeTarget, group *guardianUpsertGroup, principal *guardianPrincipal) error {
-	err := r.applyGuardianUpsertGroupOnce(ctx, nodes, group, principal)
-	if err == nil || !isRetryableKVSError(err) {
-		return err
-	}
-	if guardianRepoStorageBackend(group.displayPath) != "kvs" {
-		return err
-	}
+func (r *Router) applyGuardianUpsertGroup(ctx context.Context, group *guardianUpsertGroup, principal *guardianPrincipal) error {
+	isKVS := guardianRepoStorageBackend(group.displayPath) == "kvs"
+	baseTargets := r.guardianMutationTargets(r.collectGuardianNodes(), group.displayPath)
 
-	// A leadership change can happen between the role check and the write.
-	// Re-probe KVS roles and retry once against the refreshed target.
-	r.logger.Info("retrying guardian kvs write after leadership error",
-		"display_path", group.displayPath,
-		"error", err)
-	r.refreshGuardianKVSStatuses(ctx)
-	return r.applyGuardianUpsertGroupOnce(ctx, r.collectGuardianNodes(), group, principal)
+	var lastErr error
+	for attempt := 0; attempt < guardianWriteMaxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(guardianWriteRetryBackoff * time.Duration(attempt)):
+			}
+		}
+
+		targets := baseTargets
+		if isKVS && attempt > 0 {
+			// Any healthy KVS node forwards to the current leader. After a
+			// failure, re-read topology and roles so the retry targets a peer
+			// instead of the dead address that was cached a moment ago.
+			r.refreshGuardianKVSStatuses(ctx)
+			targets = r.guardianMutationTargets(r.collectGuardianNodes(), group.displayPath)
+		}
+		if len(targets) == 0 {
+			lastErr = status.Errorf(codes.Unavailable, "no healthy guardian node available for %s", group.displayPath)
+			continue
+		}
+
+		failures, err := r.applyGuardianUpsertGroupOnce(ctx, targets, group, principal)
+		if err == nil {
+			for _, target := range targets {
+				r.clearGuardianNodeFailure(target.id)
+			}
+			return nil
+		}
+		lastErr = err
+		for _, failure := range failures {
+			if isGuardianTransportError(failure.err) {
+				r.markGuardianNodeUnhealthy(failure.nodeID, failure.err.Error())
+			}
+		}
+		if !isRetryableGuardianWriteError(err) {
+			return err
+		}
+	}
+	return lastErr
 }
 
-func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guardianNodeTarget, group *guardianUpsertGroup, principal *guardianPrincipal) error {
+func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, targets []guardianNodeTarget, group *guardianUpsertGroup, principal *guardianPrincipal) ([]guardianNodeFailure, error) {
 	var (
-		wg      sync.WaitGroup
-		errMu   sync.Mutex
-		errs    []error
-		repoURL string
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		failures []guardianNodeFailure
+		repoURL  string
 	)
 	if principal != nil && strings.TrimSpace(principal.BaseURL) != "" {
 		repoURL = strings.TrimRight(strings.TrimSpace(principal.BaseURL), "/")
 	}
 	batchFiles := appendGuardianDirHints(group.files)
-	targetNodes := r.guardianMutationTargets(nodes, group.displayPath)
+	targetNodes := targets
 	if len(targetNodes) == 0 {
 		if guardianRepoStorageBackend(group.displayPath) == "kvs" {
-			return fmt.Errorf("no healthy kvs node available for %s", group.displayPath)
+			return nil, fmt.Errorf("no healthy kvs node available for %s", group.displayPath)
 		}
-		return fmt.Errorf("no healthy guardian node available for %s", group.displayPath)
+		return nil, fmt.Errorf("no healthy guardian node available for %s", group.displayPath)
 	}
 
 	for _, node := range targetNodes {
@@ -633,7 +799,7 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guard
 			nodeClient, closeConn, err := r.guardianNodeClient(node)
 			if err != nil {
 				errMu.Lock()
-				errs = append(errs, fmt.Errorf("node %s connect: %w", node.id, err))
+				failures = append(failures, guardianNodeFailure{nodeID: node.id, err: fmt.Errorf("node %s connect: %w", node.id, err)})
 				errMu.Unlock()
 				return
 			}
@@ -677,7 +843,7 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guard
 			if err != nil {
 				r.guardianRegisteredNodeRepos.Delete(regKey)
 				errMu.Lock()
-				errs = append(errs, fmt.Errorf("node %s ingest %s: %w", node.id, group.displayPath, err))
+				failures = append(failures, guardianNodeFailure{nodeID: node.id, err: fmt.Errorf("node %s ingest %s: %w", node.id, group.displayPath, err)})
 				errMu.Unlock()
 				return
 			}
@@ -688,14 +854,14 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guard
 					message = resp.GetErrorMessage()
 				}
 				errMu.Lock()
-				errs = append(errs, fmt.Errorf("node %s ingest %s failed: %s", node.id, group.displayPath, message))
+				failures = append(failures, guardianNodeFailure{nodeID: node.id, err: fmt.Errorf("node %s ingest %s failed: %s", node.id, group.displayPath, message)})
 				errMu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
-	if len(errs) > 0 {
-		return errs[0]
+	if len(failures) > 0 {
+		return failures, &guardianWriteError{failures: failures}
 	}
 
 	r.mu.Lock()
@@ -712,8 +878,24 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, nodes []guard
 	}
 	r.mu.Unlock()
 	r.bumpNativeNamespaceGeneration("guardian upsert")
+	r.invalidateGuardianPartitions()
 
-	return nil
+	return nil, nil
+}
+
+// guardianVersionCommitStatus maps version-store conflicts to gRPC statuses
+// that Guardian understands as CAS conflicts.
+func guardianVersionCommitStatus(err error) error {
+	switch {
+	case errors.Is(err, errGuardianVersionExists):
+		guardianVersionStoreCASConflictsTotal.Inc()
+		return status.Errorf(codes.AlreadyExists, "guardian version: %v", err)
+	case errors.Is(err, errGuardianVersionConflict):
+		guardianVersionStoreCASConflictsTotal.Inc()
+		return status.Errorf(codes.FailedPrecondition, "guardian version: %v", err)
+	default:
+		return status.Errorf(codes.Internal, "record guardian version: %v", err)
+	}
 }
 
 func grpcCode(err error) codes.Code {

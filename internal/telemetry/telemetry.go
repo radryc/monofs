@@ -48,22 +48,53 @@ var excludedDoctorIngestMethods = map[string]struct{}{
 	pb.MonoFSRouter_IngestTraces_FullMethodName:  {},
 }
 
+// excludedLongLivedStreams lists subscription RPCs that stay open for the
+// lifetime of a client. Tracing them produces a span that never ends, which
+// keeps the trace alive forever and (when otelc's goroutine-local span fallback
+// is present) makes every later span on that goroutine join the same trace.
+var excludedLongLivedStreams = map[string]struct{}{
+	pb.MonoFSRouter_SubscribeGuardianChanges_FullMethodName: {},
+	pb.MonoFSRouter_SubscribeToChanges_FullMethodName:       {},
+}
+
 // NewGRPCServerStatsHandler returns the standard server stats handler with
-// MonoFS-specific exclusions for doctor ingest RPCs. Without this filter, a
-// collector that exports back into MonoFS doctor can create a telemetry loop by
-// instrumenting the ingest RPCs themselves.
+// MonoFS-specific exclusions for doctor ingest RPCs and long-lived
+// subscription streams. Without the ingest filter, a collector that exports
+// back into MonoFS doctor can create a telemetry loop; without the stream
+// filter, a subscription's span never ends and keeps its trace alive.
 func NewGRPCServerStatsHandler() stats.Handler {
 	return otelgrpc.NewServerHandler(otelgrpc.WithFilter(ShouldInstrumentGRPCServerRPC))
+}
+
+// NewGRPCClientStatsHandler returns the standard client stats handler with the
+// same long-lived-stream exclusions as the server handler.
+func NewGRPCClientStatsHandler() stats.Handler {
+	return otelgrpc.NewClientHandler(otelgrpc.WithFilter(ShouldInstrumentGRPCClientRPC))
 }
 
 // ShouldInstrumentGRPCServerRPC reports whether a server-side gRPC request
 // should emit OpenTelemetry data.
 func ShouldInstrumentGRPCServerRPC(info *stats.RPCTagInfo) bool {
+	return shouldInstrumentRPC(info)
+}
+
+// ShouldInstrumentGRPCClientRPC reports whether a client-side gRPC request
+// should emit OpenTelemetry data.
+func ShouldInstrumentGRPCClientRPC(info *stats.RPCTagInfo) bool {
+	return shouldInstrumentRPC(info)
+}
+
+func shouldInstrumentRPC(info *stats.RPCTagInfo) bool {
 	if info == nil {
 		return true
 	}
-	_, excluded := excludedDoctorIngestMethods[info.FullMethodName]
-	return !excluded
+	if _, excluded := excludedDoctorIngestMethods[info.FullMethodName]; excluded {
+		return false
+	}
+	if _, excluded := excludedLongLivedStreams[info.FullMethodName]; excluded {
+		return false
+	}
+	return true
 }
 
 func Setup(ctx context.Context, cfg Config) (*Handle, error) {

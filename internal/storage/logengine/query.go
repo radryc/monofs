@@ -368,6 +368,12 @@ func (q *QueryEngine) StreamLogs(ctx context.Context, queryStr, service string, 
 
 			parquetPath := filepath.Join("chunks", string(SignalLogs), candidate.chunkID, chunkDataFileName)
 			if err := q.scanLogParquet(ctx, parquetPath, validRows, compiled, from, to, observer, func(record LogRecord) error {
+				// Apply the caller's partition scope before the top-N
+				// selection. Filtering only at emit time let a restricted
+				// caller's batch be consumed entirely by other partitions.
+				if scope.Restricted && !scope.allowsLog(record) {
+					return nil
+				}
 				if top.Len() < limit {
 					heap.Push(&top, record)
 					return nil
@@ -843,6 +849,7 @@ func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, serv
 	pruneStart := time.Now()
 	defer observer.observeStage("manifest_pruning", pruneStart)
 
+	scope, _ := QueryScopeFromContext(ctx)
 	remaining := make([]string, 0, len(chunkIDs))
 	for _, chunkID := range chunkIDs {
 		if minT, maxT, ok := ParseChunkTimeRangeFromID(chunkID); ok {
@@ -886,6 +893,10 @@ func (q *QueryEngine) logCandidates(ctx context.Context, chunkIDs []string, serv
 		}
 		if !manifestMatchesLogQuery(manifest, compiled) {
 			observer.addChunksPruned("label_mismatch", 1)
+			continue
+		}
+		if !manifestMatchesScope(manifest, scope) {
+			observer.addChunksPruned("scope_mismatch", 1)
 			continue
 		}
 		candidates = append(candidates, candidateChunk{chunkID: chunkID, manifest: manifest, cutoffMax: manifest.MaxTime})
@@ -1174,6 +1185,15 @@ func mergeMetricSeriesMeta(merged map[string]*MetricSeriesMeta, order *[]string,
 		*order = append(*order, key)
 		return nil
 	}
+	if existing.MetricType == "" {
+		existing.MetricType = meta.MetricType
+	}
+	if existing.Unit == "" {
+		existing.Unit = meta.Unit
+	}
+	if existing.Description == "" {
+		existing.Description = meta.Description
+	}
 	if meta.MinTime.Before(existing.MinTime) {
 		existing.MinTime = meta.MinTime
 	}
@@ -1396,9 +1416,12 @@ func (q *QueryEngine) metricSeriesForChunk(ctx context.Context, candidate candid
 	collected := make([]MetricSeriesMeta, 0, len(candidate.manifest.MetricNames))
 	if err := q.scanMetricParquet(ctx, path, MetricQuery{}, nil, time.Time{}, time.Time{}, observer, func(record MetricRecord) error {
 		collected = append(collected, MetricSeriesMeta{
-			MetricName: record.MetricName,
-			Service:    record.Service,
-			Labels:     record.Labels,
+			MetricName:  record.MetricName,
+			Service:     record.Service,
+			MetricType:  record.MetricType,
+			Unit:        record.Unit,
+			Description: record.Description,
+			Labels:      record.Labels,
 		})
 		return nil
 	}); err != nil {
@@ -1587,6 +1610,9 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 		if n == 0 {
 			continue
 		}
+		if rg.NumColumns() < 9 {
+			return fmt.Errorf("%w: chunk has %d columns, want at least 9", ErrUnsupportedMetricSchema, rg.NumColumns())
+		}
 
 		// Phase 1: Read filter columns (timestamp, service, metric_name) first.
 		tsBuf, err := readInt64Column(rg, 0, n)
@@ -1636,6 +1662,19 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 			return err
 		}
 
+		typeBuf, err := readByteArrayColumn(rg, 6, n)
+		if err != nil {
+			return err
+		}
+		temporalityBuf, err := readByteArrayColumn(rg, 7, n)
+		if err != nil {
+			return err
+		}
+		startTimes, err := readInt64Column(rg, 8, n)
+		if err != nil {
+			return err
+		}
+
 		for _, i := range candidateIdxs {
 			ts := time.Unix(0, tsBuf[i])
 			svc := string(svcBuf[i])
@@ -1647,13 +1686,19 @@ func (q *QueryEngine) scanMetricParquet(ctx context.Context, path string, query 
 			if !metricLabelsMatch(name, svc, labels, matchers) {
 				continue
 			}
-			if err := yield(MetricRecord{
-				Timestamp:  ts,
-				Service:    svc,
-				MetricName: name,
-				Value:      valBuf[i],
-				Labels:     labels,
-			}); err != nil {
+			record := MetricRecord{
+				Timestamp:   ts,
+				Service:     svc,
+				MetricName:  name,
+				Value:       valBuf[i],
+				MetricType:  string(typeBuf[i]),
+				Temporality: string(temporalityBuf[i]),
+				Labels:      labels,
+			}
+			if startTimes[i] != 0 {
+				record.StartTime = time.Unix(0, startTimes[i])
+			}
+			if err := yield(record); err != nil {
 				return err
 			}
 		}
@@ -1718,6 +1763,10 @@ func (q *QueryEngine) StreamTraces(ctx context.Context, traceID, service string,
 			}
 
 			if err := q.scanTraceParquet(ctx, filepath.Join("chunks", string(SignalTraces), candidate.chunkID, chunkDataFileName), traceID, service, from, to, observer, func(record SpanRecord) error {
+				// Scope before the top-N selection; see StreamLogs.
+				if scope.Restricted && !scope.allowsSpan(record) {
+					return nil
+				}
 				if top.Len() < limit {
 					heap.Push(&top, record)
 					return nil
@@ -1755,6 +1804,7 @@ func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, tr
 	pruneStart := time.Now()
 	defer observer.observeStage("manifest_pruning", pruneStart)
 
+	scope, _ := QueryScopeFromContext(ctx)
 	remaining := make([]string, 0, len(chunkIDs))
 	for _, chunkID := range chunkIDs {
 		if minT, maxT, ok := ParseChunkTimeRangeFromID(chunkID); ok {
@@ -1798,6 +1848,10 @@ func (q *QueryEngine) traceCandidates(ctx context.Context, chunkIDs []string, tr
 		}
 		if traceID != "" && !traceBloomMayContain(manifest.TraceBloom, traceID) {
 			observer.addChunksPruned("trace_bloom_miss", 1)
+			continue
+		}
+		if !manifestMatchesScope(manifest, scope) {
+			observer.addChunksPruned("scope_mismatch", 1)
 			continue
 		}
 		candidates = append(candidates, candidateChunk{chunkID: chunkID, manifest: manifest, cutoffMax: manifest.MaxTime})

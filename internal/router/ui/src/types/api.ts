@@ -425,6 +425,8 @@ export interface FetcherKeyStatus {
 }
 
 export interface LogEngineData {
+  span_engine?: 'native' | 'logengine' | 'clickhouse'
+  clickhouse?: ClickHouseStats | null
   enabled: boolean
   log_chunks: number
   metric_chunks: number
@@ -447,6 +449,31 @@ export interface LogEngineData {
   compaction_deleted_chunks?: number
   compaction_records?: number
   nodes: LogEngineNode[]
+}
+
+export interface ClickHouseStats {
+  enabled: boolean
+  healthy: boolean
+  version?: string
+  url?: string
+  database?: string
+  tenant?: string
+  disk_total_bytes: number
+  disk_free_bytes: number
+  disk_used_bytes: number
+  total_bytes: number
+  total_rows: number
+  parts: number
+  spans_bytes: number
+  spans_rows: number
+  logs_bytes: number
+  logs_rows: number
+  metrics_bytes: number
+  metrics_rows: number
+  retention_seconds: number
+  error?: string
+  measured_unix_nano: number
+  reporting_node?: string
 }
 
 export interface LogEngineNode {

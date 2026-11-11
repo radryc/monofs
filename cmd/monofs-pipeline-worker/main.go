@@ -89,6 +89,7 @@ func main() {
 
 	conn, err := grpc.NewClient(*routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64*1024*1024)),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			MinConnectTimeout: 5 * time.Second,

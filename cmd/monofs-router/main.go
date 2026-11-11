@@ -89,52 +89,59 @@ func init() {
 
 func main() {
 	var (
-		port                   = flag.Int("port", 9090, "Router service port")
-		httpPort               = flag.Int("http-port", 8080, "HTTP UI port")
-		nativeAddr             = flag.String("native-addr", "", "Native protocol listen address (disabled when empty)")
-		nativeAuthToken        = flag.String("native-auth-token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Shared token required by native MountRequest.AuthToken (defaults to MONOFS_TOKEN)")
-		clusterID              = flag.String("cluster-id", "monofs-cluster", "Cluster identifier")
-		routerName             = flag.String("router-name", "local", "Router instance name for UI identification")
-		nodes                  = flag.String("nodes", "", "Initial nodes: node1=host1:port1,node2=host2:port2,...")
-		weights                = flag.String("weights", "", "Node weights: node1=100,node2=100,...")
-		externalAddrs          = flag.String("external-addrs", "", "External addresses for host clients: node1=localhost:9001,node2=localhost:9002,...")
-		peerRouters            = flag.String("peer-routers", "", "Peer routers for UI aggregation: name=http://host:port or host:port,...")
-		searchAddr             = flag.String("search-addr", "", "Search service address (e.g., search:9100)")
-		searchDiagAddr         = flag.String("search-diagnostics-addr", "", "Search diagnostics address for pprof collection (e.g., search:9101)")
-		fetcherAddrs           = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
-		fetcherDiagAddrs       = flag.String("fetcher-diagnostics-addrs", "", "Fetcher diagnostics addresses for pprof collection (e.g., fetcher1:9201,fetcher2:9201)")
-		registryAddr           = flag.String("registry-addr", "", "Monofs-registry address for UI proxy (e.g., monofs-registry:5000)")
-		registryAuthToken      = flag.String("registry-auth-token", os.Getenv("MONOFS_REGISTRY_TOKEN"), "Machine bearer token for router->registry API calls (defaults to MONOFS_REGISTRY_TOKEN)")
-		peerRouterToken        = flag.String("peer-router-auth-token", os.Getenv("MONOFS_ROUTER_PEER_TOKEN"), "Machine bearer token for router->router UI aggregation calls (defaults to MONOFS_ROUTER_PEER_TOKEN)")
-		registryDiagAddr       = flag.String("registry-diagnostics-addr", "", "Registry diagnostics address for pprof collection (e.g., registry:5001)")
-		serverDiagAddrs        = flag.String("server-diagnostics-addrs", "", "Server diagnostics addresses for pprof collection (e.g., node-a=node-a:9100,node-b=node-b:9100)")
-		healthInt              = flag.Duration("health-interval", 2*time.Second, "Health check interval")
-		unhealthyThr           = flag.Duration("unhealthy-threshold", 6*time.Second, "Time before marking node unhealthy")
-		queryNodeStartTimeout  = flag.Duration("query-node-start-timeout", 30*time.Second, "Max time to wait for any node to start returning telemetry query records")
-		queryNodeGrace         = flag.Duration("query-node-straggler-grace", time.Second, "Extra time allowed for remaining nodes after the first node responds to a telemetry query")
-		queryNodeIdleTimeout   = flag.Duration("query-node-idle-timeout", 10*time.Second, "Max gap between records from one node before it is skipped")
-		debug                  = flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
-		logLevel               = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-		guardianStateDir       = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
-		workspaceStateDir      = flag.String("workspace-state-dir", "", "Directory for persistent workspace job state (Phase 1), separate from Guardian state")
-		sourcePushMode         = flag.String("source-push-mode", "squash", "Source push mode: squash or preserve")
-		policyGateEnabled      = flag.Bool("policy-gate", false, "Enable policy-gated push/publish/refresh (Phase 3)")
-		policyConfigPath       = flag.String("policy-config", "", "Path to policy YAML config file (Phase 3)")
-		autoPushEnabled        = flag.Bool("auto-push", false, "Enable automatic push of pending commits (Phase 3)")
-		autoPushInterval       = flag.Duration("auto-push-interval", 60*time.Second, "Interval between auto-push scans (Phase 3)")
-		autoRefreshEnabled     = flag.Bool("auto-refresh", false, "Enable automatic re-ingestion of advanced upstreams (Phase 5)")
-		autoRefreshInterval    = flag.Duration("auto-refresh-interval", 5*time.Minute, "Interval between auto-refresh probes (Phase 5)")
-		autoRefreshConcurrency = flag.Int("auto-refresh-concurrency", 4, "Max concurrent auto-refresh probes (Phase 5)")
-		autoRefreshOwner       = flag.String("auto-refresh-owner", "", "Only this router name runs the auto-refresh worker (empty = every router)")
-		autoRefreshMaxInterval = flag.Duration("auto-refresh-max-interval", time.Hour, "Maximum adaptive probe interval")
-		autoRefreshBatchSize   = flag.Int("auto-refresh-batch-size", 32, "Repositories per probe RPC")
-		autoRefreshShards      = flag.Int("auto-refresh-shards", 1, "Number of auto-refresh shards")
-		autoRefreshShard       = flag.Int("auto-refresh-shard", 0, "Shard owned by this router (0-based)")
-		autoRefreshStateDir    = flag.String("auto-refresh-state-dir", ".monofs-repowatch", "Directory for persisted auto-refresh schedule")
-		autoRefreshLease       = flag.Bool("auto-refresh-lease", false, "Use Kubernetes Lease leader election for the auto-refresh worker")
-		autoRefreshLeaseName   = flag.String("auto-refresh-lease-name", "monofs-repowatch", "Kubernetes Lease name prefix")
-		autoRefreshLeaseNS     = flag.String("auto-refresh-lease-namespace", os.Getenv("POD_NAMESPACE"), "Kubernetes Lease namespace")
-		localIngestEnabled     = flag.Bool("local-ingest", true, "Allow ingestion from router-local filesystem paths (file ingestion and uploads)")
+		port                         = flag.Int("port", 9090, "Router service port")
+		httpPort                     = flag.Int("http-port", 8080, "HTTP UI port")
+		nativeAddr                   = flag.String("native-addr", "", "Native protocol listen address (disabled when empty)")
+		nativeAuthToken              = flag.String("native-auth-token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Shared token required by native MountRequest.AuthToken (defaults to MONOFS_TOKEN)")
+		clusterID                    = flag.String("cluster-id", "monofs-cluster", "Cluster identifier")
+		routerName                   = flag.String("router-name", "local", "Router instance name for UI identification")
+		nodes                        = flag.String("nodes", "", "Initial nodes: node1=host1:port1,node2=host2:port2,...")
+		weights                      = flag.String("weights", "", "Node weights: node1=100,node2=100,...")
+		externalAddrs                = flag.String("external-addrs", "", "External addresses for host clients: node1=localhost:9001,node2=localhost:9002,...")
+		peerRouters                  = flag.String("peer-routers", "", "Peer routers for UI aggregation: name=http://host:port or host:port,...")
+		searchAddr                   = flag.String("search-addr", "", "Search service address (e.g., search:9100)")
+		searchDiagAddr               = flag.String("search-diagnostics-addr", "", "Search diagnostics address for pprof collection (e.g., search:9101)")
+		fetcherAddrs                 = flag.String("fetcher-addrs", "", "Fetcher service addresses for cluster monitoring (e.g., fetcher1:9200,fetcher2:9200)")
+		fetcherDiagAddrs             = flag.String("fetcher-diagnostics-addrs", "", "Fetcher diagnostics addresses for pprof collection (e.g., fetcher1:9201,fetcher2:9201)")
+		registryAddr                 = flag.String("registry-addr", "", "Monofs-registry address for UI proxy (e.g., monofs-registry:5000)")
+		registryAuthToken            = flag.String("registry-auth-token", os.Getenv("MONOFS_REGISTRY_TOKEN"), "Machine bearer token for router->registry API calls (defaults to MONOFS_REGISTRY_TOKEN)")
+		peerRouterToken              = flag.String("peer-router-auth-token", os.Getenv("MONOFS_ROUTER_PEER_TOKEN"), "Machine bearer token for router->router UI aggregation calls (defaults to MONOFS_ROUTER_PEER_TOKEN)")
+		registryDiagAddr             = flag.String("registry-diagnostics-addr", "", "Registry diagnostics address for pprof collection (e.g., registry:5001)")
+		serverDiagAddrs              = flag.String("server-diagnostics-addrs", "", "Server diagnostics addresses for pprof collection (e.g., node-a=node-a:9100,node-b=node-b:9100)")
+		healthInt                    = flag.Duration("health-interval", 5*time.Second, "Health check interval")
+		unhealthyThr                 = flag.Duration("unhealthy-threshold", 15*time.Second, "Time before marking node unhealthy")
+		healthProbeTimeout           = flag.Duration("health-probe-timeout", 2*time.Second, "Timeout for a single node health probe")
+		queryNodeStartTimeout        = flag.Duration("query-node-start-timeout", 30*time.Second, "Max time to wait for any node to start returning telemetry query records")
+		queryNodeGrace               = flag.Duration("query-node-straggler-grace", time.Second, "Extra time allowed for remaining nodes after the first node responds to a telemetry query")
+		queryNodeIdleTimeout         = flag.Duration("query-node-idle-timeout", 10*time.Second, "Max gap between records from one node before it is skipped")
+		debug                        = flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
+		logLevel                     = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+		guardianStateDir             = flag.String("state-dir", ".monofs-router-state", "Directory for persistent router Guardian state")
+		guardianVersionBackend       = flag.String("guardian-version-backend", "local", "Guardian version store backend: local|kvs")
+		guardianVersionFallback      = flag.String("guardian-version-backend-fallback", "error", "Fallback when the KVS version backend fails: error|local")
+		guardianCoordinatorLease     = flag.String("guardian-coordinator-lease", "", "Guardian mutation coordinator lease: auto|required|off (default: required with kvs backend)")
+		guardianCoordinatorLeaseName = flag.String("guardian-coordinator-lease-name", "monofs-guardian-mutations", "Kubernetes Lease name for guardian mutations")
+		guardianCoordinatorLeaseNS   = flag.String("guardian-coordinator-lease-namespace", "", "Kubernetes Lease namespace for guardian mutations")
+		guardianAllowMultiWriter     = flag.Bool("guardian-allow-multi-writer", false, "Development override: bypass the guardian coordinator lease")
+		workspaceStateDir            = flag.String("workspace-state-dir", "", "Directory for persistent workspace job state (Phase 1), separate from Guardian state")
+		sourcePushMode               = flag.String("source-push-mode", "squash", "Source push mode: squash or preserve")
+		policyGateEnabled            = flag.Bool("policy-gate", false, "Enable policy-gated push/publish/refresh (Phase 3)")
+		policyConfigPath             = flag.String("policy-config", "", "Path to policy YAML config file (Phase 3)")
+		autoPushEnabled              = flag.Bool("auto-push", false, "Enable automatic push of pending commits (Phase 3)")
+		autoPushInterval             = flag.Duration("auto-push-interval", 60*time.Second, "Interval between auto-push scans (Phase 3)")
+		autoRefreshEnabled           = flag.Bool("auto-refresh", false, "Enable automatic re-ingestion of advanced upstreams (Phase 5)")
+		autoRefreshInterval          = flag.Duration("auto-refresh-interval", 5*time.Minute, "Interval between auto-refresh probes (Phase 5)")
+		autoRefreshConcurrency       = flag.Int("auto-refresh-concurrency", 4, "Max concurrent auto-refresh probes (Phase 5)")
+		autoRefreshOwner             = flag.String("auto-refresh-owner", "", "Only this router name runs the auto-refresh worker (empty = every router)")
+		autoRefreshMaxInterval       = flag.Duration("auto-refresh-max-interval", time.Hour, "Maximum adaptive probe interval")
+		autoRefreshBatchSize         = flag.Int("auto-refresh-batch-size", 32, "Repositories per probe RPC")
+		autoRefreshShards            = flag.Int("auto-refresh-shards", 1, "Number of auto-refresh shards")
+		autoRefreshShard             = flag.Int("auto-refresh-shard", 0, "Shard owned by this router (0-based)")
+		autoRefreshStateDir          = flag.String("auto-refresh-state-dir", ".monofs-repowatch", "Directory for persisted auto-refresh schedule")
+		autoRefreshLease             = flag.Bool("auto-refresh-lease", false, "Use Kubernetes Lease leader election for the auto-refresh worker")
+		autoRefreshLeaseName         = flag.String("auto-refresh-lease-name", "monofs-repowatch", "Kubernetes Lease name prefix")
+		autoRefreshLeaseNS           = flag.String("auto-refresh-lease-namespace", os.Getenv("POD_NAMESPACE"), "Kubernetes Lease namespace")
+		localIngestEnabled           = flag.Bool("local-ingest", true, "Allow ingestion from router-local filesystem paths (file ingestion and uploads)")
 		// Replication and failover configuration
 		replicationFactor     = flag.Int("replication-factor", 2, "Number of data copies (1=no replication, 2=primary+1 backup, etc.)")
 		rebalanceDelay        = flag.Duration("rebalance-delay", 10*time.Minute, "Wait time before permanent rebalancing after node failure")
@@ -246,56 +253,63 @@ func main() {
 
 	// Create router
 	cfg := router.RouterConfig{
-		ClusterID:               *clusterID,
-		RouterName:              *routerName,
-		HealthCheckInterval:     *healthInt,
-		UnhealthyThreshold:      *unhealthyThr,
-		QueryNodeStartTimeout:   *queryNodeStartTimeout,
-		QueryNodeStragglerGrace: *queryNodeGrace,
-		QueryNodeIdleTimeout:    *queryNodeIdleTimeout,
-		SpanEngine:              *spanEngine,
-		PeerRouters:             parsePeerRouters(*peerRouters),
-		SearchDiagnostics:       strings.TrimSpace(*searchDiagAddr),
-		FetcherDiagnostics:      parseCSVAddrs(*fetcherDiagAddrs),
-		ServerDiagnostics:       parseServerDiagnostics(*serverDiagAddrs),
-		RegistryDiagnostics:     strings.TrimSpace(*registryDiagAddr),
-		GuardianStateDir:        *guardianStateDir,
-		WorkspaceStateDir:       *workspaceStateDir,
-		SourcePushMode:          *sourcePushMode,
-		PolicyGateEnabled:       *policyGateEnabled,
-		PolicyConfigPath:        *policyConfigPath,
-		AutoPushEnabled:         *autoPushEnabled,
-		AutoPushInterval:        *autoPushInterval,
-		AutoRefreshEnabled:      *autoRefreshEnabled,
-		AutoRefreshInterval:     *autoRefreshInterval,
-		AutoRefreshMaxInterval:  *autoRefreshMaxInterval,
-		AutoRefreshConcurrency:  *autoRefreshConcurrency,
-		AutoRefreshBatchSize:    *autoRefreshBatchSize,
-		AutoRefreshShards:       *autoRefreshShards,
-		AutoRefreshShard:        *autoRefreshShard,
-		AutoRefreshStateDir:     strings.TrimSpace(*autoRefreshStateDir),
-		AutoRefreshLease:        *autoRefreshLease,
-		AutoRefreshLeaseName:    strings.TrimSpace(*autoRefreshLeaseName),
-		AutoRefreshLeaseNS:      strings.TrimSpace(*autoRefreshLeaseNS),
-		AutoRefreshOwner:        strings.TrimSpace(*autoRefreshOwner),
-		EncryptionKey:           encryptionKey,
-		ReplicationFactor:       *replicationFactor,
-		RebalanceDelay:          *rebalanceDelay,
-		GracefulFailoverDelay:   *gracefulFailoverDelay,
-		GuardianIngestTimeout:   *guardianIngestTimeout,
-		SearchIndexGuardian:     *searchIndexGuardian,
-		AuthzEnforceIngest:      *authzEnforceIngest,
-		AuthzGrantsPath:         strings.TrimSpace(*authzGrantsPath),
-		AuthzGrantsJSON:         strings.TrimSpace(os.Getenv("MONOFS_AUTHZ_GRANTS_JSON")),
-		OwnershipGateEnabled:    *ownershipGate,
-		AllowLocalIngest:        *localIngestEnabled,
-		AccessPolicyURL:         strings.TrimSpace(*accessPolicyURL),
-		AccessPolicyFile:        strings.TrimSpace(*accessPolicyFile),
-		AccessPolicyToken:       strings.TrimSpace(*accessPolicyToken),
-		AccessPolicyInterval:    *accessPolicyInterval,
-		AccessEnforce:           *accessEnforce,
-		AccessPolicyServeToken:  strings.TrimSpace(*accessPolicyServeToken),
-		InternalToken:           strings.TrimSpace(*internalToken),
+		ClusterID:                      *clusterID,
+		RouterName:                     *routerName,
+		HealthCheckInterval:            *healthInt,
+		UnhealthyThreshold:             *unhealthyThr,
+		HealthProbeTimeout:             *healthProbeTimeout,
+		QueryNodeStartTimeout:          *queryNodeStartTimeout,
+		QueryNodeStragglerGrace:        *queryNodeGrace,
+		QueryNodeIdleTimeout:           *queryNodeIdleTimeout,
+		SpanEngine:                     *spanEngine,
+		PeerRouters:                    parsePeerRouters(*peerRouters),
+		SearchDiagnostics:              strings.TrimSpace(*searchDiagAddr),
+		FetcherDiagnostics:             parseCSVAddrs(*fetcherDiagAddrs),
+		ServerDiagnostics:              parseServerDiagnostics(*serverDiagAddrs),
+		RegistryDiagnostics:            strings.TrimSpace(*registryDiagAddr),
+		GuardianStateDir:               *guardianStateDir,
+		GuardianVersionBackend:         *guardianVersionBackend,
+		GuardianVersionBackendFallback: *guardianVersionFallback,
+		GuardianCoordinatorLease:       *guardianCoordinatorLease,
+		GuardianCoordinatorLeaseName:   *guardianCoordinatorLeaseName,
+		GuardianCoordinatorLeaseNS:     *guardianCoordinatorLeaseNS,
+		GuardianAllowMultiWriter:       *guardianAllowMultiWriter,
+		WorkspaceStateDir:              *workspaceStateDir,
+		SourcePushMode:                 *sourcePushMode,
+		PolicyGateEnabled:              *policyGateEnabled,
+		PolicyConfigPath:               *policyConfigPath,
+		AutoPushEnabled:                *autoPushEnabled,
+		AutoPushInterval:               *autoPushInterval,
+		AutoRefreshEnabled:             *autoRefreshEnabled,
+		AutoRefreshInterval:            *autoRefreshInterval,
+		AutoRefreshMaxInterval:         *autoRefreshMaxInterval,
+		AutoRefreshConcurrency:         *autoRefreshConcurrency,
+		AutoRefreshBatchSize:           *autoRefreshBatchSize,
+		AutoRefreshShards:              *autoRefreshShards,
+		AutoRefreshShard:               *autoRefreshShard,
+		AutoRefreshStateDir:            strings.TrimSpace(*autoRefreshStateDir),
+		AutoRefreshLease:               *autoRefreshLease,
+		AutoRefreshLeaseName:           strings.TrimSpace(*autoRefreshLeaseName),
+		AutoRefreshLeaseNS:             strings.TrimSpace(*autoRefreshLeaseNS),
+		AutoRefreshOwner:               strings.TrimSpace(*autoRefreshOwner),
+		EncryptionKey:                  encryptionKey,
+		ReplicationFactor:              *replicationFactor,
+		RebalanceDelay:                 *rebalanceDelay,
+		GracefulFailoverDelay:          *gracefulFailoverDelay,
+		GuardianIngestTimeout:          *guardianIngestTimeout,
+		SearchIndexGuardian:            *searchIndexGuardian,
+		AuthzEnforceIngest:             *authzEnforceIngest,
+		AuthzGrantsPath:                strings.TrimSpace(*authzGrantsPath),
+		AuthzGrantsJSON:                strings.TrimSpace(os.Getenv("MONOFS_AUTHZ_GRANTS_JSON")),
+		OwnershipGateEnabled:           *ownershipGate,
+		AllowLocalIngest:               *localIngestEnabled,
+		AccessPolicyURL:                strings.TrimSpace(*accessPolicyURL),
+		AccessPolicyFile:               strings.TrimSpace(*accessPolicyFile),
+		AccessPolicyToken:              strings.TrimSpace(*accessPolicyToken),
+		AccessPolicyInterval:           *accessPolicyInterval,
+		AccessEnforce:                  *accessEnforce,
+		AccessPolicyServeToken:         strings.TrimSpace(*accessPolicyServeToken),
+		InternalToken:                  strings.TrimSpace(*internalToken),
 	}
 	r := router.NewRouter(cfg, logger)
 	r.SetVersion(Version, Commit, BuildTime)

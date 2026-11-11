@@ -16,6 +16,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/server"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -39,6 +40,7 @@ func main() {
 	nodeFilesCmd := flag.NewFlagSet("node-files", flag.ExitOnError)
 	fetchersCmd := flag.NewFlagSet("fetchers", flag.ExitOnError)
 	dogfoodCmd := flag.NewFlagSet("dogfood", flag.ExitOnError)
+	repairIndexCmd := flag.NewFlagSet("repair-namespace-index", flag.ExitOnError)
 
 	// Ingest flags
 	routerAddr := ingestCmd.String("router", "localhost:9090", "MonoFS router address")
@@ -109,6 +111,9 @@ func main() {
 	dogfoodRouter := dogfoodCmd.String("router", "localhost:9090", "MonoFS router gRPC address")
 	dogfoodRepos := dogfoodCmd.String("repos", "", "Comma-separated repo names (default: all siblings)")
 	dogfoodExclude := dogfoodCmd.String("exclude", "agent", "Comma-separated repo names to exclude")
+
+	// Repair namespace index flags
+	repairIndexDB := repairIndexCmd.String("db-path", "", "Path to the offline MonoFS server metadata database (required)")
 
 	// Whitelist command
 	whitelistCmd := flag.NewFlagSet("whitelist", flag.ExitOnError)
@@ -291,6 +296,20 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "repair-namespace-index":
+		repairIndexCmd.Parse(os.Args[2:])
+
+		if *repairIndexDB == "" {
+			fmt.Fprintln(os.Stderr, "Error: --db-path is required")
+			repairIndexCmd.Usage()
+			os.Exit(1)
+		}
+		if err := server.RepairRepositoryNamespaceIndex(*repairIndexDB); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: repair-namespace-index failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("repository namespace index repaired")
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -321,6 +340,7 @@ Commands:
   fetchers         Show fetcher cluster status and statistics
   whitelist        Manage ingestion whitelist (add, remove, list, enable, disable)
   dogfood          Ingest all local sibling repositories into MonoFS
+  repair-namespace-index  Rebuild the repository namespace index for an offline database
 
 Examples:
   # Ingest repository (auto-detect branch from URL)
@@ -1935,12 +1955,8 @@ func showNodeOverview(ctx context.Context, nodeClient pb.MonoFSClient, routerAdd
 		return fmt.Errorf("failed to get node info: %w", err)
 	}
 
-	// List all repositories on this node
-	repoList, err := nodeClient.ListRepositories(ctx, &pb.ListRepositoriesRequest{})
-	if err != nil {
-		return fmt.Errorf("failed to list repositories: %w", err)
-	}
-
+	// List all repositories on this node. Use the batched details mode so a
+	// large cluster does not require one GetRepositoryInfo call per repo.
 	type repoSummary struct {
 		StorageID   string `json:"storage_id"`
 		DisplayPath string `json:"display_path"`
@@ -1948,17 +1964,31 @@ func showNodeOverview(ctx context.Context, nodeClient pb.MonoFSClient, routerAdd
 		FileCount   int    `json:"file_count"`
 	}
 
-	var repos []repoSummary
-	for _, sid := range repoList.RepositoryIds {
-		rs := repoSummary{StorageID: sid}
-
-		// Get display path
-		info, err := nodeClient.GetRepositoryInfo(ctx, &pb.GetRepositoryInfoRequest{
-			StorageId: sid,
+	var records []*pb.RepositoryRecord
+	pageToken := ""
+	for page := 0; page < 1000; page++ {
+		repoList, err := nodeClient.ListRepositories(ctx, &pb.ListRepositoriesRequest{
+			PageSize:       5000,
+			PageToken:      pageToken,
+			IncludeDetails: true,
 		})
-		if err == nil {
-			rs.DisplayPath = info.DisplayPath
-			rs.Source = info.Source
+		if err != nil {
+			return fmt.Errorf("failed to list repositories: %w", err)
+		}
+		records = append(records, repoList.GetRepositories()...)
+		pageToken = repoList.GetNextPageToken()
+		if pageToken == "" {
+			break
+		}
+	}
+
+	var repos []repoSummary
+	for _, record := range records {
+		sid := record.GetStorageId()
+		rs := repoSummary{
+			StorageID:   sid,
+			DisplayPath: record.GetDisplayPath(),
+			Source:      record.GetSource(),
 		}
 
 		// Get file count for this repo

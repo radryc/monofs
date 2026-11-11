@@ -27,6 +27,7 @@ import (
 	"github.com/radryc/monofs/internal/storage/clickhouse"
 	"github.com/radryc/monofs/internal/storage/logengine"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/internal/telemetrycrypto"
 	"github.com/radryc/monofs/pkg/authz"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -147,6 +148,7 @@ func main() {
 	logengineDir := flag.String("logengine-dir", "", "Directory for the doctor telemetry log engine (empty disables)")
 	logengineCompactInterval := flag.Duration("logengine-compact-interval", 10*time.Minute, "Interval for background telemetry chunk compaction (0 disables)")
 	logengineCompactAge := flag.Duration("logengine-compact-age", time.Hour, "Only compact telemetry chunks older than this")
+	logengineCompactStartupDelay := flag.Duration("logengine-compact-startup-delay", logengine.DefaultCompactionStartupDelay, "Delay before the first background telemetry compaction after startup (0 disables the delay)")
 	logengineRetention := flag.Duration("logengine-retention", 0, "Delete telemetry chunks older than this (0 disables)")
 	logengineRetentionInterval := flag.Duration("logengine-retention-interval", time.Hour, "How often to run logengine retention")
 	logQuerySidecar := flag.String("logquery-sidecar", "", "Node-local DuckDB query sidecar address (host:port; empty uses the native scanner)")
@@ -166,6 +168,12 @@ func main() {
 	clickhouseRetention := flag.Duration("clickhouse-retention", 30*24*time.Hour, "ClickHouse span TTL")
 	telemetryMaxQueryChunks := flag.Int("telemetry-max-query-chunks", 20000, "Maximum candidate chunks one telemetry query may inspect")
 	telemetryMaxQueryRecords := flag.Int64("telemetry-max-query-records", 1000000, "Maximum records one telemetry streaming query may yield")
+	telemetryEncryption := flag.String("telemetry-encryption", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION")), "Telemetry encryption: off, read, or envelope (default off)")
+	telemetryEncryptionMode := flag.String("telemetry-encryption-mode", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_MODE")), "Telemetry encryption read policy: observe or enforce (default observe)")
+	telemetryEncryptionKeysFile := flag.String("telemetry-encryption-keys-file", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_FILE")), "Path to the telemetry encryption key file")
+	telemetryEncryptionKeysJSON := flag.String("telemetry-encryption-keys-json", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_KEYS_JSON")), "Inline telemetry encryption key JSON")
+	telemetryEncryptionTenant := flag.String("telemetry-encryption-tenant", strings.TrimSpace(os.Getenv("MONOFS_TELEMETRY_ENCRYPTION_TENANT")), "Tenant used for telemetry encryption keys (default default)")
+	clickhouseEncryption := flag.String("clickhouse-encryption", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_ENCRYPTION")), "ClickHouse encryption: inherit, off, read, or envelope (default inherit)")
 
 	// Metrics
 	metricsAddr := flag.String("metrics-addr", ":9100", "Listen address for Prometheus /metrics endpoint (empty disables)")
@@ -416,6 +424,80 @@ func main() {
 		logger.Error("invalid span engine", "value", *spanEngine, "error", err)
 		os.Exit(1)
 	}
+
+	globalSetting, err := telemetrycrypto.ParseSetting(*telemetryEncryption)
+	if err != nil {
+		logger.Error("invalid telemetry encryption setting", "value", *telemetryEncryption, "error", err)
+		os.Exit(1)
+	}
+
+	clickhouseMode := strings.ToLower(strings.TrimSpace(*clickhouseEncryption))
+	if clickhouseMode == "" {
+		clickhouseMode = "inherit"
+	}
+	var clickhouseSetting telemetrycrypto.Setting
+	switch clickhouseMode {
+	case "inherit":
+		clickhouseSetting = globalSetting
+	case "off", "false", "disabled":
+	case "read", "decrypt", "decrypt-only", "read-only":
+		clickhouseSetting = telemetrycrypto.Setting{Read: true}
+	case "envelope", "on", "true", "enabled":
+		clickhouseSetting = telemetrycrypto.Setting{Write: true, Read: true}
+	default:
+		logger.Error("invalid ClickHouse encryption mode", "value", *clickhouseEncryption, "want", "inherit, off, read or envelope")
+		os.Exit(1)
+	}
+
+	encryptionMode := telemetrycrypto.Mode(strings.ToLower(strings.TrimSpace(*telemetryEncryptionMode)))
+	if encryptionMode == "" {
+		encryptionMode = telemetrycrypto.ModeObserve
+	}
+	newEncryptionProvider := func(setting telemetrycrypto.Setting) (*telemetrycrypto.Provider, error) {
+		if !setting.Write && !setting.Read {
+			return nil, nil
+		}
+		return telemetrycrypto.LoadProvider(telemetrycrypto.Config{
+			Enabled:     setting.Write,
+			DecryptOnly: setting.Read && !setting.Write,
+			Mode:        encryptionMode,
+			Tenant:      strings.TrimSpace(*telemetryEncryptionTenant),
+			KeysFile:    *telemetryEncryptionKeysFile,
+			KeysJSON:    *telemetryEncryptionKeysJSON,
+		})
+	}
+	telemetryEnc, err := newEncryptionProvider(globalSetting)
+	if err != nil {
+		logger.Error("invalid telemetry encryption configuration", "error", err)
+		os.Exit(1)
+	}
+	var clickhouseEnc *telemetrycrypto.Provider
+	if clickhouseSetting == globalSetting {
+		clickhouseEnc = telemetryEnc
+	} else {
+		clickhouseEnc, err = newEncryptionProvider(clickhouseSetting)
+		if err != nil {
+			logger.Error("invalid ClickHouse encryption configuration", "error", err)
+			os.Exit(1)
+		}
+	}
+	if telemetryEnc != nil {
+		logger.Info("telemetry encryption configured",
+			"write", globalSetting.Write,
+			"read", globalSetting.Read,
+			"mode", telemetryEnc.Mode(),
+			"tenant", telemetryEnc.Tenant(),
+			"root_key_id", telemetryEnc.RootKeyID())
+	}
+	if clickhouseEnc != nil && clickhouseEnc != telemetryEnc {
+		logger.Info("ClickHouse encryption configured",
+			"write", clickhouseSetting.Write,
+			"read", clickhouseSetting.Read,
+			"mode", clickhouseEnc.Mode(),
+			"tenant", clickhouseEnc.Tenant(),
+			"root_key_id", clickhouseEnc.RootKeyID())
+	}
+
 	var clickhouseStore *clickhouse.TraceStore
 	if traceEngine == server.SpanEngineClickHouse {
 		store, err := clickhouse.New(clickhouse.Config{
@@ -428,6 +510,7 @@ func main() {
 			User:         *clickhouseUser,
 			Password:     *clickhousePassword,
 			Retention:    *clickhouseRetention,
+			Encryption:   clickhouseEnc,
 		})
 		if err != nil {
 			logger.Error("failed to configure ClickHouse trace store", "error", err)
@@ -448,7 +531,8 @@ func main() {
 			"spans_table", *clickhouseTable,
 			"logs_table", *clickhouseLogsTable,
 			"metrics_table", *clickhouseMetricsTable,
-			"tenant", *clickhouseTenant)
+			"tenant", *clickhouseTenant,
+			"encryption", clickhouseEnc != nil)
 	}
 
 	var stopLogEngine func()
@@ -466,14 +550,16 @@ func main() {
 			ChunkDuration:   5 * time.Minute,
 			MaxQueryChunks:  *telemetryMaxQueryChunks,
 			MaxQueryRecords: *telemetryMaxQueryRecords,
+			Encryption:      telemetryEnc,
 		})
 		compactCtx, compactCancel := context.WithCancel(context.Background())
 		stopLogEngine = compactCancel
 		if *logengineCompactInterval > 0 {
-			le.RunCompactor(compactCtx, *logengineCompactInterval, *logengineCompactAge)
+			le.RunCompactorWithStartupDelay(compactCtx, *logengineCompactInterval, *logengineCompactAge, *logengineCompactStartupDelay)
 			logger.Info("doctor logengine compaction enabled",
 				"interval", logengineCompactInterval.String(),
-				"min_age", logengineCompactAge.String())
+				"min_age", logengineCompactAge.String(),
+				"startup_delay", logengineCompactStartupDelay.String())
 		}
 		if *logengineRetention > 0 {
 			le.RunRetention(compactCtx, *logengineRetentionInterval, *logengineRetention)

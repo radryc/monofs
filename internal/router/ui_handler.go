@@ -13,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	pb "github.com/radryc/monofs/api/proto"
 )
 
 // handleUIRequests processes UI requests in a separate goroutine to prevent blocking router operations.
@@ -53,6 +51,29 @@ func (r *Router) processUIRequest(req UIRequest) {
 	}
 }
 
+// repositoriesDataCached returns a repository snapshot cached for maxAge. It is
+// used by endpoints that would otherwise trigger a full cluster fan-out on
+// every request (for example /api/routers).
+func (r *Router) repositoriesDataCached(maxAge time.Duration) *RepositoriesData {
+	if maxAge > 0 {
+		r.repoCacheMu.RLock()
+		if r.repoCache != nil && time.Since(r.repoCacheAt) < maxAge {
+			data := r.repoCache
+			r.repoCacheMu.RUnlock()
+			return data
+		}
+		r.repoCacheMu.RUnlock()
+	}
+	data := r.buildRepositoriesData()
+	if maxAge > 0 {
+		r.repoCacheMu.Lock()
+		r.repoCache = data
+		r.repoCacheAt = time.Now()
+		r.repoCacheMu.Unlock()
+	}
+	return data
+}
+
 // buildRepositoriesData creates repository list snapshot (called from UI goroutine).
 func (r *Router) buildRepositoriesData() *RepositoriesData {
 	// Query actual nodes for repository list (source of truth)
@@ -62,10 +83,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 	for k, v := range r.inProgressIngestions {
 		inProgressSnapshot[k] = v
 	}
-	nodesSnapshot := make(map[string]*nodeState, len(r.nodes))
-	for k, v := range r.nodes {
-		nodesSnapshot[k] = v
-	}
+	nodesSnapshot := r.snapshotUINodesLocked()
 	// Snapshot ingested repos for file counts
 	ingestedSnapshot := make(map[string]*ingestedRepo, len(r.ingestedRepos))
 	for k, v := range r.ingestedRepos {
@@ -82,8 +100,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 6)
 	for _, state := range nodesSnapshot {
-		state := state
-		if state.client == nil || !state.info.Healthy {
+		if state.client == nil || !state.healthy {
 			continue
 		}
 		if staleThreshold > 0 && time.Since(state.lastSeen) > staleThreshold {
@@ -96,43 +113,33 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			resp, err := state.client.ListRepositories(ctx, &pb.ListRepositoriesRequest{})
+			// Bound a single node's listing without penalising fast nodes. The
+			// result is cached by repositoriesDataCached for other UI paths.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			records, err := listRepositoryRecords(ctx, state.client, "")
 			cancel()
 
 			if err != nil {
-				r.logger.Warn("failed to list repositories from node", "node_id", state.info.NodeId, "error", err)
+				r.logger.Warn("failed to list repositories from node", "node_id", state.nodeID, "error", err)
 				return
 			}
 
-			// Get full repository info for each
-			for _, storageID := range resp.RepositoryIds {
+			for _, record := range records {
+				storageID := record.GetStorageId()
+				if storageID == "" {
+					continue
+				}
 				repoMu.Lock()
 				_, exists := repoMap[storageID]
-				if !exists {
-					repoMap[storageID] = map[string]interface{}{}
-				}
 				repoMu.Unlock()
 				if exists {
 					continue
 				}
 
-				infoCtx, infoCancel := context.WithTimeout(context.Background(), 1*time.Second)
-				repoInfo, err := state.client.GetRepositoryInfo(infoCtx, &pb.GetRepositoryInfoRequest{
-					StorageId: storageID,
-				})
-				infoCancel()
-
-				if err != nil {
-					r.logger.Warn("failed to get repository info", "storage_id", storageID, "error", err)
-					continue
-				}
-
-				// Get file count and ingested time from router's tracking
 				var filesCount int64
 				var ingestedAt time.Time
-				var rebalanceState string = "Stable"
-				var rebalanceProgress float64 = 1.0
+				var rebalanceState = "Stable"
+				var rebalanceProgress = 1.0
 				refreshInfo := map[string]any{
 					"last_probed_at":    0,
 					"last_probe_status": "",
@@ -142,7 +149,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 					"reingests_total":   0,
 					"next_probe_at":     0,
 				}
-				guardianURL := repoInfo.GuardianUrl
+				guardianURL := record.GetGuardianUrl()
 				if tracked, ok := ingestedSnapshot[storageID]; ok {
 					tracked.mu.RLock()
 					filesCount = tracked.filesCount
@@ -155,21 +162,22 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 				if ingestedAt.IsZero() {
 					ingestedAt = time.Now()
 				}
+				displayPath := record.GetDisplayPath()
 				productLink := buildRepositoryProductLink(
-					repoInfo.DisplayPath,
-					repositoryProductStoredURL(repoInfo.DisplayPath, guardianURL, repoInfo.Source),
+					displayPath,
+					repositoryProductStoredURL(displayPath, guardianURL, record.GetSource()),
 					uiBases,
 				)
 
 				repoMu.Lock()
 				repoMap[storageID] = map[string]interface{}{
 					"storage_id":         storageID,
-					"repo_id":            repoInfo.DisplayPath,
-					"repo_url":           repoInfo.Source,
-					"branch":             repoInfo.Ref,
-					"commit_hash":        repoInfo.CommitHash,
-					"commit_time":        repoInfo.CommitTime,
-					"commit_message":     repoInfo.CommitMessage,
+					"repo_id":            displayPath,
+					"repo_url":           record.GetSource(),
+					"branch":             record.GetRef(),
+					"commit_hash":        record.GetCommitHash(),
+					"commit_time":        record.GetCommitTime(),
+					"commit_message":     record.GetCommitMessage(),
 					"files_count":        filesCount,
 					"ingested_at":        ingestedAt.Unix(),
 					"refresh":            refreshInfo,
@@ -240,10 +248,7 @@ func (r *Router) buildRepositoriesData() *RepositoriesData {
 func (r *Router) buildStatusData() *StatusData {
 	// Snapshot nodes quickly, then release lock
 	r.mu.RLock()
-	nodesSnapshot := make(map[string]*nodeState, len(r.nodes))
-	for k, v := range r.nodes {
-		nodesSnapshot[k] = v
-	}
+	nodesSnapshot := r.snapshotUINodesLocked()
 	r.mu.RUnlock()
 
 	// Build response without holding lock
@@ -262,7 +267,7 @@ func (r *Router) buildStatusData() *StatusData {
 	for _, state := range nodesSnapshot {
 		kvsStatus := normalizedKVSNodeStatus(state.kvsStatus)
 		nodesTotal++
-		if state.info.Healthy {
+		if state.healthy {
 			nodesHealthy++
 		} else {
 			nodesUnhealthy++
@@ -279,10 +284,10 @@ func (r *Router) buildStatusData() *StatusData {
 		diskFreeBytes += float64(state.diskFreeBytes)
 
 		nodeInfo := map[string]interface{}{
-			"id":         state.info.NodeId,
-			"address":    state.info.Address,
-			"healthy":    state.info.Healthy,
-			"weight":     state.info.Weight,
+			"id":         state.nodeID,
+			"address":    state.address,
+			"healthy":    state.healthy,
+			"weight":     state.weight,
 			"status":     state.status.String(),
 			"file_count": state.ownedFilesCount,
 			"disk_used":  state.diskUsedBytes,
@@ -307,8 +312,8 @@ func (r *Router) buildStatusData() *StatusData {
 		}
 
 		// Add "covered_by" for failed nodes
-		if !state.info.Healthy {
-			if backupNodeID, hasFailover := r.failoverMap.Load(state.info.NodeId); hasFailover {
+		if !state.healthy {
+			if backupNodeID, hasFailover := r.failoverMap.Load(state.nodeID); hasFailover {
 				nodeInfo["covered_by"] = backupNodeID.(string)
 			}
 		}
@@ -458,7 +463,7 @@ func (r *Router) buildRoutersData() *RoutersData {
 
 	// Always include local router snapshot
 	localStatus := r.buildStatusData()
-	localRepos := r.buildRepositoriesData()
+	localRepos := r.repositoriesDataCached(3 * time.Second)
 	routerName := r.config.RouterName
 	if routerName == "" {
 		routerName = "local"
@@ -640,10 +645,7 @@ func (r *Router) buildDependenciesData() *DependenciesData {
 
 	// Snapshot healthy nodes and ingested repo info.
 	r.mu.RLock()
-	nodesSnapshot := make(map[string]*nodeState, len(r.nodes))
-	for k, v := range r.nodes {
-		nodesSnapshot[k] = v
-	}
+	nodesSnapshot := r.snapshotUINodesLocked()
 	ingestedSnapshot := make(map[string]*ingestedRepo, len(r.ingestedRepos))
 	for k, v := range r.ingestedRepos {
 		ingestedSnapshot[k] = v
@@ -669,8 +671,7 @@ func (r *Router) buildDependenciesData() *DependenciesData {
 	sem := make(chan struct{}, 6)
 
 	for _, state := range nodesSnapshot {
-		state := state
-		if state.client == nil || !state.info.Healthy {
+		if state.client == nil || !state.healthy {
 			continue
 		}
 		if staleThreshold > 0 && time.Since(state.lastSeen) > staleThreshold {
@@ -704,11 +705,11 @@ func (r *Router) buildDependenciesData() *DependenciesData {
 
 			if err != nil {
 				r.logger.Warn("failed to get dependency files from node",
-					"node_id", state.info.NodeId, "error", err)
+					"node_id", state.nodeID, "error", err)
 				return
 			}
 			mu.Lock()
-			nodeCounts[state.info.NodeId] = n
+			nodeCounts[state.nodeID] = n
 			mu.Unlock()
 		}()
 	}

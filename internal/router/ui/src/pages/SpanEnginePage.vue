@@ -1,22 +1,44 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Archive, ChartColumn, Database, HardDrive, Layers, RefreshCw, Trash2, TrendingUp } from 'lucide-vue-next'
+import {
+  Activity,
+  Archive,
+  ChartColumn,
+  CircleCheck,
+  CircleX,
+  Clock,
+  Database,
+  Gauge,
+  HardDrive,
+  Layers,
+  RefreshCw,
+  Server,
+  Table2,
+  Trash2,
+  TrendingUp,
+} from 'lucide-vue-next'
 import { useAutoRefresh, formatBytes, formatNumber } from '../composables/useAutoRefresh'
 import PageHeader from '../components/PageHeader.vue'
 import StatCard from '../components/StatCard.vue'
 import DataCard from '../components/DataCard.vue'
+import ProgressBar from '../components/ProgressBar.vue'
 import type { LogEngineData, LogEngineNode } from '../types/api'
 
 const logEngine = ref<LogEngineData | null>(null)
 
-async function loadLogEngine() {
-  logEngine.value = await fetch('/api/logengine').then(r => r.json())
+async function loadSpanEngine() {
+  logEngine.value = await fetch('/api/span-engine').then(r => r.json())
 }
 
-const { loading } = useAutoRefresh(loadLogEngine, 10_000)
+const { loading, error } = useAutoRefresh(loadSpanEngine, 10_000)
+
+const spanEngine = computed(() => (logEngine.value?.span_engine === 'clickhouse' ? 'clickhouse' : 'native'))
+const isClickHouse = computed(() => spanEngine.value === 'clickhouse')
+const clickHouse = computed(() => logEngine.value?.clickhouse ?? null)
 
 const nodes = computed<LogEngineNode[]>(() => logEngine.value?.nodes ?? [])
 
+// --- Native engine (local Parquet chunks + compaction + DuckDB) ---
 const storedBuckets = computed(() => logEngine.value?.stored_buckets ?? 0)
 const compactedBuckets = computed(() => logEngine.value?.compacted_buckets ?? 0)
 const rawBuckets = computed(() => Math.max(0, storedBuckets.value - compactedBuckets.value))
@@ -56,6 +78,45 @@ const totalChunks = computed(() =>
 
 const duckdbNodes = computed(() => nodes.value.filter((node) => node.duckdb_enabled))
 
+// --- ClickHouse engine ---
+const chHealthy = computed(() => clickHouse.value?.healthy === true)
+const chDiskPct = computed(() => {
+  const total = clickHouse.value?.disk_total_bytes ?? 0
+  if (!total) return 0
+  return Math.min(100, ((clickHouse.value?.disk_used_bytes ?? 0) / total) * 100)
+})
+const chFreePct = computed(() => {
+  const total = clickHouse.value?.disk_total_bytes ?? 0
+  if (!total) return 0
+  return Math.min(100, ((clickHouse.value?.disk_free_bytes ?? 0) / total) * 100)
+})
+
+const clickHouseRows = computed(() => {
+  const ch = clickHouse.value
+  const rows = [
+    { signal: 'Spans', rows: ch?.spans_rows ?? 0, bytes: ch?.spans_bytes ?? 0 },
+    { signal: 'Logs', rows: ch?.logs_rows ?? 0, bytes: ch?.logs_bytes ?? 0 },
+    { signal: 'Metrics', rows: ch?.metrics_rows ?? 0, bytes: ch?.metrics_bytes ?? 0 },
+  ]
+  return rows.map((row) => ({
+    ...row,
+    share: (ch?.total_bytes ?? 0) > 0 ? (row.bytes / (ch?.total_bytes ?? 1)) * 100 : 0,
+  }))
+})
+
+const retentionLabel = computed(() => {
+  const seconds = clickHouse.value?.retention_seconds ?? 0
+  if (!seconds) return 'no TTL'
+  const days = seconds / 86_400
+  return Number.isInteger(days) ? `${days}d` : `${(days).toFixed(1)}d`
+})
+
+const engineDescription = computed(() =>
+  isClickHouse.value
+    ? 'Logs, metrics, and traces are written to the shared ClickHouse cluster. Every MonoFS node uses the same tables, so the router reads from one node.'
+    : 'Logs, metrics, and traces are stored in shard-local Parquet chunks. The background compactor merges hourly buckets, and the optional DuckDB sidecar serves ad-hoc SQL.'
+)
+
 function formatNano(value?: number): string {
   if (!value) return 'never'
   return new Date(value / 1_000_000).toLocaleString()
@@ -77,30 +138,260 @@ function nodeCompactedBuckets(node: LogEngineNode): number {
 <template>
   <div>
     <PageHeader
-      title="Compactor & DuckDB"
-      subtitle="Hourly bucket storage, background compaction, and the DuckDB query sidecar"
+      title="Span engine"
+      :subtitle="isClickHouse ? 'Shared ClickHouse telemetry storage' : 'Native Parquet storage, compaction, and DuckDB'"
     >
       <template #actions>
-        <button
-          type="button"
-          class="inline-flex items-center gap-2 rounded-lg border border-slate-700/50 bg-slate-900/60 px-3 py-2 text-xs font-semibold text-slate-300 hover:border-slate-500 hover:text-slate-100"
-          @click="loadLogEngine"
-        >
-          <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
-          Refresh
-        </button>
+        <div class="flex items-center gap-2">
+          <span
+            class="inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold uppercase tracking-wide"
+            :class="isClickHouse
+              ? 'border-sky-500/30 bg-sky-500/10 text-sky-300'
+              : 'border-violet-500/30 bg-violet-500/10 text-violet-300'"
+          >
+            <Activity class="h-3.5 w-3.5" />
+            {{ isClickHouse ? 'ClickHouse' : 'Native' }}
+          </span>
+          <button
+            type="button"
+            class="inline-flex items-center gap-2 rounded-lg border border-slate-700/50 bg-slate-900/60 px-3 py-2 text-xs font-semibold text-slate-300 hover:border-slate-500 hover:text-slate-100"
+            @click="loadSpanEngine"
+          >
+            <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
+            Refresh
+          </button>
+        </div>
       </template>
     </PageHeader>
 
-    <div v-if="!nodes.length && !loading" class="mb-6 rounded-2xl border border-slate-700/40 bg-slate-900/60 p-10 text-center">
-      <Archive class="mx-auto h-8 w-8 text-slate-500" />
-      <h2 class="mt-3 text-sm font-semibold text-slate-200">No log engine nodes reported yet</h2>
-      <p class="mt-1 text-xs text-slate-400">
-        The compactor and DuckDB statistics appear after a MonoFS node registers with telemetry enabled.
-      </p>
+    <div class="mb-6 rounded-2xl border border-slate-700/40 bg-slate-900/60 p-5">
+      <div class="flex flex-wrap items-start gap-4">
+        <div
+          class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl"
+          :class="isClickHouse ? 'bg-sky-500/15 text-sky-300' : 'bg-violet-500/15 text-violet-300'"
+        >
+          <Database v-if="isClickHouse" class="h-5 w-5" />
+          <Archive v-else class="h-5 w-5" />
+        </div>
+        <div class="min-w-0 flex-1">
+          <h2 class="text-sm font-semibold text-slate-200">
+            {{ isClickHouse ? 'ClickHouse span engine' : 'Native span engine' }}
+          </h2>
+          <p class="mt-1 max-w-3xl text-xs text-slate-400">{{ engineDescription }}</p>
+        </div>
+        <div v-if="isClickHouse" class="flex items-center gap-2 text-xs">
+          <span
+            class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-semibold"
+            :class="chHealthy
+              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+              : 'border-rose-500/30 bg-rose-500/10 text-rose-300'"
+          >
+            <CircleCheck v-if="chHealthy" class="h-3 w-3" />
+            <CircleX v-else class="h-3 w-3" />
+            {{ chHealthy ? 'Healthy' : 'Unreachable' }}
+          </span>
+          <span v-if="clickHouse?.version" class="rounded-full border border-slate-700/50 bg-slate-800/40 px-2.5 py-1 font-mono text-slate-400">
+            v{{ clickHouse.version }}
+          </span>
+        </div>
+      </div>
     </div>
 
+    <div
+      v-if="error"
+      class="mb-6 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-300"
+    >
+      {{ error }}
+    </div>
+
+    <!-- ================= ClickHouse engine ================= -->
+    <template v-if="isClickHouse">
+      <div
+        v-if="clickHouse?.error"
+        class="mb-6 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-300"
+      >
+        <span class="font-semibold">ClickHouse probe failed:</span> {{ clickHouse.error }}
+      </div>
+
+      <div class="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <StatCard
+          :icon="chHealthy ? CircleCheck : CircleX"
+          label="Health"
+          :value="chHealthy ? 'Healthy' : 'Unreachable'"
+          :sub="chHealthy ? `ClickHouse ${clickHouse?.version || ''}`.trim() : 'No response from ClickHouse'"
+        />
+        <StatCard
+          :icon="HardDrive"
+          label="Free space"
+          :value="formatBytes(clickHouse?.disk_free_bytes ?? 0)"
+          :sub="`${chFreePct.toFixed(1)}% free of ${formatBytes(clickHouse?.disk_total_bytes ?? 0)}`"
+        />
+        <StatCard
+          :icon="Database"
+          label="Used by ClickHouse"
+          :value="formatBytes(clickHouse?.disk_used_bytes ?? 0)"
+          :sub="`${chDiskPct.toFixed(1)}% of server disk`"
+        />
+        <StatCard
+          :icon="Table2"
+          label="Telemetry on disk"
+          :value="formatBytes(clickHouse?.total_bytes ?? 0)"
+          :sub="`${formatNumber(clickHouse?.total_rows ?? 0)} rows · ${formatNumber(clickHouse?.parts ?? 0)} parts`"
+        />
+        <StatCard
+          :icon="Layers"
+          label="Spans"
+          :value="formatNumber(clickHouse?.spans_rows ?? 0)"
+          :sub="`${formatBytes(clickHouse?.spans_bytes ?? 0)} on disk`"
+        />
+        <StatCard
+          :icon="ChartColumn"
+          label="Logs"
+          :value="formatNumber(clickHouse?.logs_rows ?? 0)"
+          :sub="`${formatBytes(clickHouse?.logs_bytes ?? 0)} on disk`"
+        />
+        <StatCard
+          :icon="Gauge"
+          label="Metrics"
+          :value="formatNumber(clickHouse?.metrics_rows ?? 0)"
+          :sub="`${formatBytes(clickHouse?.metrics_bytes ?? 0)} on disk`"
+        />
+        <StatCard
+          :icon="Clock"
+          label="Retention"
+          :value="retentionLabel"
+          :sub="`${clickHouse?.database || 'strata'} database`"
+        />
+      </div>
+
+      <DataCard class="mb-6">
+        <template #header>
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 class="text-sm font-semibold text-slate-200">Storage by signal</h2>
+              <p class="mt-0.5 text-xs text-slate-400">
+                Active ClickHouse parts for the shared telemetry tables.
+              </p>
+            </div>
+            <div class="flex items-center gap-2 text-xs">
+              <span class="inline-flex items-center gap-1 rounded-full border border-slate-700/50 bg-slate-800/40 px-2 py-1 text-slate-400">
+                <Server class="h-3 w-3" />
+                {{ nodes.length }} MonoFS node{{ nodes.length === 1 ? '' : 's' }}
+              </span>
+            </div>
+          </div>
+        </template>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-slate-700/40 text-xs uppercase tracking-wider text-slate-400">
+                <th class="px-6 py-3 text-left font-medium">Signal</th>
+                <th class="px-6 py-3 text-right font-medium">Rows</th>
+                <th class="px-6 py-3 text-right font-medium">On disk</th>
+                <th class="px-6 py-3 text-left font-medium">Share of telemetry</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-700/20">
+              <tr v-for="row in clickHouseRows" :key="row.signal" class="transition-colors hover:bg-slate-800/30">
+                <td class="px-6 py-3 font-medium text-slate-200">{{ row.signal }}</td>
+                <td class="px-6 py-3 text-right text-slate-300">{{ formatNumber(row.rows) }}</td>
+                <td class="px-6 py-3 text-right text-slate-300">{{ formatBytes(row.bytes) }}</td>
+                <td class="px-6 py-3">
+                  <div class="flex items-center gap-3">
+                    <ProgressBar :value="row.share" class="max-w-[220px]" />
+                    <span class="w-12 text-right text-xs text-slate-400">{{ row.share.toFixed(1) }}%</span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+            <tfoot class="border-t border-slate-700/40 bg-slate-800/20">
+              <tr class="font-semibold">
+                <td class="px-6 py-3 text-slate-200">Total</td>
+                <td class="px-6 py-3 text-right text-slate-200">{{ formatNumber(clickHouse?.total_rows ?? 0) }}</td>
+                <td class="px-6 py-3 text-right text-slate-200">{{ formatBytes(clickHouse?.total_bytes ?? 0) }}</td>
+                <td class="px-6 py-3 text-xs font-normal text-slate-400">{{ formatNumber(clickHouse?.parts ?? 0) }} active parts</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </DataCard>
+
+      <div class="grid gap-6 lg:grid-cols-2">
+        <DataCard>
+          <template #header>
+            <div>
+              <h2 class="text-sm font-semibold text-slate-200">Server disk</h2>
+              <p class="mt-0.5 text-xs text-slate-400">Space reported by ClickHouse's <code>system.disks</code>.</p>
+            </div>
+          </template>
+          <div class="space-y-5 px-6 py-5">
+            <div>
+              <div class="mb-2 flex items-center justify-between text-xs">
+                <span class="text-slate-400">Used</span>
+                <span class="text-slate-300">{{ formatBytes(clickHouse?.disk_used_bytes ?? 0) }} / {{ formatBytes(clickHouse?.disk_total_bytes ?? 0) }}</span>
+              </div>
+              <ProgressBar :value="chDiskPct" />
+            </div>
+            <div class="grid grid-cols-3 gap-3 text-center">
+              <div class="rounded-lg border border-slate-700/40 bg-slate-800/30 px-3 py-2">
+                <div class="text-[10px] uppercase tracking-wide text-slate-500">Total</div>
+                <div class="mt-1 text-sm font-semibold text-slate-200">{{ formatBytes(clickHouse?.disk_total_bytes ?? 0) }}</div>
+              </div>
+              <div class="rounded-lg border border-slate-700/40 bg-slate-800/30 px-3 py-2">
+                <div class="text-[10px] uppercase tracking-wide text-slate-500">Used</div>
+                <div class="mt-1 text-sm font-semibold text-amber-300">{{ formatBytes(clickHouse?.disk_used_bytes ?? 0) }}</div>
+              </div>
+              <div class="rounded-lg border border-slate-700/40 bg-slate-800/30 px-3 py-2">
+                <div class="text-[10px] uppercase tracking-wide text-slate-500">Free</div>
+                <div class="mt-1 text-sm font-semibold text-emerald-300">{{ formatBytes(clickHouse?.disk_free_bytes ?? 0) }}</div>
+              </div>
+            </div>
+          </div>
+        </DataCard>
+
+        <DataCard>
+          <template #header>
+            <div>
+              <h2 class="text-sm font-semibold text-slate-200">Connection</h2>
+              <p class="mt-0.5 text-xs text-slate-400">Values reported by the node serving this snapshot.</p>
+            </div>
+          </template>
+          <dl class="divide-y divide-slate-700/20 text-sm">
+            <div class="flex items-center justify-between gap-4 px-6 py-3">
+              <dt class="text-xs uppercase tracking-wide text-slate-500">Endpoint</dt>
+              <dd class="max-w-[300px] truncate font-mono text-xs text-slate-300" :title="clickHouse?.url">{{ clickHouse?.url || '—' }}</dd>
+            </div>
+            <div class="flex items-center justify-between gap-4 px-6 py-3">
+              <dt class="text-xs uppercase tracking-wide text-slate-500">Database</dt>
+              <dd class="font-mono text-xs text-slate-300">{{ clickHouse?.database || '—' }}</dd>
+            </div>
+            <div class="flex items-center justify-between gap-4 px-6 py-3">
+              <dt class="text-xs uppercase tracking-wide text-slate-500">Tenant</dt>
+              <dd class="font-mono text-xs text-slate-300">{{ clickHouse?.tenant || '—' }}</dd>
+            </div>
+            <div class="flex items-center justify-between gap-4 px-6 py-3">
+              <dt class="text-xs uppercase tracking-wide text-slate-500">Reporting node</dt>
+              <dd class="font-mono text-xs text-slate-300">{{ clickHouse?.reporting_node || '—' }}</dd>
+            </div>
+            <div class="flex items-center justify-between gap-4 px-6 py-3">
+              <dt class="text-xs uppercase tracking-wide text-slate-500">Measured</dt>
+              <dd class="text-xs text-slate-400">{{ formatNano(clickHouse?.measured_unix_nano) }}</dd>
+            </div>
+          </dl>
+        </DataCard>
+      </div>
+    </template>
+
+    <!-- ================= Native engine ================= -->
     <template v-else>
+      <div v-if="!nodes.length && !loading" class="mb-6 rounded-2xl border border-slate-700/40 bg-slate-900/60 p-10 text-center">
+        <Archive class="mx-auto h-8 w-8 text-slate-500" />
+        <h2 class="mt-3 text-sm font-semibold text-slate-200">No log engine nodes reported yet</h2>
+        <p class="mt-1 text-xs text-slate-400">
+          The compactor and DuckDB statistics appear after a MonoFS node registers with telemetry enabled.
+        </p>
+      </div>
+
       <div class="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
         <StatCard
           :icon="Layers"

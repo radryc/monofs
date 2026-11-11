@@ -64,9 +64,7 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		}, nil
 	}
 
-	// Check if path is a full repo ID or an intermediate directory
-	// First check if it's a complete repo ID (display path)
-	if s.repoExists(path) {
+	if cached, ok := s.intermediateDirCache.Load(path); ok && cached.(bool) {
 		return &pb.LookupResponse{
 			Ino:   hashPath(path),
 			Mode:  0755 | uint32(syscall.S_IFDIR),
@@ -76,21 +74,20 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 		}, nil
 	}
 
-	// Check if it's an intermediate directory (cached check)
-	if s.isIntermediateDir(path) {
-		return &pb.LookupResponse{
-			Ino:   hashPath(path),
-			Mode:  0755 | uint32(syscall.S_IFDIR),
-			Size:  0,
-			Mtime: time.Now().Unix(),
-			Found: true,
-		}, nil
-	}
-
-	// Try to resolve path to (storageID, filePath)
+	// Resolve the longest repository prefix first. This avoids an extra
+	// namespace-index lookup on every file lookup; only paths without a
+	// matching repository need the intermediate-directory check.
 	storageID, filePath, ok := s.resolvePathToStorage(path)
 	if !ok {
-		// No matching repository found
+		if s.isIntermediateDir(path) {
+			return &pb.LookupResponse{
+				Ino:   hashPath(path),
+				Mode:  0755 | uint32(syscall.S_IFDIR),
+				Size:  0,
+				Mtime: time.Now().Unix(),
+				Found: true,
+			}, nil
+		}
 		return &pb.LookupResponse{Found: false}, nil
 	}
 
@@ -291,9 +288,7 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 		}, nil
 	}
 
-	// Check if path is a full repo ID or an intermediate directory
-	// First check if it's a complete repo ID
-	if s.repoExists(path) {
+	if cached, ok := s.intermediateDirCache.Load(path); ok && cached.(bool) {
 		return &pb.GetAttrResponse{
 			Ino:   hashPath(path),
 			Mode:  0755 | uint32(syscall.S_IFDIR),
@@ -308,23 +303,9 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 		}, nil
 	}
 
-	// Check if it's an intermediate directory (cached check)
-	if s.isIntermediateDir(path) {
-		return &pb.GetAttrResponse{
-			Ino:   hashPath(path),
-			Mode:  0755 | uint32(syscall.S_IFDIR),
-			Size:  0,
-			Mtime: time.Now().Unix(),
-			Atime: time.Now().Unix(),
-			Ctime: time.Now().Unix(),
-			Nlink: 2,
-			Uid:   uint32(1000),
-			Gid:   uint32(1000),
-			Found: true,
-		}, nil
-	}
-
-	// Try to resolve path to (storageID, filePath)
+	// Resolve the longest repository prefix first. This avoids an extra
+	// namespace-index lookup on every file lookup; only paths without a
+	// matching repository need the intermediate-directory check.
 	storageID, filePath, ok := s.resolvePathToStorage(path)
 
 	s.logger.Debug("getattr path resolution",
@@ -333,8 +314,22 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 		"file_path", filePath,
 		"resolved", ok)
 
-	// If no repo matched, not found
+	// If no repo matched, it may still be an intermediate directory.
 	if !ok {
+		if s.isIntermediateDir(path) {
+			return &pb.GetAttrResponse{
+				Ino:   hashPath(path),
+				Mode:  0755 | uint32(syscall.S_IFDIR),
+				Size:  0,
+				Mtime: time.Now().Unix(),
+				Atime: time.Now().Unix(),
+				Ctime: time.Now().Unix(),
+				Nlink: 2,
+				Uid:   uint32(1000),
+				Gid:   uint32(1000),
+				Found: true,
+			}, nil
+		}
 		s.logger.Debug("getattr no repo matched", "path", path)
 		return &pb.GetAttrResponse{Found: false}, nil
 	}
@@ -711,9 +706,11 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		}
 	}
 
-	// If not found anywhere, return error
+	// If not found anywhere, return error. A missing file is a normal client
+	// outcome (callers probe optional paths), so this stays at debug level; the
+	// NotFound status and span event already surface the miss where it matters.
 	if err != nil {
-		s.logger.WarnContext(ctx, "read: metadata not found",
+		s.logger.DebugContext(ctx, "read: metadata not found",
 			"path", path,
 			"storage_id", storageID,
 			"file_path", filePath,
@@ -934,6 +931,7 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 	var filesDeleted int64
 	var dirsDeleted int64
 	var deletedBytes int64
+	var deletedDisplayPath string
 
 	kvsFilesDeleted, kvsDirsDeleted, err := s.deleteKVSRepository(ctx, storageID)
 	if err != nil {
@@ -949,22 +947,26 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 	err = s.db.Update(func(tx metastore.Tx) error {
 		// 1. Delete repo info
 		repoKey := []byte(storageID)
-		var displayPath string
+		displayPath := ""
 		if val, err := tx.Get(bucketRepos, repoKey); err == nil {
 			var info repoInfo
 			if json.Unmarshal(val, &info) == nil {
 				displayPath = info.DisplayPath
 			}
 		}
+		deletedDisplayPath = displayPath
 		if err := tx.Delete(bucketRepos, repoKey); err != nil && err != metastore.ErrKeyNotFound {
 			return fmt.Errorf("delete repo info: %w", err)
 		}
 
-		// 2. Delete display path → storage_id lookup
+		// 2. Delete display path → storage_id lookup and namespace index
 		if displayPath != "" {
 			lookupKey := []byte(displayPath)
 			if err := tx.Delete(bucketRepoLookup, lookupKey); err != nil && err != metastore.ErrKeyNotFound {
 				return fmt.Errorf("delete path lookup: %w", err)
+			}
+			if err := removeRepositoryNamespaceIndexTx(tx, displayPath); err != nil {
+				return fmt.Errorf("remove repository namespace index: %w", err)
 			}
 		}
 
@@ -1075,15 +1077,14 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 	}
 	s.persistUsageCounters()
 
-	// Clear intermediate directory cache
-	s.intermediateDirCache.Range(func(key, value interface{}) bool {
-		if k, ok := key.(string); ok {
-			if len(k) > len(storageID) && k[:len(storageID)] == storageID {
-				s.intermediateDirCache.Delete(key)
-			}
+	// Clear intermediate directory cache entries for every ancestor of the
+	// deleted repository. The namespace index remains authoritative.
+	if deletedDisplayPath != "" {
+		parts := strings.Split(strings.Trim(deletedDisplayPath, "/"), "/")
+		for i := 1; i < len(parts); i++ {
+			s.intermediateDirCache.Delete(strings.Join(parts[:i], "/"))
 		}
-		return true
-	})
+	}
 
 	s.logger.Info("repository deleted from node",
 		"storage_id", storageID,
@@ -1218,6 +1219,9 @@ func metricSeriesItemFromMeta(meta logengine.MetricSeriesMeta) *pb.MetricSeriesI
 		Labels:          meta.Labels,
 		MinTimeUnixNano: meta.MinTime.UnixNano(),
 		MaxTimeUnixNano: meta.MaxTime.UnixNano(),
+		MetricType:      meta.MetricType,
+		Unit:            meta.Unit,
+		Description:     meta.Description,
 	}
 }
 

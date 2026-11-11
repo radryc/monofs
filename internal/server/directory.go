@@ -286,7 +286,7 @@ func (s *Server) checkVirtualFile(storageID, filePath string) *pb.LookupResponse
 // ReadDir implements the ReadDir RPC (streaming).
 func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServer[pb.DirEntry]) error {
 	startTime := time.Now()
-	path := req.Path
+	path := strings.Trim(req.Path, "/")
 	s.logger.Debug("readdir started", "path", path)
 
 	if s.access != nil {
@@ -304,47 +304,13 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 		repoCount := 0
 
 		s.db.View(func(tx metastore.Tx) error {
-			// Use GetKeys first to get only keys (lighter), then batch Get values
-			keys, err := tx.GetKeys(bucketRepos)
-			if err != nil {
-				return nil // Empty is okay
-			}
-
-			repoCount = len(keys)
-
-			// Process in batches of 100
-			const batchSize = 100
-			for batchStart := 0; batchStart < len(keys); batchStart += batchSize {
-				batchEnd := batchStart + batchSize
-				if batchEnd > len(keys) {
-					batchEnd = len(keys)
+			return tx.ScanPrefix(bucketRepoChildren, []byte{0x00}, func(key, _ []byte) error {
+				repoCount++
+				if len(key) > 1 {
+					topLevelDirs[string(key[1:])] = true
 				}
-
-				for i := batchStart; i < batchEnd; i++ {
-					value, err := tx.Get(bucketRepos, keys[i])
-					if err != nil {
-						continue
-					}
-
-					var info repoInfo
-					if err := json.Unmarshal(value, &info); err != nil {
-						continue
-					}
-
-					displayPath := info.DisplayPath
-					if idx := strings.Index(displayPath, "/"); idx > 0 {
-						topLevelDirs[displayPath[:idx]] = true
-					} else {
-						// Repo without slash, show as-is
-						stream.Send(&pb.DirEntry{
-							Name: displayPath,
-							Mode: 0755 | uint32(syscall.S_IFDIR),
-							Ino:  hashPath(displayPath),
-						})
-					}
-				}
-			}
-			return nil
+				return nil
+			})
 		})
 
 		if repoCount == 0 && len(topLevelDirs) == 0 {
@@ -385,50 +351,19 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 
 	// If no matching repo found, treat as intermediate directory
 	if !ok {
-		pathPrefix := path + "/"
 		intermediateDirs := make(map[string]bool)
 		for _, dir := range managedNamespaceEntries(path) {
 			intermediateDirs[dir] = true
 		}
 
+		scanPrefix := []byte(path + "\x00")
 		s.db.View(func(tx metastore.Tx) error {
-			// Use GetKeys first, then batch Get values
-			keys, err := tx.GetKeys(bucketRepos)
-			if err != nil {
+			return tx.ScanPrefix(bucketRepoChildren, scanPrefix, func(key, _ []byte) error {
+				if len(key) > len(scanPrefix) {
+					intermediateDirs[string(key[len(scanPrefix):])] = true
+				}
 				return nil
-			}
-
-			// Process in batches of 100
-			const batchSize = 100
-			for batchStart := 0; batchStart < len(keys); batchStart += batchSize {
-				batchEnd := batchStart + batchSize
-				if batchEnd > len(keys) {
-					batchEnd = len(keys)
-				}
-
-				for i := batchStart; i < batchEnd; i++ {
-					value, err := tx.Get(bucketRepos, keys[i])
-					if err != nil {
-						continue
-					}
-
-					var info repoInfo
-					if err := json.Unmarshal(value, &info); err != nil {
-						continue
-					}
-
-					displayPath := info.DisplayPath
-					if strings.HasPrefix(displayPath, pathPrefix) {
-						remainder := strings.TrimPrefix(displayPath, pathPrefix)
-						if idx := strings.Index(remainder, "/"); idx > 0 {
-							intermediateDirs[remainder[:idx]] = true
-						} else {
-							intermediateDirs[remainder] = true
-						}
-					}
-				}
-			}
-			return nil
+			})
 		})
 
 		// Collect and sort entries for deterministic ordering

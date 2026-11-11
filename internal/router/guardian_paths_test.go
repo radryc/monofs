@@ -23,6 +23,139 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func TestGuardianReadRepairsContentVersionMismatch(t *testing.T) {
+	router, _, node, cleanup := newGuardianRouterTestHarness(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	logicalPath := "/partitions/genomics/intents/workers.yaml"
+	first := []byte("version-one\n")
+	writeResp, err := router.UpsertGuardianPaths(ctx, &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{{
+			LogicalPath: logicalPath,
+			Content:     first,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGuardianPaths() error = %v", err)
+	}
+	firstVersion := writeResp.GetVersions()[0].GetVersionId()
+
+	mapped, err := mapGuardianLogicalPath(logicalPath)
+	if err != nil {
+		t.Fatalf("mapGuardianLogicalPath() error = %v", err)
+	}
+
+	// Simulate the write ordering failure: content reached the node but the
+	// version commit did not, so the version still describes the old content.
+	second := []byte("version-two\n")
+	fullPath := guardianDisplayPathJoin(mapped.DisplayPath, mapped.RelativePath)
+	node.mu.Lock()
+	node.files[fullPath] = append([]byte(nil), second...)
+	node.fileMode[fullPath] = 0o644 | uint32(syscall.S_IFREG)
+	node.files[mapped.RelativePath] = append([]byte(nil), second...)
+	node.fileMode[mapped.RelativePath] = 0o644 | uint32(syscall.S_IFREG)
+	node.mu.Unlock()
+
+	readResp, err := router.ReadGuardianPath(ctx, &pb.ReadGuardianPathRequest{
+		GuardianToken: "secret-token",
+		LogicalPath:   logicalPath,
+	})
+	if err != nil {
+		t.Fatalf("ReadGuardianPath() error = %v (expected the node content to be served)", err)
+	}
+	if got := string(readResp.GetContent()); got != string(second) {
+		t.Fatalf("read content = %q, want %q", got, string(second))
+	}
+
+	// A CAS write using the version returned by the read must succeed and
+	// commit a version that matches the new content, healing the pair.
+	writeResp2, err := router.UpsertGuardianPaths(ctx, &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{{
+			LogicalPath:       logicalPath,
+			Content:           []byte("version-three\n"),
+			ExpectedVersionId: readResp.GetVersion().GetVersionId(),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGuardianPaths() after mismatch error = %v", err)
+	}
+	if writeResp2.GetVersions()[0].GetVersionId() == firstVersion {
+		t.Fatalf("write version unchanged after healing")
+	}
+	if got := writeResp2.GetVersions()[0].GetContentSha256(); got != guardianContentHash([]byte("version-three\n")) {
+		t.Fatalf("healed version sha = %q, want %q", got, guardianContentHash([]byte("version-three\n")))
+	}
+}
+
+func TestGuardianReadTombstonesVersionWhenContentIsMissing(t *testing.T) {
+	router, _, node, cleanup := newGuardianRouterTestHarness(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	logicalPath := "/partitions/genomics/.state/intents/query.json"
+	if _, err := router.UpsertGuardianPaths(ctx, &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{{
+			LogicalPath: logicalPath,
+			Content:     []byte(`{"status":"Healthy"}`),
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertGuardianPaths() error = %v", err)
+	}
+
+	// Simulate content loss after a replica/router failover: the version record
+	// survives but the bytes are gone from every node.
+	mapped, err := mapGuardianLogicalPath(logicalPath)
+	if err != nil {
+		t.Fatalf("mapGuardianLogicalPath() error = %v", err)
+	}
+	fullPath := guardianDisplayPathJoin(mapped.DisplayPath, mapped.RelativePath)
+	node.mu.Lock()
+	delete(node.files, fullPath)
+	delete(node.files, mapped.RelativePath)
+	delete(node.fileMode, fullPath)
+	delete(node.fileMode, mapped.RelativePath)
+	node.mu.Unlock()
+
+	readResp, err := router.ReadGuardianPath(ctx, &pb.ReadGuardianPathRequest{
+		GuardianToken: "secret-token",
+		LogicalPath:   logicalPath,
+	})
+	if err != nil {
+		t.Fatalf("ReadGuardianPath() error = %v (want Found=false instead of Unavailable)", err)
+	}
+	if readResp.GetFound() {
+		t.Fatal("expected Found=false after the content disappeared")
+	}
+
+	// Guardian reacts to Found=false with a create (expected version "absent").
+	// The tombstoned record must not block that write.
+	if _, err := router.UpsertGuardianPaths(ctx, &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{{
+			LogicalPath:       logicalPath,
+			Content:           []byte(`{"status":"Blocked"}`),
+			ExpectedVersionId: "absent",
+		}},
+	}); err != nil {
+		t.Fatalf("create after missing content error = %v", err)
+	}
+
+	readResp, err = router.ReadGuardianPath(ctx, &pb.ReadGuardianPathRequest{
+		GuardianToken: "secret-token",
+		LogicalPath:   logicalPath,
+	})
+	if err != nil {
+		t.Fatalf("ReadGuardianPath() after recreate error = %v", err)
+	}
+	if !readResp.GetFound() || string(readResp.GetContent()) != `{"status":"Blocked"}` {
+		t.Fatalf("read after recreate = found:%v content:%q", readResp.GetFound(), readResp.GetContent())
+	}
+}
+
 func TestGuardianPathsWriteReadDeleteAndHistory(t *testing.T) {
 	router, nodeClient, _, cleanup := newGuardianRouterTestHarness(t)
 	defer cleanup()
@@ -827,6 +960,86 @@ func TestGuardianKVSLeaderIncludedWhenGenericHealthFails(t *testing.T) {
 	}
 }
 
+func TestGuardianMutationTargetsSkipsCoolingKVSLeader(t *testing.T) {
+	now := time.Now()
+	nodes := []guardianNodeTarget{
+		{id: "node-1", address: "node-1:9000", healthy: true, kvsStatus: &pb.KVSNodeStatus{Enabled: true, Healthy: true, Role: "leader", LeaderId: "node-1"}},
+		{id: "node-2", address: "node-2:9000", healthy: true, kvsStatus: &pb.KVSNodeStatus{Enabled: true, Healthy: true, Role: "follower", LeaderId: "node-1"}},
+	}
+	nodes[0].failedUntil = now.Add(time.Minute)
+
+	router := &Router{}
+	targets := router.guardianMutationTargets(nodes, "guardian-system")
+	if len(targets) != 1 {
+		t.Fatalf("targets = %+v, want one peer", targets)
+	}
+	if targets[0].id != "node-2" {
+		t.Fatalf("target = %s, want node-2", targets[0].id)
+	}
+}
+
+func TestGuardianMutationTargetsSkipsCoolingReplica(t *testing.T) {
+	now := time.Now()
+	nodes := []guardianNodeTarget{
+		{id: "node-1", address: "node-1:9000", healthy: true},
+		{id: "node-2", address: "node-2:9000", healthy: true},
+	}
+	nodes[0].failedUntil = now.Add(time.Minute)
+
+	router := &Router{}
+	targets := router.guardianMutationTargets(nodes, "guardian/example")
+	if len(targets) != 1 || targets[0].id != "node-2" {
+		t.Fatalf("targets = %+v, want only node-2", targets)
+	}
+}
+
+func TestGuardianKVSUpsertFailsOverToPeer(t *testing.T) {
+	router, nodes, cleanup := newGuardianMultiNodeRouterTestHarness(t, map[string]*pb.KVSNodeStatus{
+		"node-1": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
+		"node-2": {Enabled: true, Healthy: true, Mode: "raft", Role: "leader", LeaderId: "node-2", PeerCount: 3},
+		"node-3": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
+	})
+	defer cleanup()
+
+	// node-2 is the cached leader but its transport is down. The write should
+	// be retried against a healthy peer instead of failing the whole upsert.
+	brokenConn, err := grpc.NewClient(
+		"passthrough:///broken-node-2",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return nil, errors.New("connection refused")
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient() error = %v", err)
+	}
+	t.Cleanup(func() { _ = brokenConn.Close() })
+	router.nodes["node-2"].client = pb.NewMonoFSClient(brokenConn)
+
+	_, err = router.UpsertGuardianPaths(context.Background(), &pb.UpsertGuardianPathsRequest{
+		GuardianToken: "secret-token",
+		Writes: []*pb.GuardianPathWrite{{
+			LogicalPath: "/.queues/failover/task.yaml",
+			Content:     []byte("kind: Task\n"),
+		}},
+		Context: &pb.GuardianMutationContext{
+			Reason:        "kvs peer failover",
+			CorrelationId: "leader-transport-failover",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGuardianPaths() error = %v", err)
+	}
+
+	if got := nodes["node-2"].ingestBatchCalls; got != 0 {
+		t.Fatalf("failed leader ingest calls = %d, want 0", got)
+	}
+	wrotePeer := nodes["node-1"].ingestBatchCalls > 0 || nodes["node-3"].ingestBatchCalls > 0
+	if !wrotePeer {
+		t.Fatal("expected a healthy KVS peer to receive the write")
+	}
+}
+
 func TestGuardianKVSRetriesAfterLeadershipError(t *testing.T) {
 	router, nodes, cleanup := newGuardianMultiNodeRouterTestHarness(t, map[string]*pb.KVSNodeStatus{
 		"node-1": {Enabled: true, Healthy: true, Mode: "raft", Role: "follower", LeaderId: "node-2", PeerCount: 3},
@@ -1424,6 +1637,41 @@ func (s *guardianTestNodeServer) RegisterRepository(_ context.Context, req *pb.R
 		GuardianUrl:     req.GetGuardianUrl(),
 	}
 	return &pb.RegisterRepositoryResponse{Success: true, Message: "ok"}, nil
+}
+
+func (s *guardianTestNodeServer) ListGuardianPartitions(_ context.Context, req *pb.ListGuardianPartitionsRequest) (*pb.ListGuardianPartitionsResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pageSize := int(req.GetPageSize())
+	if pageSize <= 0 {
+		pageSize = 1000
+	}
+	startAfter := req.GetPageToken()
+	ids := make([]string, 0, len(s.repos))
+	for storageID, displayPath := range s.repos {
+		if displayPath != "guardian-system" && !strings.HasPrefix(displayPath, "guardian/") {
+			continue
+		}
+		ids = append(ids, storageID)
+	}
+	sort.Slice(ids, func(i, j int) bool { return s.repos[ids[i]] < s.repos[ids[j]] })
+	resp := &pb.ListGuardianPartitionsResponse{}
+	for _, storageID := range ids {
+		displayPath := s.repos[storageID]
+		if startAfter != "" && displayPath <= startAfter {
+			continue
+		}
+		if len(resp.Partitions) >= pageSize {
+			resp.NextPageToken = resp.Partitions[len(resp.Partitions)-1].GetDisplayPath()
+			break
+		}
+		resp.Partitions = append(resp.Partitions, &pb.GuardianPartitionRecord{
+			StorageId:   storageID,
+			DisplayPath: displayPath,
+		})
+	}
+	resp.Total = int64(len(ids))
+	return resp, nil
 }
 
 func (s *guardianTestNodeServer) IngestFileBatch(_ context.Context, req *pb.IngestFileBatchRequest) (*pb.IngestFileBatchResponse, error) {

@@ -10,6 +10,12 @@ import (
 // exporters and normalized OTLP attributes working.
 var partitionLabelKeys = []string{"guardian.partition", "guardian_partition", "partition"}
 
+// PartitionFromLabels returns the canonical partition for a label/attribute
+// map. It is exported for storage backends that live outside this package.
+func PartitionFromLabels(labels map[string]string) string {
+	return recordPartition(labels)
+}
+
 // recordPartition returns the Strata partition associated with a telemetry
 // record. An empty result means the record is not partition-attributed.
 func recordPartition(labels map[string]string) string {

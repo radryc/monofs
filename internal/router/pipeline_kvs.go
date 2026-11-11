@@ -122,6 +122,25 @@ func (r *Router) processGuardianDelete(ctx context.Context, req *pb.DeleteGuardi
 		return nil, fmt.Errorf("at least one delete required")
 	}
 
+	if err := r.requireGuardianCoordinator(); err != nil {
+		return nil, err
+	}
+
+	displayPaths := make([]string, 0, len(req.GetDeletes()))
+	for _, del := range req.GetDeletes() {
+		mapped, err := mapGuardianLogicalPath(del.GetLogicalPath())
+		if err != nil {
+			return nil, fmt.Errorf("invalid path %q: %w", del.GetLogicalPath(), err)
+		}
+		displayPaths = append(displayPaths, mapped.DisplayPath)
+	}
+	unlockMutations := r.lockGuardianMutations(displayPaths...)
+	defer unlockMutations()
+
+	if err := r.requireGuardianCoordinator(); err != nil {
+		return nil, err
+	}
+
 	now := time.Now()
 	committedAt := now.Unix()
 	batchRevisionID := guardianBatchRevisionID(now)
@@ -138,8 +157,11 @@ func (r *Router) processGuardianDelete(ctx context.Context, req *pb.DeleteGuardi
 			return nil, fmt.Errorf("invalid path %q: %w", del.GetLogicalPath(), err)
 		}
 
-		current, exists := r.guardianVersions.currentVersion(mapped.LogicalPath)
-		if !exists || current.Tombstone {
+		current, exists, currentErr := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		if currentErr != nil {
+			return nil, fmt.Errorf("guardian version store unavailable: %w", currentErr)
+		}
+		if !exists || current == nil || current.Tombstone {
 			continue
 		}
 
@@ -158,13 +180,14 @@ func (r *Router) processGuardianDelete(ctx context.Context, req *pb.DeleteGuardi
 		}
 
 		version, err := r.guardianVersions.commit(guardianVersionCommit{
-			LogicalPath:     mapped.LogicalPath,
-			DisplayPath:     mapped.DisplayPath,
-			StorageID:       mapped.StorageID,
-			BatchRevisionID: batchRevisionID,
-			PrincipalID:     principal.PrincipalID,
-			CommittedAt:     committedAt,
-			Tombstone:       true,
+			LogicalPath:       mapped.LogicalPath,
+			DisplayPath:       mapped.DisplayPath,
+			StorageID:         mapped.StorageID,
+			BatchRevisionID:   batchRevisionID,
+			PrincipalID:       principal.PrincipalID,
+			CommittedAt:       committedAt,
+			ExpectedVersionID: del.GetExpectedVersionId(),
+			Tombstone:         true,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("record version: %w", err)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/internal/storage/logengine"
+	"github.com/radryc/monofs/internal/telemetrycrypto"
 )
 
 const (
@@ -49,6 +50,9 @@ type Config struct {
 	Timeout time.Duration
 	// HTTPClient is optional and primarily used by tests.
 	HTTPClient *http.Client
+	// Encryption optionally seals sensitive payload columns. Filter columns
+	// (tenant, time, service, trace/span id, level, metrics) stay plaintext.
+	Encryption *telemetrycrypto.Provider
 }
 
 // TraceStore implements MonoFS telemetry ingest and query over ClickHouse's
@@ -60,6 +64,7 @@ type TraceStore struct {
 	baseURL   string
 	client    *http.Client
 	transport *http.Transport
+	stats     clickHouseStatsCache
 }
 
 // New creates a ClickHouse trace store. Call Bootstrap before serving traffic.
@@ -203,9 +208,14 @@ func (s *TraceStore) Bootstrap(ctx context.Context) error {
 			sql: "CREATE TABLE IF NOT EXISTS " + s.tableFor(s.cfg.MetricsTable) + ` (
 		tenant LowCardinality(String),
 		timestamp DateTime64(9, 'UTC'),
+		start_time DateTime64(9, 'UTC'),
 		service LowCardinality(String),
 		metric_name String,
 		value Float64,
+		metric_type LowCardinality(String),
+		temporality LowCardinality(String),
+		unit String,
+		description String,
 		labels Map(String, String)
 	) ENGINE = MergeTree
 	PARTITION BY toYYYYMMDD(timestamp)
@@ -277,6 +287,10 @@ func (s *TraceStore) insertBatch(ctx context.Context, spans []logengine.SpanReco
 		if duration < 0 {
 			duration = 0
 		}
+		name, err := s.encryptField(partitionFor(attributes), "spans.name", span.Name)
+		if err != nil {
+			return err
+		}
 		if err := encoder.Encode(insertSpan{
 			Tenant:       s.cfg.Tenant,
 			Timestamp:    formatClickHouseTime(start),
@@ -286,7 +300,7 @@ func (s *TraceStore) insertBatch(ctx context.Context, spans []logengine.SpanReco
 			SpanID:       span.SpanID,
 			ParentSpanID: span.ParentSpanID,
 			Service:      span.Service,
-			Name:         span.Name,
+			Name:         name,
 			StatusCode:   span.StatusCode,
 			Attributes:   attributes,
 		}); err != nil {
@@ -316,7 +330,8 @@ func (s *TraceStore) QueryTraces(ctx context.Context, traceID, service string, f
 
 // StreamTraces streams spans from ClickHouse in newest-first order.
 func (s *TraceStore) StreamTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int, yield func(logengine.SpanRecord) error) error {
-	query, params := s.traceQuery(traceID, service, from, to, limit)
+	scope, _ := logengine.QueryScopeFromContext(ctx)
+	query, params := s.traceQuery(ctx, traceID, service, from, to, limit)
 	response, err := s.do(ctx, query, params, nil)
 	if err != nil {
 		return err
@@ -332,7 +347,16 @@ func (s *TraceStore) StreamTraces(ctx context.Context, traceID, service string, 
 			}
 			return fmt.Errorf("decode clickhouse span: %w", err)
 		}
-		if err := yield(row.record()); err != nil {
+		record, err := row.record(s.encryption())
+		if err != nil {
+			return err
+		}
+		// The SQL predicate is the efficient path; keep the record-level guard
+		// so the scope stays authoritative even if the predicate is changed.
+		if scope.Restricted && !scope.AllowsPartitionLabels(record.Attributes) {
+			continue
+		}
+		if err := yield(record); err != nil {
 			return err
 		}
 	}
@@ -350,7 +374,15 @@ type traceRow struct {
 	Attributes   string `json:"attributes_json"`
 }
 
-func (r traceRow) record() logengine.SpanRecord {
+func (r traceRow) record(enc *telemetrycrypto.Provider) (logengine.SpanRecord, error) {
+	name := r.Name
+	if enc != nil {
+		decrypted, err := enc.DecryptField(r.Name, "spans.name")
+		if err != nil {
+			return logengine.SpanRecord{}, err
+		}
+		name = decrypted
+	}
 	record := logengine.SpanRecord{
 		Timestamp:    time.Unix(0, r.TimestampNS).UTC(),
 		EndTime:      time.Unix(0, r.EndTimeNS).UTC(),
@@ -358,16 +390,16 @@ func (r traceRow) record() logengine.SpanRecord {
 		SpanID:       r.SpanID,
 		ParentSpanID: r.ParentSpanID,
 		Service:      r.Service,
-		Name:         r.Name,
+		Name:         name,
 		StatusCode:   r.StatusCode,
 	}
 	if strings.TrimSpace(r.Attributes) != "" {
 		_ = json.Unmarshal([]byte(r.Attributes), &record.Attributes)
 	}
-	return record
+	return record, nil
 }
 
-func (s *TraceStore) traceQuery(traceID, service string, from, to time.Time, limit int) (string, url.Values) {
+func (s *TraceStore) traceQuery(ctx context.Context, traceID, service string, from, to time.Time, limit int) (string, url.Values) {
 	params := url.Values{}
 	params.Set("param_tenant", s.cfg.Tenant)
 	where := []string{"tenant = {tenant:String}"}
@@ -387,6 +419,9 @@ func (s *TraceStore) traceQuery(traceID, service string, from, to time.Time, lim
 		params.Set("param_service", service)
 		where = append(where, "service = {service:String}")
 	}
+	if scope, ok := logengine.QueryScopeFromContext(ctx); ok && scope.Restricted {
+		where = append(where, traceScopePredicate("attributes", scope, params))
+	}
 	if limit <= 0 {
 		limit = 1000
 	}
@@ -400,6 +435,31 @@ func (s *TraceStore) traceQuery(traceID, service string, from, to time.Time, lim
 		"FROM " + s.table() + " WHERE " + strings.Join(where, " AND ") +
 		" ORDER BY timestamp DESC LIMIT " + strconv.Itoa(limit) + " FORMAT JSONEachRow"
 	return query, params
+}
+
+// traceScopePredicate pushes the caller's partition scope into the span query.
+// The predicate must be applied before ORDER BY/LIMIT: scanning the newest
+// rows globally and then dropping the invisible ones leaves a scoped caller
+// with an empty page while their own data sits further back in the window.
+func traceScopePredicate(column string, scope logengine.QueryScope, params url.Values) string {
+	placeholders := make([]string, 0, len(scope.Partitions))
+	for _, partition := range scope.Partitions {
+		partition = strings.TrimSpace(partition)
+		if partition == "" {
+			continue
+		}
+		name := "scope_" + strconv.Itoa(len(placeholders))
+		params.Set("param_"+name, partition)
+		placeholders = append(placeholders, "{"+name+":String}")
+	}
+	if len(placeholders) == 0 {
+		return "0"
+	}
+	list := strings.Join(placeholders, ", ")
+	return "(" +
+		"coalesce(" + column + "['guardian_partition'], '') IN (" + list + ") OR " +
+		"coalesce(" + column + "['guardian.partition'], '') IN (" + list + ")" +
+		")"
 }
 
 // DiscoverTraceServices returns distinct services in the time window.
@@ -438,7 +498,20 @@ func (s *TraceStore) DiscoverTraceTagValues(ctx context.Context, from, to time.T
 		return s.DiscoverTraceServices(ctx, from, to)
 	}
 	query, params := s.discoveryQuery(tag, from, to, tag)
-	return s.queryStrings(ctx, query, params)
+	values, err := s.queryStrings(ctx, query, params)
+	if err != nil {
+		return nil, err
+	}
+	if tag == "name" && s.encryption() != nil {
+		for i, value := range values {
+			decrypted, decErr := s.decryptField(value, "spans.name")
+			if decErr != nil {
+				return nil, decErr
+			}
+			values[i] = decrypted
+		}
+	}
+	return values, nil
 }
 
 func (s *TraceStore) discoveryQuery(kind string, from, to time.Time, tag string) (string, url.Values) {

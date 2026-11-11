@@ -69,6 +69,22 @@ COPY . .
 # with this module's OpenTelemetry log API.
 ARG OTELC_VERSION=v1.2.0
 RUN GOBIN=/usr/local/bin go install go.opentelemetry.io/otelc/tool/cmd/otelc@${OTELC_VERSION}
+
+# Build Bazelisk from the Go module proxy and copy it into the client image.
+# GitHub release-asset downloads (github.com/.../releases/download/...) return
+# 504s from this network, while proxy.golang.org is reachable and cached.
+ARG BAZELISK_VERSION=v1.29.0
+RUN set -eu; \
+    for attempt in 1 2 3; do \
+        if GOBIN=/usr/local/bin go install "github.com/bazelbuild/bazelisk@${BAZELISK_VERSION}"; then \
+            break; \
+        fi; \
+        [ "$attempt" -lt 3 ] || exit 1; \
+        echo "go install bazelisk failed (attempt ${attempt}/3); retrying..." >&2; \
+        sleep $((attempt * 5)); \
+    done; \
+    ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+
 COPY --from=router-ui-builder /ui/dist ./internal/router/ui/dist
 
 FROM builder AS server-builder
@@ -200,6 +216,11 @@ FROM alpine:3.19 AS router
 
 RUN apk add --no-cache ca-certificates
 
+# The router instruments its HTTP server (otelhttp) and gRPC clients (internal/router)
+# manually. otelc's gRPC client instrumentation leaks long-lived subscription
+# spans into goroutine-local storage, so disable it just like guardiand does.
+ENV OTEL_GO_DISABLED_INSTRUMENTATIONS=nethttp,grpc
+
 COPY --from=router-builder /bin/monofs-router /usr/local/bin/monofs-router
 
 EXPOSE 9090
@@ -278,10 +299,9 @@ RUN apk add --no-cache \
 # Install Rust via apk to speed up builds and cache effectively
 RUN apk add --no-cache rust cargo
 
-# Install Bazel via Bazelisk
-RUN curl -fsSL https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 \
-    -o /usr/local/bin/bazel && \
-    chmod +x /usr/local/bin/bazel
+# Install Bazel (Bazelisk built in the builder stage; see note there)
+COPY --from=builder /usr/local/bin/bazelisk /usr/local/bin/bazelisk
+RUN ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
 
 # Copy Go 1.26.10 toolchain from the builder stage
 COPY --from=builder /usr/local/go /usr/local/go

@@ -24,10 +24,12 @@ import (
 	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
+	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"github.com/radryc/monofs/pkg/repowatch"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -38,6 +40,10 @@ type RouterConfig struct {
 	RouterName          string
 	HealthCheckInterval time.Duration
 	UnhealthyThreshold  time.Duration
+	// HealthProbeTimeout bounds a single node GetNodeInfo probe. A loaded node
+	// can take longer than a few hundred milliseconds to answer; too tight a
+	// timeout marks healthy nodes unhealthy and fails routing.
+	HealthProbeTimeout  time.Duration
 	PeerRouters         []RouterPeer
 	FetcherAddresses    []string          // Fetcher cluster addresses for monitoring
 	FetcherDiagnostics  []string          // Optional explicit diagnostics addresses for fetchers
@@ -47,6 +53,20 @@ type RouterConfig struct {
 	EncryptionKey       []byte            // 32-byte ChaCha20-Poly1305 key for packager archives
 	GuardianStateDir    string            // Optional directory for persistent Guardian router state
 	WorkspaceStateDir   string            // Optional directory for persistent workspace job state (Phase 1)
+
+	// Guardian version store backend.
+	//   local: router-local Pebble store (default, single-router)
+	//   kvs:   KVS-backed authoritative store for asset paths (multicluster)
+	GuardianVersionBackend         string
+	GuardianVersionBackendFallback string // error (default) or local
+
+	// Guardian coordinator lease (cross-router mutation serialization).
+	// auto|required|off. Defaults to required when the version backend is kvs.
+	GuardianCoordinatorLease     string
+	GuardianCoordinatorLeaseName string
+	GuardianCoordinatorLeaseNS   string
+	// GuardianAllowMultiWriter bypasses the coordinator lease for development.
+	GuardianAllowMultiWriter bool
 
 	// Source push behavior
 	SourcePushMode string // "squash" (default) or "preserve"
@@ -139,27 +159,30 @@ type RouterPeer struct {
 // DefaultRouterConfig returns default router configuration.
 func DefaultRouterConfig() RouterConfig {
 	return RouterConfig{
-		ClusterID:               "monofs-cluster",
-		HealthCheckInterval:     5 * time.Second,  // Check every 5 seconds (reduced frequency to avoid lock contention)
-		UnhealthyThreshold:      15 * time.Second, // Mark unhealthy after 15 seconds (3 missed checks)
-		PeerRouters:             nil,
-		GuardianStateDir:        "",
-		ReplicationFactor:       2,                // Primary + 1 backup (protects against 1 node failure)
-		RebalanceDelay:          10 * time.Minute, // Wait 10 minutes before permanent rebalancing
-		GracefulFailoverDelay:   60 * time.Second, // 60 seconds for planned restarts
-		GuardianIngestTimeout:   5 * time.Minute,  // 5 minutes for large guardian file batches
-		AllowLocalIngest:        true,             // Local filesystem ingestion is on unless explicitly disabled
-		AutoRefreshInterval:     1 * time.Minute,
-		AutoRefreshMaxInterval:  1 * time.Hour,
-		AutoRefreshConcurrency:  4,
-		AutoRefreshBatchSize:    32,
-		AutoRefreshShards:       1,
-		AutoRefreshStateDir:     ".monofs-repowatch",
-		AutoRefreshLeaseName:    "monofs-repowatch",
-		QueryNodeStartTimeout:   30 * time.Second,
-		QueryNodeStragglerGrace: time.Second,
-		QueryNodeIdleTimeout:    10 * time.Second,
-		SpanEngine:              "logengine",
+		ClusterID:                      "monofs-cluster",
+		HealthCheckInterval:            5 * time.Second,  // Check every 5 seconds (reduced frequency to avoid lock contention)
+		UnhealthyThreshold:             15 * time.Second, // Mark unhealthy after 15 seconds (3 missed checks)
+		HealthProbeTimeout:             2 * time.Second,  // Allow headroom for a busy (not dead) node to answer
+		PeerRouters:                    nil,
+		GuardianStateDir:               "",
+		GuardianVersionBackend:         "local",
+		GuardianVersionBackendFallback: "error",
+		ReplicationFactor:              2,                // Primary + 1 backup (protects against 1 node failure)
+		RebalanceDelay:                 10 * time.Minute, // Wait 10 minutes before permanent rebalancing
+		GracefulFailoverDelay:          60 * time.Second, // 60 seconds for planned restarts
+		GuardianIngestTimeout:          5 * time.Minute,  // 5 minutes for large guardian file batches
+		AllowLocalIngest:               true,             // Local filesystem ingestion is on unless explicitly disabled
+		AutoRefreshInterval:            1 * time.Minute,
+		AutoRefreshMaxInterval:         1 * time.Hour,
+		AutoRefreshConcurrency:         4,
+		AutoRefreshBatchSize:           32,
+		AutoRefreshShards:              1,
+		AutoRefreshStateDir:            ".monofs-repowatch",
+		AutoRefreshLeaseName:           "monofs-repowatch",
+		QueryNodeStartTimeout:          30 * time.Second,
+		QueryNodeStragglerGrace:        time.Second,
+		QueryNodeIdleTimeout:           10 * time.Second,
+		SpanEngine:                     "logengine",
 	}
 }
 
@@ -198,6 +221,15 @@ type Router struct {
 	repoCacheMu sync.RWMutex
 	repoCache   *RepositoriesData
 	repoCacheAt time.Time
+
+	guardianPartitionsMu      sync.RWMutex
+	guardianPartitionsCache   *guardianPartitionSnapshot
+	guardianPartitionsAt      time.Time
+	guardianPartitionsGen     uint64
+	guardianPartitionsSeq     atomic.Uint64
+	guardianPartitionsHistory map[uint64]*guardianPartitionSnapshot
+	guardianPartitionsOrder   []uint64
+	guardianPartitionsGroup   singleflight.Group
 
 	statusCacheMu sync.RWMutex
 	statusCache   *StatusData
@@ -264,6 +296,17 @@ type Router struct {
 	guardianPrincipals          *guardianPrincipalStore
 	guardianVersions            *guardianVersionStore
 	guardianRegisteredNodeRepos sync.Map // "nodeID|addr|storageID|displayPath|repoURL" -> bool
+	// guardianMutationLocks are striped locks that serialize the
+	// check -> node apply -> version commit critical section for a display
+	// path. Cross-router serialization is provided by the coordinator lease
+	// and the KVS-backed version store.
+	guardianMutationLocks [guardianMutationLockStripes]sync.Mutex
+
+	guardianLeaseMode        string
+	guardianLeaseCancel      context.CancelFunc
+	guardianLeader           atomic.Bool
+	guardianLeaseActive      atomic.Bool
+	guardianLeaseUnavailable atomic.Bool
 
 	// Guardian change subscriptions
 	guardianChangeSubs   map[uint64]*guardianChangeSubscriber
@@ -353,6 +396,10 @@ type nodeState struct {
 	kvsStatus                *pb.KVSNodeStatus
 	lastHealthCheckError     string
 	healthCheckFailureLogged bool
+	// guardianFailedUntil excludes the node from Guardian mutation targets for
+	// a short cooldown after a transport failure. The connection is kept alive
+	// so gRPC can reconnect in the background instead of redialing per request.
+	guardianFailedUntil time.Time
 
 	// NEW: Staging and failover state
 	status           NodeStatus
@@ -458,6 +505,38 @@ func discoveredIngestedRepo(info *pb.GetRepositoryInfoResponse, topologyVersion 
 		rebalanceState:    RebalanceStateStable,
 		rebalanceProgress: 1.0,
 	}
+}
+
+// listRepositoryRecords fetches repository metadata from a node in pages. It
+// uses the batched ListRepositories details mode so large clusters do not
+// require one unary GetRepositoryInfo call per repository.
+func listRepositoryRecords(ctx context.Context, client pb.MonoFSClient, prefix string) ([]*pb.RepositoryRecord, error) {
+	const pageSize = 5000
+	var out []*pb.RepositoryRecord
+	pageToken := ""
+	for page := 0; page < 1000; page++ {
+		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		resp, err := client.ListRepositories(callCtx, &pb.ListRepositoriesRequest{
+			Prefix:         prefix,
+			PageSize:       pageSize,
+			PageToken:      pageToken,
+			IncludeDetails: true,
+		})
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resp.GetRepositories()...)
+		nextToken := resp.GetNextPageToken()
+		if nextToken == "" {
+			return out, nil
+		}
+		if nextToken == pageToken {
+			return nil, fmt.Errorf("repository listing pagination token did not advance at %q", pageToken)
+		}
+		pageToken = nextToken
+	}
+	return nil, fmt.Errorf("repository listing exceeded %d pages (possible pagination loop)", 1000)
 }
 
 func autoRefreshOwnerMatches(owner, routerName string) bool {
@@ -570,6 +649,12 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		logger:                    logger,
 		whitelist:                 newWhitelistStore(),
 	}
+	if strings.EqualFold(strings.TrimSpace(cfg.GuardianVersionBackend), "kvs") {
+		r.guardianVersions.kvs = newKVSGuardianVersionBackend(r, r.guardianVersions)
+		r.guardianVersions.kvsFallbackLocal = strings.EqualFold(strings.TrimSpace(cfg.GuardianVersionBackendFallback), "local")
+		logger.Info("guardian version store using KVS backend", "fallback_local", r.guardianVersions.kvsFallbackLocal)
+	}
+	r.startGuardianCoordinatorLease(logger)
 	r.internalTokenValue.Store(strings.TrimSpace(cfg.InternalToken))
 	r.version.Store(1)
 	r.namespaceGeneration.Store(1)
@@ -757,6 +842,7 @@ func (r *Router) SetSearchClient(addr string) error {
 	// Try initial connection
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
 	)
 	if err != nil {
@@ -812,6 +898,7 @@ func (r *Router) retrySearchConnection(addr string) {
 
 		conn, err := grpc.NewClient(addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
 		)
 		if err != nil {
@@ -994,6 +1081,7 @@ func (r *Router) RegisterNode(nodeID, address string, weight uint32) error {
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpcx.IPv4DialerOption(),
+		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 	)
 	if err != nil {
 		return fmt.Errorf("connect to node %s: %w", nodeID, err)
@@ -1103,6 +1191,7 @@ func (r *Router) GetClusterInfo(ctx context.Context, req *pb.ClusterInfoRequest)
 		// Build metadata map with operational status
 		metadata := make(map[string]string)
 		metadata["status"] = state.status.String()
+		metadata["span_engine"] = r.config.SpanEngine
 		if state.status == NodeSyncing {
 			metadata["sync_progress"] = fmt.Sprintf("%.1f%%", state.syncProgress*100)
 		}
@@ -1529,6 +1618,32 @@ func (r *Router) QueryDuckDBSQL(ctx context.Context, req *pb.QueryDuckDBSQLReque
 		Address string          `json:"address"`
 		Result  json.RawMessage `json:"result,omitempty"`
 		Error   string          `json:"error,omitempty"`
+	}
+	// A shared backend (ClickHouse) already contains every node's data. Run the
+	// statement on one healthy node and return a single result envelope instead
+	// of duplicating the same global result once per node.
+	if r.sharedTelemetryReads() {
+		var firstErr error
+		for _, node := range nodes {
+			resp, err := node.client.QueryDuckDBSQL(ctx, req)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			results := []nodeResult{{
+				NodeID:  node.id,
+				Address: node.address,
+				Result:  json.RawMessage(resp.GetResultsJson()),
+			}}
+			data, err := json.Marshal(map[string]any{"nodes": results})
+			if err != nil {
+				return nil, fmt.Errorf("marshal duckdb sql results: %w", err)
+			}
+			return &pb.QueryDuckDBSQLResponse{ResultsJson: string(data)}, nil
+		}
+		return nil, fmt.Errorf("query duckdb sql failed on all nodes: %w", firstErr)
 	}
 	results := make([]nodeResult, len(nodes))
 	var wg sync.WaitGroup
@@ -2658,8 +2773,7 @@ func (r *Router) discoverClusterRepositories() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			// List repositories on this node
-			listResp, err := c.ListRepositories(ctx, &pb.ListRepositoriesRequest{})
+			records, err := listRepositoryRecords(ctx, c, "")
 			if err != nil {
 				r.logger.Warn("failed to list repositories from node",
 					"node_id", nid,
@@ -2669,24 +2783,23 @@ func (r *Router) discoverClusterRepositories() {
 
 			r.logger.Debug("discovered repositories on node",
 				"node_id", nid,
-				"count", len(listResp.RepositoryIds))
+				"count", len(records))
 
-			// Get info for each repository
-			for _, storageID := range listResp.RepositoryIds {
-				infoCtx, infoCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				infoResp, err := c.GetRepositoryInfo(infoCtx, &pb.GetRepositoryInfoRequest{
-					StorageId: storageID,
-				})
-				infoCancel()
-
-				if err != nil {
-					r.logger.Debug("failed to get repo info",
-						"node_id", nid,
-						"storage_id", storageID,
-						"error", err)
+			for _, record := range records {
+				if record == nil || record.GetStorageId() == "" {
 					continue
 				}
-
+				infoResp := &pb.GetRepositoryInfoResponse{
+					StorageId:     record.GetStorageId(),
+					DisplayPath:   record.GetDisplayPath(),
+					Source:        record.GetSource(),
+					Ref:           record.GetRef(),
+					CommitHash:    record.GetCommitHash(),
+					CommitTime:    record.GetCommitTime(),
+					CommitMessage: record.GetCommitMessage(),
+					GuardianUrl:   record.GetGuardianUrl(),
+				}
+				storageID := record.GetStorageId()
 				mu.Lock()
 				if _, exists := discoveredRepos[storageID]; !exists {
 					discoveredRepos[storageID] = discoveredIngestedRepo(infoResp, r.version.Load())
@@ -2715,6 +2828,7 @@ func (r *Router) discoverClusterRepositories() {
 	if newCount > 0 {
 		r.bumpNativeNamespaceGeneration("repository discovery")
 	}
+	r.invalidateGuardianPartitions()
 
 	r.logger.Info("cluster repository discovery complete",
 		"discovered", len(discoveredRepos),
@@ -2748,10 +2862,35 @@ func (r *Router) checkAllNodes() {
 	// or dead node must not stall routing for every other request while its
 	// health check is in flight.
 	type nodeProbe struct {
-		info *pb.NodeInfoResponse
-		err  error
+		info      *pb.NodeInfoResponse
+		err       error
+		startedAt time.Time
 	}
-	probes := make(map[string]nodeProbe)
+	probeTimeout := r.config.HealthProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = 2 * time.Second
+	}
+	runProbes := func(clients map[string]pb.MonoFSClient) map[string]nodeProbe {
+		probes := make(map[string]nodeProbe, len(clients))
+		var probeMu sync.Mutex
+		var probeWG sync.WaitGroup
+		for id, probeClient := range clients {
+			probeWG.Add(1)
+			go func(id string, probeClient pb.MonoFSClient) {
+				defer probeWG.Done()
+				startedAt := time.Now()
+				ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+				info, err := probeClient.GetNodeInfo(ctx, &pb.NodeInfoRequest{})
+				cancel()
+				probeMu.Lock()
+				probes[id] = nodeProbe{info: info, err: err, startedAt: startedAt}
+				probeMu.Unlock()
+			}(id, probeClient)
+		}
+		probeWG.Wait()
+		return probes
+	}
+
 	r.mu.RLock()
 	clients := make(map[string]pb.MonoFSClient, len(r.nodes))
 	for id, st := range r.nodes {
@@ -2760,17 +2899,78 @@ func (r *Router) checkAllNodes() {
 		}
 	}
 	r.mu.RUnlock()
-	for id, probeClient := range clients {
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		info, err := probeClient.GetNodeInfo(ctx, &pb.NodeInfoRequest{})
-		cancel()
-		probes[id] = nodeProbe{info: info, err: err}
+
+	probes := runProbes(clients)
+
+	// First locked pass: detect timeouts and (re)create connections. Do not
+	// perform network probes here; that would block routing for every request
+	// during the probe timeout.
+	newClients := make(map[string]pb.MonoFSClient)
+	now := time.Now()
+	r.mu.Lock()
+	for nodeID, state := range r.nodes {
+		timeSinceLastSeen := now.Sub(state.lastSeen)
+
+		if timeSinceLastSeen > r.config.UnhealthyThreshold {
+			if state.info.Healthy {
+				r.logger.Warn("node became unhealthy, assigning failover",
+					"node_id", nodeID,
+					"last_seen", timeSinceLastSeen,
+					"status", state.status.String())
+				state.info.Healthy = false
+				state.kvsStatus = nil
+				state.guardianFailedUntil = now.Add(guardianNodeFailureCooldown)
+				r.version.Add(1)
+
+				if state.status == NodeActive && !r.IsDrained() {
+					r.assignFailoverNodeLocked(nodeID)
+				}
+			}
+		}
+
+		if state.client == nil && state.conn == nil {
+			conn, err := grpc.NewClient(state.info.Address,
+				append([]grpc.DialOption{
+					grpc.WithTransportCredentials(insecure.NewCredentials()),
+					grpcx.IPv4DialerOption(),
+					grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
+				}, r.internalDialOptions()...)...,
+			)
+			if err != nil {
+				r.logger.Debug("failed to connect to node", "node_id", nodeID, "error", err)
+				if timeSinceLastSeen > r.config.UnhealthyThreshold/2 && state.info.Healthy {
+					r.logger.Warn("node became unhealthy (connection failed), assigning failover",
+						"node_id", nodeID,
+						"last_seen", timeSinceLastSeen,
+						"status", state.status.String())
+					state.info.Healthy = false
+					r.version.Add(1)
+					if state.status == NodeActive && !r.IsDrained() {
+						r.assignFailoverNodeLocked(nodeID)
+					}
+				}
+				continue
+			}
+			state.conn = conn
+			state.client = pb.NewMonoFSClient(conn)
+			newClients[nodeID] = state.client
+			r.logger.Info("established connection to node", "node_id", nodeID, "address", state.info.Address)
+		}
+	}
+	r.mu.Unlock()
+
+	// Probe newly established connections outside the lock, then merge them
+	// into the pre-lock probe results.
+	if len(newClients) > 0 {
+		for id, probe := range runProbes(newClients) {
+			probes[id] = probe
+		}
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	now := time.Now()
+	now = time.Now()
 
 	// Log overall cluster health state at start of each check
 	healthyCount := 0
@@ -2782,163 +2982,92 @@ func (r *Router) checkAllNodes() {
 	r.logger.Debug("health check starting", "total_nodes", len(r.nodes), "healthy_nodes", healthyCount)
 
 	for nodeID, state := range r.nodes {
-		// Check if node has timed out based on lastSeen (for passive monitoring)
-		timeSinceLastSeen := now.Sub(state.lastSeen)
+		if state.client == nil {
+			continue
+		}
+		probe, probed := probes[nodeID]
+		if !probed {
+			// The connection was replaced between the probe pass and this
+			// pass. Leave it for the next health tick instead of blocking here.
+			continue
+		}
+		timeSinceLastSeen := probe.startedAt.Sub(state.lastSeen)
+		nodeInfo, err := probe.info, probe.err
 
-		// NEW: Detect node transition to unhealthy (but still try to reconnect)
-		if timeSinceLastSeen > r.config.UnhealthyThreshold {
-			if state.info.Healthy {
-				r.logger.Warn("node became unhealthy, assigning failover",
+		if err != nil {
+			errText := err.Error()
+			if !state.healthCheckFailureLogged || state.lastHealthCheckError != errText {
+				r.logger.Warn("health check failed", "node_id", nodeID, "error", err, "was_healthy", state.info.Healthy)
+				state.healthCheckFailureLogged = true
+				state.lastHealthCheckError = errText
+			}
+			// Keep the connection: gRPC reconnects with its own backoff.
+			// Closing it here would force a fresh dial on every request
+			// while the node is restarting.
+			// Immediately exclude the node from Guardian mutations and drop
+			// cached KVS roles, which are stale while the node is unreachable.
+			state.kvsStatus = nil
+			state.guardianFailedUntil = now.Add(guardianNodeFailureCooldown)
+			if timeSinceLastSeen > r.config.UnhealthyThreshold/2 && state.info.Healthy {
+				r.logger.Warn("node became unhealthy (health check failed), assigning failover",
 					"node_id", nodeID,
 					"last_seen", timeSinceLastSeen,
 					"status", state.status.String())
 				state.info.Healthy = false
 				r.version.Add(1)
-
-				// Close stale connection
-				if state.conn != nil {
-					state.conn.Close()
-					state.conn = nil
-					state.client = nil
-				}
-
-				// NEW: Assign failover node (only for NodeActive nodes that held data, and not in drain mode)
 				if state.status == NodeActive && !r.IsDrained() {
 					r.assignFailoverNodeLocked(nodeID)
 				}
 			}
-			// IMPORTANT: Don't skip - still try to reconnect even if unhealthy
-			// This allows nodes to recover when they come back online
+			continue
 		}
 
-		// Try to create client connection if needed (for statically registered nodes)
-		if state.client == nil && state.conn == nil {
-			conn, err := grpc.NewClient(state.info.Address,
-				append([]grpc.DialOption{
-					grpc.WithTransportCredentials(insecure.NewCredentials()),
-					grpcx.IPv4DialerOption(),
-				}, r.internalDialOptions()...)...,
-			)
-			if err != nil {
-				r.logger.Debug("failed to connect to node", "node_id", nodeID, "error", err)
-				// Mark unhealthy only if connection fails AND we're past threshold
-				if timeSinceLastSeen > r.config.UnhealthyThreshold/2 && state.info.Healthy {
-					r.logger.Warn("node became unhealthy (connection failed), assigning failover",
-						"node_id", nodeID,
-						"last_seen", timeSinceLastSeen,
-						"status", state.status.String())
-					state.info.Healthy = false
-					r.version.Add(1)
-					// Assign failover node (only for NodeActive nodes that held data, and not in drain mode)
-					if state.status == NodeActive && !r.IsDrained() {
-						r.assignFailoverNodeLocked(nodeID)
-					}
-				}
-				continue
-			}
-			state.conn = conn
-			state.client = pb.NewMonoFSClient(conn)
-			r.logger.Info("established connection to node", "node_id", nodeID, "address", state.info.Address)
-		}
+		state.healthCheckFailureLogged = false
+		state.lastHealthCheckError = ""
+		state.lastSeen = now
+		state.guardianFailedUntil = time.Time{}
 
-		// Active health check using the probe taken before the lock was held.
-		if state.client != nil {
-			probe, probed := probes[nodeID]
-			var nodeInfo *pb.NodeInfoResponse
-			var err error
-			if probed {
-				nodeInfo, err = probe.info, probe.err
-			} else {
-				// Connection was established during this pass; probe it inline
-				// (one-time per node lifetime).
-				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-				nodeInfo, err = state.client.GetNodeInfo(ctx, &pb.NodeInfoRequest{})
-				cancel()
-			}
+		state.ownedFilesCount = nodeInfo.TotalFiles
+		state.diskUsedBytes = nodeInfo.DiskUsedBytes
+		state.diskTotalBytes = nodeInfo.DiskTotalBytes
+		state.diskFreeBytes = nodeInfo.DiskFreeBytes
+		state.kvsStatus = normalizedKVSNodeStatus(nodeInfo.GetKvs())
+		state.logEngineStats = nodeInfo.GetLogEngine()
+		if !state.info.Healthy {
+			state.info.Healthy = true
+			r.version.Add(1)
 
-			if err != nil {
-				errText := err.Error()
-				if !state.healthCheckFailureLogged || state.lastHealthCheckError != errText {
-					r.logger.Warn("health check failed", "node_id", nodeID, "error", err, "was_healthy", state.info.Healthy)
-					state.healthCheckFailureLogged = true
-					state.lastHealthCheckError = errText
-				}
-				// Close stale connection
-				if state.conn != nil {
-					state.conn.Close()
-					state.conn = nil
-					state.client = nil
-				}
-				// Only mark unhealthy if we're past threshold
-				if timeSinceLastSeen > r.config.UnhealthyThreshold/2 && state.info.Healthy {
-					r.logger.Warn("node became unhealthy (health check failed), assigning failover",
-						"node_id", nodeID,
-						"last_seen", timeSinceLastSeen,
-						"status", state.status.String())
-					state.info.Healthy = false
-					r.version.Add(1)
-					// Assign failover node (only for NodeActive nodes that held data, and not in drain mode)
-					if state.status == NodeActive && !r.IsDrained() {
-						r.assignFailoverNodeLocked(nodeID)
-					}
-				}
-			} else {
-				state.healthCheckFailureLogged = false
-				state.lastHealthCheckError = ""
-				state.lastSeen = now
+			r.cancelFailoverTimer(nodeID)
 
-				// Update file count and disk usage from node info
-				state.ownedFilesCount = nodeInfo.TotalFiles
-				state.diskUsedBytes = nodeInfo.DiskUsedBytes
-				state.diskTotalBytes = nodeInfo.DiskTotalBytes
-				state.diskFreeBytes = nodeInfo.DiskFreeBytes
-				state.kvsStatus = normalizedKVSNodeStatus(nodeInfo.GetKvs())
-				state.logEngineStats = nodeInfo.GetLogEngine()
-				if !state.info.Healthy {
-					// Node was unhealthy, now healthy — recovery path
-					state.info.Healthy = true
-					r.version.Add(1)
+			if backupNodeID, hadFailover := r.failoverMap.LoadAndDelete(nodeID); hadFailover {
+				r.logger.Info("cleared failover mapping for newly healthy node",
+					"node_id", nodeID,
+					"backup_node", backupNodeID)
 
-					// Cancel any pending timer and clear failover state
-					r.cancelFailoverTimer(nodeID)
-
-					// Clear any failover mapping
-					if backupNodeID, hadFailover := r.failoverMap.LoadAndDelete(nodeID); hadFailover {
-						r.logger.Info("cleared failover mapping for newly healthy node",
-							"node_id", nodeID,
-							"backup_node", backupNodeID)
-
-						// Remove from backup node's backingUpNodes list
-						if backupState, exists := r.nodes[backupNodeID.(string)]; exists {
-							for i, id := range backupState.backingUpNodes {
-								if id == nodeID {
-									backupState.backingUpNodes = append(
-										backupState.backingUpNodes[:i],
-										backupState.backingUpNodes[i+1:]...,
-									)
-									r.logger.Debug("removed from backup node's list",
-										"recovered_node", nodeID,
-										"backup_node", backupNodeID)
-									break
-								}
-							}
+				if backupState, exists := r.nodes[backupNodeID.(string)]; exists {
+					for i, id := range backupState.backingUpNodes {
+						if id == nodeID {
+							backupState.backingUpNodes = append(
+								backupState.backingUpNodes[:i],
+								backupState.backingUpNodes[i+1:]...,
+							)
+							r.logger.Debug("removed from backup node's list",
+								"recovered_node", nodeID,
+								"backup_node", backupNodeID)
+							break
 						}
 					}
-
-					// Handle recovery for newly healthy nodes
-					if state.status == NodeActive {
-						go r.handleEarlyRecovery(nodeID)
-					}
-				}
-
-				// Check onboarding status and trigger recovery if needed
-				if state.status == NodeActive && state.client != nil && !state.onboardRequested {
-					// Only check if not already in progress
-					go r.checkAndRecoverNode(nodeID, state)
 				}
 			}
+
+			if state.status == NodeActive {
+				go r.handleEarlyRecovery(nodeID)
+			}
 		}
-		_ = nodeID // Silence unused variable warning
+
+		if state.status == NodeActive && state.client != nil && !state.onboardRequested {
+			go r.checkAndRecoverNode(nodeID, state)
+		}
 	}
 }
 
@@ -2967,7 +3096,8 @@ func (r *Router) Close() error {
 		close(r.stopClients)
 		r.stopFetcherReconnectLoop()
 
-		// Flush and stop the guardian version and principal stores.
+		// Stop the coordinator lease, then the Guardian stores.
+		r.stopGuardianCoordinatorLease()
 		r.guardianVersions.close()
 		if r.guardianPrincipals != nil {
 			r.guardianPrincipals.close()
@@ -3707,22 +3837,43 @@ func (r *Router) onboardNewNode(nodeID string) {
 		"node_count", totalNodes,
 		"new_node", nodeID)
 
+	repoMetadata := make(map[string]*pb.RepositoryRecord)
+	var voteMu sync.Mutex
+	var voteWG sync.WaitGroup
+	voteSem := make(chan struct{}, 6)
 	for sourceNodeID, sourceState := range existingNodes {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		reposResp, err := sourceState.client.ListRepositories(ctx, &pb.ListRepositoriesRequest{})
-		cancel()
+		sourceNodeID := sourceNodeID
+		sourceState := sourceState
+		voteWG.Add(1)
+		go func() {
+			defer voteWG.Done()
+			voteSem <- struct{}{}
+			defer func() { <-voteSem }()
 
-		if err != nil {
-			r.logger.Warn("failed to list repositories from node",
-				"node", sourceNodeID,
-				"error", err)
-			continue
-		}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			records, err := listRepositoryRecords(ctx, sourceState.client, "")
+			cancel()
+			if err != nil {
+				r.logger.Warn("failed to list repositories from node",
+					"node", sourceNodeID,
+					"error", err)
+				return
+			}
 
-		for _, repoID := range reposResp.RepositoryIds {
-			repoVotes[repoID]++
-		}
+			voteMu.Lock()
+			for _, record := range records {
+				if record == nil || record.GetStorageId() == "" {
+					continue
+				}
+				repoVotes[record.GetStorageId()]++
+				if _, exists := repoMetadata[record.GetStorageId()]; !exists {
+					repoMetadata[record.GetStorageId()] = record
+				}
+			}
+			voteMu.Unlock()
+		}()
 	}
+	voteWG.Wait()
 
 	// Calculate majority threshold (more than 50% of nodes)
 	majorityThreshold := (totalNodes / 2) + 1
@@ -3767,7 +3918,15 @@ func (r *Router) onboardNewNode(nodeID string) {
 		}
 		r.mu.RUnlock()
 
-		// If not in router memory, query nodes for repository info
+		// If not in router memory, use the metadata already returned by the
+		// batched node listing instead of one unary RPC per repository.
+		if repoURL == "" {
+			if record := repoMetadata[repoID]; record != nil {
+				repoURL = record.GetSource()
+				displayPath = record.GetDisplayPath()
+				guardianURL = record.GetGuardianUrl()
+			}
+		}
 		if repoURL == "" {
 			for _, sourceState := range existingNodes {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

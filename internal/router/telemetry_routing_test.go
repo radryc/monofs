@@ -27,7 +27,9 @@ type telemetryTestNodeServer struct {
 	logResults    []byte
 	metricResults []byte
 	traceResults  []byte
+	sqlResults    []byte
 	aggregateRows []byte
+	sqlCalls      int
 
 	streamGateOnce sync.Once
 	streamBlocked  chan struct{}
@@ -126,6 +128,13 @@ func (s *telemetryTestNodeServer) StreamQueryLogs(_ *pb.QueryLogsRequest, stream
 		return err
 	}
 	return streamTelemetryResults(results, stream.Send)
+}
+
+func (s *telemetryTestNodeServer) QueryDuckDBSQL(context.Context, *pb.QueryDuckDBSQLRequest) (*pb.QueryDuckDBSQLResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sqlCalls++
+	return &pb.QueryDuckDBSQLResponse{ResultsJson: string(append([]byte(nil), s.sqlResults...))}, nil
 }
 
 func (s *telemetryTestNodeServer) QueryMetrics(context.Context, *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
@@ -385,6 +394,47 @@ func TestStreamQueryTracesUsesSingleNodeForSharedBackend(t *testing.T) {
 	}
 	if len(collector.items) != 1 {
 		t.Fatalf("streamed item count = %d, want 1", len(collector.items))
+	}
+}
+
+func TestQueryDuckDBSQLUsesSingleNodeForSharedBackend(t *testing.T) {
+	router, servers, cleanup := newTelemetryRouterHarness(t, "node-a", "node-b")
+	defer cleanup()
+	router.config.SpanEngine = "clickhouse"
+
+	sqlResult := []byte(`{"dataset":"logs","columns":["service"],"rows":[["api"]],"row_count":1}`)
+	servers["node-a"].sqlResults = sqlResult
+	servers["node-b"].sqlResults = sqlResult
+
+	resp, err := router.QueryDuckDBSQL(context.Background(), &pb.QueryDuckDBSQLRequest{
+		Dataset: "logs",
+		Query:   "SELECT service FROM logs",
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("QueryDuckDBSQL() error = %v", err)
+	}
+	var envelope struct {
+		Nodes []struct {
+			NodeID string          `json:"node_id"`
+			Result json.RawMessage `json:"result"`
+			Error  string          `json:"error"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal([]byte(resp.GetResultsJson()), &envelope); err != nil {
+		t.Fatalf("unmarshal sql results: %v", err)
+	}
+	if len(envelope.Nodes) != 1 {
+		t.Fatalf("node results = %d, want 1 shared-backend result", len(envelope.Nodes))
+	}
+	servers["node-a"].mu.Lock()
+	callsA := servers["node-a"].sqlCalls
+	servers["node-a"].mu.Unlock()
+	servers["node-b"].mu.Lock()
+	callsB := servers["node-b"].sqlCalls
+	servers["node-b"].mu.Unlock()
+	if callsA+callsB != 1 {
+		t.Fatalf("SQL backend calls = %d, want 1", callsA+callsB)
 	}
 }
 
