@@ -1,3 +1,4 @@
+// Package workspacepr opens pull requests for published workspaces through a hosting provider.
 package workspacepr
 
 import (

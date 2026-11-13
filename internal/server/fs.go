@@ -749,7 +749,7 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	s.logger.DebugContext(ctx, "read: reading blob via fetcher", "blob_hash", blobHash, "repo_url", repoURL, "display_path", displayPath, "branch", branch)
 
 	// Fetcher client is required for all blob reads
-	if s.fetcherClient == nil {
+	if s.blobFetcher == nil {
 		s.logger.ErrorContext(ctx, "read: fetcher client not configured - cannot read blobs without fetchers")
 		return status.Errorf(codes.FailedPrecondition, "storage node not configured: fetcher client required")
 	}
@@ -1140,14 +1140,14 @@ func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoUR
 	sourceType := fetcher.SourceTypeBlob
 
 	// Check prefetch cache
-	inCache, err := s.fetcherClient.CheckCacheSimple(ctx, repoURL, blobHash)
+	inCache, err := s.blobFetcher.CheckCacheSimple(ctx, repoURL, blobHash)
 	if err != nil {
 		return nil, false, fmt.Errorf("check cache failed: %w", err)
 	}
 	wasPrefetched = inCache
 
 	// Fetch via fetcher service
-	content, err = s.fetcherClient.FetchBlobSimple(ctx, storageID, repoURL, blobHash, filePath, branch, offset, length, sourceType)
+	content, err = s.blobFetcher.FetchBlobSimple(ctx, storageID, repoURL, blobHash, filePath, branch, offset, length, sourceType)
 	if err != nil {
 		return nil, false, fmt.Errorf("fetch blob failed: %w", err)
 	}

@@ -1,3 +1,4 @@
+// Package workspaceledger keeps the in-memory and WAL-backed node ledger of commits, push outcomes, and refreshes.
 package workspaceledger
 
 import (

@@ -1,3 +1,4 @@
+// Package workspacestore persists workspace jobs and ledger records with a write-ahead log.
 package workspacestore
 
 import (

@@ -1,3 +1,4 @@
+// Package worker implements the pipeline worker and command executor.
 package worker
 
 import (

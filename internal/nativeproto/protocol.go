@@ -1,3 +1,4 @@
+// Package nativeproto defines the framing and message types for the MonoFS native kernel protocol.
 package nativeproto
 
 import (

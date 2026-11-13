@@ -1,3 +1,4 @@
+// Package pipeline runs declarative build-and-test jobs against MonoFS workspaces.
 package pipeline
 
 import (

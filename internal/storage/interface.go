@@ -1,3 +1,4 @@
+// Package storage defines the ingestion and fetch backend contracts shared by MonoFS services.
 package storage
 
 import (
@@ -304,10 +305,9 @@ type StorageBackend interface {
 	Close() error
 }
 
-// BackendRegistry manages available backends
+// BackendRegistry manages available ingestion backends.
 type BackendRegistry struct {
 	ingestionBackends map[IngestionType]func() IngestionBackend
-	fetchBackends     map[FetchType]func() FetchBackend
 }
 
 // DefaultRegistry is the global registry
@@ -317,18 +317,12 @@ var DefaultRegistry = NewBackendRegistry()
 func NewBackendRegistry() *BackendRegistry {
 	return &BackendRegistry{
 		ingestionBackends: make(map[IngestionType]func() IngestionBackend),
-		fetchBackends:     make(map[FetchType]func() FetchBackend),
 	}
 }
 
 // RegisterIngestionBackend registers an ingestion backend factory
 func (r *BackendRegistry) RegisterIngestionBackend(t IngestionType, factory func() IngestionBackend) {
 	r.ingestionBackends[t] = factory
-}
-
-// RegisterFetchBackend registers a fetch backend factory
-func (r *BackendRegistry) RegisterFetchBackend(t FetchType, factory func() FetchBackend) {
-	r.fetchBackends[t] = factory
 }
 
 // CreateIngestionBackend creates a new ingestion backend instance

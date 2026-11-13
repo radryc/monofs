@@ -20,9 +20,9 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
 	"github.com/radryc/monofs/internal/metastore"
-	"github.com/radryc/monofs/internal/router/workspaceledger"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
+	"github.com/radryc/monofs/internal/workspaceledger"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 )
@@ -41,10 +41,10 @@ type Server struct {
 	// NutsDB for metadata storage
 	db *metastore.Store
 
-	// Fetcher client for external blob retrieval (required)
-	fetcherClient *fetcher.Client
-	kvsStore      KVSStore
-	cfgStore      CfgBackendStore
+	// Blob fetcher for external content retrieval (required)
+	blobFetcher BlobFetcher
+	kvsStore    KVSStore
+	cfgStore    CfgBackendStore
 
 	// Predictor for access pattern learning and prefetching
 	predictor *Predictor
@@ -462,7 +462,7 @@ func (s *Server) ConfigureFetcher(fetcherAddrs []string) error {
 		return fmt.Errorf("failed to create fetcher client: %w", err)
 	}
 
-	s.fetcherClient = client
+	s.SetBlobFetcher(client)
 
 	// Initialize predictor with fetcher client for prefetch requests
 	predictorConfig := DefaultPredictorConfig()
@@ -476,6 +476,14 @@ func (s *Server) ConfigureFetcher(fetcherAddrs []string) error {
 		"predictor_enabled", true)
 
 	return nil
+}
+
+// SetBlobFetcher injects the blob fetcher used for content reads. Tests and
+// embedders can supply their own implementation; ConfigureFetcher uses the
+// gRPC client. The predictor keeps its own reference, so call
+// ConfigureFetcher when prefetching is also required.
+func (s *Server) SetBlobFetcher(f BlobFetcher) {
+	s.blobFetcher = f
 }
 
 // GetPrefetchStats returns prefetch hit/miss statistics.
@@ -547,31 +555,11 @@ func (s *Server) resolvePathToStorage(path string) (storageID, filePath string, 
 	return "", "", false
 }
 
-// repoExistsByStorageID checks if a repository exists by storage ID.
-func (s *Server) repoExistsByStorageID(storageID string) bool {
-	exists := false
-	s.db.View(func(tx metastore.Tx) error {
-		_, err := tx.Get(bucketRepos, []byte(storageID))
-		exists = (err == nil)
-		return nil
-	})
-	return exists
-}
-
 // repoExistsByStorageIDTx checks if a repository exists within an existing transaction.
 // Use this version when already inside a transaction to avoid deadlocks.
 func (s *Server) repoExistsByStorageIDTx(tx metastore.Tx, storageID string) bool {
 	_, err := tx.Get(bucketRepos, []byte(storageID))
 	return err == nil
-}
-
-// repoExists checks if a repository exists by display path (legacy method).
-func (s *Server) repoExists(displayPath string) bool {
-	storageID, found := s.lookupStorageID(displayPath)
-	if !found {
-		return false
-	}
-	return s.repoExistsByStorageID(storageID)
 }
 
 func encodeRefCount(value uint64) []byte {
@@ -1487,7 +1475,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 	// Forward blob content to fetchers synchronously.
 	// We must wait for blobs to be stored before returning, otherwise
 	// subsequent Read requests may fail with "blob not found" (EIO).
-	if s.fetcherClient != nil {
+	if s.blobFetcher != nil {
 		blobsToForward := make(map[string][]byte)
 		for _, pf := range prepared {
 			if len(pf.inlineContent) > 0 && pf.blobHash != "" {
@@ -1497,7 +1485,7 @@ func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchReq
 		if len(blobsToForward) > 0 {
 			fwdCtx, fwdCancel := context.WithTimeout(ctx, 120*time.Second)
 			defer fwdCancel()
-			stored, failed, fwdErr := s.fetcherClient.StoreBlobBatch(fwdCtx, storageID, blobsToForward)
+			stored, failed, fwdErr := s.blobFetcher.StoreBlobBatch(fwdCtx, storageID, blobsToForward)
 			if fwdErr != nil {
 				s.logger.Error("failed to forward blobs to fetcher",
 					"error", fwdErr,

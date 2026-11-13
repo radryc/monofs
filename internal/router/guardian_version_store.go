@@ -261,15 +261,6 @@ func (s *guardianVersionStore) kvsBackend() *kvsGuardianVersionBackend {
 	return s.kvs
 }
 
-// nextSeq allocates a monotonic sequence number used to build version IDs.
-func (s *guardianVersionStore) nextSeq() uint64 {
-	s.mu.Lock()
-	s.seq++
-	seq := s.seq
-	s.mu.Unlock()
-	return seq
-}
-
 func (s *guardianVersionStore) load() error {
 	if !s.persistent() {
 		return nil

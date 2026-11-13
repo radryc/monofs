@@ -1,3 +1,4 @@
+// Package telemetry configures OpenTelemetry traces, metrics, and logs for MonoFS services.
 package telemetry
 
 import (

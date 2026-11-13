@@ -72,19 +72,12 @@ func init() {
 		storage.IngestionTypeGit,
 		gitstorage.NewGitIngestionBackend,
 	)
-	storage.DefaultRegistry.RegisterFetchBackend(
-		storage.FetchTypeGit,
-		gitstorage.NewGitFetchBackend,
-	)
 
 	// Register file backend
 	storage.DefaultRegistry.RegisterIngestionBackend(
 		storage.IngestionTypeFile,
 		filestorage.NewFileIngestionBackend,
 	)
-
-	// Future backends will be registered here:
-	// storage.DefaultRegistry.RegisterFetchBackend(storage.FetchTypeS3, s3storage.NewS3FetchBackend)
 }
 
 func main() {

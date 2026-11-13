@@ -1,3 +1,4 @@
+// Package clickhouse stores and queries telemetry signals in ClickHouse.
 package clickhouse
 
 import (

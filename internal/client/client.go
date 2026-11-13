@@ -10,7 +10,7 @@ import (
 )
 
 // MonoFSClient is the interface for MonoFS client operations.
-// Both simple Client and ShardedClient implement this interface.
+// ShardedClient is the gRPC implementation.
 type MonoFSClient interface {
 	Lookup(ctx context.Context, path string) (*pb.LookupResponse, error)
 	GetAttr(ctx context.Context, path string) (*pb.GetAttrResponse, error)

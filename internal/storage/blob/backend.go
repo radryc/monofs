@@ -214,6 +214,9 @@ type BlobBackend struct {
 	currentKeyFingerprint  string
 }
 
+// BlobBackend implements storage.FetchBackend and storage.ObjectLister.
+var _ storage.FetchBackend = (*BlobBackend)(nil)
+
 // NewBlobBackend creates a new packager-based blob backend.
 func NewBlobBackend() *BlobBackend {
 	bb := &BlobBackend{

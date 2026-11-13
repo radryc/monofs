@@ -1,3 +1,4 @@
+// Package fetcher implements the blob fetcher and repository sync services, including encrypted content-addressed archive storage.
 package fetcher
 
 import (
