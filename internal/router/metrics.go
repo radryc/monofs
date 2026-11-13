@@ -207,6 +207,13 @@ var (
 		Help:      "Aggregated disk bytes across nodes by kind.",
 	}, []string{"kind"})
 
+	guardianUpsertRetriesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "monofs",
+		Subsystem: "router",
+		Name:      "guardian_upsert_retries_total",
+		Help:      "Guardian upsert retries after a transient node or leader error.",
+	})
+
 	authOutcomes = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "monofs",
 		Subsystem: "router",

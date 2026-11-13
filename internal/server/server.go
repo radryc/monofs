@@ -23,6 +23,7 @@ import (
 	"github.com/radryc/monofs/internal/router/workspaceledger"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 )
 
@@ -54,6 +55,12 @@ type Server struct {
 
 	// Cache for intermediate directories (path -> exists)
 	intermediateDirCache sync.Map
+
+	// Negative cache and request coalescing for blobs that cannot be fetched.
+	// Repeated reads of a missing blob must not turn into repeated S3 scans.
+	blobNegMu  sync.Mutex
+	blobNeg    map[string]time.Time
+	blobFlight singleflight.Group
 
 	// Stats
 	filesServed    atomic.Uint64
@@ -376,6 +383,7 @@ func NewServer(nodeID, address, dbPath, gitCacheDir string, dbSync bool, logger 
 		logger:       logger,
 		db:           db,
 		ledger:       workspaceledger.New(),
+		blobNeg:      make(map[string]time.Time),
 	}
 
 	if err := s.ensureRepoNamespaceIndex(); err != nil {
@@ -1164,6 +1172,8 @@ func (s *Server) IngestFile(ctx context.Context, req *pb.IngestFileRequest) (*pb
 // IngestFileBatch stores multiple file metadata in a single database transaction.
 // This is significantly faster than calling IngestFile repeatedly (10-50x improvement).
 func (s *Server) IngestFileBatch(ctx context.Context, req *pb.IngestFileBatchRequest) (*pb.IngestFileBatchResponse, error) {
+	start := time.Now()
+	defer observeServerOp("ingest_batch", start)
 	serverOpsTotal.WithLabelValues("ingest_batch").Inc()
 	if len(req.Files) == 0 {
 		return &pb.IngestFileBatchResponse{

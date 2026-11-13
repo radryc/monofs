@@ -132,6 +132,15 @@ type BlobBackend struct {
 	archiveMu    sync.Mutex
 	archiveCache map[string]*openArchive
 
+	// blobCache caches full small blobs to avoid repeated archive reads for
+	// hot files. Content-addressed blobs are immutable.
+	blobCacheMu        sync.Mutex
+	blobCache          map[string][]byte
+	blobCacheOrder     []string
+	blobCacheBytes     int64
+	blobCacheMaxBytes  int64
+	blobCacheMaxObject int64
+
 	// storageIDs tracks which storage IDs have archives on this fetcher.
 	storageIDs map[string]bool
 
@@ -216,6 +225,9 @@ func NewBlobBackend() *BlobBackend {
 		walPending:         make(map[string]struct{}),
 		cloudBlobIndex:     make(map[string]string),
 		cloudIndexPrefixes: make(map[string]time.Time),
+		blobCache:          make(map[string][]byte),
+		blobCacheMaxBytes:  int64Env("MONOFS_FETCHER_BLOB_CACHE_BYTES", defaultBlobCacheBytes),
+		blobCacheMaxObject: int64Env("MONOFS_FETCHER_BLOB_CACHE_MAX_OBJECT", defaultBlobCacheMaxObject),
 		stats:              storage.NewAtomicStats(),
 	}
 	bb.storageHealthy.Store(true)
@@ -2154,6 +2166,25 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 	newStats := *stats
 	newStats.Requests++
 
+	if cached, ok := bb.cachedBlob(req.ContentID); ok {
+		data := applyFetchRange(cached, req.SourceConfig)
+		newStats.CacheHits++
+		newStats.BytesFetched += int64(len(data))
+		bb.stats.Store(&newStats)
+		storageType := string(bb.config.StorageType)
+		if storageType == "" {
+			storageType = "local"
+		}
+		packagerFetchBlobTotal.WithLabelValues(storageType).Inc()
+		packagerFetchBytesTotal.WithLabelValues(storageType).Add(float64(len(data)))
+		return &storage.FetchResult{
+			Content:        data,
+			Size:           int64(len(data)),
+			FromCache:      true,
+			FetchLatencyMs: time.Since(start).Milliseconds(),
+		}, nil
+	}
+
 	bb.mu.RLock()
 	ref, ok := bb.blobIndex[req.ContentID]
 	bb.mu.RUnlock()
@@ -2238,6 +2269,10 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 		packagerFetchErrorsTotal.WithLabelValues(string(bb.config.StorageType)).Inc()
 		return nil, fmt.Errorf("read/decrypt blob %s from archive: %w", req.ContentID, err)
 	}
+
+	// Cache the full blob before slicing so repeated range reads share it.
+	bb.putBlob(req.ContentID, data)
+	data = applyFetchRange(data, req.SourceConfig)
 
 	newStats.CacheHits++
 	newStats.BytesFetched += int64(len(data))

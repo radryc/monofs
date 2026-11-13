@@ -53,6 +53,9 @@ type Config struct {
 	// Encryption optionally seals sensitive payload columns. Filter columns
 	// (tenant, time, service, trace/span id, level, metrics) stay plaintext.
 	Encryption *telemetrycrypto.Provider
+	// AsyncInsert coalesces small inserts on the ClickHouse side. wait=1 keeps
+	// the write acknowledged only after ClickHouse has flushed the batch.
+	AsyncInsert bool
 }
 
 // TraceStore implements MonoFS telemetry ingest and query over ClickHouse's
@@ -238,6 +241,10 @@ func (s *TraceStore) Ping(ctx context.Context) error {
 
 // IngestTraces writes spans in JSONEachRow batches.
 func (s *TraceStore) IngestTraces(ctx context.Context, _ string, spans []logengine.SpanRecord) error {
+	return s.insertTracesChunked(ctx, spans)
+}
+
+func (s *TraceStore) insertTracesChunked(ctx context.Context, spans []logengine.SpanRecord) error {
 	if len(spans) == 0 {
 		return nil
 	}
@@ -308,7 +315,7 @@ func (s *TraceStore) insertBatch(ctx context.Context, spans []logengine.SpanReco
 		}
 	}
 	statement := "INSERT INTO " + s.table() + " (tenant, timestamp, end_time, duration_ns, trace_id, span_id, parent_span_id, service, name, status_code, attributes) FORMAT JSONEachRow"
-	if err := s.exec(ctx, statement, nil, &body); err != nil {
+	if err := s.exec(ctx, statement, s.insertParams(), &body); err != nil {
 		return fmt.Errorf("insert clickhouse spans: %w", err)
 	}
 	return nil
@@ -564,6 +571,17 @@ func (s *TraceStore) queryStrings(ctx context.Context, query string, params url.
 	}
 	sort.Strings(values)
 	return values, nil
+}
+
+func (s *TraceStore) insertParams() url.Values {
+	if !s.cfg.AsyncInsert {
+		return nil
+	}
+	return url.Values{
+		"async_insert":                 {"1"},
+		"wait_for_async_insert":        {"1"},
+		"async_insert_busy_timeout_ms": {"200"},
+	}
 }
 
 func (s *TraceStore) exec(ctx context.Context, statement string, params url.Values, body io.Reader) error {

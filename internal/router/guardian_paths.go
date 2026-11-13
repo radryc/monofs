@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"path"
 	"strings"
 	"sync"
@@ -119,6 +120,52 @@ func (r *Router) UpsertGuardianPathsStream(stream grpc.ClientStreamingServer[pb.
 
 func (r *Router) UpsertGuardianPaths(ctx context.Context, req *pb.UpsertGuardianPathsRequest) (*pb.UpsertGuardianPathsResponse, error) {
 	return r.processGuardianUpsert(ctx, req)
+}
+
+func guardianRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch status.Code(err) {
+	case codes.Unavailable, codes.Aborted, codes.Canceled, codes.DeadlineExceeded, codes.Internal:
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not the leader") ||
+		strings.Contains(msg, "leadership") ||
+		strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "unavailable")
+}
+
+// retryGuardianRPC retries transient node/leader failures with jittered
+// exponential backoff. It returns the number of retries performed.
+func retryGuardianRPC(ctx context.Context, attempts int, fn func(context.Context) error) (int, error) {
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var last error
+	for attempt := 0; attempt < attempts; attempt++ {
+		last = fn(ctx)
+		if last == nil || !guardianRetryable(last) {
+			return attempt, last
+		}
+		guardianUpsertRetriesTotal.Inc()
+		if attempt == attempts-1 {
+			break
+		}
+		delay := time.Duration(100*(1<<attempt)) * time.Millisecond
+		if delay > 2*time.Second {
+			delay = 2 * time.Second
+		}
+		delay += time.Duration(rand.IntN(100)) * time.Millisecond
+		select {
+		case <-ctx.Done():
+			return attempt, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return attempts - 1, last
 }
 
 func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardianPathsRequest) (*pb.UpsertGuardianPathsResponse, error) {
@@ -782,6 +829,10 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, targets []gua
 		repoURL = strings.TrimRight(strings.TrimSpace(principal.BaseURL), "/")
 	}
 	batchFiles := appendGuardianDirHints(group.files)
+	// Node writes are idempotent and content-addressed. Finish them even if the
+	// caller's stream is canceled (a guardian retry must not redo partial work).
+	writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer writeCancel()
 	targetNodes := targets
 	if len(targetNodes) == 0 {
 		if guardianRepoStorageBackend(group.displayPath) == "kvs" {
@@ -811,50 +862,67 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, targets []gua
 			}
 			regKey := node.id + "|" + node.address + "|" + group.storageID + "|" + group.displayPath + "|" + regSource
 			if _, alreadyRegistered := r.guardianRegisteredNodeRepos.Load(regKey); !alreadyRegistered {
-				regCtx, regCancel := context.WithTimeout(ctx, 10*time.Second)
-				regResp, regErr := nodeClient.RegisterRepository(regCtx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
-					StorageId:     group.storageID,
-					DisplayPath:   group.displayPath,
-					Source:        regSource,
-					IngestionType: pb.IngestionType_INGESTION_GUARDIAN,
-					FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
-					GuardianUrl:   repoURL,
-				}))
-				regCancel()
+				regErr := func() error {
+					_, err := retryGuardianRPC(writeCtx, 3, func(callCtx context.Context) error {
+						regCtx, regCancel := context.WithTimeout(callCtx, 10*time.Second)
+						defer regCancel()
+						regResp, regErr := nodeClient.RegisterRepository(regCtx, applyGuardianRepoStorageBackend(&pb.RegisterRepositoryRequest{
+							StorageId:     group.storageID,
+							DisplayPath:   group.displayPath,
+							Source:        regSource,
+							IngestionType: pb.IngestionType_INGESTION_GUARDIAN,
+							FetchType:     pb.SourceType_SOURCE_TYPE_BLOB,
+							GuardianUrl:   repoURL,
+						}))
+						if regErr != nil {
+							return regErr
+						}
+						if regResp == nil || !regResp.GetSuccess() {
+							return fmt.Errorf("registration rejected: %s", regResp.GetMessage())
+						}
+						return nil
+					})
+					return err
+				}()
 				if regErr != nil {
 					r.logger.Warn("RegisterRepository failed for guardian upsert", "node", node.id, "display_path", group.displayPath, "error", regErr)
-				} else if regResp != nil && regResp.GetSuccess() {
+				} else {
 					r.guardianRegisteredNodeRepos.Store(regKey, true)
 				}
 			}
 
-			batchCtx, batchCancel := context.WithTimeout(ctx, r.config.GuardianIngestTimeout)
 			batchSource := repoURL
 			if batchSource == "" {
 				batchSource = "guardian-path-api"
 			}
-			resp, err := nodeClient.IngestFileBatch(batchCtx, &pb.IngestFileBatchRequest{
-				Files:       batchFiles,
-				StorageId:   group.storageID,
-				DisplayPath: group.displayPath,
-				Source:      batchSource,
-			})
-			batchCancel()
-			if err != nil {
+			ingestErr := func() error {
+				_, err := retryGuardianRPC(writeCtx, 3, func(callCtx context.Context) error {
+					batchCtx, batchCancel := context.WithTimeout(callCtx, r.config.GuardianIngestTimeout)
+					defer batchCancel()
+					resp, err := nodeClient.IngestFileBatch(batchCtx, &pb.IngestFileBatchRequest{
+						Files:       batchFiles,
+						StorageId:   group.storageID,
+						DisplayPath: group.displayPath,
+						Source:      batchSource,
+					})
+					if err != nil {
+						return err
+					}
+					if resp == nil || !resp.GetSuccess() {
+						message := ""
+						if resp != nil {
+							message = resp.GetErrorMessage()
+						}
+						return fmt.Errorf("ingest rejected: %s", message)
+					}
+					return nil
+				})
+				return err
+			}()
+			if ingestErr != nil {
 				r.guardianRegisteredNodeRepos.Delete(regKey)
 				errMu.Lock()
-				failures = append(failures, guardianNodeFailure{nodeID: node.id, err: fmt.Errorf("node %s ingest %s: %w", node.id, group.displayPath, err)})
-				errMu.Unlock()
-				return
-			}
-			if resp == nil || !resp.Success {
-				r.guardianRegisteredNodeRepos.Delete(regKey)
-				message := ""
-				if resp != nil {
-					message = resp.GetErrorMessage()
-				}
-				errMu.Lock()
-				failures = append(failures, guardianNodeFailure{nodeID: node.id, err: fmt.Errorf("node %s ingest %s failed: %s", node.id, group.displayPath, message)})
+				failures = append(failures, guardianNodeFailure{nodeID: node.id, err: fmt.Errorf("node %s ingest %s: %w", node.id, group.displayPath, ingestErr)})
 				errMu.Unlock()
 			}
 		}()

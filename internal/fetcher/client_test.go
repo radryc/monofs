@@ -265,6 +265,8 @@ func TestClient_FetchBlobSimple(t *testing.T) {
 		"abc123",
 		"main.go",
 		"main",
+		0,
+		0,
 		SourceTypeGit,
 	)
 	if err != nil {

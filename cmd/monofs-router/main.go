@@ -488,7 +488,9 @@ func main() {
 		grpc.MaxSendMsgSize(1024*1024*1024),
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
 		grpc.ChainUnaryInterceptor(grpcAuthenticator.UnaryServerInterceptor()),
+		grpc.ChainUnaryInterceptor(router.MetricsUnaryInterceptor()),
 		grpc.ChainStreamInterceptor(grpcAuthenticator.StreamServerInterceptor()),
+		grpc.ChainStreamInterceptor(router.MetricsStreamInterceptor()),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second, // Allow pings every 5s (prevents too_many_pings)
 			PermitWithoutStream: true,            // Allow pings even when no streams active
