@@ -50,7 +50,15 @@ type SessionSocketHandler struct {
 	// not carry an explicit --push-mode flag.
 	pushModeMu        sync.Mutex
 	preferredPushMode pb.SourcePushMode
+
+	// actions is the command table for socket requests. It is built lazily so
+	// handlers constructed directly in tests work without wiring.
+	actions     map[string]sessionAction
+	actionsOnce sync.Once
 }
+
+// sessionAction handles one session socket command.
+type sessionAction func(req *SessionRequest) SessionResponse
 
 // BlobIngester ingests dependency files into the cluster backend so they
 // are visible on all nodes (served the same way as github.com repos).
@@ -466,53 +474,51 @@ func (h *SessionSocketHandler) handleConnection(conn net.Conn) {
 
 	h.logger.Debug("session request", "action", req.Action)
 
-	// Handle action
-	var resp SessionResponse
-	switch req.Action {
-	case "start":
-		resp = h.handleStart()
-	case "add":
-		resp = h.handleAdd(req.Paths)
-	case "rm":
-		resp = h.handleRemove(req.Paths)
-	case "status":
-		resp = h.handleStatus(req.ShowBlobs)
-	case "branch":
-		resp = h.handleBranch(req)
-	case "refs":
-		resp = h.handleRefs()
-	case "log":
-		resp = h.handleLog(req)
-	case "tags":
-		resp = h.handleUpstreamTags(req)
-	case "blame":
-		resp = h.handleUpstreamBlame(req)
-	case "commit":
-		resp = h.handleCommit(req)
-	case "pull", "refresh":
-		resp = h.handlePull()
-	case "discard":
-		resp = h.handleDiscard()
-	case "push":
-		resp = h.handlePushSource(req)
-	case "conflicts":
-		resp = h.handleConflicts()
-	case "push-blobs":
-		resp = h.handleUploadDeps()
-	case "blobs-info":
-		resp = h.handleBlobsInfo()
-	case "diff":
-		resp = h.handleDiff(req.Path, req.ShowBlobs)
-	default:
-		resp = SessionResponse{
-			Success: false,
-			Error:   "unknown action: " + req.Action,
-		}
+	// Dispatch through the command table.
+	resp := SessionResponse{Success: false, Error: "unknown action: " + req.Action}
+	if action, ok := h.resolveAction(req.Action); ok {
+		resp = action(&req)
 	}
 
 	// Send response
 	if err := json.NewEncoder(conn).Encode(resp); err != nil {
 		h.logger.Warn("failed to encode response", "error", err)
+	}
+}
+
+// resolveAction looks up a command handler, building the table on first use.
+func (h *SessionSocketHandler) resolveAction(name string) (sessionAction, bool) {
+	h.actionsOnce.Do(func() {
+		if h.actions == nil {
+			h.actions = h.buildActions()
+		}
+	})
+	action, ok := h.actions[name]
+	return action, ok
+}
+
+// buildActions defines the session socket command table. Adding a command is
+// a single entry here plus its handler.
+func (h *SessionSocketHandler) buildActions() map[string]sessionAction {
+	return map[string]sessionAction{
+		"start":      func(*SessionRequest) SessionResponse { return h.handleStart() },
+		"add":        func(req *SessionRequest) SessionResponse { return h.handleAdd(req.Paths) },
+		"rm":         func(req *SessionRequest) SessionResponse { return h.handleRemove(req.Paths) },
+		"status":     func(req *SessionRequest) SessionResponse { return h.handleStatus(req.ShowBlobs) },
+		"branch":     func(req *SessionRequest) SessionResponse { return h.handleBranch(*req) },
+		"refs":       func(*SessionRequest) SessionResponse { return h.handleRefs() },
+		"log":        func(req *SessionRequest) SessionResponse { return h.handleLog(*req) },
+		"tags":       func(req *SessionRequest) SessionResponse { return h.handleUpstreamTags(*req) },
+		"blame":      func(req *SessionRequest) SessionResponse { return h.handleUpstreamBlame(*req) },
+		"commit":     func(req *SessionRequest) SessionResponse { return h.handleCommit(*req) },
+		"pull":       func(*SessionRequest) SessionResponse { return h.handlePull() },
+		"refresh":    func(*SessionRequest) SessionResponse { return h.handlePull() },
+		"discard":    func(*SessionRequest) SessionResponse { return h.handleDiscard() },
+		"push":       func(req *SessionRequest) SessionResponse { return h.handlePushSource(*req) },
+		"conflicts":  func(*SessionRequest) SessionResponse { return h.handleConflicts() },
+		"push-blobs": func(*SessionRequest) SessionResponse { return h.handleUploadDeps() },
+		"blobs-info": func(*SessionRequest) SessionResponse { return h.handleBlobsInfo() },
+		"diff":       func(req *SessionRequest) SessionResponse { return h.handleDiff(req.Path, req.ShowBlobs) },
 	}
 }
 
