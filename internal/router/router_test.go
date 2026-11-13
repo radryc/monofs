@@ -531,3 +531,15 @@ func BenchmarkHeartbeat(b *testing.B) {
 		router.Heartbeat(ctx, req)
 	}
 }
+
+func TestStartIsIdempotent(t *testing.T) {
+	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
+	defer r.Close()
+
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := r.Start(); err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+}

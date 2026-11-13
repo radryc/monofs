@@ -396,6 +396,13 @@ func main() {
 		}
 	}
 
+	// Start background workers after all configuration is applied so they
+	// observe the final node set, credentials, and policy.
+	if err := r.Start(); err != nil {
+		logger.Error("failed to start router background workers", "error", err)
+		os.Exit(1)
+	}
+
 	// Start health checking
 	r.StartHealthCheck()
 
