@@ -35,11 +35,11 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 			end = len(content)
 		}
 		if int(off) >= len(content) {
-			n.client.RecordOperation()
+			n.recordOperation()
 			return fuse.ReadResultData(nil), 0
 		}
-		n.client.RecordOperation()
-		n.client.RecordBytesRead(int64(end - int(off)))
+		n.recordOperation()
+		n.recordBytesRead(int64(end - int(off)))
 		return fuse.ReadResultData(content[off:end]), 0
 	}
 
@@ -79,11 +79,11 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 					end = len(data)
 				}
 				if int(off) >= len(data) {
-					n.client.RecordOperation()
+					n.recordOperation()
 					return fuse.ReadResultData(nil), 0
 				}
-				n.client.RecordOperation()
-				n.client.RecordBytesRead(int64(end - int(off)))
+				n.recordOperation()
+				n.recordBytesRead(int64(end - int(off)))
 				return fuse.ReadResultData(data[off:end]), 0
 			}
 			n.logger.Warn("read: overlay file read failed", "path", n.path, "error", err)
@@ -148,7 +148,7 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 			// Only count real errors, not context cancellations
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				if n.client != nil {
-					n.client.RecordError()
+					n.recordError()
 				}
 			}
 			return nil, syscall.EIO
@@ -163,13 +163,13 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 		end = len(content)
 	}
 	if int(off) >= len(content) {
-		n.client.RecordOperation()
+		n.recordOperation()
 		return fuse.ReadResultData(nil), 0
 	}
 
 	bytesRead := int64(end - int(off))
-	n.client.RecordOperation()
-	n.client.RecordBytesRead(bytesRead)
+	n.recordOperation()
+	n.recordBytesRead(bytesRead)
 	return fuse.ReadResultData(content[off:end]), 0
 }
 
@@ -226,11 +226,11 @@ func (n *MonoNode) readLocalFileRange(path string, dest []byte, off int64) (fuse
 		return nil, syscall.EIO
 	}
 	if nread <= 0 {
-		n.client.RecordOperation()
+		n.recordOperation()
 		return fuse.ReadResultData(nil), 0
 	}
 
-	n.client.RecordOperation()
-	n.client.RecordBytesRead(int64(nread))
+	n.recordOperation()
+	n.recordBytesRead(int64(nread))
 	return fuse.ReadResultData(dest[:nread]), 0
 }

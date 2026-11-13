@@ -17,7 +17,7 @@ import (
 // Readdir reads directory entries.
 func (n *MonoNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	defer n.recoverPanic("Readdir")
-	n.client.RecordOperation()
+	n.recordOperation()
 	n.logger.Debug("readdir", "path", n.path)
 	if strings.Trim(n.path, "/") == syntheticWorkspaceControlPath {
 		return fs.NewListDirStream(n.syntheticWorkspaceControlEntries()), 0

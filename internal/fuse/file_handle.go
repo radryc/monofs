@@ -38,8 +38,8 @@ func (h *monofsFileHandle) Read(ctx context.Context, dest []byte, off int64) (fu
 		h.logger.Error("handle read failed", "error", err)
 		return nil, syscall.EIO
 	}
-	h.node.client.RecordOperation()
-	h.node.client.RecordBytesRead(int64(n))
+	h.node.recordOperation()
+	h.node.recordBytesRead(int64(n))
 	return fuse.ReadResultData(dest[:n]), 0
 }
 
@@ -53,7 +53,7 @@ func (h *monofsFileHandle) Write(ctx context.Context, data []byte, off int64) (u
 		return 0, syscall.EIO
 	}
 
-	h.node.client.RecordOperation()
+	h.node.recordOperation()
 
 	// Update node size if we extended the file
 	h.node.mu.Lock()

@@ -15,7 +15,7 @@ import (
 // Lookup looks up a child entry in a directory.
 func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	defer n.recoverPanic("Lookup")
-	n.client.RecordOperation()
+	n.recordOperation()
 	n.logger.Debug("lookup", "path", n.path, "name", name)
 
 	// If looking up FS_ERROR.txt in root and we have any error, create the error file

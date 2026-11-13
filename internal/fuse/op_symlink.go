@@ -79,7 +79,7 @@ func (n *MonoNode) Symlink(ctx context.Context, target, name string, out *fuse.E
 // Readlink implements fs.NodeReadlinker for reading symbolic link targets
 func (n *MonoNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 	defer n.recoverPanic("Readlink")
-	n.client.RecordOperation()
+	n.recordOperation()
 	n.logger.Debug("readlink", "path", n.path)
 
 	// Check if we have the target cached in the node
