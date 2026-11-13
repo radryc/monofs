@@ -110,15 +110,6 @@ var (
 		Help:      "Total bytes returned by NativeRead operations through the router.",
 	})
 
-	// routerGuardianVersionStoreWriteBytesTotal counts bytes written to the
-	// Guardian version store.
-	routerGuardianVersionStoreWriteBytesTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Namespace: "monofs",
-		Subsystem: "router",
-		Name:      "guardian_version_store_write_bytes_total",
-		Help:      "Total bytes written to the Guardian version store.",
-	})
-
 	// routerGuardianVersionStoreFileBytes tracks the last observed on-disk
 	// state size. The Pebble store does not rewrite a single snapshot file, so
 	// this gauge is only updated when a size sample is available.

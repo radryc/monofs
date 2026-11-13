@@ -1,4 +1,4 @@
-package router
+package guardian
 
 import (
 	"errors"
@@ -6,14 +6,14 @@ import (
 )
 
 func TestGuardianVersionStoreExpectedVersionCAS(t *testing.T) {
-	store, err := newGuardianVersionStore(t.TempDir())
+	store, err := NewStore(t.TempDir())
 	if err != nil {
-		t.Fatalf("newGuardianVersionStore: %v", err)
+		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.close()
+	defer store.Close()
 
 	path := "/partitions/demo/.state/intents/app.json"
-	first, err := store.commit(guardianVersionCommit{
+	first, err := store.Commit(Commit{
 		LogicalPath:       path,
 		DisplayPath:       "guardian/demo",
 		StorageID:         "storage-demo",
@@ -25,25 +25,25 @@ func TestGuardianVersionStoreExpectedVersionCAS(t *testing.T) {
 		t.Fatalf("absent create: %v", err)
 	}
 
-	if _, err := store.commit(guardianVersionCommit{
+	if _, err := store.Commit(Commit{
 		LogicalPath:       path,
 		Content:           []byte("v2"),
 		ExpectedVersionID: "absent",
 		CommittedAt:       2,
-	}); !errors.Is(err, errGuardianVersionExists) {
+	}); !errors.Is(err, ErrExists) {
 		t.Fatalf("second absent create error = %v, want exists", err)
 	}
 
-	if _, err := store.commit(guardianVersionCommit{
+	if _, err := store.Commit(Commit{
 		LogicalPath:       path,
 		Content:           []byte("v2"),
 		ExpectedVersionID: "wrong-version",
 		CommittedAt:       3,
-	}); !errors.Is(err, errGuardianVersionConflict) {
+	}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("wrong expected version error = %v, want conflict", err)
 	}
 
-	second, err := store.commit(guardianVersionCommit{
+	second, err := store.Commit(Commit{
 		LogicalPath:       path,
 		Content:           []byte("v2"),
 		ExpectedVersionID: first.GetVersionId(),
@@ -53,7 +53,7 @@ func TestGuardianVersionStoreExpectedVersionCAS(t *testing.T) {
 		t.Fatalf("matching expected version: %v", err)
 	}
 
-	if _, err := store.commit(guardianVersionCommit{
+	if _, err := store.Commit(Commit{
 		LogicalPath:       path,
 		Tombstone:         true,
 		ExpectedVersionID: second.GetVersionId(),
@@ -62,7 +62,7 @@ func TestGuardianVersionStoreExpectedVersionCAS(t *testing.T) {
 		t.Fatalf("tombstone: %v", err)
 	}
 
-	if _, err := store.commit(guardianVersionCommit{
+	if _, err := store.Commit(Commit{
 		LogicalPath:       path,
 		Content:           []byte("v3"),
 		ExpectedVersionID: "absent",
@@ -88,8 +88,8 @@ func TestIsGuardianAssetPathUsesSharedBackendForControlPlaneState(t *testing.T) 
 		{"/.archive/demo/app/rev_1/manifest.yaml", false},
 	}
 	for _, tc := range cases {
-		if got := isGuardianAssetPath(tc.path); got != tc.want {
-			t.Errorf("isGuardianAssetPath(%q) = %v, want %v", tc.path, got, tc.want)
+		if got := IsAssetPath(tc.path); got != tc.want {
+			t.Errorf("IsAssetPath(%q) = %v, want %v", tc.path, got, tc.want)
 		}
 	}
 }

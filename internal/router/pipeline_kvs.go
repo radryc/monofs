@@ -7,6 +7,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/router/guardian"
 )
 
 func (r *Router) writePipelinePath(logicalPath string, content []byte, expectedVersionID string) (string, error) {
@@ -39,7 +40,7 @@ func (r *Router) readPipelinePath(logicalPath string) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("map path: %w", err)
 	}
 
-	current, exists := r.guardianVersions.currentVersion(logicalPath)
+	current, exists := r.guardianVersions.CurrentVersion(logicalPath)
 	if !exists || current.Tombstone {
 		return nil, "", fmt.Errorf("not found: %s", logicalPath)
 	}
@@ -91,7 +92,7 @@ func (r *Router) listPipelinePath(logicalDir string) ([]string, error) {
 	prefix := logicalDir + "/"
 	var entries []string
 
-	versions := r.guardianVersions.listCurrentUnderPrefix(prefix, 1000)
+	versions := r.guardianVersions.ListCurrentUnderPrefix(prefix, 1000)
 	for _, version := range versions {
 		if version == nil || version.GetTombstone() {
 			continue
@@ -157,7 +158,7 @@ func (r *Router) processGuardianDelete(ctx context.Context, req *pb.DeleteGuardi
 			return nil, fmt.Errorf("invalid path %q: %w", del.GetLogicalPath(), err)
 		}
 
-		current, exists, currentErr := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		current, exists, currentErr := r.guardianVersions.CurrentVersionWithError(mapped.LogicalPath)
 		if currentErr != nil {
 			return nil, fmt.Errorf("guardian version store unavailable: %w", currentErr)
 		}
@@ -179,7 +180,7 @@ func (r *Router) processGuardianDelete(ctx context.Context, req *pb.DeleteGuardi
 			return nil, fmt.Errorf("delete file: %w", err)
 		}
 
-		version, err := r.guardianVersions.commit(guardianVersionCommit{
+		version, err := r.guardianVersions.Commit(guardian.Commit{
 			LogicalPath:       mapped.LogicalPath,
 			DisplayPath:       mapped.DisplayPath,
 			StorageID:         mapped.StorageID,

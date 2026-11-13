@@ -19,6 +19,7 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/router/guardian"
 	"github.com/radryc/monofs/internal/router/mergerequest"
 	"github.com/radryc/monofs/internal/router/pipeline"
 	"github.com/radryc/monofs/internal/router/workspacepolicy"
@@ -295,7 +296,7 @@ type Router struct {
 
 	// Guardian persistence
 	guardianPrincipals          *guardianPrincipalStore
-	guardianVersions            *guardianVersionStore
+	guardianVersions            *guardian.Store
 	guardianRegisteredNodeRepos sync.Map // "nodeID|addr|storageID|displayPath|repoURL" -> bool
 	// guardianMutationLocks are striped locks that serialize the
 	// check -> node apply -> version commit critical section for a display
@@ -594,10 +595,10 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		logger.Error("failed to initialize guardian principal store", "state_dir", cfg.GuardianStateDir, "error", err)
 		guardianPrincipals, _ = newGuardianPrincipalStore("")
 	}
-	guardianVersions, err := newGuardianVersionStore(cfg.GuardianStateDir)
+	guardianVersions, err := guardian.NewStore(cfg.GuardianStateDir)
 	if err != nil {
 		logger.Error("failed to initialize guardian version store", "state_dir", cfg.GuardianStateDir, "error", err)
-		guardianVersions, _ = newGuardianVersionStore("")
+		guardianVersions, _ = guardian.NewStore("")
 	}
 
 	var wjs *workspacestore.Store
@@ -651,9 +652,9 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		whitelist:                 newWhitelistStore(),
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.GuardianVersionBackend), "kvs") {
-		r.guardianVersions.kvs = newKVSGuardianVersionBackend(r, r.guardianVersions)
-		r.guardianVersions.kvsFallbackLocal = strings.EqualFold(strings.TrimSpace(cfg.GuardianVersionBackendFallback), "local")
-		logger.Info("guardian version store using KVS backend", "fallback_local", r.guardianVersions.kvsFallbackLocal)
+		fallbackLocal := strings.EqualFold(strings.TrimSpace(cfg.GuardianVersionBackendFallback), "local")
+		r.guardianVersions.UseBackend(newKVSGuardianVersionBackend(r, r.guardianVersions), fallbackLocal)
+		logger.Info("guardian version store using KVS backend", "fallback_local", fallbackLocal)
 	}
 	// Resolve the coordinator lease mode and synchronous leadership state.
 	// With the local backend this is a no-op; it only starts an elector
@@ -3122,7 +3123,7 @@ func (r *Router) Close() error {
 
 		// Stop the coordinator lease, then the Guardian stores.
 		r.stopGuardianCoordinatorLease()
-		r.guardianVersions.close()
+		r.guardianVersions.Close()
 		if r.guardianPrincipals != nil {
 			r.guardianPrincipals.close()
 		}

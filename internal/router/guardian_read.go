@@ -9,6 +9,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/router/guardian"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -39,7 +40,7 @@ func (r *Router) ReadGuardianPath(ctx context.Context, req *pb.ReadGuardianPathR
 	unlockMutations := r.lockGuardianMutations(mapped.DisplayPath)
 	defer unlockMutations()
 
-	current, exists, err := r.guardianVersions.currentVersionWithError(logicalPath)
+	current, exists, err := r.guardianVersions.CurrentVersionWithError(logicalPath)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "guardian version store unavailable: %v", err)
 	}
@@ -54,7 +55,7 @@ func (r *Router) ReadGuardianPath(ctx context.Context, req *pb.ReadGuardianPathR
 		return &pb.ReadGuardianPathResponse{
 			Found:   true,
 			Content: content,
-			Version: recovered.toProto(),
+			Version: recovered.ToProto(),
 		}, nil
 	}
 
@@ -70,7 +71,7 @@ func (r *Router) ReadGuardianPath(ctx context.Context, req *pb.ReadGuardianPathR
 			return &pb.ReadGuardianPathResponse{
 				Found:   true,
 				Content: repairedContent,
-				Version: current.toProto(),
+				Version: current.ToProto(),
 			}, nil
 		}
 		if !conclusive {
@@ -92,7 +93,7 @@ func (r *Router) ReadGuardianPath(ctx context.Context, req *pb.ReadGuardianPathR
 	return &pb.ReadGuardianPathResponse{
 		Found:   true,
 		Content: content,
-		Version: current.toProto(),
+		Version: current.ToProto(),
 	}, nil
 }
 
@@ -102,7 +103,7 @@ func (r *Router) ReadGuardianPath(ctx context.Context, req *pb.ReadGuardianPathR
 func (r *Router) tombstoneMissingGuardianVersionLocked(mapped guardianPhysicalPath) error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		latest, exists, err := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		latest, exists, err := r.guardianVersions.CurrentVersionWithError(mapped.LogicalPath)
 		if err != nil {
 			return err
 		}
@@ -110,7 +111,7 @@ func (r *Router) tombstoneMissingGuardianVersionLocked(mapped guardianPhysicalPa
 			// Another writer or reader already retired the record.
 			return nil
 		}
-		_, err = r.guardianVersions.commit(guardianVersionCommit{
+		_, err = r.guardianVersions.Commit(guardian.Commit{
 			LogicalPath:       mapped.LogicalPath,
 			DisplayPath:       mapped.DisplayPath,
 			StorageID:         mapped.StorageID,
@@ -124,7 +125,7 @@ func (r *Router) tombstoneMissingGuardianVersionLocked(mapped guardianPhysicalPa
 			return nil
 		}
 		lastErr = err
-		if !errors.Is(err, errGuardianVersionConflict) && !errors.Is(err, errGuardianVersionExists) {
+		if !errors.Is(err, guardian.ErrConflict) && !errors.Is(err, guardian.ErrExists) {
 			return err
 		}
 	}
@@ -134,7 +135,7 @@ func (r *Router) tombstoneMissingGuardianVersionLocked(mapped guardianPhysicalPa
 // recoverGuardianVersionLocked synthesizes a version record from node content
 // when the authoritative record is missing (for example after a router
 // failover with an empty local state directory).
-func (r *Router) recoverGuardianVersionLocked(ctx context.Context, mapped guardianPhysicalPath) (*storedGuardianFileVersion, []byte, bool, error) {
+func (r *Router) recoverGuardianVersionLocked(ctx context.Context, mapped guardianPhysicalPath) (*guardian.Record, []byte, bool, error) {
 	content, ok, conclusive := r.readGuardianContentVerified(ctx, mapped, "")
 	if !ok {
 		if !conclusive {
@@ -145,7 +146,7 @@ func (r *Router) recoverGuardianVersionLocked(ctx context.Context, mapped guardi
 	sum := sha256.Sum256(content)
 	contentSHA := hex.EncodeToString(sum[:])
 	now := time.Now()
-	version, err := r.guardianVersions.commit(guardianVersionCommit{
+	version, err := r.guardianVersions.Commit(guardian.Commit{
 		LogicalPath:       mapped.LogicalPath,
 		DisplayPath:       mapped.DisplayPath,
 		StorageID:         mapped.StorageID,
@@ -158,7 +159,7 @@ func (r *Router) recoverGuardianVersionLocked(ctx context.Context, mapped guardi
 	if err != nil {
 		// Another writer won the race. Re-read and use the winner if it still
 		// describes the content we found.
-		current, exists, readErr := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		current, exists, readErr := r.guardianVersions.CurrentVersionWithError(mapped.LogicalPath)
 		if readErr == nil && exists && current != nil && !current.Tombstone &&
 			(current.ContentSHA256 == "" || strings.EqualFold(current.ContentSHA256, contentSHA)) {
 			guardianVersionStoreRecoveriesTotal.WithLabelValues("conflict").Inc()
@@ -166,7 +167,7 @@ func (r *Router) recoverGuardianVersionLocked(ctx context.Context, mapped guardi
 		}
 		return nil, nil, false, err
 	}
-	stored := &storedGuardianFileVersion{
+	stored := &guardian.Record{
 		LogicalPath:     mapped.LogicalPath,
 		DisplayPath:     mapped.DisplayPath,
 		StorageID:       mapped.StorageID,

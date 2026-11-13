@@ -9,6 +9,7 @@ import (
 	"github.com/radryc/kvs/pkg/grpcserver"
 	"github.com/radryc/kvs/pkg/localstore"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/router/guardian"
 	"google.golang.org/grpc"
 )
 
@@ -34,11 +35,11 @@ func startEmbeddedKVS(t *testing.T) (string, func()) {
 	}
 }
 
-func newKVSBackedStore(t *testing.T, address string) (*guardianVersionStore, *Router) {
+func newKVSBackedStore(t *testing.T, address string) (*guardian.Store, *Router) {
 	t.Helper()
-	store, err := newGuardianVersionStore(t.TempDir())
+	store, err := guardian.NewStore(t.TempDir())
 	if err != nil {
-		t.Fatalf("newGuardianVersionStore: %v", err)
+		t.Fatalf("guardian.NewStore: %v", err)
 	}
 	router := &Router{
 		nodes: map[string]*nodeState{
@@ -48,7 +49,7 @@ func newKVSBackedStore(t *testing.T, address string) (*guardianVersionStore, *Ro
 			},
 		},
 	}
-	store.kvs = newKVSGuardianVersionBackend(router, store)
+	store.UseBackend(newKVSGuardianVersionBackend(router, store), false)
 	return store, router
 }
 
@@ -57,12 +58,12 @@ func TestKVSGuardianVersionBackendCASAcrossStores(t *testing.T) {
 	defer stop()
 
 	storeA, _ := newKVSBackedStore(t, address)
-	defer storeA.close()
+	defer storeA.Close()
 	storeB, _ := newKVSBackedStore(t, address)
-	defer storeB.close()
+	defer storeB.Close()
 
 	path := "/partitions/demo/intents/app.yaml"
-	first, err := storeA.commit(guardianVersionCommit{
+	first, err := storeA.Commit(guardian.Commit{
 		LogicalPath:       path,
 		DisplayPath:       "guardian/demo",
 		StorageID:         "storage-demo",
@@ -75,21 +76,21 @@ func TestKVSGuardianVersionBackendCASAcrossStores(t *testing.T) {
 	}
 
 	// The other "router" sees the same authoritative record.
-	currentB, ok := storeB.currentVersion(path)
+	currentB, ok := storeB.CurrentVersion(path)
 	if !ok || currentB.VersionID != first.GetVersionId() {
 		t.Fatalf("storeB current = %+v, ok=%v, want %s", currentB, ok, first.GetVersionId())
 	}
 
-	if _, err := storeB.commit(guardianVersionCommit{
+	if _, err := storeB.Commit(guardian.Commit{
 		LogicalPath:       path,
 		Content:           []byte("v2"),
 		ExpectedVersionID: "absent",
 		CommittedAt:       2,
-	}); !errors.Is(err, errGuardianVersionExists) {
+	}); !errors.Is(err, guardian.ErrExists) {
 		t.Fatalf("storeB second absent create = %v, want exists", err)
 	}
 
-	second, err := storeB.commit(guardianVersionCommit{
+	second, err := storeB.Commit(guardian.Commit{
 		LogicalPath:       path,
 		Content:           []byte("v2"),
 		ExpectedVersionID: first.GetVersionId(),
@@ -100,16 +101,16 @@ func TestKVSGuardianVersionBackendCASAcrossStores(t *testing.T) {
 	}
 
 	// StoreA's stale expected version must now conflict.
-	if _, err := storeA.commit(guardianVersionCommit{
+	if _, err := storeA.Commit(guardian.Commit{
 		LogicalPath:       path,
 		Content:           []byte("stale"),
 		ExpectedVersionID: first.GetVersionId(),
 		CommittedAt:       4,
-	}); !errors.Is(err, errGuardianVersionConflict) {
+	}); !errors.Is(err, guardian.ErrConflict) {
 		t.Fatalf("storeA stale CAS = %v, want conflict", err)
 	}
 
-	versions, _, err := storeA.list(path, 10, "")
+	versions, _, err := storeA.List(path, 10, "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -117,14 +118,14 @@ func TestKVSGuardianVersionBackendCASAcrossStores(t *testing.T) {
 		t.Fatalf("versions = %+v, want newest %s", versions, second.GetVersionId())
 	}
 
-	version, content, available, found, err := storeB.get(path, second.GetVersionId())
+	version, content, available, found, err := storeB.Get(path, second.GetVersionId())
 	if err != nil || !found || !available {
 		t.Fatalf("get = version=%v available=%v found=%v err=%v", version, available, found, err)
 	}
 	if string(content) != "v2" {
 		t.Fatalf("content = %q, want v2", string(content))
 	}
-	if _, _, availableA, foundA, err := storeA.get(path, second.GetVersionId()); err != nil || !foundA || availableA {
+	if _, _, availableA, foundA, err := storeA.Get(path, second.GetVersionId()); err != nil || !foundA || availableA {
 		t.Fatalf("storeA get = available=%v found=%v err=%v, want metadata-only", availableA, foundA, err)
 	}
 }

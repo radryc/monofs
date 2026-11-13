@@ -14,6 +14,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/router/guardian"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -42,7 +43,7 @@ type guardianUpsertPlan struct {
 type guardianDeletePlan struct {
 	deleteReq    *pb.GuardianPathDelete
 	mapped       guardianPhysicalPath
-	existing     *storedGuardianFileVersion
+	existing     *guardian.Record
 	content      []byte
 	changeType   pb.ChangeType
 	physicalPath string
@@ -227,7 +228,7 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 		write := item.write
 		mapped := item.mapped
 
-		current, exists, currentErr := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		current, exists, currentErr := r.guardianVersions.CurrentVersionWithError(mapped.LogicalPath)
 		if currentErr != nil {
 			return nil, status.Errorf(codes.Unavailable, "guardian version store unavailable: %v", currentErr)
 		}
@@ -299,9 +300,9 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 		}
 	}
 
-	changes := make([]guardianVersionCommit, 0, len(plans))
+	changes := make([]guardian.Commit, 0, len(plans))
 	for _, plan := range plans {
-		changes = append(changes, guardianVersionCommit{
+		changes = append(changes, guardian.Commit{
 			LogicalPath:       plan.mapped.LogicalPath,
 			DisplayPath:       plan.mapped.DisplayPath,
 			StorageID:         plan.mapped.StorageID,
@@ -315,7 +316,7 @@ func (r *Router) processGuardianUpsert(ctx context.Context, req *pb.UpsertGuardi
 			CommittedAt:       committedAt,
 		})
 	}
-	versions, err := r.guardianVersions.commitBatch(changes)
+	versions, err := r.guardianVersions.CommitBatch(changes)
 	if err != nil {
 		return nil, guardianVersionCommitStatus(err)
 	}
@@ -404,7 +405,7 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 		deleteReq := item.deleteReq
 		mapped := item.mapped
 
-		current, exists, currentErr := r.guardianVersions.currentVersionWithError(mapped.LogicalPath)
+		current, exists, currentErr := r.guardianVersions.CurrentVersionWithError(mapped.LogicalPath)
 		if currentErr != nil {
 			return nil, status.Errorf(codes.Unavailable, "guardian version store unavailable: %v", currentErr)
 		}
@@ -451,7 +452,7 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 			if attrErr == nil && attr != nil && attr.Found {
 				plan.needsDelete = true
 				plan.isDir = attr.Mode&uint32(syscall.S_IFDIR) != 0
-				if !plan.isDir && isGuardianAssetPath(mapped.LogicalPath) && (plan.existing == nil || len(plan.existing.Content) == 0) {
+				if !plan.isDir && guardian.IsAssetPath(mapped.LogicalPath) && (plan.existing == nil || len(plan.existing.Content) == 0) {
 					plan.content, _ = readGuardianFileContent(ctx, attrClient, plan.physicalPath)
 				}
 			}
@@ -485,9 +486,9 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 		}
 	}
 
-	changes := make([]guardianVersionCommit, 0, len(plans))
+	changes := make([]guardian.Commit, 0, len(plans))
 	for _, plan := range plans {
-		changes = append(changes, guardianVersionCommit{
+		changes = append(changes, guardian.Commit{
 			LogicalPath:       plan.mapped.LogicalPath,
 			DisplayPath:       plan.mapped.DisplayPath,
 			StorageID:         plan.mapped.StorageID,
@@ -501,7 +502,7 @@ func (r *Router) DeleteGuardianPaths(ctx context.Context, req *pb.DeleteGuardian
 			CommittedAt:       committedAt,
 		})
 	}
-	tombstones, err := r.guardianVersions.commitBatch(changes)
+	tombstones, err := r.guardianVersions.CommitBatch(changes)
 	if err != nil {
 		return nil, guardianVersionCommitStatus(err)
 	}
@@ -613,7 +614,7 @@ func (r *Router) ListGuardianVersions(ctx context.Context, req *pb.ListGuardianV
 		return nil, status.Errorf(codes.InvalidArgument, "invalid logical path %q: %v", req.GetLogicalPath(), err)
 	}
 
-	versions, nextToken, err := r.guardianVersions.list(logicalPath, req.GetPageSize(), req.GetPageToken())
+	versions, nextToken, err := r.guardianVersions.List(logicalPath, req.GetPageSize(), req.GetPageToken())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -635,7 +636,7 @@ func (r *Router) GetGuardianVersion(ctx context.Context, req *pb.GetGuardianVers
 		return nil, status.Error(codes.InvalidArgument, "version_id is required")
 	}
 
-	version, content, contentAvailable, ok, versionErr := r.guardianVersions.get(logicalPath, req.GetVersionId())
+	version, content, contentAvailable, ok, versionErr := r.guardianVersions.Get(logicalPath, req.GetVersionId())
 	if versionErr != nil {
 		return nil, status.Errorf(codes.Unavailable, "guardian version store unavailable: %v", versionErr)
 	}
@@ -955,10 +956,10 @@ func (r *Router) applyGuardianUpsertGroupOnce(ctx context.Context, targets []gua
 // that Guardian understands as CAS conflicts.
 func guardianVersionCommitStatus(err error) error {
 	switch {
-	case errors.Is(err, errGuardianVersionExists):
+	case errors.Is(err, guardian.ErrExists):
 		guardianVersionStoreCASConflictsTotal.Inc()
 		return status.Errorf(codes.AlreadyExists, "guardian version: %v", err)
-	case errors.Is(err, errGuardianVersionConflict):
+	case errors.Is(err, guardian.ErrConflict):
 		guardianVersionStoreCASConflictsTotal.Inc()
 		return status.Errorf(codes.FailedPrecondition, "guardian version: %v", err)
 	default:
