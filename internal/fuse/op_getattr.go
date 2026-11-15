@@ -13,8 +13,8 @@ import (
 )
 
 // Getattr returns file attributes.
-func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	defer n.recoverPanic("Getattr")
+func (n *MonoNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) (resultErrno syscall.Errno) {
+	defer n.recoverPanic("Getattr", &resultErrno)
 	n.logger.Debug("getattr", "path", n.path)
 
 	// Special handling for FS_ERROR.txt

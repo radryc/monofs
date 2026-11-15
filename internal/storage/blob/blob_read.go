@@ -215,7 +215,7 @@ func (bb *BlobBackend) findBlobInCloud(ctx context.Context, storageID, blobHash 
 // ensureCloudBlobIndex loads .idx sidecars for the requested storage prefix,
 // plus the shared _batch/_loose archive prefixes.
 func (bb *BlobBackend) ensureCloudBlobIndex(ctx context.Context, storageID string) error {
-	if !bb.hasCloudDownload() || bb.s3Client == nil {
+	if !bb.hasCloudDownload() || bb.listCloudObjects == nil {
 		return fmt.Errorf("cloud index unavailable")
 	}
 
@@ -236,7 +236,7 @@ func (bb *BlobBackend) ensureCloudBlobIndex(ctx context.Context, storageID strin
 			continue
 		}
 
-		objects, err := bb.listS3ObjectsPrefix(ctx, prefix, 5000)
+		objects, err := bb.listCloudObjects(ctx, prefix, 5000)
 		if err != nil {
 			return err
 		}
@@ -347,20 +347,20 @@ func (bb *BlobBackend) findBlobOnDisk(blobHash string) (archiveRef, bool, error)
 				continue
 			}
 
-			found := false
+			foundEntry := ""
 			for _, entryPath := range ar.ListFiles() {
-				if entryPath == blobHash {
-					found = true
+				if normalizeBlobEntry(entryPath) == blobHash {
+					foundEntry = entryPath
 					break
 				}
 			}
 			ar.Close()
 			store.Close()
 
-			if found {
+			if foundEntry != "" {
 				return archiveRef{
 					archivePath: packPath,
-					entryPath:   blobHash,
+					entryPath:   foundEntry,
 				}, true, nil
 			}
 		}
@@ -410,13 +410,23 @@ func (bb *BlobBackend) CachedSources() []string {
 	return sources
 }
 
+// pathWithinDir reports whether path is dir itself or lives below it. Unlike
+// a bare strings.HasPrefix it cannot match a sibling such as "/archives/abc2"
+// when cleaning up "/archives/abc".
+func pathWithinDir(path, dir string) bool {
+	if path == dir {
+		return true
+	}
+	return strings.HasPrefix(path, dir+string(filepath.Separator))
+}
+
 // Cleanup removes archives for a specific storage ID.
 func (bb *BlobBackend) Cleanup(ctx context.Context, sourceKey string) error {
 	archiveDir := filepath.Join(bb.config.CacheDir, "archives", sourceKey)
 
 	bb.archiveMu.Lock()
 	for path, cached := range bb.archiveCache {
-		if strings.HasPrefix(path, archiveDir) {
+		if pathWithinDir(path, archiveDir) {
 			cached.reader.Close()
 			cached.store.Close()
 			delete(bb.archiveCache, path)
@@ -426,11 +436,17 @@ func (bb *BlobBackend) Cleanup(ctx context.Context, sourceKey string) error {
 
 	bb.mu.Lock()
 	for hash, ref := range bb.blobIndex {
-		if strings.HasPrefix(ref.archivePath, archiveDir) {
+		if pathWithinDir(ref.archivePath, archiveDir) {
 			delete(bb.blobIndex, hash)
 		}
 	}
+	for path := range bb.archivePaths {
+		if pathWithinDir(path, archiveDir) {
+			delete(bb.archivePaths, path)
+		}
+	}
 	delete(bb.storageIDs, sourceKey)
+	delete(bb.storageBlobCounts, sourceKey)
 	bb.mu.Unlock()
 
 	os.RemoveAll(archiveDir)
@@ -440,17 +456,21 @@ func (bb *BlobBackend) Cleanup(ctx context.Context, sourceKey string) error {
 
 // Close shuts down the backend, closing all open archive readers and cloud clients.
 func (bb *BlobBackend) Close() error {
+	bb.closed.Store(true)
+
 	if bb.scannerStop != nil {
 		close(bb.scannerStop)
 		bb.scannerWG.Wait()
 		bb.scannerStop = nil
 	}
 
+	bb.cloudUploadMu.Lock()
 	if bb.cloudUploadQueue != nil {
 		close(bb.cloudUploadQueue)
 		bb.cloudUploadWG.Wait()
 		bb.cloudUploadQueue = nil
 	}
+	bb.cloudUploadMu.Unlock()
 
 	bb.archiveMu.Lock()
 	defer bb.archiveMu.Unlock()

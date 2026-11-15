@@ -136,81 +136,73 @@ func (r *Router) injectGuardianPartitionFromSource(ctx context.Context, source, 
 	return nil
 }
 
+// apiRoutes returns the HTTP API surface. Keeping it in one table makes route
+// drift visible to tests: ServeHTTP and the route-contract test share it.
+func (r *Router) apiRoutes() map[string]http.HandlerFunc {
+	return map[string]http.HandlerFunc{
+		"/api/ingest":                   r.handleIngest,
+		"/api/ingest/file":              r.handleIngestFileUpload,
+		"/api/workspace-sync/jobs":      r.handleWorkspaceSyncJobsAPI,
+		"/api/workspace-sync/jobs/":     r.handleWorkspaceSyncJobsAPI,
+		"/api/status":                   r.handleStatus,
+		"/api/auth/me":                  r.handleAuthMe,
+		"/api/repositories":             r.handleRepositoriesList,
+		"/api/repositories/refresh":     r.handleRepositoryRefresh,
+		"/api/workers/auto-refresh":     r.handleAutoRefreshWorker,
+		"/api/routers":                  r.handleRouters,
+		"/api/rebalance":                r.handleRebalance,
+		"/api/clients":                  r.handleClientsAPI,
+		"/api/local-clients":            r.handleLocalClientsAPI,
+		"/api/fetchers":                 r.handleFetchersAPI,
+		"/api/fetchers/storage-objects": r.handleFetcherStorageObjects,
+		"/api/fetchers/observability":   r.handleFetcherObservability,
+		"/api/fetcher-key-status":       r.handleFetcherKeyStatus,
+		"/api/confirm-fetcher-key":      r.handleConfirmFetcherKey,
+		"/api/logengine":                r.handleLogEngineAPI,
+		"/api/span-engine":              r.handleLogEngineAPI,
+		"/api/fs/ls":                    r.handleFSList,
+		"/api/access/policy":            r.handleAccessPolicy,
+		"/api/whitelist":                r.handleWhitelistAPI,
+		"/api/whitelist/toggle":         r.handleWhitelistToggleAPI,
+		"/api/access/enforce":             r.handleAccessEnforceStatusAPI,
+		"/api/access/enforce/toggle":      r.handleAccessEnforceToggleAPI,
+		"/api/merge-requests":           r.handleMergeRequestsAPI,
+		"/api/merge-requests/":          r.handleMergeRequestsAPI,
+		"/api/predictor":                r.handlePredictorAPI,
+		"/api/pprof/collect":            r.handlePprofCollectAPI,
+		"/api/bazel/status":             r.handleBazelStatusAPI,
+		"/api/search":                   r.handleSearchAPI,
+		"/api/search/indexes":           r.handleSearchIndexes,
+		"/api/search/rebuild":           r.handleSearchRebuild,
+		"/api/search/stats":             r.handleSearchStats,
+		"/api/file/content":             r.handleFileContent,
+		"/api/guardian/clients":         r.handleGuardianClientsAPI,
+		"/api/guardian/local-clients":   r.handleGuardianLocalClientsAPI,
+		"/api/guardian/inject":          r.handleGuardianInject,
+		"/api/guardian/partitions":      r.handleGuardianPartitions,
+		"/api/guardian/partitions/":     r.handleGuardianPartition,
+		"/api/registry/stats":           r.handleRegistryStats,
+		"/api/registry/repos":           r.handleRegistryRepos,
+		"/api/registry/repos/":          r.handleRegistryRepoDetail,
+		"/api/dependencies":             r.handleDependenciesAPI,
+		"/api/pipelines":                r.handlePipelinesAPI,
+		"/api/pipelines/":               r.handlePipelinesAPI,
+		"/api/pipelines/help":           r.handlePipelineHelp,
+		"/api/webhooks/github":          r.handleGitHubWebhook,
+		"/api/webhooks/gitlab":          r.handleGitLabWebhook,
+		"/health":                       r.handleHealth,
+	}
+}
+
 // ServeHTTP returns an HTTP handler for the web UI.
 func (r *Router) ServeHTTP() http.Handler {
 	mux := http.NewServeMux()
 
-	// API routes
-	mux.HandleFunc("/api/ingest", r.handleIngest)
-	mux.HandleFunc("/api/ingest/file", r.handleIngestFileUpload)
-	mux.HandleFunc("/api/workspace-sync/jobs", r.handleWorkspaceSyncJobsAPI)
-	mux.HandleFunc("/api/workspace-sync/jobs/", r.handleWorkspaceSyncJobsAPI)
-	mux.HandleFunc("/api/status", r.handleStatus)
-	mux.HandleFunc("/api/auth/me", r.handleAuthMe)
-	mux.HandleFunc("/api/repositories", r.handleRepositoriesList)
-	mux.HandleFunc("/api/repositories/refresh", r.handleRepositoryRefresh)
-	mux.HandleFunc("/api/workers/auto-refresh", r.handleAutoRefreshWorker)
-	mux.HandleFunc("/api/routers", r.handleRouters)
-	mux.HandleFunc("/api/rebalance", r.handleRebalance)
-	mux.HandleFunc("/api/clients", r.handleClientsAPI)
-	mux.HandleFunc("/api/local-clients", r.handleLocalClientsAPI)
-	mux.HandleFunc("/api/fetchers", r.handleFetchersAPI)
-	mux.HandleFunc("/api/fetchers/storage-objects", r.handleFetcherStorageObjects)
-	mux.HandleFunc("/api/fetchers/observability", r.handleFetcherObservability)
-	mux.HandleFunc("/api/fetcher-key-status", r.handleFetcherKeyStatus)
-	mux.HandleFunc("/api/confirm-fetcher-key", r.handleConfirmFetcherKey)
-	mux.HandleFunc("/api/logengine", r.handleLogEngineAPI)
-	mux.HandleFunc("/api/span-engine", r.handleLogEngineAPI)
-	mux.HandleFunc("/api/fs/ls", r.handleFSList)
-	mux.HandleFunc("/api/access/policy", r.handleAccessPolicy)
-
-	// Whitelist API routes
-	mux.HandleFunc("/api/whitelist", r.handleWhitelistAPI)
-	mux.HandleFunc("/api/whitelist/toggle", r.handleWhitelistToggleAPI)
-	mux.HandleFunc("/api/authz/ingest", r.handleAuthzIngestStatusAPI)
-	mux.HandleFunc("/api/authz/ingest/toggle", r.handleAuthzIngestToggleAPI)
-	mux.HandleFunc("/api/merge-requests", r.handleMergeRequestsAPI)
-	mux.HandleFunc("/api/merge-requests/", r.handleMergeRequestsAPI)
-
-	// Predictor API route
-	mux.HandleFunc("/api/predictor", r.handlePredictorAPI)
-	mux.HandleFunc("/api/pprof/collect", r.handlePprofCollectAPI)
-
-	// Bazel adoption status API route
-	mux.HandleFunc("/api/bazel/status", r.handleBazelStatusAPI)
-
-	// Search API routes
-	mux.HandleFunc("/api/search", r.handleSearchAPI)
-	mux.HandleFunc("/api/search/indexes", r.handleSearchIndexes)
-	mux.HandleFunc("/api/search/rebuild", r.handleSearchRebuild)
-	mux.HandleFunc("/api/search/stats", r.handleSearchStats)
-
-	// File content API (for code viewer)
-	mux.HandleFunc("/api/file/content", r.handleFileContent)
-
-	// Guardian API routes
-	mux.HandleFunc("/api/guardian/clients", r.handleGuardianClientsAPI)
-	mux.HandleFunc("/api/guardian/local-clients", r.handleGuardianLocalClientsAPI)
-	mux.HandleFunc("/api/guardian/inject", r.handleGuardianInject)
-	mux.HandleFunc("/api/guardian/partitions", r.handleGuardianPartitions)
-	mux.HandleFunc("/api/guardian/partitions/", r.handleGuardianPartition)
-
-	// Registry API routes (proxy to monofs-registry)
-	mux.HandleFunc("/api/registry/stats", r.handleRegistryStats)
-	mux.HandleFunc("/api/registry/repos", r.handleRegistryRepos)
-	mux.HandleFunc("/api/registry/repos/", r.handleRegistryRepoDetail)
-
-	mux.HandleFunc("/api/dependencies", r.handleDependenciesAPI)
-
-	mux.HandleFunc("/api/pipelines", r.handlePipelinesAPI)
-	mux.HandleFunc("/api/pipelines/", r.handlePipelinesAPI)
-	mux.HandleFunc("/api/pipelines/help", r.handlePipelineHelp)
-
-	mux.HandleFunc("/api/webhooks/github", r.handleGitHubWebhook)
-	mux.HandleFunc("/api/webhooks/gitlab", r.handleGitLabWebhook)
-
-	// Health check endpoint for HAProxy
-	mux.HandleFunc("/health", r.handleHealth)
+	// API routes are declared in apiRoutes so tests can verify that every
+	// registered endpoint stays reachable.
+	for pattern, handler := range r.apiRoutes() {
+		mux.HandleFunc(pattern, handler)
+	}
 
 	// Prometheus metrics
 	mux.Handle("/metrics", promhttp.Handler())

@@ -49,6 +49,15 @@ func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Re
 		os.Remove(tmpPath)
 		return 0, 0, fmt.Errorf("close temp archive: %w", err)
 	}
+
+	// Validate the archive (open + decrypt + list) before it replaces the live
+	// file, so corrupt input cannot clobber a working archive.
+	hashes, err := bb.archiveHashes(tmpPath)
+	if err != nil {
+		os.Remove(tmpPath)
+		return written, 0, fmt.Errorf("build archive index: %w", err)
+	}
+
 	if err := os.Rename(tmpPath, archivePath); err != nil {
 		os.Remove(tmpPath)
 		return 0, 0, fmt.Errorf("rename archive: %w", err)
@@ -56,18 +65,25 @@ func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Re
 
 	// Build the sidecar index before the archive is uploaded so other fetchers
 	// can locate blobs in S3 without downloading every archive.
-	hashes, err := bb.archiveHashes(archivePath)
-	if err != nil {
-		return written, 0, fmt.Errorf("build archive index: %w", err)
-	}
 	if err := bb.writeArchiveIndex(archivePath, hashes); err != nil {
+		os.Remove(archivePath)
+		os.Remove(archivePath + archiveIndexSuffix)
 		return written, 0, fmt.Errorf("write archive index: %w", err)
 	}
 
 	bb.evictArchiveReader(archivePath)
 
+	// Drop any refs from a previous version of this archive before indexing
+	// the replacement, so re-ingesting a chunk neither double-counts blobs nor
+	// leaves entries that are absent from the new archive.
+	bb.mu.Lock()
+	removed := bb.removeArchiveFromIndexLocked(archivePath)
+	bb.mu.Unlock()
+
 	count, err := bb.indexArchive(archivePath)
 	if err != nil {
+		os.Remove(archivePath)
+		os.Remove(archivePath + archiveIndexSuffix)
 		return written, 0, fmt.Errorf("index archive: %w", err)
 	}
 
@@ -86,7 +102,10 @@ func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Re
 	}
 
 	stats := *bb.stats.Load()
-	stats.CachedItems += int64(count)
+	stats.CachedItems += int64(count) - removed
+	if stats.CachedItems < 0 {
+		stats.CachedItems = 0
+	}
 	stats.CacheBytes += written
 	bb.stats.Store(&stats)
 
@@ -380,6 +399,7 @@ func (w *StoreBlobBatchWriter) sealCurrentArchive() error {
 	packagerIndexedBlobsGauge.Add(float64(len(w.curHashes)))
 
 	w.result.ArchivesCreated++
+	w.curHashes = w.curHashes[:0]
 	w.tmpFile = nil
 	w.counter = nil
 	w.writer = nil
@@ -427,6 +447,29 @@ type DeleteBlobsResult struct {
 
 // DeleteBlobs removes the given blob hashes from the in-memory index.
 // If compact is true, empty archive files are deleted from disk.
+// removeArchiveFromIndexLocked deletes every blob reference owned by
+// archivePath and returns how many blobs were removed. Callers must hold bb.mu.
+func (bb *BlobBackend) removeArchiveFromIndexLocked(archivePath string) int64 {
+	var removed int64
+	storageID := filepath.Base(filepath.Dir(archivePath))
+	for hash, ref := range bb.blobIndex {
+		if ref.archivePath != archivePath {
+			continue
+		}
+		delete(bb.blobIndex, hash)
+		removed++
+		if storageID != "" {
+			bb.storageBlobCounts[storageID]--
+		}
+	}
+	if storageID != "" && bb.storageBlobCounts[storageID] <= 0 {
+		delete(bb.storageBlobCounts, storageID)
+		delete(bb.storageIDs, storageID)
+	}
+	delete(bb.archivePaths, archivePath)
+	return removed
+}
+
 func (bb *BlobBackend) DeleteBlobs(hashes []string, compact bool) *DeleteBlobsResult {
 	result := &DeleteBlobsResult{}
 	if err := bb.keyGuardCheck(); err != nil {
@@ -454,6 +497,7 @@ func (bb *BlobBackend) DeleteBlobs(hashes []string, compact bool) *DeleteBlobsRe
 			bb.storageBlobCounts[storageID]--
 			if bb.storageBlobCounts[storageID] <= 0 {
 				delete(bb.storageBlobCounts, storageID)
+				delete(bb.storageIDs, storageID)
 			}
 		}
 	}

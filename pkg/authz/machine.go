@@ -167,7 +167,7 @@ func hashToken(token string) string {
 }
 
 // NewBreakGlassVerifier maps a single admin token to an admin service identity
-// (authz epic G2). Pair it with an admin grant on WildcardPartition for the same
+// (authz epic G2). Pair it with an admin entry in the access policy for the same
 // client id (e.g. via the grant store) so the break-glass principal can act
 // everywhere. Intended to back the MONOFS_TOKEN break-glass path; every use
 // should be audit-logged by the interceptor's Observe hook.

@@ -33,8 +33,8 @@ func IdentityFromContext(ctx context.Context) (Identity, bool) {
 // a log line. In ENFORCE mode (RequireToken=true) missing or invalid tokens are
 // rejected.
 //
-// Authorization (grant checks) is performed separately at call sites via a
-// GrantEvaluator; this type only handles authentication.
+// Authorization decisions are made separately by the repo-managed access
+// policy; this type only handles authentication.
 type Authenticator struct {
 	Verifier     TokenVerifier
 	Logger       *slog.Logger

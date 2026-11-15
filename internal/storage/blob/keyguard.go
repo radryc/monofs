@@ -69,12 +69,14 @@ func (bb *BlobBackend) verifyEncryptionKey() error {
 		}
 		packagerEncryptionKeyPending.Set(0)
 		bb.keyGuardPending.Store(false)
+		bb.keyGuardFirstAuto.Store(true)
 		return nil
 	}
 
 	if strings.EqualFold(accepted, current) {
 		packagerEncryptionKeyPending.Set(0)
 		bb.keyGuardPending.Store(false)
+		bb.keyGuardFirstAuto.Store(false)
 		if bb.logger != nil {
 			bb.logger.Info("encryption key verified against accepted fingerprint",
 				"fingerprint", current,
@@ -212,6 +214,8 @@ func (bb *BlobBackend) ConfirmEncryptionKey() (EncryptionKeyStatus, error) {
 	bb.acceptedKeyFingerprint = current
 	bb.keyGuardMu.Unlock()
 	bb.keyGuardPending.Store(false)
+	bb.keyGuardFirstAuto.Store(false)
+	bb.keyGuardConfirmed.Store(true)
 	packagerEncryptionKeyPending.Set(0)
 	if bb.logger != nil {
 		bb.logger.Info("encryption key explicitly confirmed",
@@ -234,11 +238,14 @@ func (bb *BlobBackend) EncryptionKeyStatus() EncryptionKeyStatus {
 	pending := bb.keyGuardPending.Load()
 	state := "ok"
 	firstAuto := false
-	if pending {
+	switch {
+	case pending:
 		state = "pending"
-	} else if accepted == "" {
+	case accepted == "":
 		state = "no_key"
-	} else if accepted == bb.currentKeyFingerprint {
+	case bb.keyGuardConfirmed.Load():
+		state = "confirmed"
+	case bb.keyGuardFirstAuto.Load():
 		firstAuto = true
 		state = "auto_accepted"
 	}

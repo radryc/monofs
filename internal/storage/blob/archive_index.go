@@ -123,14 +123,11 @@ func (bb *BlobBackend) indexArchive(archivePath string) (int, error) {
 		if strings.Contains(entry, "/") || strings.Contains(entry, ".") {
 			continue
 		}
-		hexPart := entry
-		if after, found := strings.CutPrefix(entry, "sha256:"); found {
-			hexPart = after
-		}
-		if !isHexString(hexPart) {
+		key := normalizeBlobEntry(entry)
+		if !isHexString(key) {
 			continue
 		}
-		bb.blobIndex[entry] = archiveRef{
+		bb.blobIndex[key] = archiveRef{
 			archivePath: archivePath,
 			entryPath:   entry,
 		}
@@ -142,6 +139,12 @@ func (bb *BlobBackend) indexArchive(archivePath string) (int, error) {
 	store.Close()
 
 	return indexed, nil
+}
+
+// normalizeBlobEntry maps an archive entry name to the bare content hash used
+// as the blob index key. Older archives may store "sha256:"-prefixed names.
+func normalizeBlobEntry(name string) string {
+	return strings.TrimPrefix(name, "sha256:")
 }
 
 // archiveHashes lists the blob hashes indexed in an archive. Only entries that
@@ -164,12 +167,9 @@ func (bb *BlobBackend) archiveHashes(archivePath string) ([]string, error) {
 		if strings.Contains(entry, "/") || strings.Contains(entry, ".") {
 			continue
 		}
-		hexPart := entry
-		if after, found := strings.CutPrefix(entry, "sha256:"); found {
-			hexPart = after
-		}
-		if isHexString(hexPart) {
-			hashes = append(hashes, entry)
+		key := normalizeBlobEntry(entry)
+		if isHexString(key) {
+			hashes = append(hashes, key)
 		}
 	}
 	sort.Strings(hashes)

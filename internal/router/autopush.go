@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
@@ -19,12 +20,24 @@ const (
 	deadLetterAfterFailures = 10
 )
 
+// autoPushPusher is the narrow fetcher surface used by the auto-push worker.
+// *fetcher.Client satisfies it; tests inject a fake.
+type autoPushPusher interface {
+	StageWorkspaceCommitBundle(ctx context.Context, bundleID, workspaceID string, data []byte) (*pb.StageWorkspaceBundleResponse, error)
+	StartWorkspaceCommitPush(ctx context.Context, req *pb.StartWorkspaceCommitPushRequest) ([]*pb.RepoSyncProgress, error)
+}
+
 type autoPushWorker struct {
 	router      *Router
 	logger      *slog.Logger
 	interval    time.Duration
 	concurrency int
 	stop        chan struct{}
+	done        chan struct{}
+	startOnce   sync.Once
+	stopOnce    sync.Once
+	started     atomic.Bool
+	pusher      autoPushPusher
 
 	mu           sync.Mutex
 	active       map[string]bool
@@ -45,6 +58,7 @@ func newAutoPushWorker(r *Router, interval time.Duration, concurrency int, logge
 		interval:     interval,
 		concurrency:  concurrency,
 		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
 		active:       make(map[string]bool),
 		failureCount: make(map[string]int),
 		backoffUntil: make(map[string]time.Time),
@@ -52,16 +66,23 @@ func newAutoPushWorker(r *Router, interval time.Duration, concurrency int, logge
 }
 
 func (w *autoPushWorker) Start() {
-	w.logger.Info("auto-push worker started", "interval", w.interval, "concurrency", w.concurrency)
-	go w.loop()
+	w.startOnce.Do(func() {
+		w.started.Store(true)
+		w.logger.Info("auto-push worker started", "interval", w.interval, "concurrency", w.concurrency)
+		go w.loop()
+	})
 }
 
 func (w *autoPushWorker) Stop() {
-	close(w.stop)
+	w.stopOnce.Do(func() { close(w.stop) })
+	if w.started.Load() {
+		<-w.done
+	}
 	w.logger.Info("auto-push worker stopped")
 }
 
 func (w *autoPushWorker) loop() {
+	defer close(w.done)
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 
@@ -195,7 +216,10 @@ func (w *autoPushWorker) tryPush(workspaceID string) {
 		return
 	}
 
-	fetcherClient := w.router.getFetcherClient()
+	fetcherClient := w.pusher
+	if fetcherClient == nil {
+		fetcherClient = w.router.getFetcherClient()
+	}
 	if fetcherClient == nil {
 		w.recordFailure(workspaceID)
 		w.logger.Warn("auto-push skipped, no fetcher client", "workspace_id", workspaceID)

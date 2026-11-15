@@ -11,8 +11,8 @@ import (
 )
 
 // Rename implements fs.NodeRenamer for moving/renaming files
-func (n *MonoNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	defer n.recoverPanic("Rename")
+func (n *MonoNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) (resultErrno syscall.Errno) {
+	defer n.recoverPanic("Rename", &resultErrno)
 	n.logger.Debug("rename", "oldParent", n.path, "oldName", name, "newName", newName)
 
 	// Check if we have session manager for writes

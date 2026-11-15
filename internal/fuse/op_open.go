@@ -11,8 +11,8 @@ import (
 )
 
 // Open opens a file.
-func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	defer n.recoverPanic("Open")
+func (n *MonoNode) Open(ctx context.Context, flags uint32) (resultHandle fs.FileHandle, resultFlags uint32, resultErrno syscall.Errno) {
+	defer n.recoverPanic("Open", &resultErrno)
 	n.logger.Debug("open", "path", n.path, "flags", flags)
 
 	// Special handling for FS_ERROR.txt - content is already set
@@ -76,7 +76,12 @@ func (n *MonoNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		}
 
 		n.mu.Lock()
-		n.isLocalWrite = true
+		// Opening for write does not change content by itself; only O_TRUNC
+		// does. Marking dirty here produced a vacuous ChangeModify on
+		// open+close without any write.
+		if flags&syscall.O_TRUNC != 0 {
+			n.isLocalWrite = true
+		}
 		n.localHandle = f
 		n.mu.Unlock()
 		n.stampNode()

@@ -4,11 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/radryc/monofs/pkg/authz"
 )
 
-func (r *Router) handleAuthzIngestToggleAPI(w http.ResponseWriter, req *http.Request) {
+func (r *Router) handleAccessEnforceToggleAPI(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id, _ := authz.IdentityFromContext(req.Context())
+	if !r.accessAdmin(id) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -25,28 +32,29 @@ func (r *Router) handleAuthzIngestToggleAPI(w http.ResponseWriter, req *http.Req
 		return
 	}
 
-	r.SetAuthzEnforceIngest(body.Enforce)
+	r.SetAccessEnforce(body.Enforce)
 
-	state := "disabled"
+	state := "observe"
 	if body.Enforce {
-		state = "enabled"
+		state = "enforce"
 	}
-	r.logger.Info("authz ingest enforcement toggled", "enforce", body.Enforce)
+	r.logger.Info("access policy enforcement toggled", "enforce", body.Enforce)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"message": fmt.Sprintf("partition ingest authorization %s", state),
+		"message": fmt.Sprintf("access policy %s mode", state),
 	})
 }
 
-func (r *Router) handleAuthzIngestStatusAPI(w http.ResponseWriter, req *http.Request) {
+func (r *Router) handleAccessEnforceStatusAPI(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"enforce": r.AuthzEnforceIngest(),
+		"configured": r.accessPolicySnapshot() != nil,
+		"enforce":    r.AccessEnforce(),
 	})
 }

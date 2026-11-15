@@ -58,15 +58,6 @@ func (bb *BlobBackend) putBlob(contentID string, data []byte) {
 	bb.blobCacheBytes += int64(len(data))
 }
 
-func (bb *BlobBackend) dropCachedBlob(contentID string) {
-	bb.blobCacheMu.Lock()
-	defer bb.blobCacheMu.Unlock()
-	if old, ok := bb.blobCache[contentID]; ok {
-		bb.blobCacheBytes -= int64(len(old))
-		delete(bb.blobCache, contentID)
-	}
-}
-
 // applyFetchRange slices a full blob according to the optional offset/length
 // source_config keys. The fetcher still reads the whole archive entry (the
 // packager provides O(1) file access, not intra-file ranges), but the network
@@ -85,7 +76,7 @@ func applyFetchRange(data []byte, cfg map[string]string) []byte {
 		}
 	}
 	if offset >= int64(len(data)) {
-		return nil
+		return []byte{}
 	}
 	data = data[offset:]
 	if length > 0 && int64(len(data)) > length {

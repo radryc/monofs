@@ -19,8 +19,8 @@ import (
 //     re-opening the file on every write syscall.
 //   - TrackChange is NOT called per-write; the dirty flag (isLocalWrite)
 //     is set and the tracking is deferred to Flush/Release.
-func (n *MonoNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
-	defer n.recoverPanic("Write")
+func (n *MonoNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (resultWritten uint32, resultErrno syscall.Errno) {
+	defer n.recoverPanic("Write", &resultErrno)
 	n.logger.Debug("write", "path", n.path, "offset", off, "len", len(data))
 
 	// Use file handle if available (the fast, common path)
@@ -79,12 +79,13 @@ func (n *MonoNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off
 	}
 	n.isLocalWrite = true
 	n.mu.Unlock()
+	n.stampNode()
 
-	// NOTE: TrackChange is intentionally NOT called here. The dirty flag
-	// (isLocalWrite) is set above; the actual DB write is deferred to
-	// Flush/Release via the file handle path, or to the next explicit
-	// TrackChange call. This avoids a NutsDB transaction + os.Lstat +
-	// JSON marshal on every 4 KB write chunk.
+	// This fallback path has no monofsFileHandle, so no Flush/Release will run
+	// later. Track the change here instead of dropping it.
+	if err := n.sessionMgr.TrackChangeWithMeta(ChangeModify, n.path, "", int64(newSize)); err != nil {
+		n.logger.Warn("write: failed to track change", "error", err)
+	}
 
 	return uint32(written), 0
 }

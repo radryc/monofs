@@ -297,6 +297,14 @@ func (s *Store) backend() Backend {
 	return s.remote
 }
 
+// backendState returns the remote backend and the fallback policy from one
+// consistent snapshot, so a concurrent UseBackend cannot race the caller.
+func (s *Store) backendState() (Backend, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.remote, s.fallbackLocal
+}
+
 func (s *Store) load() error {
 	if !s.persistent() {
 		return nil
@@ -378,7 +386,8 @@ func (s *Store) CurrentVersion(logicalPath string) (*Record, bool) {
 }
 
 func (s *Store) CurrentVersionWithError(logicalPath string) (*Record, bool, error) {
-	if backend := s.backend(); backend != nil && IsAssetPath(logicalPath) {
+	backend, fallbackLocal := s.backendState()
+	if backend != nil && IsAssetPath(logicalPath) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		current, ok, err := backend.Current(ctx, logicalPath)
 		cancel()
@@ -393,7 +402,7 @@ func (s *Store) CurrentVersionWithError(logicalPath string) (*Record, bool, erro
 			}
 			return current, true, nil
 		}
-		if !s.fallbackLocal {
+		if !fallbackLocal {
 			return nil, false, err
 		}
 	}
@@ -466,7 +475,7 @@ func (s *Store) CommitBatch(changes []Commit) ([]*pb.GuardianFileVersion, error)
 	if len(changes) == 0 {
 		return nil, nil
 	}
-	backend := s.backend()
+	backend, fallbackLocal := s.backendState()
 	if backend == nil {
 		return s.commitBatchLocal(changes)
 	}
@@ -490,8 +499,11 @@ func (s *Store) CommitBatch(changes []Commit) ([]*pb.GuardianFileVersion, error)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		kvsVersions, err := backend.CommitBatch(ctx, kvsChanges)
 		cancel()
+		if err == nil && len(kvsVersions) != len(kvsChanges) {
+			err = fmt.Errorf("backend commit batch returned %d versions for %d changes", len(kvsVersions), len(kvsChanges))
+		}
 		if err != nil {
-			if !s.fallbackLocal {
+			if !fallbackLocal {
 				return nil, err
 			}
 			localChanges = append(localChanges, kvsChanges...)
@@ -526,35 +538,47 @@ func (s *Store) commitBatchLocal(changes []Commit) ([]*pb.GuardianFileVersion, e
 	return s.commitBatchMemory(changes)
 }
 
+func newRecordForCommit(change Commit, contentSHA string, seq uint64) *Record {
+	return &Record{
+		LogicalPath:     change.LogicalPath,
+		DisplayPath:     change.DisplayPath,
+		StorageID:       change.StorageID,
+		VersionID:       VersionID(change.LogicalPath, contentSHA, change.BatchRevisionID, change.CommittedAt, seq, change.Tombstone),
+		BatchRevisionID: change.BatchRevisionID,
+		ContentSHA256:   contentSHA,
+		CommittedAt:     change.CommittedAt,
+		Tombstone:       change.Tombstone,
+		PrincipalID:     change.PrincipalID,
+		Reason:          change.Reason,
+		CorrelationID:   change.CorrelationID,
+		seq:             seq,
+	}
+}
+
+func commitContentSHA(change Commit) string {
+	if change.Content == nil {
+		return ""
+	}
+	sum := sha256.Sum256(change.Content)
+	return hex.EncodeToString(sum[:])
+}
+
 func (s *Store) commitBatchMemory(changes []Commit) ([]*pb.GuardianFileVersion, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	versions := make([]*pb.GuardianFileVersion, len(changes))
-	for i, change := range changes {
+	// Validate the whole batch before applying any change so a CAS failure on
+	// a later entry cannot leave the earlier ones committed.
+	for _, change := range changes {
 		if err := s.validateExpectedVersionLocked(change.LogicalPath, change.ExpectedVersionID); err != nil {
 			return nil, fmt.Errorf("%w: %s", err, change.LogicalPath)
 		}
-		contentSHA := ""
-		if change.Content != nil {
-			sum := sha256.Sum256(change.Content)
-			contentSHA = hex.EncodeToString(sum[:])
-		}
+	}
+
+	versions := make([]*pb.GuardianFileVersion, len(changes))
+	for i, change := range changes {
 		s.seq++
-		record := &Record{
-			LogicalPath:     change.LogicalPath,
-			DisplayPath:     change.DisplayPath,
-			StorageID:       change.StorageID,
-			VersionID:       VersionID(change.LogicalPath, contentSHA, change.BatchRevisionID, change.CommittedAt, s.seq, change.Tombstone),
-			BatchRevisionID: change.BatchRevisionID,
-			ContentSHA256:   contentSHA,
-			CommittedAt:     change.CommittedAt,
-			Tombstone:       change.Tombstone,
-			PrincipalID:     change.PrincipalID,
-			Reason:          change.Reason,
-			CorrelationID:   change.CorrelationID,
-			seq:             s.seq,
-		}
+		record := newRecordForCommit(change, commitContentSHA(change), s.seq)
 		versions[i] = record.ToProto()
 
 		if !IsAssetPath(change.LogicalPath) {
@@ -590,60 +614,28 @@ func (s *Store) commitBatchPersistent(changes []Commit) ([]*pb.GuardianFileVersi
 	defer s.writeMu.Unlock()
 
 	s.mu.Lock()
+	seqBefore := s.seq
 	versions := make([]*pb.GuardianFileVersion, len(changes))
 	prepared := make([]preparedVersionChange, 0, len(changes))
+	ephemeral := make([]preparedVersionChange, 0, len(changes))
 	assetPaths := make(map[string]struct{}, len(changes))
 	addedCounts := make(map[string]int, len(changes))
 	for i, change := range changes {
-		contentSHA := ""
-		if change.Content != nil {
-			sum := sha256.Sum256(change.Content)
-			contentSHA = hex.EncodeToString(sum[:])
-		}
+		contentSHA := commitContentSHA(change)
 		if !IsAssetPath(change.LogicalPath) {
 			if err := s.validateExpectedVersionLocked(change.LogicalPath, change.ExpectedVersionID); err != nil {
+				s.seq = seqBefore
 				s.mu.Unlock()
 				return nil, fmt.Errorf("%w: %s", err, change.LogicalPath)
 			}
 			s.seq++
-			record := &Record{
-				LogicalPath:     change.LogicalPath,
-				DisplayPath:     change.DisplayPath,
-				StorageID:       change.StorageID,
-				VersionID:       VersionID(change.LogicalPath, contentSHA, change.BatchRevisionID, change.CommittedAt, s.seq, change.Tombstone),
-				BatchRevisionID: change.BatchRevisionID,
-				ContentSHA256:   contentSHA,
-				CommittedAt:     change.CommittedAt,
-				Tombstone:       change.Tombstone,
-				PrincipalID:     change.PrincipalID,
-				Reason:          change.Reason,
-				CorrelationID:   change.CorrelationID,
-				seq:             s.seq,
-			}
+			record := newRecordForCommit(change, contentSHA, s.seq)
 			versions[i] = record.ToProto()
-			if change.Tombstone {
-				delete(s.ephemeral, change.LogicalPath)
-			} else {
-				record.Content = append([]byte(nil), change.Content...)
-				s.ephemeral[change.LogicalPath] = record
-			}
+			ephemeral = append(ephemeral, preparedVersionChange{change: change, record: record})
 			continue
 		}
 		s.seq++
-		record := &Record{
-			LogicalPath:     change.LogicalPath,
-			DisplayPath:     change.DisplayPath,
-			StorageID:       change.StorageID,
-			VersionID:       VersionID(change.LogicalPath, contentSHA, change.BatchRevisionID, change.CommittedAt, s.seq, change.Tombstone),
-			BatchRevisionID: change.BatchRevisionID,
-			ContentSHA256:   contentSHA,
-			CommittedAt:     change.CommittedAt,
-			Tombstone:       change.Tombstone,
-			PrincipalID:     change.PrincipalID,
-			Reason:          change.Reason,
-			CorrelationID:   change.CorrelationID,
-			seq:             s.seq,
-		}
+		record := newRecordForCommit(change, contentSHA, s.seq)
 		versions[i] = record.ToProto()
 		prepared = append(prepared, preparedVersionChange{change: change, record: record})
 		assetPaths[change.LogicalPath] = struct{}{}
@@ -652,77 +644,103 @@ func (s *Store) commitBatchPersistent(changes []Commit) ([]*pb.GuardianFileVersi
 	seq := s.seq
 	s.mu.Unlock()
 
-	if len(prepared) == 0 {
-		return versions, nil
-	}
-
-	newCounts := make(map[string]int, len(assetPaths))
-	err := s.db.Update(func(tx metastore.Tx) error {
-		for _, item := range prepared {
-			if err := s.validateExpectedVersionTx(tx, item.change.LogicalPath, item.change.ExpectedVersionID); err != nil {
-				return fmt.Errorf("%w: %s", err, item.change.LogicalPath)
-			}
-			value, err := json.Marshal(item.record)
-			if err != nil {
-				return err
-			}
-			versionStoreWriteBytesTotal.Add(float64(len(value)))
-			if err := tx.Put(guardianVersionsCurrentBucket, []byte(item.record.LogicalPath), value, 0); err != nil {
-				return err
-			}
-			if err := tx.Put(guardianVersionsHistoryBucket, guardianVersionHistoryKey(item.record.LogicalPath, item.record.seq), value, 0); err != nil {
-				return err
-			}
-		}
-		if err := tx.Put(guardianVersionsMetaBucket, []byte(guardianVersionsSeqKey), []byte(strconv.FormatUint(seq, 10)), 0); err != nil {
-			return err
-		}
-		for logicalPath := range assetPaths {
-			count, known := s.historyCounts[logicalPath]
-			var keys [][]byte
-			if !known {
-				if err := tx.ScanPrefix(guardianVersionsHistoryBucket, []byte(logicalPath+"\x00"), func(key, _ []byte) error {
-					keys = append(keys, append([]byte(nil), key...))
-					return nil
-				}); err != nil {
+	if len(prepared) > 0 {
+		newCounts := make(map[string]int, len(assetPaths))
+		err := s.db.Update(func(tx metastore.Tx) error {
+			for _, item := range prepared {
+				if err := s.validateExpectedVersionTx(tx, item.change.LogicalPath, item.change.ExpectedVersionID); err != nil {
+					return fmt.Errorf("%w: %s", err, item.change.LogicalPath)
+				}
+				value, err := json.Marshal(item.record)
+				if err != nil {
 					return err
 				}
-				count = len(keys)
-			} else {
-				count += addedCounts[logicalPath]
+				versionStoreWriteBytesTotal.Add(float64(len(value)))
+				if err := tx.Put(guardianVersionsCurrentBucket, []byte(item.record.LogicalPath), value, 0); err != nil {
+					return err
+				}
+				if err := tx.Put(guardianVersionsHistoryBucket, guardianVersionHistoryKey(item.record.LogicalPath, item.record.seq), value, 0); err != nil {
+					return err
+				}
 			}
-			if count > PerPathHistory {
-				if keys == nil {
+			if err := tx.Put(guardianVersionsMetaBucket, []byte(guardianVersionsSeqKey), []byte(strconv.FormatUint(seq, 10)), 0); err != nil {
+				return err
+			}
+			for logicalPath := range assetPaths {
+				count, known := s.historyCounts[logicalPath]
+				var keys [][]byte
+				if !known {
 					if err := tx.ScanPrefix(guardianVersionsHistoryBucket, []byte(logicalPath+"\x00"), func(key, _ []byte) error {
 						keys = append(keys, append([]byte(nil), key...))
 						return nil
 					}); err != nil {
 						return err
 					}
+					count = len(keys)
+				} else {
+					count += addedCounts[logicalPath]
 				}
-				for _, key := range keys[PerPathHistory:] {
-					if err := tx.Delete(guardianVersionsHistoryBucket, key); err != nil && err != metastore.ErrKeyNotFound {
-						return err
+				if count > PerPathHistory {
+					if keys == nil {
+						if err := tx.ScanPrefix(guardianVersionsHistoryBucket, []byte(logicalPath+"\x00"), func(key, _ []byte) error {
+							keys = append(keys, append([]byte(nil), key...))
+							return nil
+						}); err != nil {
+							return err
+						}
 					}
+					for _, key := range keys[PerPathHistory:] {
+						if err := tx.Delete(guardianVersionsHistoryBucket, key); err != nil && err != metastore.ErrKeyNotFound {
+							return err
+						}
+					}
+					count = PerPathHistory
 				}
-				count = PerPathHistory
+				newCounts[logicalPath] = count
 			}
-			newCounts[logicalPath] = count
+			return nil
+		})
+		if err != nil {
+			// The transaction rolled back, but sequence numbers were assigned
+			// before it ran. Restore them so failed commits do not burn IDs.
+			s.mu.Lock()
+			s.seq = seqBefore
+			s.mu.Unlock()
+			return nil, err
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		s.mu.Lock()
+		for logicalPath, count := range newCounts {
+			s.historyCounts[logicalPath] = count
+		}
+		s.mu.Unlock()
 	}
-	for logicalPath, count := range newCounts {
-		s.historyCounts[logicalPath] = count
+
+	// Apply memory-only (machinery) changes only after the asset transaction
+	// has committed, so a failed batch leaves no partial state behind.
+	if len(ephemeral) > 0 {
+		s.mu.Lock()
+		s.applyEphemeralLocked(ephemeral)
+		s.mu.Unlock()
 	}
+
 	for i, change := range changes {
 		if IsAssetPath(change.LogicalPath) {
 			s.CacheContent(change.LogicalPath, versions[i].GetVersionId(), change.Content)
 		}
 	}
 	return versions, nil
+}
+
+// applyEphemeralLocked stores memory-only version records. Callers must hold s.mu.
+func (s *Store) applyEphemeralLocked(items []preparedVersionChange) {
+	for _, item := range items {
+		if item.change.Tombstone {
+			delete(s.ephemeral, item.change.LogicalPath)
+			continue
+		}
+		item.record.Content = append([]byte(nil), item.change.Content...)
+		s.ephemeral[item.change.LogicalPath] = item.record
+	}
 }
 
 // validateExpectedVersionTx validates against the transaction's view (the
@@ -761,14 +779,14 @@ func guardianVersionHistoryKey(logicalPath string, seq uint64) []byte {
 }
 
 func (s *Store) List(logicalPath string, pageSize int32, pageToken string) ([]*pb.GuardianFileVersion, string, error) {
-	if backend := s.backend(); backend != nil && IsAssetPath(logicalPath) {
+	if backend, fallbackLocal := s.backendState(); backend != nil && IsAssetPath(logicalPath) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		versions, next, err := backend.List(ctx, logicalPath, pageSize, pageToken)
 		cancel()
 		if err == nil {
 			return versions, next, nil
 		}
-		if !s.fallbackLocal {
+		if !fallbackLocal {
 			return nil, "", err
 		}
 	}
@@ -776,8 +794,8 @@ func (s *Store) List(logicalPath string, pageSize int32, pageToken string) ([]*p
 		pageSize = 50
 	}
 	offset := 0
-	if strings.TrimSpace(pageToken) != "" {
-		value, err := strconv.Atoi(pageToken)
+	if trimmedToken := strings.TrimSpace(pageToken); trimmedToken != "" {
+		value, err := strconv.Atoi(trimmedToken)
 		if err != nil || value < 0 {
 			return nil, "", fmt.Errorf("invalid page token %q", pageToken)
 		}
@@ -943,14 +961,14 @@ func (s *Store) currentRecordLocked(logicalPath string) (*Record, bool) {
 // flag reporting whether content is actually available, and whether the
 // version exists at all.
 func (s *Store) Get(logicalPath, versionID string) (*pb.GuardianFileVersion, []byte, bool, bool, error) {
-	if backend := s.backend(); backend != nil && IsAssetPath(logicalPath) {
+	if backend, fallbackLocal := s.backendState(); backend != nil && IsAssetPath(logicalPath) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		version, content, available, found, err := backend.Get(ctx, logicalPath, versionID)
 		cancel()
 		if err == nil {
 			return version, content, available, found, nil
 		}
-		if !s.fallbackLocal {
+		if !fallbackLocal {
 			return nil, nil, false, false, err
 		}
 	}

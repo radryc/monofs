@@ -2,9 +2,8 @@
 // across MonoFS and Guardian to enforce partition-scoped access control.
 //
 // The package is deliberately dependency-light: it defines the identity model,
-// the role/action vocabulary, and the interfaces (TokenVerifier, GrantEvaluator)
-// that concrete implementations plug into. Enforcement wiring lives in the
-// router/control-plane packages that consume these primitives.
+// the role/action vocabulary, and the TokenVerifier interface. Authorization
+// decisions are made by the repo-managed access policy (pkg/authz/policy).
 package authz
 
 import "strings"

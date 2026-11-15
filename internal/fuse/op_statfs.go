@@ -9,8 +9,8 @@ import (
 )
 
 // Statfs returns filesystem statistics for df command
-func (n *MonoNode) Statfs(ctx context.Context, out *fuse.StatfsOut) (errno syscall.Errno) {
-	defer n.recoverPanic("Statfs")
+func (n *MonoNode) Statfs(ctx context.Context, out *fuse.StatfsOut) (resultErrno syscall.Errno) {
+	defer n.recoverPanic("Statfs", &resultErrno)
 
 	n.logger.Debug("statfs", "path", n.path)
 

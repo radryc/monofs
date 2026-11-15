@@ -20,16 +20,30 @@ import (
 // configured prefix). For local storage it enumerates .pack files under the
 // local archive directory.
 func (bb *BlobBackend) ListStorageObjects(ctx context.Context) ([]storage.StorageObject, error) {
+	var objects []storage.StorageObject
+	var err error
 	switch bb.config.StorageType {
 	case storage.StorageTypeS3:
-		return bb.listS3Objects(ctx)
+		objects, err = bb.listS3Objects(ctx)
 	case storage.StorageTypeGCS:
-		return bb.listGCSObjects(ctx)
+		objects, err = bb.listGCSObjects(ctx)
 	case storage.StorageTypeLocal, "":
-		return bb.listLocalObjects()
+		objects, err = bb.listLocalObjects()
 	default:
 		return nil, fmt.Errorf("unsupported storage type %q for object listing", bb.config.StorageType)
 	}
+	if err != nil {
+		return objects, err
+	}
+	// Only archives are storage objects; sidecars (.idx), WAL files and temp
+	// files are internal bookkeeping.
+	archives := objects[:0]
+	for _, object := range objects {
+		if strings.HasSuffix(object.Key, ".pack") {
+			archives = append(archives, object)
+		}
+	}
+	return archives, nil
 }
 
 func (bb *BlobBackend) listS3Objects(ctx context.Context) ([]storage.StorageObject, error) {
@@ -187,6 +201,45 @@ func (bb *BlobBackend) listGCSObjects(ctx context.Context) ([]storage.StorageObj
 	return objects, nil
 }
 
+func (bb *BlobBackend) listGCSObjectsPrefix(ctx context.Context, prefix string, maxTotal int) ([]storage.StorageObject, error) {
+	if bb.gcsClient == nil {
+		return nil, fmt.Errorf("gcs client not initialized")
+	}
+	if maxTotal <= 0 {
+		maxTotal = 5000
+	}
+	basePrefix := strings.TrimRight(bb.config.Cloud.GCSPrefix, "/")
+	if basePrefix != "" {
+		basePrefix += "/"
+	}
+	fullPrefix := basePrefix + strings.TrimLeft(prefix, "/")
+
+	var objects []storage.StorageObject
+	it := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket).Objects(ctx, &gcStorage.Query{
+		Prefix: fullPrefix,
+	})
+	for {
+		if len(objects) >= maxTotal {
+			break
+		}
+		attrs, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return objects, fmt.Errorf("list gcs objects under %s: %w", fullPrefix, err)
+		}
+		objects = append(objects, storage.StorageObject{
+			Key:          attrs.Name,
+			Size:         attrs.Size,
+			LastModified: attrs.Updated.Unix(),
+			StorageType:  string(storage.StorageTypeGCS),
+			Bucket:       bb.config.Cloud.GCSBucket,
+		})
+	}
+	return objects, nil
+}
+
 func (bb *BlobBackend) listLocalObjects() ([]storage.StorageObject, error) {
 	archiveDir := filepath.Join(bb.config.CacheDir, "archives")
 	var objects []storage.StorageObject
@@ -195,7 +248,7 @@ func (bb *BlobBackend) listLocalObjects() ([]storage.StorageObject, error) {
 		if err != nil {
 			return nil // keep walking
 		}
-		if d.IsDir() {
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".pack") {
 			return nil
 		}
 		info, err := d.Info()

@@ -694,11 +694,14 @@ func (n *MonoNode) getattrFromOverlay(out *fuse.AttrOut) syscall.Errno {
 // recoverPanic catches panics and stores them as catastrophic errors.
 // This must be safe to call even when the node is not mounted in a FUSE
 // tree (e.g. during unit tests or early initialisation).
-func (n *MonoNode) recoverPanic(operation string) {
+func (n *MonoNode) recoverPanic(operation string, errno *syscall.Errno) {
 	if r := recover(); r != nil {
 		stack := debug.Stack()
 		errMsg := fmt.Sprintf("PANIC in %s: %v\n\nStack trace:\n%s", operation, r, string(stack))
 		n.logger.Error("catastrophic error", "operation", operation, "panic", r)
+		if errno != nil {
+			*errno = syscall.EIO
+		}
 
 		// Store error in root node (only if properly embedded in FUSE tree).
 		// Check inode != nil BEFORE calling Parent() to avoid a nil-deref
@@ -773,18 +776,25 @@ func (n *MonoNode) ensureLocalCopyFor(ctx context.Context, monofsPath string) er
 			return fmt.Errorf("create empty file: %w", err)
 		}
 	} else {
-		// Fetch from backend
+		// Fetch from backend. Only a definitive NotFound means the file is new;
+		// any other error (transport, timeout, permission) must not be turned
+		// into an empty local copy, which would later be committed and destroy
+		// the real content.
+		if n.client == nil {
+			return fmt.Errorf("no backend client for %s", monofsPath)
+		}
 		content, err := n.client.Read(ctx, monofsPath, 0, 0)
-		if err != nil {
-			// File might be new, create empty
-			n.logger.Debug("backend read failed, creating empty file", "path", monofsPath, "error", err)
-			if err := os.WriteFile(localPath, []byte{}, 0644); err != nil {
-				return fmt.Errorf("create empty file: %w", err)
-			}
-		} else {
+		switch {
+		case err == nil:
 			if err := os.WriteFile(localPath, content, 0644); err != nil {
 				return fmt.Errorf("write local copy: %w", err)
 			}
+		case isNotFoundStatus(err):
+			if err := os.WriteFile(localPath, []byte{}, 0644); err != nil {
+				return fmt.Errorf("create empty file: %w", err)
+			}
+		default:
+			return fmt.Errorf("fetch backend content for %s: %w", monofsPath, err)
 		}
 	}
 

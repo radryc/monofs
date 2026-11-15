@@ -1,7 +1,6 @@
 package authz
 
 import (
-	"context"
 	"testing"
 )
 
@@ -35,22 +34,6 @@ func TestCompileGrants(t *testing.T) {
 		t.Fatalf("grant[2] unexpected: %+v", grants[2])
 	}
 
-	// Feed into a store and verify evaluation end-to-end.
-	store, _ := NewGrantStore("")
-	if err := store.Replace(grants); err != nil {
-		t.Fatalf("replace: %v", err)
-	}
-	ctx := context.Background()
-	eng := Identity{Subject: "alice", Groups: []string{"strata-platform-eng"}}
-	if !store.Can(ctx, eng, "doctor", ActionModify) {
-		t.Error("mapped maintainer group should modify doctor")
-	}
-	if !store.Can(ctx, Identity{ClientID: "ci-bot"}, "doctor", ActionIngest) {
-		t.Error("ci-bot should ingest doctor")
-	}
-	if store.Can(ctx, Identity{ClientID: "ci-bot"}, "doctor", ActionModify) {
-		t.Error("ci-bot ingester should not modify doctor")
-	}
 }
 
 func TestParseTeamMapping(t *testing.T) {

@@ -2,6 +2,8 @@ package blob
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +14,27 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/radryc/monofs/internal/storage"
 )
+
+// cloudObjectInfo is the subset of remote object metadata used to decide
+// whether a local archive is already backed up.
+type cloudObjectInfo struct {
+	Size   int64
+	SHA256 string
+}
+
+// fileSHA256 returns the lower-case hex SHA-256 of a local file.
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sum.Sum(nil)), nil
+}
 
 // cloudKey returns the S3/GCS object key for a local archive path.
 // The key is: <prefix>/<storageID>/<filename.pack>
@@ -43,10 +66,15 @@ func (bb *BlobBackend) uploadArchiveToS3(ctx context.Context, archivePath string
 	}
 	defer file.Close()
 
+	metadata := map[string]string{}
+	if fingerprint, hashErr := fileSHA256(archivePath); hashErr == nil {
+		metadata["sha256"] = fingerprint
+	}
 	_, err = bb.s3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bb.config.Cloud.S3Bucket),
-		Key:    aws.String(key),
-		Body:   file,
+		Bucket:   aws.String(bb.config.Cloud.S3Bucket),
+		Key:      aws.String(key),
+		Body:     file,
+		Metadata: metadata,
 	})
 	if err != nil {
 		return fmt.Errorf("s3 PutObject %s: %w", key, err)
@@ -85,6 +113,9 @@ func (bb *BlobBackend) uploadArchiveToGCS(ctx context.Context, archivePath strin
 
 	bucket := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket)
 	writer := bucket.Object(key).NewWriter(ctx)
+	if fingerprint, hashErr := fileSHA256(archivePath); hashErr == nil {
+		writer.Metadata = map[string]string{"sha256": fingerprint}
+	}
 	if _, err := io.Copy(writer, file); err != nil {
 		writer.Close()
 		return fmt.Errorf("gcs write %s: %w", key, err)
@@ -165,17 +196,27 @@ func (bb *BlobBackend) openGCSReader(key string) (io.ReadCloser, error) {
 	return rc, nil
 }
 
-func (bb *BlobBackend) headS3Object(key string) bool {
-	_, err := bb.s3Client.HeadObject(context.Background(), &s3.HeadObjectInput{
+func (bb *BlobBackend) headS3Object(key string) (cloudObjectInfo, bool) {
+	out, err := bb.s3Client.HeadObject(context.Background(), &s3.HeadObjectInput{
 		Bucket: aws.String(bb.config.Cloud.S3Bucket),
 		Key:    aws.String(key),
 	})
-	return err == nil
+	if err != nil {
+		return cloudObjectInfo{}, false
+	}
+	return cloudObjectInfo{Size: aws.ToInt64(out.ContentLength), SHA256: out.Metadata["sha256"]}, true
 }
 
-func (bb *BlobBackend) headGCSObject(key string) bool {
-	_, err := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket).Object(key).Attrs(context.Background())
-	return err == nil
+func (bb *BlobBackend) headGCSObject(key string) (cloudObjectInfo, bool) {
+	attrs, err := bb.gcsClient.Bucket(bb.config.Cloud.GCSBucket).Object(key).Attrs(context.Background())
+	if err != nil {
+		return cloudObjectInfo{}, false
+	}
+	info := cloudObjectInfo{Size: attrs.Size}
+	if attrs.Metadata != nil {
+		info.SHA256 = attrs.Metadata["sha256"]
+	}
+	return info, true
 }
 
 // downloadFromCloud fetches an archive from the cloud and caches it locally.
@@ -237,8 +278,35 @@ func (bb *BlobBackend) cloudArchiveExists(archivePath string) bool {
 	if bb.headCloudObject == nil {
 		return false
 	}
-	key := bb.cloudKey(archivePath)
-	return bb.headCloudObject(key)
+	_, ok := bb.headCloudObject(bb.cloudKey(archivePath))
+	return ok
+}
+
+// cloudArchiveMatches reports whether the cloud copy of archivePath has the
+// same size and (when the remote exposes it) the same SHA-256. Existence alone
+// is not enough: re-ingesting a chunk reuses the same object key.
+func (bb *BlobBackend) cloudArchiveMatches(archivePath string) bool {
+	if bb.headCloudObject == nil {
+		return false
+	}
+	local, err := os.Stat(archivePath)
+	if err != nil {
+		return false
+	}
+	remote, ok := bb.headCloudObject(bb.cloudKey(archivePath))
+	if !ok || remote.Size != local.Size() {
+		return false
+	}
+	if remote.SHA256 == "" {
+		// Legacy objects uploaded before metadata support: size is the best
+		// available signal.
+		return true
+	}
+	localSHA, err := fileSHA256(archivePath)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(remote.SHA256, localSHA)
 }
 
 // ensureArchiveInCloud uploads the local archive to cloud storage if a cloud
@@ -248,7 +316,7 @@ func (bb *BlobBackend) ensureArchiveInCloud(ctx context.Context, archivePath str
 	if !bb.hasCloudUpload() {
 		return fmt.Errorf("cloud upload not configured")
 	}
-	if bb.cloudArchiveExists(archivePath) {
+	if bb.cloudArchiveMatches(archivePath) {
 		// Repair a missing sidecar index without re-uploading the payload.
 		if _, err := os.Stat(archivePath + archiveIndexSuffix); err == nil && !bb.cloudArchiveIndexExists(archivePath) {
 			return bb.uploadArchiveIndex(ctx, archivePath)
@@ -273,5 +341,6 @@ func (bb *BlobBackend) cloudArchiveIndexExists(archivePath string) bool {
 	if bb.headCloudObject == nil {
 		return false
 	}
-	return bb.headCloudObject(bb.cloudKey(archivePath) + archiveIndexSuffix)
+	_, ok := bb.headCloudObject(bb.cloudKey(archivePath) + archiveIndexSuffix)
+	return ok
 }

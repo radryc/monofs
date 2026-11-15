@@ -190,7 +190,18 @@ func (c *compileCtx) validateSubjects(kind string, subjects map[string]Subject) 
 		label := fmt.Sprintf("%s %q", kind, name)
 		if sub.Role != "" {
 			if sub.Role == string(authz.RoleAdmin) {
-				c.infof("%s has the admin role and sees every partition", label)
+				global := false
+				for _, partition := range sub.Partitions {
+					if strings.TrimSpace(partition) == "*" {
+						global = true
+						break
+					}
+				}
+				if global {
+					c.infof("%s is a global admin (wildcard partitions)", label)
+				} else {
+					c.infof("%s is a scoped admin (partitions: %v)", label, sub.Partitions)
+				}
 			} else if !authz.Role(sub.Role).Valid() {
 				c.errorf("%s has invalid role %q (viewer, ingester, maintainer or admin)", label, sub.Role)
 			}

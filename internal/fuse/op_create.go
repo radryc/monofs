@@ -11,8 +11,8 @@ import (
 )
 
 // Create implements fs.NodeCreater for creating new files
-func (n *MonoNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	defer n.recoverPanic("Create")
+func (n *MonoNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (resultInode *fs.Inode, resultHandle fs.FileHandle, resultFlags uint32, resultErrno syscall.Errno) {
+	defer n.recoverPanic("Create", &resultErrno)
 	n.logger.Debug("create", "parent", n.path, "name", name, "mode", mode)
 
 	// Check if we have session manager for writes
@@ -75,9 +75,13 @@ func (n *MonoNode) Create(ctx context.Context, name string, flags uint32, mode u
 		return nil, nil, 0, syscall.EIO
 	}
 
-	// Track the creation
+	// Track the creation. Without an overlay entry the file exists on disk but
+	// will never be committed, so treat a tracking failure as a failed create.
 	if err := n.sessionMgr.TrackChange(ChangeCreate, newPath, ""); err != nil {
-		n.logger.Warn("create: failed to track change", "error", err)
+		n.logger.Error("create: failed to track change", "error", err)
+		_ = f.Close()
+		_ = os.Remove(localPath)
+		return nil, nil, 0, syscall.EIO
 	}
 
 	// Create child node

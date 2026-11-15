@@ -112,11 +112,6 @@ type RouterConfig struct {
 	// indexing would fall back to a failing git clone.
 	SearchIndexGuardian bool
 
-	// Authz (partition-level authorization)
-	AuthzEnforceIngest bool
-	AuthzGrantsPath    string
-	AuthzGrantsJSON    string
-
 	// Ownership gate (Phase 3 VCS governance): subtree-ownership review
 	// gate. When enabled, direct pushes into subtrees the principal does
 	// not own are rejected, requiring a non-direct (PR) strategy. Defaults
@@ -340,9 +335,7 @@ type Router struct {
 
 	// Authz (partition-level authorization)
 	ownershipResolver  ownershipChecker
-	grantEvaluator     authz.GrantEvaluator
 	authzEnforceRead   bool
-	authzEnforceIngest bool
 	breakGlassAdmins   map[string]bool
 	serviceIdentity    authz.Identity
 
@@ -664,13 +657,6 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 	r.version.Store(1)
 	r.namespaceGeneration.Store(1)
 
-	// Load partition-level grants (if configured) and apply ingest enforcement.
-	if evaluator := buildGrantEvaluator(cfg, logger); evaluator != nil {
-		r.SetGrantEvaluator(evaluator, cfg.AuthzEnforceIngest)
-	} else if cfg.AuthzEnforceIngest {
-		logger.Warn("authz ingest enforcement requested but no grant source configured; all ingest will be denied")
-	}
-
 	return r
 }
 
@@ -775,20 +761,6 @@ func (r *Router) SetVersion(version, commit, buildTime string) {
 	r.buildVersion = version
 	r.buildCommit = commit
 	r.buildTime = buildTime
-}
-
-// SetAuthzEnforceIngest toggles partition-level ingest authorization enforcement.
-func (r *Router) SetAuthzEnforceIngest(enforce bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.authzEnforceIngest = enforce
-}
-
-// AuthzEnforceIngest returns whether partition-level ingest authorization is enforced.
-func (r *Router) AuthzEnforceIngest() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.authzEnforceIngest
 }
 
 // markForIndexRebuild marks a repository on a node for directory index rebuild.

@@ -10,8 +10,8 @@ import (
 )
 
 // Mkdir implements fs.NodeMkdirer for creating directories
-func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	defer n.recoverPanic("Mkdir")
+func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (resultInode *fs.Inode, resultErrno syscall.Errno) {
+	defer n.recoverPanic("Mkdir", &resultErrno)
 	n.logger.Debug("mkdir", "parent", n.path, "name", name, "mode", mode)
 
 	// Check if we have session manager for writes
@@ -82,9 +82,12 @@ func (n *MonoNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 		return nil, syscall.EIO
 	}
 
-	// Track the creation
+	// Track the creation. A directory that is not in the overlay DB would be
+	// invisible to the commit, so roll it back instead of reporting success.
 	if err := n.sessionMgr.TrackChange(ChangeMkdir, newPath, ""); err != nil {
-		n.logger.Warn("mkdir: failed to track change", "error", err)
+		n.logger.Error("mkdir: failed to track change", "error", err)
+		_ = os.Remove(localPath)
+		return nil, syscall.EIO
 	}
 
 	// Create child node

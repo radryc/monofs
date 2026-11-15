@@ -84,9 +84,14 @@ type BlobBackend struct {
 
 	openCloudReader   func(key string) (io.ReadCloser, error)
 	uploadArchiveFunc func(ctx context.Context, archivePath string) error
-	headCloudObject   func(key string) bool
+	headCloudObject   func(key string) (cloudObjectInfo, bool)
+	listCloudObjects  func(ctx context.Context, prefix string, max int) ([]storage.StorageObject, error)
 	cloudUploadQueue  chan cloudArchiveUploadJob
 	cloudUploadWG     sync.WaitGroup
+	// cloudUploadMu guards cloudUploadQueue against Close closing the channel
+	// while a producer is still sending on it.
+	cloudUploadMu sync.RWMutex
+	closed        atomic.Bool
 
 	// Upload WAL. Every archive is recorded here before it is queued for S3;
 	// pending entries are replayed on startup so S3 remains the source of
@@ -133,6 +138,8 @@ type BlobBackend struct {
 	// archives unreadable.
 	keyGuardMu             sync.RWMutex
 	keyGuardPending        atomic.Bool
+	keyGuardFirstAuto      atomic.Bool
+	keyGuardConfirmed      atomic.Bool
 	acceptedKeyFingerprint string
 	currentKeyFingerprint  string
 }
@@ -203,6 +210,9 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 		bb.openCloudReader = bb.openS3Reader
 		bb.uploadArchiveFunc = bb.uploadArchiveToS3
 		bb.headCloudObject = bb.headS3Object
+		bb.listCloudObjects = func(ctx context.Context, prefix string, max int) ([]storage.StorageObject, error) {
+			return bb.listS3ObjectsPrefix(ctx, prefix, max)
+		}
 
 	case storage.StorageTypeGCS:
 		c := config.Cloud
@@ -222,12 +232,15 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 		bb.openCloudReader = bb.openGCSReader
 		bb.uploadArchiveFunc = bb.uploadArchiveToGCS
 		bb.headCloudObject = bb.headGCSObject
+		bb.listCloudObjects = bb.listGCSObjectsPrefix
 
 	default:
 		bb.s3Client = nil
 		bb.gcsClient = nil
 		bb.openCloudReader = nil
 		bb.uploadArchiveFunc = nil
+		bb.headCloudObject = nil
+		bb.listCloudObjects = nil
 	}
 
 	// Ensure local archive cache directory exists (used for all storage types).

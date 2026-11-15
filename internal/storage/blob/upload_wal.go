@@ -19,7 +19,9 @@ type cloudArchiveUploadJob struct {
 }
 
 func (bb *BlobBackend) startCloudUploadWorkers() {
-	if !bb.hasCloudUpload() || bb.cloudUploadQueue != nil {
+	bb.cloudUploadMu.Lock()
+	defer bb.cloudUploadMu.Unlock()
+	if !bb.hasCloudUpload() || bb.cloudUploadQueue != nil || bb.closed.Load() {
 		return
 	}
 
@@ -207,7 +209,7 @@ func (bb *BlobBackend) backfillCloudArchiveIndexes(ctx context.Context) {
 				continue
 			}
 		}
-		if !bb.cloudArchiveExists(path) || bb.cloudArchiveIndexExists(path) {
+		if !bb.cloudArchiveMatches(path) || bb.cloudArchiveIndexExists(path) {
 			continue
 		}
 		if err := bb.uploadArchiveIndex(ctx, path); err != nil && bb.logger != nil {
@@ -272,58 +274,74 @@ func (bb *BlobBackend) queueCloudUpload(archivePath string) error {
 	if !bb.hasCloudUpload() {
 		return nil
 	}
+	if bb.closed.Load() {
+		return fmt.Errorf("blob backend is closed")
+	}
 	if err := bb.walAdd(archivePath); err != nil {
 		return fmt.Errorf("record archive in upload WAL: %w", err)
 	}
 
-	if bb.cloudUploadQueue == nil {
-		start := time.Now()
-		if err := bb.uploadArchiveFunc(context.Background(), archivePath); err != nil {
-			bb.storageHealthy.Store(false)
-			bb.lastStorageErr.Store(err.Error())
-			bb.walUploadFailuresTotal.Add(1)
-			if bb.otel.walFailures != nil {
-				bb.otel.walFailures.Add(context.Background(), 1)
-			}
-			if bb.otel.uploads != nil {
-				bb.otel.uploads.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "failure")))
-			}
-			if bb.otel.uploadDuration != nil {
-				bb.otel.uploadDuration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(attribute.String("result", "failure")))
-			}
-			if bb.logger != nil {
-				bb.logger.Error("failed to upload archive to cloud",
-					"archive_path", archivePath,
-					"error", err)
-			}
-			return err
-		}
-		bb.cloudStores.Add(1)
-		bb.storageHealthy.Store(true)
-		bb.lastStorageErr.Store("")
-		if bb.otel.uploads != nil {
-			bb.otel.uploads.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "success")))
-		}
-		if bb.otel.uploadDuration != nil {
-			bb.otel.uploadDuration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(attribute.String("result", "success")))
-		}
-		if err := bb.walRemove(archivePath); err != nil && bb.logger != nil {
-			bb.logger.Warn("failed to remove uploaded archive from WAL",
-				"archive_path", archivePath, "error", err)
-		}
-		return nil
+	// Hold the read lock for the whole send so Close cannot close the channel
+	// underneath a producer. The upload workers never take this lock, so a
+	// full queue still drains and the blocking send below makes progress.
+	bb.cloudUploadMu.RLock()
+	queue := bb.cloudUploadQueue
+	if queue == nil {
+		bb.cloudUploadMu.RUnlock()
+		return bb.uploadArchiveNow(archivePath)
 	}
 
 	job := cloudArchiveUploadJob{archivePath: archivePath}
 	select {
-	case bb.cloudUploadQueue <- job:
+	case queue <- job:
 	default:
 		if bb.logger != nil {
 			bb.logger.Warn("cloud upload queue full; waiting for worker",
 				"archive_path", archivePath,
-				"queue_length", len(bb.cloudUploadQueue))
+				"queue_length", len(queue))
 		}
-		bb.cloudUploadQueue <- job
+		queue <- job
+	}
+	bb.cloudUploadMu.RUnlock()
+	return nil
+}
+
+// uploadArchiveNow performs a synchronous upload for backends without the
+// asynchronous worker queue (or after the queue has been disabled).
+func (bb *BlobBackend) uploadArchiveNow(archivePath string) error {
+	start := time.Now()
+	if err := bb.uploadArchiveFunc(context.Background(), archivePath); err != nil {
+		bb.storageHealthy.Store(false)
+		bb.lastStorageErr.Store(err.Error())
+		bb.walUploadFailuresTotal.Add(1)
+		if bb.otel.walFailures != nil {
+			bb.otel.walFailures.Add(context.Background(), 1)
+		}
+		if bb.otel.uploads != nil {
+			bb.otel.uploads.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "failure")))
+		}
+		if bb.otel.uploadDuration != nil {
+			bb.otel.uploadDuration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(attribute.String("result", "failure")))
+		}
+		if bb.logger != nil {
+			bb.logger.Error("failed to upload archive to cloud",
+				"archive_path", archivePath,
+				"error", err)
+		}
+		return err
+	}
+	bb.cloudStores.Add(1)
+	bb.storageHealthy.Store(true)
+	bb.lastStorageErr.Store("")
+	if bb.otel.uploads != nil {
+		bb.otel.uploads.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "success")))
+	}
+	if bb.otel.uploadDuration != nil {
+		bb.otel.uploadDuration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(attribute.String("result", "success")))
+	}
+	if err := bb.walRemove(archivePath); err != nil && bb.logger != nil {
+		bb.logger.Warn("failed to remove uploaded archive from WAL",
+			"archive_path", archivePath, "error", err)
 	}
 	return nil
 }
@@ -349,7 +367,13 @@ func (bb *BlobBackend) cloudBackupScannerLoop() {
 		interval = time.Duration(bb.config.Cloud.CloudScannerIntervalSecs) * time.Second
 	}
 
-	time.Sleep(30 * time.Second)
+	initial := time.NewTimer(30 * time.Second)
+	select {
+	case <-bb.scannerStop:
+		initial.Stop()
+		return
+	case <-initial.C:
+	}
 	bb.runCloudBackupScan()
 
 	ticker := time.NewTicker(interval)
@@ -378,7 +402,7 @@ func (bb *BlobBackend) runCloudBackupScan() {
 	var missing int64
 	var repaired int64
 	for _, archivePath := range archives {
-		if bb.cloudArchiveExists(archivePath) {
+		if bb.cloudArchiveMatches(archivePath) {
 			_ = bb.walRemove(archivePath)
 			continue
 		}

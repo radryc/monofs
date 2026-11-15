@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
@@ -20,7 +21,7 @@ import (
 // behavior is identical to a cluster without access policies.
 type accessPolicyState struct {
 	loader     *policy.Loader
-	enforce    bool
+	enforce    atomic.Bool
 	serveToken string
 
 	mu       sync.Mutex
@@ -51,14 +52,17 @@ func (r *Router) StartAccessPolicy(ctx context.Context) {
 	}
 	state := &accessPolicyState{
 		loader:     policy.NewLoader(source, cfg.AccessPolicyInterval, logf),
-		enforce:    cfg.AccessEnforce,
 		serveToken: strings.TrimSpace(cfg.AccessPolicyServeToken),
 		loggedAt:   map[string]time.Time{},
 	}
+	state.enforce.Store(cfg.AccessEnforce)
 	r.accessPolicyMu.Lock()
 	r.accessPolicy = state
 	r.accessPolicyMu.Unlock()
 
+	if err := state.loader.Refresh(ctx); err != nil {
+		logf("access policy initial load failed: %v", err)
+	}
 	go state.loader.Run(ctx)
 	r.logger.Info("access policy enabled",
 		"source", source.Describe(),
@@ -106,7 +110,7 @@ func (r *Router) canReadDisplayPath(id authz.Identity, displayPath string) bool 
 	if !allowed {
 		r.logAccessDenied(st, id, "monofs", displayPath)
 	}
-	if st.enforce {
+	if st.enforce.Load() {
 		return allowed
 	}
 	return true
@@ -128,7 +132,7 @@ func (r *Router) canSeePartition(id authz.Identity, partition string) bool {
 	if !allowed {
 		r.logAccessDenied(st, id, "partitions", partition)
 	}
-	if st.enforce {
+	if st.enforce.Load() {
 		return allowed
 	}
 	return true
@@ -174,7 +178,7 @@ func (r *Router) guardianPartitionVisibility(id authz.Identity) func(displayPath
 			return true
 		}
 		allowed := visibility.CanSee(partition)
-		if st.enforce {
+		if st.enforce.Load() {
 			return allowed
 		}
 		return true
@@ -192,7 +196,7 @@ func (r *Router) logAccessDenied(st *accessPolicyState, id authz.Identity, scope
 	st.loggedAt[key] = now
 	st.mu.Unlock()
 	mode := "observe"
-	if st.enforce {
+	if st.enforce.Load() {
 		mode = "enforce"
 	}
 	r.logger.Info("access policy decision",
@@ -331,7 +335,7 @@ func (r *Router) filterWorkspaceJobs(req *http.Request, resp *pb.ListWorkspaceSy
 // always visible under the Strata policy and return unrestricted.
 func (r *Router) queryScope(ctx context.Context, signal policy.Signal) ([]string, bool) {
 	st := r.accessPolicySnapshot()
-	if st == nil || !st.enforce {
+	if st == nil || !st.enforce.Load() {
 		return nil, false
 	}
 	p := st.loader.Get()
@@ -350,4 +354,23 @@ func (r *Router) queryScope(ctx context.Context, signal policy.Signal) ([]string
 		return nil, false
 	}
 	return names, true
+}
+
+// AccessEnforce reports whether access-policy enforcement is active. It is
+// false when no policy source is configured or the policy is in observe mode.
+func (r *Router) AccessEnforce() bool {
+	st := r.accessPolicySnapshot()
+	return st != nil && st.enforce.Load()
+}
+
+// SetAccessEnforce toggles enforcement at runtime. It is a no-op when no policy
+// source is configured.
+func (r *Router) SetAccessEnforce(enforce bool) {
+	st := r.accessPolicySnapshot()
+	if st == nil {
+		return
+	}
+	r.accessPolicyMu.Lock()
+	st.enforce.Store(enforce)
+	r.accessPolicyMu.Unlock()
 }

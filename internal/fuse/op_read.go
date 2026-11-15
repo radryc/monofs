@@ -14,8 +14,8 @@ import (
 )
 
 // Read reads file content.
-func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	defer n.recoverPanic("Read")
+func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (resultRead fuse.ReadResult, resultErrno syscall.Errno) {
+	defer n.recoverPanic("Read", &resultErrno)
 	n.logger.Debug("read", "path", n.path, "offset", off, "len", len(dest))
 
 	// Delegate to file handle if available (overlay files opened via Open/Create)
@@ -61,10 +61,6 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 			}
 		}
 	}
-	if mfh, ok := f.(*monofsFileHandle); ok {
-		return mfh.Read(ctx, dest, off)
-	}
-
 	// If the file is tracked in overlay, read from disk directly.
 	// This handles the case where go-fuse dispatches to the node's Read
 	// instead of the file handle's Read (e.g. after a re-open).

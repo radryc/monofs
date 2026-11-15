@@ -42,6 +42,8 @@ type BlobObservability struct {
 	CloudDownloadBytes      int64  `json:"cloud_download_bytes"`
 	ArchiveDeletesTotal     int64  `json:"archive_deletes_total"`
 	CacheInvalidationsTotal int64  `json:"cache_invalidations_total"`
+	Archives                int    `json:"archives"`
+	Blobs                   int    `json:"blobs"`
 }
 
 func (bb *BlobBackend) initOTelMetrics() {
@@ -86,6 +88,11 @@ func (bb *BlobBackend) Observability() BlobObservability {
 	pending := len(bb.walPending)
 	bb.walMu.Unlock()
 
+	bb.mu.RLock()
+	archives := len(bb.archivePaths)
+	blobs := len(bb.blobIndex)
+	bb.mu.RUnlock()
+
 	bb.cloudIndexMu.Lock()
 	indexLoaded := bb.cloudIndexLoaded
 	prefixes := len(bb.cloudIndexPrefixes)
@@ -109,16 +116,16 @@ func (bb *BlobBackend) Observability() BlobObservability {
 		CloudDownloadBytes:      bb.cloudDownloadBytes.Load(),
 		ArchiveDeletesTotal:     bb.archiveDeletesTotal.Load(),
 		CacheInvalidationsTotal: bb.cacheInvalidationsTotal.Load(),
+		Archives:                archives,
+		Blobs:                   blobs,
 	}
 }
 
-// Stats returns backend statistics with live archive (pack) count.
+// Stats returns backend statistics. CachedItems is the number of indexed
+// blobs, matching the counter maintained by Store/Delete and the per-storage
+// counts. Archive (pack) counts are exposed through Observability().Archives.
 func (bb *BlobBackend) Stats() storage.BackendStats {
-	bb.mu.RLock()
-	packCount := int64(len(bb.archivePaths))
-	bb.mu.RUnlock()
 	s := *bb.stats.Load()
-	s.CachedItems = packCount
 	s.CloudStores = bb.cloudStores.Load()
 	s.CloudRetrieves = bb.cloudRetrieves.Load()
 	return s
@@ -154,8 +161,15 @@ func (bb *BlobBackend) HasBlob(blobHash string) bool {
 	return ok
 }
 
-// ArchiveCount returns the number of storage IDs with archives.
+// ArchiveCount returns the number of .pack archives on this fetcher.
 func (bb *BlobBackend) ArchiveCount() int {
+	bb.mu.RLock()
+	defer bb.mu.RUnlock()
+	return len(bb.archivePaths)
+}
+
+// StorageIDCount returns the number of storage IDs with archives.
+func (bb *BlobBackend) StorageIDCount() int {
 	bb.mu.RLock()
 	defer bb.mu.RUnlock()
 	return len(bb.storageIDs)

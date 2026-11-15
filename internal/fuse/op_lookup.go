@@ -13,8 +13,8 @@ import (
 )
 
 // Lookup looks up a child entry in a directory.
-func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	defer n.recoverPanic("Lookup")
+func (n *MonoNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (resultInode *fs.Inode, resultErrno syscall.Errno) {
+	defer n.recoverPanic("Lookup", &resultErrno)
 	n.recordOperation()
 	n.logger.Debug("lookup", "path", n.path, "name", name)
 

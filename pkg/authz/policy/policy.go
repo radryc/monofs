@@ -226,15 +226,22 @@ func (p *Policy) PartitionForAWS(account, region string) (string, bool) {
 	return "", false
 }
 
-// IsAdmin reports whether the identity holds the admin role (or is listed in
-// a grant with Role=admin), which bypasses all filtering.
+// IsAdmin reports whether the identity holds *global* admin: an admin grant
+// whose partitions list contains the wildcard. Scoped admin grants are honoured
+// by Role/CanSeePartition/CanReadSignal for the resources they list, but they
+// do not grant access to platform-wide admin endpoints.
 func (p *Policy) IsAdmin(id authz.Identity) bool {
 	if p == nil || id.IsAnonymous() {
 		return false
 	}
 	for _, g := range p.bundle.Grants {
-		if g.Role == string(authz.RoleAdmin) && g.matches(id) {
-			return true
+		if g.Role != string(authz.RoleAdmin) || !g.matches(id) {
+			continue
+		}
+		for _, partition := range g.Partitions {
+			if strings.TrimSpace(partition) == "*" {
+				return true
+			}
 		}
 	}
 	return false
@@ -248,7 +255,6 @@ func (p *Policy) CanSeePartition(id authz.Identity, partition string) bool {
 // PartitionVisibility precomputes the partition decision for one identity so
 // large partition listings do not re-evaluate every grant per partition.
 type PartitionVisibility struct {
-	admin          bool
 	denied         bool
 	wildcard       bool
 	defaultAllowed bool
@@ -261,7 +267,7 @@ func (p *Policy) PartitionVisibility(id authz.Identity) PartitionVisibility {
 		return PartitionVisibility{}
 	}
 	if p.IsAdmin(id) {
-		return PartitionVisibility{admin: true}
+		return PartitionVisibility{wildcard: true}
 	}
 	if p.denied(id, ScopePartitions) {
 		return PartitionVisibility{denied: true}
@@ -288,7 +294,7 @@ func (p *Policy) PartitionVisibility(id authz.Identity) PartitionVisibility {
 // CanSee reports whether the partition is visible under the precomputed
 // policy. It is equivalent to Policy.CanSeePartition.
 func (v PartitionVisibility) CanSee(partition string) bool {
-	if v.admin || v.wildcard {
+	if v.wildcard {
 		return true
 	}
 	if v.denied {

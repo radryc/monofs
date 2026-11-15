@@ -144,9 +144,7 @@ func main() {
 		// Packager encryption
 		encryptionKeyHex = flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
 
-		// Partition authorization + SSO (authz epics A/C)
-		authzEnforceIngest  = flag.Bool("authz-enforce-ingest", false, "Enforce partition-scoped ingest authorization")
-		authzGrantsPath     = flag.String("authz-grants-path", "", "Path to authz grant store JSON (defaults to <state-dir>/authz_grants.json")
+		// SSO + ownership governance
 		ownershipGate       = flag.Bool("ownership-gate", false, "Enable subtree-ownership review gate on source push (Phase 3 VCS governance)")
 		searchIndexGuardian = flag.Bool("search-index-guardian", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_SEARCH_INDEX_GUARDIAN")), "true"), "Index Guardian-managed partitions in search (default false: no clonable upstream)")
 		ownershipTeamMap    = flag.String("ownership-team-mapping", "", "Path to team->IdP group mapping YAML for OWNERS '@team' handles (optional)")
@@ -291,9 +289,6 @@ func main() {
 		GracefulFailoverDelay:          *gracefulFailoverDelay,
 		GuardianIngestTimeout:          *guardianIngestTimeout,
 		SearchIndexGuardian:            *searchIndexGuardian,
-		AuthzEnforceIngest:             *authzEnforceIngest,
-		AuthzGrantsPath:                strings.TrimSpace(*authzGrantsPath),
-		AuthzGrantsJSON:                strings.TrimSpace(os.Getenv("MONOFS_AUTHZ_GRANTS_JSON")),
 		OwnershipGateEnabled:           *ownershipGate,
 		AllowLocalIngest:               *localIngestEnabled,
 		AccessPolicyURL:                strings.TrimSpace(*accessPolicyURL),

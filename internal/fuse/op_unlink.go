@@ -7,8 +7,8 @@ import (
 )
 
 // Unlink implements fs.NodeUnlinker for deleting files
-func (n *MonoNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	defer n.recoverPanic("Unlink")
+func (n *MonoNode) Unlink(ctx context.Context, name string) (resultErrno syscall.Errno) {
+	defer n.recoverPanic("Unlink", &resultErrno)
 	// Check if we have session manager for writes
 	if n.sessionMgr == nil {
 		return syscall.EROFS
