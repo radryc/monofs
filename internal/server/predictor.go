@@ -27,8 +27,8 @@ type Predictor struct {
 	recentAccesses *ring.Ring
 	recentMu       sync.Mutex
 
-	// Fetcher client for prefetch requests
-	fetcherClient *fetcher.Client
+	// Blob fetcher used for prefetch requests
+	blobFetcher BlobFetcher
 
 	// Configuration
 	config PredictorConfig
@@ -133,12 +133,12 @@ type directoryAccess struct {
 }
 
 // NewPredictor creates a new prediction engine.
-func NewPredictor(fetcherClient *fetcher.Client, config PredictorConfig, logger *slog.Logger) *Predictor {
+func NewPredictor(blobFetcher BlobFetcher, config PredictorConfig, logger *slog.Logger) *Predictor {
 	p := &Predictor{
 		markovChains:   make(map[string]*markovChain),
 		dirAccess:      make(map[string]*directoryAccess),
 		recentAccesses: ring.New(config.RecentWindow),
-		fetcherClient:  fetcherClient,
+		blobFetcher:    blobFetcher,
 		config:         config,
 		logger:         logger,
 	}
@@ -171,7 +171,7 @@ func (p *Predictor) RecordAccess(ctx context.Context, storageID, filePath, clien
 
 	// Get predictions and trigger prefetch
 	predictions := p.Predict(storageID, filePath)
-	if len(predictions) > 0 && p.fetcherClient != nil {
+	if len(predictions) > 0 && p.blobFetcher != nil {
 		go p.triggerPrefetch(ctx, predictions, meta)
 	}
 }
@@ -528,7 +528,7 @@ type BlobMeta struct {
 }
 
 func (p *Predictor) triggerPrefetch(ctx context.Context, predictions []PredictedFile, currentMeta *BlobMeta) {
-	if currentMeta == nil || p.fetcherClient == nil {
+	if currentMeta == nil || p.blobFetcher == nil {
 		return
 	}
 
@@ -554,7 +554,7 @@ func (p *Predictor) triggerPrefetch(ctx context.Context, predictions []Predicted
 		requests = append(requests, req)
 	}
 
-	if err := p.fetcherClient.Prefetch(ctx, requests, currentMeta.SourceType); err != nil {
+	if err := p.blobFetcher.Prefetch(ctx, requests, currentMeta.SourceType); err != nil {
 		p.logger.Warn("prefetch request failed", "error", err)
 	} else {
 		p.prefetches += int64(len(requests))

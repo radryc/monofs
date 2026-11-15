@@ -1,3 +1,4 @@
+// Package workspacebundle defines staged workspace and commit bundle payloads.
 package workspacebundle
 
 import (

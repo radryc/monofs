@@ -26,6 +26,10 @@ const (
 
 // IngestLogs writes logs in JSONEachRow batches.
 func (s *TraceStore) IngestLogs(ctx context.Context, _ string, logs []logengine.LogRecord) error {
+	return s.insertLogsChunked(ctx, logs)
+}
+
+func (s *TraceStore) insertLogsChunked(ctx context.Context, logs []logengine.LogRecord) error {
 	if len(logs) == 0 {
 		return nil
 	}
@@ -83,7 +87,7 @@ func (s *TraceStore) insertLogBatch(ctx context.Context, logs []logengine.LogRec
 	}
 	statement := "INSERT INTO " + s.tableFor(s.cfg.LogsTable) +
 		" (tenant, timestamp, level, service, trace_id, span_id, raw_message, labels) FORMAT JSONEachRow"
-	if err := s.exec(ctx, statement, nil, &body); err != nil {
+	if err := s.exec(ctx, statement, s.insertParams(), &body); err != nil {
 		return fmt.Errorf("insert clickhouse logs: %w", err)
 	}
 	return nil
@@ -240,6 +244,10 @@ func (s *TraceStore) QueryLogs(ctx context.Context, queryStr, service string, fr
 
 // IngestMetrics writes metric points in JSONEachRow batches.
 func (s *TraceStore) IngestMetrics(ctx context.Context, _ string, metrics []logengine.MetricRecord) error {
+	return s.insertMetricsChunked(ctx, metrics)
+}
+
+func (s *TraceStore) insertMetricsChunked(ctx context.Context, metrics []logengine.MetricRecord) error {
 	if len(metrics) == 0 {
 		return nil
 	}
@@ -303,7 +311,7 @@ func (s *TraceStore) insertMetricBatch(ctx context.Context, metrics []logengine.
 	}
 	statement := "INSERT INTO " + s.tableFor(s.cfg.MetricsTable) +
 		" (tenant, timestamp, start_time, service, metric_name, value, metric_type, temporality, unit, description, labels) FORMAT JSONEachRow"
-	if err := s.exec(ctx, statement, nil, &body); err != nil {
+	if err := s.exec(ctx, statement, s.insertParams(), &body); err != nil {
 		return fmt.Errorf("insert clickhouse metrics: %w", err)
 	}
 	return nil

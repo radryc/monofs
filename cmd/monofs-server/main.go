@@ -179,12 +179,12 @@ func main() {
 	metricsAddr := flag.String("metrics-addr", ":9100", "Listen address for Prometheus /metrics endpoint (empty disables)")
 
 	// Access policy (repo-managed ACL) enforcement on read RPCs. Disabled
-	// unless a policy source is configured; observe unless --authz-enforce-read.
+	// unless a policy source is configured; observe unless --access-enforce.
 	accessPolicyURL := flag.String("access-policy-url", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_POLICY_URL")), "URL of the compiled access policy bundle (e.g. the router /api/access/policy endpoint)")
 	accessPolicyFile := flag.String("access-policy-file", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_POLICY_FILE")), "Local compiled access policy file (dev alternative to --access-policy-url)")
 	accessPolicyToken := flag.String("access-policy-token", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_POLICY_TOKEN")), "Bearer token for fetching the access policy bundle")
 	accessPolicyInterval := flag.Duration("access-policy-interval", 30*time.Second, "Access policy refresh interval")
-	authzEnforceRead := flag.Bool("authz-enforce-read", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_ACCESS_ENFORCE")), "true"), "Enforce access policy on read RPCs (default false: observe only)")
+	accessEnforce := flag.Bool("access-enforce", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_ACCESS_ENFORCE")), "true"), "Enforce access policy on read RPCs (default false: observe only)")
 	internalToken := flag.String("internal-token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Cluster-internal token; calls presenting it via x-monofs-internal bypass policy (defaults to MONOFS_TOKEN)")
 	authzOIDCIssuer := flag.String("oidc-issuer", strings.TrimSpace(os.Getenv("MONOFS_OIDC_ISSUER")), "OIDC issuer for bearer token verification")
 	authzOIDCAudience := flag.String("oidc-audience", strings.TrimSpace(os.Getenv("MONOFS_OIDC_AUDIENCE")), "OIDC audience for bearer token verification")
@@ -282,7 +282,7 @@ func main() {
 		PolicyURL:     strings.TrimSpace(*accessPolicyURL),
 		PolicyToken:   strings.TrimSpace(*accessPolicyToken),
 		Interval:      *accessPolicyInterval,
-		Enforce:       *authzEnforceRead,
+		Enforce:       *accessEnforce,
 		Logger:        logger,
 	})
 	if accessControl != nil {
@@ -290,7 +290,7 @@ func main() {
 		logger.Info("access policy enabled",
 			"url", strings.TrimSpace(*accessPolicyURL),
 			"file", strings.TrimSpace(*accessPolicyFile),
-			"enforce_read", *authzEnforceRead)
+			"enforce_read", *accessEnforce)
 	}
 
 	// Create listener

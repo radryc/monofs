@@ -48,7 +48,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "Show version and exit")
 
 	// Access-control flags. Filtering is off/observe by default so rollout
-	// does not change behavior until --authz-enforce-read is set.
+	// does not change behavior until --access-enforce is set.
 	token := flag.String("token", os.Getenv("MONOFS_TOKEN"), "Internal cluster token: requests presenting it via the x-monofs-internal metadata bypass read filtering (defaults to MONOFS_TOKEN)")
 	oidcIssuer := flag.String("oidc-issuer", "", "OIDC issuer for bearer token verification (enables OIDC when set with --oidc-audience)")
 	oidcAudience := flag.String("oidc-audience", "", "OIDC audience for bearer token verification")
@@ -58,7 +58,7 @@ func main() {
 	accessPolicyFile := flag.String("access-policy-file", "", "Path to a compiled access policy bundle (dev)")
 	accessPolicyToken := flag.String("access-policy-token", "", "Bearer token for --access-policy-url")
 	accessPolicyInterval := flag.Duration("access-policy-interval", policy.DefaultPollInterval, "Access policy refresh interval")
-	authzEnforceRead := flag.Bool("authz-enforce-read", false, "Enforce access-policy filtering on search results (default false: log decisions only)")
+	accessEnforce := flag.Bool("access-enforce", false, "Enforce access-policy filtering on search results (default false: log decisions only)")
 	flag.Parse()
 
 	if *showVersion {
@@ -115,7 +115,7 @@ func main() {
 
 	// Access-control wiring: verify bearer tokens, load the compiled policy and
 	// hand both to the search service. Filtering stays off/observe unless
-	// --authz-enforce-read is set.
+	// --access-enforce is set.
 	var verifiers []authz.TokenVerifier
 	if strings.TrimSpace(*oidcIssuer) != "" && strings.TrimSpace(*oidcAudience) != "" {
 		oidcVerifier, oidcErr := authz.NewOIDCVerifier(authz.OIDCConfig{
@@ -153,7 +153,7 @@ func main() {
 	}
 	if policyLoader != nil {
 		go policyLoader.Run(context.Background())
-		logger.Info("access policy enabled", "source", policyLoader.Source(), "enforce_read", *authzEnforceRead)
+		logger.Info("access policy enabled", "source", policyLoader.Source(), "enforce_read", *accessEnforce)
 	}
 
 	// Create search service
@@ -166,7 +166,7 @@ func main() {
 		IndexGuardian: *indexGuardian,
 		Logger:        logger,
 		AccessPolicy:  policyLoader,
-		EnforceRead:   *authzEnforceRead,
+		EnforceRead:   *accessEnforce,
 		InternalToken: strings.TrimSpace(*token),
 	}
 

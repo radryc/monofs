@@ -16,6 +16,8 @@ import (
 )
 
 // GitBackend fetches blobs from Git repositories.
+var _ storage.FetchBackend = (*GitBackend)(nil)
+
 type GitBackend struct {
 	config storage.BackendConfig
 

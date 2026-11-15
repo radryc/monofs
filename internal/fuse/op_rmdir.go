@@ -7,8 +7,8 @@ import (
 )
 
 // Rmdir implements fs.NodeRmdirer for removing directories
-func (n *MonoNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	defer n.recoverPanic("Rmdir")
+func (n *MonoNode) Rmdir(ctx context.Context, name string) (resultErrno syscall.Errno) {
+	defer n.recoverPanic("Rmdir", &resultErrno)
 	// Check if we have session manager for writes
 	if n.sessionMgr == nil {
 		return syscall.EROFS

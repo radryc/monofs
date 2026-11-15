@@ -1,3 +1,4 @@
+// Package workspacepolicy loads and evaluates workspace merge-gate policy.
 package workspacepolicy
 
 import (

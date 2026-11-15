@@ -664,6 +664,8 @@ func TestVirtualMonorepoAllowsDependencyWritesAndRejectsReservedWrites(t *testin
 	}
 
 	var entryOut fuse.EntryOut
+	// Embed the node in a FUSE tree so NewInode works without a real mount.
+	_ = fs.NewNodeFS(root, &fs.Options{})
 	if _, errno := root.Mkdir(context.Background(), "dependency", 0755, &entryOut); errno != 0 {
 		t.Fatalf("Mkdir(dependency) errno = %v, want success", errno)
 	}

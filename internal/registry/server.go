@@ -1,3 +1,4 @@
+// Package registry implements an OCI registry and pull-through proxy backed by MonoFS storage nodes.
 package registry
 
 import (

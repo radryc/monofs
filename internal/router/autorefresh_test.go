@@ -527,6 +527,9 @@ func TestAutoRefreshStaticFallbackWhenLeaseUnavailable(t *testing.T) {
 	cfg.AutoRefreshConcurrency = 1
 	cfg.AutoRefreshStateDir = t.TempDir()
 	r := NewRouter(cfg, slog.New(slog.DiscardHandler))
+	if err := r.Start(); err != nil {
+		t.Fatalf("start router: %v", err)
+	}
 	defer r.Close()
 
 	if len(r.autoRefreshWorkers) != 1 {

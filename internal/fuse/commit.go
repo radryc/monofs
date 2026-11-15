@@ -33,7 +33,6 @@ type workspaceCommitBundlePusher interface {
 }
 
 type commitClient interface {
-	client.MonoFSClient
 	workspaceCommitBundlePusher
 }
 

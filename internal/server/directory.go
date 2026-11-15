@@ -285,6 +285,8 @@ func (s *Server) checkVirtualFile(storageID, filePath string) *pb.LookupResponse
 
 // ReadDir implements the ReadDir RPC (streaming).
 func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServer[pb.DirEntry]) error {
+	start := time.Now()
+	defer observeServerOp("readdir", start)
 	startTime := time.Now()
 	path := strings.Trim(req.Path, "/")
 	s.logger.Debug("readdir started", "path", path)
@@ -396,7 +398,13 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 		}
 		// Emit in name order so clients can merge node listings with a heap.
 		sort.Slice(resolved.entries, func(i, j int) bool { return resolved.entries[i].Name < resolved.entries[j].Name })
+		startAfter := req.GetStartAfter()
+		limit := int(req.GetLimit())
+		sent := 0
 		for _, entry := range resolved.entries {
+			if startAfter != "" && entry.Name <= startAfter {
+				continue
+			}
 			entryLogicalPath := kvsChildLogicalPath(resolved.logicalPath, entry.Name)
 			if err := stream.Send(&pb.DirEntry{
 				Name: entry.Name,
@@ -404,6 +412,10 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 				Ino:  hashPath(strings.TrimPrefix(entryLogicalPath, "/")),
 			}); err != nil {
 				return err
+			}
+			sent++
+			if limit > 0 && sent >= limit {
+				break
 			}
 		}
 		return nil
@@ -416,7 +428,13 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 		}
 		// Emit in name order so clients can merge node listings with a heap.
 		sort.Slice(resolved.entries, func(i, j int) bool { return resolved.entries[i].Name < resolved.entries[j].Name })
+		startAfter := req.GetStartAfter()
+		limit := int(req.GetLimit())
+		sent := 0
 		for _, entry := range resolved.entries {
+			if startAfter != "" && entry.Name <= startAfter {
+				continue
+			}
 			entryLogicalPath := kvsChildLogicalPath(resolved.logicalPath, entry.Name)
 			if err := stream.Send(&pb.DirEntry{
 				Name: entry.Name,
@@ -424,6 +442,10 @@ func (s *Server) ReadDir(req *pb.ReadDirRequest, stream grpc.ServerStreamingServ
 				Ino:  hashPath(strings.TrimPrefix(entryLogicalPath, "/")),
 			}); err != nil {
 				return err
+			}
+			sent++
+			if limit > 0 && sent >= limit {
+				break
 			}
 		}
 		return nil

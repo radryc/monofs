@@ -1,3 +1,4 @@
+// Package logengine stores and queries logs, metrics, and traces in Parquet chunks, optionally delegating SQL to DuckDB.
 package logengine
 
 import (

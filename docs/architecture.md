@@ -577,7 +577,7 @@ The detailed model is in [security-architecture.md](security-architecture.md). I
 - gRPC: bearer interceptor, but router and search are in observe mode and server enforcement requires a policy source.
 - Guardian: opaque payload/header token mapped to a persisted principal and role.
 - Internal: `x-monofs-internal` shared token bypasses node/search read policy.
-- Authorization: two policy systems (`authz.GrantStore` and `authz/policy`), plus OWNERS/CODEOWNERS, plus per-handler role checks, plus an in-memory ingestion whitelist.
+- Authorization: one runtime policy (`authz/policy`), plus OWNERS/CODEOWNERS governance, per-handler role checks, and an in-memory ingestion whitelist.
 
 ### 13.3 Error handling
 

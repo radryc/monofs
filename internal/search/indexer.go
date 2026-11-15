@@ -23,9 +23,17 @@ import (
 	"github.com/sourcegraph/zoekt/search"
 
 	pb "github.com/radryc/monofs/api/proto"
-	"github.com/radryc/monofs/internal/client"
 	"github.com/radryc/monofs/internal/gittoken"
 )
+
+// NodeReader is the subset of the cluster client the indexer needs. It is
+// defined here, in the consumer, so the indexer does not depend on the full
+// MonoFSClient surface (metrics, log queries, workspace operations).
+type NodeReader interface {
+	Read(ctx context.Context, path string, offset, size int64) ([]byte, error)
+	ReadDir(ctx context.Context, path string) ([]*pb.DirEntry, error)
+	Close() error
+}
 
 // Indexer manages Zoekt indexing and searching
 type Indexer struct {
@@ -34,10 +42,10 @@ type Indexer struct {
 	cacheDir        string
 	searcher        zoekt.Streamer
 	logger          *slog.Logger
-	pathToStorageID map[string]string   // DisplayPath -> StorageID mapping
-	monofsClient    client.MonoFSClient // Optional client for fetching from storage nodes
-	ctagsPath       string              // universal-ctags binary for symbol extraction ("" = disabled)
-	symbolsEnabled  bool                // whether sym: queries are supported
+	pathToStorageID map[string]string // DisplayPath -> StorageID mapping
+	monofsClient    NodeReader        // Optional client for fetching from storage nodes
+	ctagsPath       string            // universal-ctags binary for symbol extraction ("" = disabled)
+	symbolsEnabled  bool              // whether sym: queries are supported
 }
 
 // IndexRequest contains repository indexing parameters
@@ -129,7 +137,7 @@ func globToRegex(glob string) string {
 }
 
 // NewIndexer creates a new Zoekt indexer
-func NewIndexer(indexDir, cacheDir string, monofsClient client.MonoFSClient, logger *slog.Logger) (*Indexer, error) {
+func NewIndexer(indexDir, cacheDir string, monofsClient NodeReader, logger *slog.Logger) (*Indexer, error) {
 	if err := os.MkdirAll(indexDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create index dir: %w", err)
 	}

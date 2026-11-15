@@ -1,3 +1,4 @@
+// Package diagnostics exposes Prometheus metrics and pprof handlers for MonoFS binaries.
 package diagnostics
 
 import (

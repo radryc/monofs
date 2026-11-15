@@ -24,6 +24,8 @@ import (
 
 // Lookup implements the Lookup RPC.
 func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupResponse, error) {
+	start := time.Now()
+	defer observeServerOp("lookup", start)
 	serverOpsTotal.WithLabelValues("lookup").Inc()
 	path := req.ParentPath
 	if path == "" && req.Name != "" {
@@ -247,6 +249,8 @@ func (s *Server) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.LookupR
 
 // GetAttr implements the GetAttr RPC.
 func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAttrResponse, error) {
+	start := time.Now()
+	defer observeServerOp("getattr", start)
 	serverOpsTotal.WithLabelValues("getattr").Inc()
 	path := req.Path
 	s.logger.Debug("getattr request", "path", path)
@@ -518,6 +522,8 @@ func (s *Server) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAt
 
 // Read implements the Read RPC - lazy loads from Git repo.
 func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.DataChunk]) error {
+	start := time.Now()
+	defer observeServerOp("read", start)
 	serverOpsTotal.WithLabelValues("read").Inc()
 	ctx := stream.Context()
 	path := req.Path
@@ -743,21 +749,50 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	s.logger.DebugContext(ctx, "read: reading blob via fetcher", "blob_hash", blobHash, "repo_url", repoURL, "display_path", displayPath, "branch", branch)
 
 	// Fetcher client is required for all blob reads
-	if s.fetcherClient == nil {
+	if s.blobFetcher == nil {
 		s.logger.ErrorContext(ctx, "read: fetcher client not configured - cannot read blobs without fetchers")
 		return status.Errorf(codes.FailedPrecondition, "storage node not configured: fetcher client required")
 	}
 
-	var fetchErr error
-	content, wasPrefetched, fetchErr = s.readViaFetcher(ctx, storageID, blobHash, repoURL, filePath, branch)
+	offset := req.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	size := req.Size
+
+	// Negative cache: a blob that the fetcher reported missing is remembered
+	// briefly so repeated reads do not hammer the fetcher/S3 on every request.
+	if s.blobIsNegative(blobHash) {
+		return status.Errorf(codes.NotFound, "blob not found (cached): %s", blobHash)
+	}
+
+	// Coalesce concurrent reads of the same blob. Without this, N workers
+	// reading a cold or missing blob each issue a fetcher RPC and an S3 lookup.
+	type blobFetchResult struct {
+		content    []byte
+		prefetched bool
+	}
+	fetchKey := fmt.Sprintf("%s|%d|%d", blobHash, offset, size)
+	fetchValue, fetchErr, _ := s.blobFlight.Do(fetchKey, func() (any, error) {
+		content, prefetched, err := s.readViaFetcher(ctx, storageID, blobHash, repoURL, filePath, branch, offset, size)
+		if err != nil {
+			return nil, err
+		}
+		return blobFetchResult{content: content, prefetched: prefetched}, nil
+	})
 	if fetchErr != nil {
+		if isBlobNotFoundError(fetchErr) {
+			s.markBlobNegative(blobHash)
+		}
 		s.logger.ErrorContext(ctx, "read: fetcher request failed", "path", path, "blob_hash", blobHash, "error", fetchErr)
 		code := codes.Unavailable
-		if strings.Contains(fetchErr.Error(), "blob not found") {
+		if strings.Contains(fetchErr.Error(), "blob not found") || strings.Contains(fetchErr.Error(), "not found") {
 			code = codes.NotFound
 		}
 		return status.Errorf(code, "failed to read blob via fetcher: %v", fetchErr)
 	}
+	result, _ := fetchValue.(blobFetchResult)
+	content, wasPrefetched = result.content, result.prefetched
 
 	// Track prefetch hit/miss metrics
 	if wasPrefetched {
@@ -773,23 +808,9 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 		go s.recordAccessForPredictor(ctx, storageID, filePath, blobHash, repoURL, branch)
 	}
 
-	// Handle offset and size
-	offset := req.Offset
-	size := req.Size
-	if offset < 0 {
-		offset = 0
-	}
-
-	if offset >= int64(len(content)) {
-		return nil
-	}
-	content = content[offset:]
-
-	if size > 0 && size < int64(len(content)) {
-		content = content[:size]
-	}
-
-	// Stream in chunks
+	// The fetcher was asked for [offset, offset+size), so content is already
+	// the requested window. Stream it directly; the DataChunk offset still
+	// carries the original file position for clients.
 	chunkSize := 64 * 1024
 	currentOffset := offset
 
@@ -1101,20 +1122,32 @@ func (s *Server) DeleteRepository(ctx context.Context, req *pb.DeleteRepositoryO
 
 // readViaFetcher attempts to read blob content via the fetcher service.
 // Returns the content, whether it was a prefetch hit, and any error.
-func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoURL, filePath, branch string) ([]byte, bool, error) {
+func (s *Server) readViaFetcher(ctx context.Context, storageID, blobHash, repoURL, filePath, branch string, offset, length int64) (content []byte, wasPrefetched bool, err error) {
+	start := time.Now()
+	defer func() {
+		result := "ok"
+		if err != nil {
+			if isBlobNotFoundError(err) {
+				result = "not_found"
+			} else {
+				result = "error"
+			}
+		}
+		serverFetchDurationSeconds.WithLabelValues(result).Observe(time.Since(start).Seconds())
+	}()
+
 	// Default to blob source type (packager archive). Git is optional.
 	sourceType := fetcher.SourceTypeBlob
 
 	// Check prefetch cache
-	var wasPrefetched bool
-	inCache, err := s.fetcherClient.CheckCacheSimple(ctx, repoURL, blobHash)
+	inCache, err := s.blobFetcher.CheckCacheSimple(ctx, repoURL, blobHash)
 	if err != nil {
 		return nil, false, fmt.Errorf("check cache failed: %w", err)
 	}
 	wasPrefetched = inCache
 
 	// Fetch via fetcher service
-	content, err := s.fetcherClient.FetchBlobSimple(ctx, storageID, repoURL, blobHash, filePath, branch, sourceType)
+	content, err = s.blobFetcher.FetchBlobSimple(ctx, storageID, repoURL, blobHash, filePath, branch, offset, length, sourceType)
 	if err != nil {
 		return nil, false, fmt.Errorf("fetch blob failed: %w", err)
 	}
@@ -1197,7 +1230,11 @@ func (s *Server) StreamMetricSeries(req *pb.QueryMetricsRequest, stream grpc.Ser
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
-	if err := backend.StreamMetricSeries(stream.Context(), logengine.MetricQuery{
+	queryCtx := stream.Context()
+	if req.GetVisiblePartitionsSet() {
+		queryCtx = logengine.WithQueryScope(queryCtx, requestQueryScope(req.GetVisiblePartitions(), true))
+	}
+	if err := backend.StreamMetricSeries(queryCtx, logengine.MetricQuery{
 		MetricName:    req.MetricName,
 		Service:       req.GetService(),
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
@@ -1309,7 +1346,11 @@ func (s *Server) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.Ser
 		batcher = newQueryResultBatcher(stream.Send, int(req.GetBatchSize()))
 		yield = func(record logengine.MetricRecord) error { return batcher.add(record) }
 	}
-	if err := backend.StreamMetrics(stream.Context(), logengine.MetricQuery{
+	queryCtx := stream.Context()
+	if req.GetVisiblePartitionsSet() {
+		queryCtx = logengine.WithQueryScope(queryCtx, requestQueryScope(req.GetVisiblePartitions(), true))
+	}
+	if err := backend.StreamMetrics(queryCtx, logengine.MetricQuery{
 		MetricName:    req.MetricName,
 		Service:       req.GetService(),
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
@@ -1335,7 +1376,11 @@ func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
-	records, err := backend.QueryMetrics(ctx, logengine.MetricQuery{
+	queryCtx := ctx
+	if req.GetVisiblePartitionsSet() {
+		queryCtx = logengine.WithQueryScope(queryCtx, requestQueryScope(req.GetVisiblePartitions(), true))
+	}
+	records, err := backend.QueryMetrics(queryCtx, logengine.MetricQuery{
 		MetricName:    req.MetricName,
 		Service:       req.GetService(),
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),

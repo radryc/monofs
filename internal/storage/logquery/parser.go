@@ -1,3 +1,4 @@
+// Package logquery parses the MonoFS log query language.
 package logquery
 
 import (

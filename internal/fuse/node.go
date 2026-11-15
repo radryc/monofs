@@ -8,6 +8,7 @@ package fuse
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"os"
@@ -22,9 +23,31 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/cache"
 	"github.com/radryc/monofs/internal/client"
+	"github.com/radryc/monofs/internal/fsstat"
 )
+
+// nodeBackend is the read-side cluster client surface used by FUSE nodes. It
+// is defined here, in the consumer, so nodes do not depend on the full
+// MonoFSClient interface (log queries, workspace operations, batch ingest).
+type nodeBackend interface {
+	Lookup(ctx context.Context, path string) (*pb.LookupResponse, error)
+	GetAttr(ctx context.Context, path string) (*pb.GetAttrResponse, error)
+	ReadDir(ctx context.Context, path string) ([]*pb.DirEntry, error)
+	Read(ctx context.Context, path string, offset, size int64) ([]byte, error)
+	StatFS(ctx context.Context) (fsstat.Snapshot, error)
+	WriteQueryLogs(ctx context.Context, query string, writer io.Writer) error
+}
+
+// metricsRecorder records client-side operation counters. It is separate from
+// nodeBackend so instrumentation is optional in tests.
+type metricsRecorder interface {
+	RecordOperation()
+	RecordBytesRead(n int64)
+	RecordError()
+}
 
 // MonoNode represents a node in the MonoFS filesystem.
 // It implements various fs.Node* interfaces for FUSE operations.
@@ -43,8 +66,11 @@ type MonoNode struct {
 	// File size (0 for directories)
 	size uint64
 
-	// Backend client for gRPC operations
-	client client.MonoFSClient
+	// Backend client for gRPC reads
+	client nodeBackend
+
+	// Client-side operation metrics (usually the same value as client)
+	metrics metricsRecorder
 
 	// Optional cache layer (can be nil)
 	cache *cache.Cache
@@ -111,13 +137,14 @@ func NewRoot(c client.MonoFSClient, cache *cache.Cache, logger *slog.Logger) *Mo
 		logger = slog.Default()
 	}
 	return &MonoNode{
-		path:   "",
-		isDir:  true,
-		mode:   0755 | uint32(syscall.S_IFDIR),
-		client: c,
-		cache:  cache,
-		owner:  currentProcessOwner(),
-		logger: logger.With("component", "fuse"),
+		path:    "",
+		isDir:   true,
+		mode:    0755 | uint32(syscall.S_IFDIR),
+		client:  c,
+		metrics: c,
+		cache:   cache,
+		owner:   currentProcessOwner(),
+		logger:  logger.With("component", "fuse"),
 	}
 }
 
@@ -131,6 +158,7 @@ func NewRootWithSession(c client.MonoFSClient, cache *cache.Cache, sessionMgr *S
 		isDir:      true,
 		mode:       0755 | uint32(syscall.S_IFDIR),
 		client:     c,
+		metrics:    c,
 		cache:      cache,
 		sessionMgr: sessionMgr,
 		owner:      currentProcessOwner(),
@@ -212,12 +240,33 @@ func (n *MonoNode) newChild(name string, isDir bool, mode uint32, size uint64) *
 		mode:         mode,
 		size:         size,
 		client:       n.client,
+		metrics:      n.metrics,
 		cache:        n.cache,
 		sessionMgr:   n.sessionMgr,
 		workspace:    n.workspace,
 		workspaceGit: n.workspaceGit,
 		owner:        n.owner,
 		logger:       n.logger,
+	}
+}
+
+// recordOperation records a FUSE operation, tolerating nodes built without
+// a metrics recorder (tests construct MonoNode literals directly).
+func (n *MonoNode) recordOperation() {
+	if n.metrics != nil {
+		n.metrics.RecordOperation()
+	}
+}
+
+func (n *MonoNode) recordBytesRead(size int64) {
+	if n.metrics != nil {
+		n.metrics.RecordBytesRead(size)
+	}
+}
+
+func (n *MonoNode) recordError() {
+	if n.metrics != nil {
+		n.metrics.RecordError()
 	}
 }
 
@@ -232,7 +281,7 @@ func (n *MonoNode) recordAndConvertError(err error) syscall.Errno {
 		return syscall.EINTR
 	}
 	if n.client != nil {
-		n.client.RecordError()
+		n.recordError()
 	}
 	return syscall.EIO
 }
@@ -645,11 +694,14 @@ func (n *MonoNode) getattrFromOverlay(out *fuse.AttrOut) syscall.Errno {
 // recoverPanic catches panics and stores them as catastrophic errors.
 // This must be safe to call even when the node is not mounted in a FUSE
 // tree (e.g. during unit tests or early initialisation).
-func (n *MonoNode) recoverPanic(operation string) {
+func (n *MonoNode) recoverPanic(operation string, errno *syscall.Errno) {
 	if r := recover(); r != nil {
 		stack := debug.Stack()
 		errMsg := fmt.Sprintf("PANIC in %s: %v\n\nStack trace:\n%s", operation, r, string(stack))
 		n.logger.Error("catastrophic error", "operation", operation, "panic", r)
+		if errno != nil {
+			*errno = syscall.EIO
+		}
 
 		// Store error in root node (only if properly embedded in FUSE tree).
 		// Check inode != nil BEFORE calling Parent() to avoid a nil-deref
@@ -724,18 +776,25 @@ func (n *MonoNode) ensureLocalCopyFor(ctx context.Context, monofsPath string) er
 			return fmt.Errorf("create empty file: %w", err)
 		}
 	} else {
-		// Fetch from backend
+		// Fetch from backend. Only a definitive NotFound means the file is new;
+		// any other error (transport, timeout, permission) must not be turned
+		// into an empty local copy, which would later be committed and destroy
+		// the real content.
+		if n.client == nil {
+			return fmt.Errorf("no backend client for %s", monofsPath)
+		}
 		content, err := n.client.Read(ctx, monofsPath, 0, 0)
-		if err != nil {
-			// File might be new, create empty
-			n.logger.Debug("backend read failed, creating empty file", "path", monofsPath, "error", err)
-			if err := os.WriteFile(localPath, []byte{}, 0644); err != nil {
-				return fmt.Errorf("create empty file: %w", err)
-			}
-		} else {
+		switch {
+		case err == nil:
 			if err := os.WriteFile(localPath, content, 0644); err != nil {
 				return fmt.Errorf("write local copy: %w", err)
 			}
+		case isNotFoundStatus(err):
+			if err := os.WriteFile(localPath, []byte{}, 0644); err != nil {
+				return fmt.Errorf("create empty file: %w", err)
+			}
+		default:
+			return fmt.Errorf("fetch backend content for %s: %w", monofsPath, err)
 		}
 	}
 

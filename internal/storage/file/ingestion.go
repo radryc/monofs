@@ -1,3 +1,4 @@
+// Package file ingests repositories from a server-local filesystem.
 package file
 
 import (

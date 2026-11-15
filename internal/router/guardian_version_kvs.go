@@ -16,6 +16,7 @@ import (
 
 	kvsv1 "github.com/radryc/kvs/api/proto/kvs/v1"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/router/guardian"
 	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
@@ -65,8 +66,8 @@ type kvsGuardianVersionRecord struct {
 	History     []kvsGuardianVersionMeta `json:"history"`
 }
 
-func (m kvsGuardianVersionMeta) stored() *storedGuardianFileVersion {
-	return &storedGuardianFileVersion{
+func (m kvsGuardianVersionMeta) stored() *guardian.Record {
+	return &guardian.Record{
 		LogicalPath:     "",
 		DisplayPath:     m.DisplayPath,
 		StorageID:       m.StorageID,
@@ -83,7 +84,7 @@ func (m kvsGuardianVersionMeta) stored() *storedGuardianFileVersion {
 
 type kvsGuardianVersionBackend struct {
 	router *Router
-	store  *guardianVersionStore
+	store  *guardian.Store
 
 	mu      sync.Mutex
 	conns   map[string]*grpc.ClientConn
@@ -95,7 +96,7 @@ type kvsGuardianCandidate struct {
 	address string
 }
 
-func newKVSGuardianVersionBackend(router *Router, store *guardianVersionStore) *kvsGuardianVersionBackend {
+func newKVSGuardianVersionBackend(router *Router, store *guardian.Store) *kvsGuardianVersionBackend {
 	return &kvsGuardianVersionBackend{router: router, store: store}
 }
 
@@ -248,7 +249,7 @@ func (b *kvsGuardianVersionBackend) readRecord(ctx context.Context, logicalPath 
 	return &record, recordVersion, true, nil
 }
 
-func (b *kvsGuardianVersionBackend) current(ctx context.Context, logicalPath string) (*storedGuardianFileVersion, bool, error) {
+func (b *kvsGuardianVersionBackend) Current(ctx context.Context, logicalPath string) (*guardian.Record, bool, error) {
 	record, _, exists, err := b.readRecord(ctx, logicalPath)
 	if err != nil {
 		return nil, false, err
@@ -261,12 +262,12 @@ func (b *kvsGuardianVersionBackend) current(ctx context.Context, logicalPath str
 	return current, true, nil
 }
 
-func (b *kvsGuardianVersionBackend) commitBatch(ctx context.Context, changes []guardianVersionCommit) ([]*pb.GuardianFileVersion, error) {
+func (b *kvsGuardianVersionBackend) CommitBatch(ctx context.Context, changes []guardian.Commit) ([]*pb.GuardianFileVersion, error) {
 	// Preserve input order for the caller while deduplicating paths for the
 	// KVS batch (KVS rejects duplicate paths in one batch).
 	type preparedWrite struct {
 		index    int
-		change   guardianVersionCommit
+		change   guardian.Commit
 		record   *kvsGuardianVersionRecord
 		expected string
 		version  *pb.GuardianFileVersion
@@ -307,11 +308,11 @@ func (b *kvsGuardianVersionBackend) commitBatch(ctx context.Context, changes []g
 			case "":
 			case "absent":
 				if current != nil && !current.Tombstone {
-					return nil, fmt.Errorf("%w: %s", errGuardianVersionExists, logicalPath)
+					return nil, fmt.Errorf("%w: %s", guardian.ErrExists, logicalPath)
 				}
 			default:
 				if current == nil || current.VersionID != entry.change.ExpectedVersionID {
-					return nil, fmt.Errorf("%w: %s", errGuardianVersionConflict, logicalPath)
+					return nil, fmt.Errorf("%w: %s", guardian.ErrConflict, logicalPath)
 				}
 			}
 		}
@@ -326,7 +327,7 @@ func (b *kvsGuardianVersionBackend) commitBatch(ctx context.Context, changes []g
 				contentSHA = hex.EncodeToString(sum[:])
 			}
 			seq := nextKVSVersionSeq()
-			versionID := guardianVersionID(change.LogicalPath, contentSHA, change.BatchRevisionID, change.CommittedAt, seq, change.Tombstone)
+			versionID := guardian.VersionID(change.LogicalPath, contentSHA, change.BatchRevisionID, change.CommittedAt, seq, change.Tombstone)
 			meta := kvsGuardianVersionMeta{
 				VersionID:       versionID,
 				DisplayPath:     change.DisplayPath,
@@ -343,8 +344,8 @@ func (b *kvsGuardianVersionBackend) commitBatch(ctx context.Context, changes []g
 			record.LogicalPath = logicalPath
 			record.Current = &meta
 			record.History = append(record.History, meta)
-			if len(record.History) > guardianVersionsPerPathHistory {
-				record.History = record.History[len(record.History)-guardianVersionsPerPathHistory:]
+			if len(record.History) > guardian.PerPathHistory {
+				record.History = record.History[len(record.History)-guardian.PerPathHistory:]
 			}
 			payload, err := json.Marshal(record)
 			if err != nil {
@@ -403,7 +404,7 @@ func (b *kvsGuardianVersionBackend) commitBatch(ctx context.Context, changes []g
 				PrincipalId:     current.PrincipalID,
 				Reason:          current.Reason,
 			}
-			b.store.cacheContent(logicalPath, current.VersionID, entry.change.Content)
+			b.store.CacheContent(logicalPath, current.VersionID, entry.change.Content)
 		}
 		// Duplicate paths in the same batch resolve to the same final version.
 		for i, entry := range prepared {
@@ -416,10 +417,10 @@ func (b *kvsGuardianVersionBackend) commitBatch(ctx context.Context, changes []g
 		}
 		return versions, nil
 	}
-	return nil, fmt.Errorf("%w: guardian KVS CAS retries exhausted", errGuardianVersionConflict)
+	return nil, fmt.Errorf("%w: guardian KVS CAS retries exhausted", guardian.ErrConflict)
 }
 
-func (b *kvsGuardianVersionBackend) list(ctx context.Context, logicalPath string, pageSize int32, pageToken string) ([]*pb.GuardianFileVersion, string, error) {
+func (b *kvsGuardianVersionBackend) List(ctx context.Context, logicalPath string, pageSize int32, pageToken string) ([]*pb.GuardianFileVersion, string, error) {
 	record, _, exists, err := b.readRecord(ctx, logicalPath)
 	if err != nil {
 		return nil, "", err
@@ -442,7 +443,7 @@ func (b *kvsGuardianVersionBackend) list(ctx context.Context, logicalPath string
 		meta := record.History[i]
 		stored := meta.stored()
 		stored.LogicalPath = logicalPath
-		versions = append(versions, stored.toProto())
+		versions = append(versions, stored.ToProto())
 	}
 	if offset >= len(versions) {
 		return nil, "", nil
@@ -458,7 +459,7 @@ func (b *kvsGuardianVersionBackend) list(ctx context.Context, logicalPath string
 	return versions[offset:end], next, nil
 }
 
-func (b *kvsGuardianVersionBackend) get(ctx context.Context, logicalPath, versionID string) (*pb.GuardianFileVersion, []byte, bool, bool, error) {
+func (b *kvsGuardianVersionBackend) Get(ctx context.Context, logicalPath, versionID string) (*pb.GuardianFileVersion, []byte, bool, bool, error) {
 	record, _, exists, err := b.readRecord(ctx, logicalPath)
 	if err != nil {
 		return nil, nil, false, false, err
@@ -473,11 +474,11 @@ func (b *kvsGuardianVersionBackend) get(ctx context.Context, logicalPath, versio
 		}
 		stored := meta.stored()
 		stored.LogicalPath = logicalPath
-		content, available := b.store.cachedContent(logicalPath, versionID)
+		content, available := b.store.CachedContent(logicalPath, versionID)
 		if meta.Tombstone {
-			return stored.toProto(), nil, false, true, nil
+			return stored.ToProto(), nil, false, true, nil
 		}
-		return stored.toProto(), content, available, true, nil
+		return stored.ToProto(), content, available, true, nil
 	}
 	return nil, nil, false, false, nil
 }
@@ -495,7 +496,7 @@ func (b *kvsGuardianVersionBackend) dropClient(address string) {
 	delete(b.clients, address)
 }
 
-func (b *kvsGuardianVersionBackend) close() error {
+func (b *kvsGuardianVersionBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var errs []error

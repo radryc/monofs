@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -55,4 +57,26 @@ var (
 		Name:      "kvs_write_ops_total",
 		Help:      "Total KVS-path write operations committed by this server node, by op.",
 	}, []string{"op"}) // op: upsert, delete
+
+	// serverOpDurationSeconds is the end-to-end latency of a node RPC, by op.
+	serverOpDurationSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "monofs",
+		Subsystem: "server",
+		Name:      "op_duration_seconds",
+		Help:      "End-to-end latency of MonoFS node RPCs, by op.",
+		Buckets:   []float64{0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+	}, []string{"op"})
+
+	// serverFetchDurationSeconds isolates the fetcher/S3 portion of Read.
+	serverFetchDurationSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "monofs",
+		Subsystem: "server",
+		Name:      "fetch_duration_seconds",
+		Help:      "Latency of blob fetches from a node, by result (ok, not_found, error).",
+		Buckets:   []float64{0.0001, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+	}, []string{"result"})
 )
+
+func observeServerOp(op string, start time.Time) {
+	serverOpDurationSeconds.WithLabelValues(op).Observe(time.Since(start).Seconds())
+}

@@ -3,28 +3,79 @@ package router
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/pkg/authz"
+	"github.com/radryc/monofs/pkg/authz/policy"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-func newAuthzTestRouter(t *testing.T, enforce bool, grants ...authz.Grant) *Router {
+func newAuthzTestRouter(t *testing.T, enforce bool) *Router {
 	t.Helper()
 	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
-	store, err := authz.NewGrantStore("")
-	if err != nil {
-		t.Fatalf("new grant store: %v", err)
-	}
-	for _, g := range grants {
-		if err := store.Add(g); err != nil {
-			t.Fatalf("add grant: %v", err)
-		}
-	}
-	r.SetGrantEvaluator(store, enforce)
+	r.accessPolicy = newTestAccessPolicy(t, enforce)
 	return r
+}
+
+func newTestAccessPolicy(t *testing.T, enforce bool) *accessPolicyState {
+	t.Helper()
+	const raw = `
+version: 1
+defaults:
+  partitions: deny
+  logs: deny
+  traces: deny
+  monofs: deny
+clients:
+  ci-bot:
+    partitions: [team-a]
+    role: ingester
+users:
+  reader@example.com:
+    partitions: [doctor]
+    logs: [doctor]
+    role: viewer
+  admin@example.com:
+    partitions: ["*"]
+    logs: ["*"]
+    traces: ["*"]
+    monofs: ["*"]
+    role: admin
+`
+	file, err := policy.ParseFile([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse policy: %v", err)
+	}
+	catalog := &policy.Catalog{Partitions: []policy.Partition{
+		{Name: "team-a"},
+		{Name: "team-b"},
+		{Name: "doctor"},
+	}}
+	bundle, _, err := policy.Compile(file, catalog, time.Unix(0, 0))
+	if err != nil {
+		t.Fatalf("compile policy: %v", err)
+	}
+	data, err := policy.MarshalPolicy(policy.New(*bundle))
+	if err != nil {
+		t.Fatalf("marshal policy: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	state := &accessPolicyState{
+		loader: policy.NewLoader(policy.FileSource{Path: path}, time.Hour, func(string, ...any) {}),
+	}
+	state.enforce.Store(enforce)
+	if err := state.loader.Refresh(context.Background()); err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	return state
 }
 
 func TestIngestPartitionForGrant(t *testing.T) {
@@ -49,8 +100,7 @@ func TestIngestPartitionForGrant(t *testing.T) {
 }
 
 func TestAuthorizeIngestEnforcement(t *testing.T) {
-	r := newAuthzTestRouter(t, true,
-		authz.Grant{Subject: "ci-bot", Partition: "team-a", Role: authz.RoleIngester})
+	r := newAuthzTestRouter(t, true)
 
 	gitReq := func(partition string) *pb.IngestRequest {
 		return &pb.IngestRequest{IngestionType: pb.IngestionType_INGESTION_GIT, SourceId: partition}
@@ -61,31 +111,37 @@ func TestAuthorizeIngestEnforcement(t *testing.T) {
 		t.Fatalf("anonymous ingest: want PermissionDenied, got %v", err)
 	}
 
-	// Granted principal -> allowed.
+	// Ingester -> allowed.
 	ciCtx := authz.ContextWithIdentity(context.Background(), authz.Identity{ClientID: "ci-bot"})
 	if err := r.authorizeIngest(ciCtx, gitReq("team-a"), "team-a"); err != nil {
 		t.Fatalf("granted ingest: want nil, got %v", err)
 	}
 
-	// Granted principal, wrong partition -> denied.
+	// Ingester, wrong partition -> denied.
 	if err := r.authorizeIngest(ciCtx, gitReq("team-b"), "team-b"); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("cross-partition ingest: want PermissionDenied, got %v", err)
 	}
 }
 
-func TestAuthorizeIngestDisabledIsNoop(t *testing.T) {
-	r := newAuthzTestRouter(t, false,
-		authz.Grant{Subject: "ci-bot", Partition: "team-a", Role: authz.RoleIngester})
-	// Enforcement off: even an anonymous caller passes.
+func TestAuthorizeIngestObserveModeIsNoop(t *testing.T) {
+	r := newAuthzTestRouter(t, false)
 	req := &pb.IngestRequest{IngestionType: pb.IngestionType_INGESTION_GIT, SourceId: "team-a"}
 	if err := r.authorizeIngest(context.Background(), req, "team-a"); err != nil {
-		t.Fatalf("disabled enforcement should be a no-op, got %v", err)
+		t.Fatalf("observe mode should be a no-op, got %v", err)
+	}
+}
+
+func TestAuthorizeIngestFailsClosedWithoutPolicy(t *testing.T) {
+	r := NewRouter(DefaultRouterConfig(), slog.New(slog.DiscardHandler))
+	r.accessPolicy = &accessPolicyState{}
+	r.accessPolicy.enforce.Store(true)
+	if err := r.authorizeIngest(context.Background(), &pb.IngestRequest{}, "team-a"); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("missing policy under enforcement: want PermissionDenied, got %v", err)
 	}
 }
 
 func TestIngestRepositoryDeniedByAuthz(t *testing.T) {
-	r := newAuthzTestRouter(t, true,
-		authz.Grant{Subject: "ci-bot", Partition: "team-a", Role: authz.RoleIngester})
+	r := newAuthzTestRouter(t, true)
 
 	// A principal without a grant for team-a must be rejected before any work.
 	stream := &mockIngestStream{ctx: authz.ContextWithIdentity(context.Background(), authz.Identity{ClientID: "intruder"})}

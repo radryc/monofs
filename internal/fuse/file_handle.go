@@ -32,20 +32,26 @@ var (
 // Read implements fs.FileReader
 func (h *monofsFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	h.logger.Debug("handle read", "offset", off, "len", len(dest))
+	if h.file == nil {
+		return nil, syscall.EIO
+	}
 
 	n, err := h.file.ReadAt(dest, off)
 	if err != nil && !errors.Is(err, io.EOF) {
 		h.logger.Error("handle read failed", "error", err)
 		return nil, syscall.EIO
 	}
-	h.node.client.RecordOperation()
-	h.node.client.RecordBytesRead(int64(n))
+	h.node.recordOperation()
+	h.node.recordBytesRead(int64(n))
 	return fuse.ReadResultData(dest[:n]), 0
 }
 
 // Write implements fs.FileWriter
 func (h *monofsFileHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
 	h.logger.Debug("handle write", "offset", off, "len", len(data))
+	if h.file == nil {
+		return 0, syscall.EIO
+	}
 
 	n, err := h.file.WriteAt(data, off)
 	if err != nil {
@@ -53,7 +59,7 @@ func (h *monofsFileHandle) Write(ctx context.Context, data []byte, off int64) (u
 		return 0, syscall.EIO
 	}
 
-	h.node.client.RecordOperation()
+	h.node.recordOperation()
 
 	// Update node size if we extended the file
 	h.node.mu.Lock()
@@ -107,6 +113,9 @@ func (h *monofsFileHandle) Flush(ctx context.Context) syscall.Errno {
 // This is the correct place for the expensive disk sync — not Flush.
 func (h *monofsFileHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 	h.logger.Debug("handle fsync")
+	if h.file == nil {
+		return syscall.EIO
+	}
 
 	if err := h.file.Sync(); err != nil {
 		h.logger.Error("handle fsync failed", "error", err)
@@ -121,6 +130,10 @@ func (h *monofsFileHandle) Fsync(ctx context.Context, flags uint32) syscall.Errn
 // scenarios in monitoring.
 func (h *monofsFileHandle) Release(ctx context.Context) syscall.Errno {
 	h.logger.Debug("handle release")
+
+	// The kernel may deliver RELEASE without a preceding FLUSH. Track pending
+	// overlay changes before closing the file so a dirty write cannot be lost.
+	_ = h.Flush(ctx)
 
 	// Drop the node's cached handle reference if it still points at this file,
 	// otherwise a later MonoNode.Write fallback would reuse a closed fd.

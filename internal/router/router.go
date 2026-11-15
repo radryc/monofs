@@ -19,6 +19,7 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/fetcher"
+	"github.com/radryc/monofs/internal/router/guardian"
 	"github.com/radryc/monofs/internal/router/mergerequest"
 	"github.com/radryc/monofs/internal/router/pipeline"
 	"github.com/radryc/monofs/internal/router/workspacepolicy"
@@ -110,11 +111,6 @@ type RouterConfig struct {
 	// service. Default false: they have no clonable upstream git remote, so
 	// indexing would fall back to a failing git clone.
 	SearchIndexGuardian bool
-
-	// Authz (partition-level authorization)
-	AuthzEnforceIngest bool
-	AuthzGrantsPath    string
-	AuthzGrantsJSON    string
 
 	// Ownership gate (Phase 3 VCS governance): subtree-ownership review
 	// gate. When enabled, direct pushes into subtrees the principal does
@@ -287,6 +283,7 @@ type Router struct {
 	clientsMu   sync.RWMutex
 	stopClients chan struct{}
 	closeOnce   sync.Once
+	startOnce   sync.Once
 
 	// Guardian clients (guardian-* prefixed clients with special config)
 	guardianClients   map[string]*guardianClientState // clientID -> guardian state
@@ -294,7 +291,7 @@ type Router struct {
 
 	// Guardian persistence
 	guardianPrincipals          *guardianPrincipalStore
-	guardianVersions            *guardianVersionStore
+	guardianVersions            *guardian.Store
 	guardianRegisteredNodeRepos sync.Map // "nodeID|addr|storageID|displayPath|repoURL" -> bool
 	// guardianMutationLocks are striped locks that serialize the
 	// check -> node apply -> version commit critical section for a display
@@ -337,12 +334,10 @@ type Router struct {
 	peerRouterToken   string
 
 	// Authz (partition-level authorization)
-	ownershipResolver  ownershipChecker
-	grantEvaluator     authz.GrantEvaluator
-	authzEnforceRead   bool
-	authzEnforceIngest bool
-	breakGlassAdmins   map[string]bool
-	serviceIdentity    authz.Identity
+	ownershipResolver ownershipChecker
+	authzEnforceRead  bool
+	breakGlassAdmins  map[string]bool
+	serviceIdentity   authz.Identity
 
 	// internalTokenValue is presented on router -> node calls (policy bypass).
 	// Stored atomically because dial paths run while r.mu is write-locked.
@@ -593,10 +588,10 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		logger.Error("failed to initialize guardian principal store", "state_dir", cfg.GuardianStateDir, "error", err)
 		guardianPrincipals, _ = newGuardianPrincipalStore("")
 	}
-	guardianVersions, err := newGuardianVersionStore(cfg.GuardianStateDir)
+	guardianVersions, err := guardian.NewStore(cfg.GuardianStateDir)
 	if err != nil {
 		logger.Error("failed to initialize guardian version store", "state_dir", cfg.GuardianStateDir, "error", err)
-		guardianVersions, _ = newGuardianVersionStore("")
+		guardianVersions, _ = guardian.NewStore("")
 	}
 
 	var wjs *workspacestore.Store
@@ -650,31 +645,55 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		whitelist:                 newWhitelistStore(),
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.GuardianVersionBackend), "kvs") {
-		r.guardianVersions.kvs = newKVSGuardianVersionBackend(r, r.guardianVersions)
-		r.guardianVersions.kvsFallbackLocal = strings.EqualFold(strings.TrimSpace(cfg.GuardianVersionBackendFallback), "local")
-		logger.Info("guardian version store using KVS backend", "fallback_local", r.guardianVersions.kvsFallbackLocal)
+		fallbackLocal := strings.EqualFold(strings.TrimSpace(cfg.GuardianVersionBackendFallback), "local")
+		r.guardianVersions.UseBackend(newKVSGuardianVersionBackend(r, r.guardianVersions), fallbackLocal)
+		logger.Info("guardian version store using KVS backend", "fallback_local", fallbackLocal)
 	}
+	// Resolve the coordinator lease mode and synchronous leadership state.
+	// With the local backend this is a no-op; it only starts an elector
+	// goroutine when Kubernetes is configured.
 	r.startGuardianCoordinatorLease(logger)
 	r.internalTokenValue.Store(strings.TrimSpace(cfg.InternalToken))
 	r.version.Store(1)
 	r.namespaceGeneration.Store(1)
 
-	// Load partition-level grants (if configured) and apply ingest enforcement.
-	if evaluator := buildGrantEvaluator(cfg, logger); evaluator != nil {
-		r.SetGrantEvaluator(evaluator, cfg.AuthzEnforceIngest)
-	} else if cfg.AuthzEnforceIngest {
-		logger.Warn("authz ingest enforcement requested but no grant source configured; all ingest will be denied")
-	}
+	return r
+}
 
-	if cfg.AutoPushEnabled {
-		interval := cfg.AutoPushInterval
-		if interval <= 0 {
-			interval = defaultAutoPushInterval
-		}
-		r.autoPushWorker = newAutoPushWorker(r, interval, defaultConcurrencyCap, logger)
-		r.autoPushWorker.Start()
-	}
+// Start launches the router's background workers: auto-push and auto-refresh
+// workers, the pipeline orchestrator, the UI request loop, and stale-client
+// cleanup. NewRouter deliberately starts none of them, so tests and embedders
+// can construct a Router without background goroutines. The Guardian
+// coordinator lease is resolved in NewRouter because it determines synchronous
+// authorization state; it only runs an elector when Kubernetes is configured.
+// Start is idempotent and paired with Close.
+func (r *Router) Start() error {
+	r.startOnce.Do(func() {
+		r.startAutoPushWorker()
+		r.startAutoRefreshWorkers()
+		// Boot the pipeline orchestrator: registers the internal principal,
+		// loads pipeline configs from /.pipelines/, and starts config watching.
+		r.initPipeline(r.logger)
+		go r.handleUIRequests()
+		go r.cleanupStaleClients()
+	})
+	return nil
+}
 
+func (r *Router) startAutoPushWorker() {
+	if !r.config.AutoPushEnabled {
+		return
+	}
+	interval := r.config.AutoPushInterval
+	if interval <= 0 {
+		interval = defaultAutoPushInterval
+	}
+	r.autoPushWorker = newAutoPushWorker(r, interval, defaultConcurrencyCap, r.logger)
+	r.autoPushWorker.Start()
+}
+
+func (r *Router) startAutoRefreshWorkers() {
+	cfg := r.config
 	leaseMode := cfg.AutoRefreshLease
 	if cfg.AutoRefreshEnabled && leaseMode {
 		leaseCfg := repowatch.DefaultLeaseConfig(cfg.AutoRefreshLeaseName)
@@ -683,64 +702,56 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		}
 		if !leaseCfg.Enabled() {
 			leaseMode = false
-			logger.Warn("auto-refresh lease requested but Kubernetes is not configured; using static shard ownership (set --auto-refresh-shard per router)")
+			r.logger.Warn("auto-refresh lease requested but Kubernetes is not configured; using static shard ownership (set --auto-refresh-shard per router)")
 		}
 	}
 
 	// Lease mode must start the workers on every router: the lease, not the
 	// static owner flag, decides who actually probes each shard.
 	ownerMatches := autoRefreshOwnerMatches(cfg.AutoRefreshOwner, cfg.RouterName) || leaseMode
-	if cfg.AutoRefreshEnabled && ownerMatches {
-		interval := cfg.AutoRefreshInterval
-		if interval <= 0 {
-			interval = defaultAutoRefreshInterval
+	if !cfg.AutoRefreshEnabled || !ownerMatches {
+		if cfg.AutoRefreshEnabled {
+			r.logger.Info("auto-refresh worker skipped on this router", "owner", cfg.AutoRefreshOwner, "router", cfg.RouterName)
 		}
-		shards := cfg.AutoRefreshShards
-		if shards <= 0 {
-			shards = 1
-		}
-		if leaseMode {
-			// Every router competes for every shard lease. This gives both
-			// horizontal scaling and automatic takeover when a router dies.
-			for shard := 0; shard < shards; shard++ {
-				worker := newAutoRefreshWorker(r, interval, cfg.AutoRefreshConcurrency, logger)
-				worker.configure(
-					shard, shards, cfg.AutoRefreshBatchSize,
-					cfg.AutoRefreshMaxInterval, cfg.AutoRefreshStateDir,
-					cfg.AutoRefreshLease, cfg.AutoRefreshLeaseName, cfg.AutoRefreshLeaseNS,
-				)
-				worker.Start()
-				r.autoRefreshWorkers = append(r.autoRefreshWorkers, worker)
-			}
-			if len(r.autoRefreshWorkers) > 0 {
-				r.autoRefreshWorker = r.autoRefreshWorkers[0]
-			}
-		} else {
-			worker := newAutoRefreshWorker(r, interval, cfg.AutoRefreshConcurrency, logger)
-			worker.configure(
-				cfg.AutoRefreshShard, shards, cfg.AutoRefreshBatchSize,
-				cfg.AutoRefreshMaxInterval, cfg.AutoRefreshStateDir,
-				false, cfg.AutoRefreshLeaseName, cfg.AutoRefreshLeaseNS,
-			)
-			worker.Start()
-			r.autoRefreshWorker = worker
-			r.autoRefreshWorkers = []*autoRefreshWorker{worker}
-		}
-	} else if cfg.AutoRefreshEnabled {
-		logger.Info("auto-refresh worker skipped on this router", "owner", cfg.AutoRefreshOwner, "router", cfg.RouterName)
+		return
 	}
 
-	// Boot the pipeline orchestrator: registers the internal principal,
-	// loads pipeline configs from /.pipelines/, and starts config watching.
-	r.initPipeline(logger)
+	interval := cfg.AutoRefreshInterval
+	if interval <= 0 {
+		interval = defaultAutoRefreshInterval
+	}
+	shards := cfg.AutoRefreshShards
+	if shards <= 0 {
+		shards = 1
+	}
+	if leaseMode {
+		// Every router competes for every shard lease. This gives both
+		// horizontal scaling and automatic takeover when a router dies.
+		for shard := 0; shard < shards; shard++ {
+			worker := newAutoRefreshWorker(r, interval, cfg.AutoRefreshConcurrency, r.logger)
+			worker.configure(
+				shard, shards, cfg.AutoRefreshBatchSize,
+				cfg.AutoRefreshMaxInterval, cfg.AutoRefreshStateDir,
+				cfg.AutoRefreshLease, cfg.AutoRefreshLeaseName, cfg.AutoRefreshLeaseNS,
+			)
+			worker.Start()
+			r.autoRefreshWorkers = append(r.autoRefreshWorkers, worker)
+		}
+		if len(r.autoRefreshWorkers) > 0 {
+			r.autoRefreshWorker = r.autoRefreshWorkers[0]
+		}
+		return
+	}
 
-	// Start UI request handler goroutine
-	go r.handleUIRequests()
-
-	// Start client cleanup goroutine
-	go r.cleanupStaleClients()
-
-	return r
+	worker := newAutoRefreshWorker(r, interval, cfg.AutoRefreshConcurrency, r.logger)
+	worker.configure(
+		cfg.AutoRefreshShard, shards, cfg.AutoRefreshBatchSize,
+		cfg.AutoRefreshMaxInterval, cfg.AutoRefreshStateDir,
+		false, cfg.AutoRefreshLeaseName, cfg.AutoRefreshLeaseNS,
+	)
+	worker.Start()
+	r.autoRefreshWorker = worker
+	r.autoRefreshWorkers = []*autoRefreshWorker{worker}
 }
 
 // SetVersion sets the build version information.
@@ -750,20 +761,6 @@ func (r *Router) SetVersion(version, commit, buildTime string) {
 	r.buildVersion = version
 	r.buildCommit = commit
 	r.buildTime = buildTime
-}
-
-// SetAuthzEnforceIngest toggles partition-level ingest authorization enforcement.
-func (r *Router) SetAuthzEnforceIngest(enforce bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.authzEnforceIngest = enforce
-}
-
-// AuthzEnforceIngest returns whether partition-level ingest authorization is enforced.
-func (r *Router) AuthzEnforceIngest() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.authzEnforceIngest
 }
 
 // markForIndexRebuild marks a repository on a node for directory index rebuild.
@@ -3098,7 +3095,7 @@ func (r *Router) Close() error {
 
 		// Stop the coordinator lease, then the Guardian stores.
 		r.stopGuardianCoordinatorLease()
-		r.guardianVersions.close()
+		r.guardianVersions.Close()
 		if r.guardianPrincipals != nil {
 			r.guardianPrincipals.close()
 		}

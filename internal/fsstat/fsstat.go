@@ -1,3 +1,4 @@
+// Package fsstat builds filesystem statistics snapshots for statfs responses.
 package fsstat
 
 const (

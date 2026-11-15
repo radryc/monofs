@@ -61,10 +61,3 @@ func (r *Router) snapshotUINodesLocked() []uiNodeSnapshot {
 	}
 	return out
 }
-
-// snapshotUINodes copies node state under the router lock.
-func (r *Router) snapshotUINodes() []uiNodeSnapshot {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.snapshotUINodesLocked()
-}

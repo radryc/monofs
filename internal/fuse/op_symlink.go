@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"errors"
 	"os"
 	"syscall"
 
@@ -10,8 +11,8 @@ import (
 )
 
 // Symlink implements fs.NodeSymlinker for creating symbolic links
-func (n *MonoNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	defer n.recoverPanic("Symlink")
+func (n *MonoNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (resultInode *fs.Inode, resultErrno syscall.Errno) {
+	defer n.recoverPanic("Symlink", &resultErrno)
 	n.logger.Debug("symlink", "parent", n.path, "name", name, "target", target)
 
 	// Check if we have session manager for writes
@@ -49,7 +50,14 @@ func (n *MonoNode) Symlink(ctx context.Context, target, name string, out *fuse.E
 	// Create symlink in session
 	if err := n.sessionMgr.CreateSymlink(newPath, target); err != nil {
 		n.logger.Error("symlink: failed to create symlink", "error", err)
-		return nil, syscall.EIO
+		switch {
+		case errors.Is(err, os.ErrExist), errors.Is(err, syscall.EEXIST):
+			return nil, syscall.EEXIST
+		case errors.Is(err, os.ErrNotExist), errors.Is(err, syscall.ENOENT):
+			return nil, syscall.ENOENT
+		default:
+			return nil, syscall.EIO
+		}
 	}
 
 	// Create child node for symlink
@@ -77,9 +85,9 @@ func (n *MonoNode) Symlink(ctx context.Context, target, name string, out *fuse.E
 }
 
 // Readlink implements fs.NodeReadlinker for reading symbolic link targets
-func (n *MonoNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
-	defer n.recoverPanic("Readlink")
-	n.client.RecordOperation()
+func (n *MonoNode) Readlink(ctx context.Context) (resultBytes []byte, resultErrno syscall.Errno) {
+	defer n.recoverPanic("Readlink", &resultErrno)
+	n.recordOperation()
 	n.logger.Debug("readlink", "path", n.path)
 
 	// Check if we have the target cached in the node

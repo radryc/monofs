@@ -195,7 +195,7 @@ func (r *Router) reportPipelineStatus(run *pipeline.PipelineRun, logger *slog.Lo
 }
 
 func (r *Router) loadPipelinesFromKVS(logger *slog.Logger) error {
-	versions := r.guardianVersions.listCurrentUnderPrefix(pipelineConfigsPrefix, 1000)
+	versions := r.guardianVersions.ListCurrentUnderPrefix(pipelineConfigsPrefix, 1000)
 
 	if len(versions) == 0 {
 		return nil
@@ -207,7 +207,7 @@ func (r *Router) loadPipelinesFromKVS(logger *slog.Logger) error {
 		}
 
 		logicalPath := version.GetLogicalPath()
-		stored, exists := r.guardianVersions.currentVersion(logicalPath)
+		stored, exists := r.guardianVersions.CurrentVersion(logicalPath)
 		if !exists || stored.Tombstone || len(stored.Content) == 0 {
 			continue
 		}
@@ -268,7 +268,7 @@ func (r *Router) watchPipelinesFromKVS(logger *slog.Logger) {
 				logger.Info("pipeline registered from change event", "name", cfg.Name)
 
 			case pb.ChangeType_DELETED:
-				current, exists := r.guardianVersions.currentVersion(logicalPath)
+				current, exists := r.guardianVersions.CurrentVersion(logicalPath)
 				if !exists || current.Tombstone {
 					r.pipelineOrchestrator.UnregisterPipeline(logicalPath)
 					logger.Info("pipeline unregistered", "path", logicalPath)

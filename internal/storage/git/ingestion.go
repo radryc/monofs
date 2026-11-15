@@ -1,3 +1,4 @@
+// Package git implements Git-backed ingestion and blob fetching.
 package git
 
 import (

@@ -72,19 +72,12 @@ func init() {
 		storage.IngestionTypeGit,
 		gitstorage.NewGitIngestionBackend,
 	)
-	storage.DefaultRegistry.RegisterFetchBackend(
-		storage.FetchTypeGit,
-		gitstorage.NewGitFetchBackend,
-	)
 
 	// Register file backend
 	storage.DefaultRegistry.RegisterIngestionBackend(
 		storage.IngestionTypeFile,
 		filestorage.NewFileIngestionBackend,
 	)
-
-	// Future backends will be registered here:
-	// storage.DefaultRegistry.RegisterFetchBackend(storage.FetchTypeS3, s3storage.NewS3FetchBackend)
 }
 
 func main() {
@@ -151,9 +144,7 @@ func main() {
 		// Packager encryption
 		encryptionKeyHex = flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
 
-		// Partition authorization + SSO (authz epics A/C)
-		authzEnforceIngest  = flag.Bool("authz-enforce-ingest", false, "Enforce partition-scoped ingest authorization")
-		authzGrantsPath     = flag.String("authz-grants-path", "", "Path to authz grant store JSON (defaults to <state-dir>/authz_grants.json")
+		// SSO + ownership governance
 		ownershipGate       = flag.Bool("ownership-gate", false, "Enable subtree-ownership review gate on source push (Phase 3 VCS governance)")
 		searchIndexGuardian = flag.Bool("search-index-guardian", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_SEARCH_INDEX_GUARDIAN")), "true"), "Index Guardian-managed partitions in search (default false: no clonable upstream)")
 		ownershipTeamMap    = flag.String("ownership-team-mapping", "", "Path to team->IdP group mapping YAML for OWNERS '@team' handles (optional)")
@@ -298,9 +289,6 @@ func main() {
 		GracefulFailoverDelay:          *gracefulFailoverDelay,
 		GuardianIngestTimeout:          *guardianIngestTimeout,
 		SearchIndexGuardian:            *searchIndexGuardian,
-		AuthzEnforceIngest:             *authzEnforceIngest,
-		AuthzGrantsPath:                strings.TrimSpace(*authzGrantsPath),
-		AuthzGrantsJSON:                strings.TrimSpace(os.Getenv("MONOFS_AUTHZ_GRANTS_JSON")),
 		OwnershipGateEnabled:           *ownershipGate,
 		AllowLocalIngest:               *localIngestEnabled,
 		AccessPolicyURL:                strings.TrimSpace(*accessPolicyURL),
@@ -403,6 +391,13 @@ func main() {
 		}
 	}
 
+	// Start background workers after all configuration is applied so they
+	// observe the final node set, credentials, and policy.
+	if err := r.Start(); err != nil {
+		logger.Error("failed to start router background workers", "error", err)
+		os.Exit(1)
+	}
+
 	// Start health checking
 	r.StartHealthCheck()
 
@@ -488,7 +483,9 @@ func main() {
 		grpc.MaxSendMsgSize(1024*1024*1024),
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
 		grpc.ChainUnaryInterceptor(grpcAuthenticator.UnaryServerInterceptor()),
+		grpc.ChainUnaryInterceptor(router.MetricsUnaryInterceptor()),
 		grpc.ChainStreamInterceptor(grpcAuthenticator.StreamServerInterceptor()),
+		grpc.ChainStreamInterceptor(router.MetricsStreamInterceptor()),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second, // Allow pings every 5s (prevents too_many_pings)
 			PermitWithoutStream: true,            // Allow pings even when no streams active

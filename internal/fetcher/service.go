@@ -1,3 +1,4 @@
+// Package fetcher implements the blob fetcher and repository sync services, including encrypted content-addressed archive storage.
 package fetcher
 
 import (
@@ -53,6 +54,11 @@ type Service struct {
 	syncStageFails        atomic.Int64
 	stagedBundlesMu       sync.RWMutex
 	stagedBundles         map[string]*syncWorkerBundle
+
+	// Negative cache for content IDs that the backend reported missing. This
+	// prevents repeated S3 ListObjectsV2 scans for the same missing blob.
+	negMu    sync.Mutex
+	negCache map[string]time.Time
 
 	// Configuration
 	config ServiceConfig
@@ -112,6 +118,7 @@ func NewService(fetcherID string, registry *Registry, config ServiceConfig, logg
 		repoMgr:       repoMgr,
 		prefetchQueue: make(chan *prefetchJob, config.PrefetchQueueSize),
 		stagedBundles: make(map[string]*syncWorkerBundle),
+		negCache:      make(map[string]time.Time),
 		config:        config,
 		startTime:     time.Now(),
 		ctx:           ctx,
@@ -170,9 +177,19 @@ func (s *Service) FetchBlob(req *pb.FetchBlobRequest, stream pb.BlobFetcher_Fetc
 		"source_key", fetchReq.SourceKey,
 	)
 
+	// Negative cache: a content ID the backend already reported missing is
+	// rejected immediately instead of triggering another cloud lookup.
+	if s.negativeCached(req) {
+		fetcherBlobErrorsTotal.WithLabelValues(sourceType.String()).Inc()
+		return fmt.Errorf("blob not found: %s", req.ContentId)
+	}
+
 	// Fetch with streaming
 	reader, size, err := backend.FetchBlobStream(ctx, fetchReq)
 	if err != nil {
+		if isNegativeCacheableError(err) {
+			s.markNegative(req)
+		}
 		s.logger.Warn("fetch failed", "content_id", req.ContentId, "error", err)
 		fetcherBlobErrorsTotal.WithLabelValues(sourceType.String()).Inc()
 		return err
@@ -290,8 +307,19 @@ func (s *Service) fetchSingleBlob(ctx context.Context, req *pb.FetchBlobRequest)
 		Priority:     int(req.Priority),
 	}
 
+	if s.negativeCached(req) {
+		fetcherBlobErrorsTotal.WithLabelValues(sourceType.String()).Inc()
+		return &pb.FetchBlobBatchResponse{
+			ContentId: req.ContentId,
+			Error:     fmt.Sprintf("blob not found: %s", req.ContentId),
+		}
+	}
+
 	result, err := backend.FetchBlob(ctx, fetchReq)
 	if err != nil {
+		if isNegativeCacheableError(err) {
+			s.markNegative(req)
+		}
 		fetcherBlobErrorsTotal.WithLabelValues(sourceType.String()).Inc()
 		return &pb.FetchBlobBatchResponse{
 			ContentId: req.ContentId,

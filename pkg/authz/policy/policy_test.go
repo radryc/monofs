@@ -386,3 +386,61 @@ func TestBundleRoundTrip(t *testing.T) {
 		t.Fatal("round-tripped policy must evaluate identically")
 	}
 }
+
+func TestScopedAdmin(t *testing.T) {
+	const scopedYAML = `
+version: 1
+defaults:
+  partitions: deny
+  logs: deny
+  traces: deny
+  monofs: deny
+users:
+  scoped@acme.com:
+    partitions: [aws-x]
+    logs: [aws-x]
+    role: admin
+  global@acme.com:
+    partitions: ["*"]
+    logs: ["*"]
+    traces: ["*"]
+    monofs: ["*"]
+    role: admin
+`
+	p := compileTestPolicy(t, scopedYAML, testCatalog())
+	scoped := identity("scoped@acme.com")
+
+	if p.IsAdmin(scoped) {
+		t.Fatal("scoped admin must not be a global admin")
+	}
+	if !p.CanSeePartition(scoped, "aws-x") {
+		t.Fatal("scoped admin must see its partition")
+	}
+	if p.CanSeePartition(scoped, "k8s-z") {
+		t.Fatal("scoped admin must not see other partitions")
+	}
+	if got := p.Role(scoped, "aws-x"); got != authz.RoleAdmin {
+		t.Fatalf("role on aws-x = %q, want admin", got)
+	}
+	if got := p.Role(scoped, "k8s-z"); got != "" {
+		t.Fatalf("role on k8s-z = %q, want none", got)
+	}
+	if !p.CanReadSignal(scoped, "aws-x", SignalLogs) {
+		t.Fatal("scoped admin must read logs it lists")
+	}
+	if p.CanReadSignal(scoped, "aws-x", SignalTraces) {
+		t.Fatal("scoped admin must not read scopes it does not list")
+	}
+	names, all := p.VisiblePartitions(scoped)
+	if all || len(names) != 1 || names[0] != "aws-x" {
+		t.Fatalf("visible partitions = %v all=%v, want [aws-x]", names, all)
+	}
+
+	global := identity("global@acme.com")
+	if !p.IsAdmin(global) {
+		t.Fatal("wildcard admin must be global")
+	}
+	if !p.CanReadSignal(global, "k8s-other", SignalLogs) {
+		t.Fatal("global admin must read every signal")
+	}
+}

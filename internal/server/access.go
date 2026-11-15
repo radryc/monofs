@@ -30,7 +30,7 @@ func isInternalCall(ctx context.Context) bool {
 }
 
 // AccessControl enforces the repo-managed access policy on storage-node read
-// RPCs. It is nil (or disabled) unless --authz-enforce-read and a policy
+// RPCs. It is nil (or disabled) unless --access-enforce and a policy
 // source are configured.
 type AccessControl struct {
 	verifier      authz.TokenVerifier

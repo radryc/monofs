@@ -92,13 +92,3 @@ func TestNoopVerifier(t *testing.T) {
 		t.Error("NoopVerifier should return anonymous identity")
 	}
 }
-
-func TestEvaluatorDefaults(t *testing.T) {
-	ctx := context.Background()
-	if !(AllowAllEvaluator{}).Can(ctx, Identity{}, "p", ActionModify) {
-		t.Error("AllowAllEvaluator should permit everything")
-	}
-	if (DenyAllEvaluator{}).Can(ctx, Identity{}, "p", ActionView) {
-		t.Error("DenyAllEvaluator should reject everything")
-	}
-}

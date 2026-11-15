@@ -55,12 +55,6 @@ func TestBreakGlassVerifier(t *testing.T) {
 		t.Fatalf("break-glass verify: id=%+v err=%v", id, err)
 	}
 
-	// Pairing with an admin wildcard grant authorizes everything.
-	store, _ := NewGrantStore("")
-	_ = store.Add(Grant{Subject: "break-glass-admin", Partition: WildcardPartition, Role: RoleAdmin})
-	if !store.Can(context.Background(), id, "any-partition", ActionModify) {
-		t.Fatal("break-glass admin should be able to modify any partition")
-	}
 }
 
 // errVerifier always errors.

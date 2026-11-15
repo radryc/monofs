@@ -14,8 +14,8 @@ import (
 )
 
 // Read reads file content.
-func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	defer n.recoverPanic("Read")
+func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (resultRead fuse.ReadResult, resultErrno syscall.Errno) {
+	defer n.recoverPanic("Read", &resultErrno)
 	n.logger.Debug("read", "path", n.path, "offset", off, "len", len(dest))
 
 	// Delegate to file handle if available (overlay files opened via Open/Create)
@@ -35,11 +35,11 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 			end = len(content)
 		}
 		if int(off) >= len(content) {
-			n.client.RecordOperation()
+			n.recordOperation()
 			return fuse.ReadResultData(nil), 0
 		}
-		n.client.RecordOperation()
-		n.client.RecordBytesRead(int64(end - int(off)))
+		n.recordOperation()
+		n.recordBytesRead(int64(end - int(off)))
 		return fuse.ReadResultData(content[off:end]), 0
 	}
 
@@ -61,10 +61,6 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 			}
 		}
 	}
-	if mfh, ok := f.(*monofsFileHandle); ok {
-		return mfh.Read(ctx, dest, off)
-	}
-
 	// If the file is tracked in overlay, read from disk directly.
 	// This handles the case where go-fuse dispatches to the node's Read
 	// instead of the file handle's Read (e.g. after a re-open).
@@ -79,11 +75,11 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 					end = len(data)
 				}
 				if int(off) >= len(data) {
-					n.client.RecordOperation()
+					n.recordOperation()
 					return fuse.ReadResultData(nil), 0
 				}
-				n.client.RecordOperation()
-				n.client.RecordBytesRead(int64(end - int(off)))
+				n.recordOperation()
+				n.recordBytesRead(int64(end - int(off)))
 				return fuse.ReadResultData(data[off:end]), 0
 			}
 			n.logger.Warn("read: overlay file read failed", "path", n.path, "error", err)
@@ -148,7 +144,7 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 			// Only count real errors, not context cancellations
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				if n.client != nil {
-					n.client.RecordError()
+					n.recordError()
 				}
 			}
 			return nil, syscall.EIO
@@ -163,13 +159,13 @@ func (n *MonoNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 		end = len(content)
 	}
 	if int(off) >= len(content) {
-		n.client.RecordOperation()
+		n.recordOperation()
 		return fuse.ReadResultData(nil), 0
 	}
 
 	bytesRead := int64(end - int(off))
-	n.client.RecordOperation()
-	n.client.RecordBytesRead(bytesRead)
+	n.recordOperation()
+	n.recordBytesRead(bytesRead)
 	return fuse.ReadResultData(content[off:end]), 0
 }
 
@@ -226,11 +222,11 @@ func (n *MonoNode) readLocalFileRange(path string, dest []byte, off int64) (fuse
 		return nil, syscall.EIO
 	}
 	if nread <= 0 {
-		n.client.RecordOperation()
+		n.recordOperation()
 		return fuse.ReadResultData(nil), 0
 	}
 
-	n.client.RecordOperation()
-	n.client.RecordBytesRead(int64(nread))
+	n.recordOperation()
+	n.recordBytesRead(int64(nread))
 	return fuse.ReadResultData(dest[:nread]), 0
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -853,7 +854,7 @@ func (c *Client) AllFetchers() []string {
 // FetchBlobSimple is a convenience wrapper for FetchBlob.
 // sourceKey is the stable routing key (storage ID for blob content, repo URL
 // for Git content); sourceURL remains the backend-specific source locator.
-func (c *Client) FetchBlobSimple(ctx context.Context, sourceKey, sourceURL, blobHash, filePath, branch string, sourceType SourceType) ([]byte, error) {
+func (c *Client) FetchBlobSimple(ctx context.Context, sourceKey, sourceURL, blobHash, filePath, branch string, offset, length int64, sourceType SourceType) ([]byte, error) {
 	if strings.TrimSpace(sourceKey) == "" {
 		sourceKey = sourceURL
 	}
@@ -863,6 +864,12 @@ func (c *Client) FetchBlobSimple(ctx context.Context, sourceKey, sourceURL, blob
 		"display_path": filePath,
 		"file_path":    filePath,
 		"storage_id":   sourceKey,
+	}
+	if offset > 0 {
+		sourceConfig["offset"] = strconv.FormatInt(offset, 10)
+	}
+	if length > 0 {
+		sourceConfig["length"] = strconv.FormatInt(length, 10)
 	}
 
 	req := &FetchRequest{

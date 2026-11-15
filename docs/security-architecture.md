@@ -86,14 +86,13 @@ of an older tree.
 
 ### 4.2 Authorization layers
 
-There are multiple, partially overlapping authorization systems:
+Runtime authorization has one source of truth:
 
-1. **`authz.GrantStore`** — JSON grants `{subject|group, partition, role}`; roles viewer/ingester/maintainer/admin; used by router ingest authz and available to nodes. Fails closed when enforced with no evaluator; disabled by default.
-2. **`authz/policy`** — `access.yaml` compiled into a bundle; partition/log/trace/MonoFS path grants, defaults, selectors, AWS bindings; loaded by router/nodes/search. Enforcement is opt-in; observe mode logs and allows.
-3. **OWNERS / CODEOWNERS** — `.guardian/OWNERS` with viewers/ingesters/maintainers; resolver walks ancestors. CODEOWNERS support exists but is not wired in the router.
-4. **Per-handler role checks** — Guardian mutation roles; pipeline/pusher namespace scoping; merge-request owner checks.
-5. **In-memory ingestion whitelist** — exact client ID allowlist; disabled by default; resets on restart.
-6. **Component-specific** — registry has none; search filters after querying; pipeline has no admin role for UI actions; Bazel cache/executor have none.
+1. **`authz/policy`** — `access.yaml` compiled into a bundle; partition/log/trace/MonoFS path grants, defaults, selectors, AWS bindings; loaded by router/nodes/search and Guardian. Enforcement is opt-in; observe mode logs and allows. `admin` is scope-aware: wildcard partitions are global, explicit lists are scoped.
+2. **OWNERS / CODEOWNERS** — repo-maintained inputs for merge governance and Doctor endpoint ownership. They are not a second runtime grant store.
+3. **Per-handler role checks** — pipeline/pusher namespace scoping and merge-request owner checks.
+4. **In-memory ingestion whitelist** — exact client ID allowlist; disabled by default; resets on restart.
+5. **Component-specific** — registry has none; search filters after querying; pipeline has no admin role for UI actions; Bazel cache/executor have none.
 
 ### 4.3 Transport security
 
@@ -245,7 +244,6 @@ Every `/v2/` route is open, including push, tag overwrite, and delete. Blobs are
 
 #### H6. Access-policy read controls are bypassed or dead
 
-- `authorizeRead` in the router has no production caller and is fail-open if enabled with no evaluator.
 - `/api/routers` embeds unfiltered repository data from local and peer routers.
 - `/api/merge-requests` lists all proposals.
 - Workspace job cancellation is not filtered.
@@ -304,7 +302,7 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 #### H15. Authorization model duplicates and disagrees with itself
 
 - Three break-glass implementations use different fields (`Subject` vs `ClientID`), so the operator token is not consistently admin.
-- Two policy systems have different admin/deny semantics: `authz.GrantStore` admin is per-partition; `authz/policy` admin is global.
+- Admin semantics are now scope-aware: wildcard admin is global, explicit partition lists are scoped. Missing `logs`/`traces`/`monofs` lists still deny those signals even for an admin.
 - Policy `defaults.partitions: allow` makes `CanSeePartition` true but `VisiblePartitions` returns empty.
 - Empty selector labels match absent labels; selectors can shadow partition names; missing catalog silently drops rules.
 - CODEOWNERS overmatches middle-slash patterns and parses inline comments as owners; it is not wired in the router.
@@ -390,8 +388,8 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 - PKCE S256 implementation and state binding are correct.
 - JWT verification uses an asymmetric algorithm allowlist by default and validates issuer/audience/expiry.
 - Static tokens are stored as hashes, not plaintext, in the verifier and Guardian principal store.
-- Anonymous identities are denied by `GrantStore.Can` and every `policy.Policy` method except metrics.
-- Ingest authorization fails closed when enforcement is on and the evaluator is missing.
+- Anonymous identities are denied by every `policy.Policy` method except metrics.
+- Ingest authorization fails closed when enforcement is on and the policy bundle is missing.
 - The ownership gate fails closed on resolver errors (when it is enabled and correctly wired).
 - Blob archives are encrypted at rest and use content-addressed entry names.
 - Workspace bundles validate relative paths, reject `.git` components, and reject `.`/`..` escapes for operation paths.
@@ -414,7 +412,7 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 
 ### P1 — before multi-tenant or production use
 
-1. **Unify authorization.** One identity model; one admin role; one policy evaluator; one break-glass mechanism keyed by an explicit role/claim, not a magic string. Remove dead `authorizeRead` or wire it into every read path.
+1. **Unify authorization.** One identity model; one policy evaluator; one break-glass mechanism keyed by an explicit role/claim, not a magic string. (Runtime policy consolidation is done; break-glass remains.)
 2. **Fix read enforcement.** Require a policy source when enforcement is on; fail startup otherwise. Apply ACLs to `/api/routers`, merge requests, registry, search, telemetry, upstream reads, native reads, and workspace cancellation.
 3. **Fix Guardian authorization.** Role/scope checks on read/history/subscriptions; role checks on HTTP deletes; validate paths; make principal lifecycle revocable; make version content durable; persist dot-prefixed machinery paths or separate them from ephemeral state.
 4. **Close registry authentication/integrity gaps.** Auth, TLS, repo ownership, per-repo blob namespaces or reference counting, digest verification on proxy, upload limits, chunk completion markers, and OCI conformance fixes.
@@ -432,7 +430,7 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 3. Make health/readiness honest; fix failover-cache TTL and deletion cleanup.
 4. Add per-repository and per-tenant quotas.
 5. Add negative/security tests: authn/authz deny, traversal, oversized inputs, malformed bundles, digest mismatch, symlink escape, registry conformance.
-6. Remove dead/unused security abstractions that give false confidence (inert Guardian grants, `authorizeRead`, unused session store, unused upstream credentials).
+6. Remove dead/unused security abstractions that give false confidence (unused session store, unused upstream credentials).
 7. Harden browser sessions (nonce, refresh, revocation, `__Host-` cookies, per-mount names).
 8. Harden the kernel module (frame size, reply matching, partial send, namespace auth).
 

@@ -24,12 +24,12 @@ func (r *Router) DrainCluster(ctx context.Context, req *pb.DrainClusterRequest) 
 
 	r.drainMode.Store(true)
 	r.drainedAt = time.Now()
-	r.drainReason = req.Reason
 
 	reason := req.Reason
 	if reason == "" {
 		reason = "planned maintenance"
 	}
+	r.drainReason = reason
 
 	r.logger.Warn("cluster entered drain mode - failover disabled",
 		"reason", reason,
