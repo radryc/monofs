@@ -1230,7 +1230,11 @@ func (s *Server) StreamMetricSeries(req *pb.QueryMetricsRequest, stream grpc.Ser
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
-	if err := backend.StreamMetricSeries(stream.Context(), logengine.MetricQuery{
+	queryCtx := stream.Context()
+	if req.GetVisiblePartitionsSet() {
+		queryCtx = logengine.WithQueryScope(queryCtx, requestQueryScope(req.GetVisiblePartitions(), true))
+	}
+	if err := backend.StreamMetricSeries(queryCtx, logengine.MetricQuery{
 		MetricName:    req.MetricName,
 		Service:       req.GetService(),
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
@@ -1342,7 +1346,11 @@ func (s *Server) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.Ser
 		batcher = newQueryResultBatcher(stream.Send, int(req.GetBatchSize()))
 		yield = func(record logengine.MetricRecord) error { return batcher.add(record) }
 	}
-	if err := backend.StreamMetrics(stream.Context(), logengine.MetricQuery{
+	queryCtx := stream.Context()
+	if req.GetVisiblePartitionsSet() {
+		queryCtx = logengine.WithQueryScope(queryCtx, requestQueryScope(req.GetVisiblePartitions(), true))
+	}
+	if err := backend.StreamMetrics(queryCtx, logengine.MetricQuery{
 		MetricName:    req.MetricName,
 		Service:       req.GetService(),
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
@@ -1368,7 +1376,11 @@ func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 	if req.ToUnixNano == 0 {
 		to = time.Time{}
 	}
-	records, err := backend.QueryMetrics(ctx, logengine.MetricQuery{
+	queryCtx := ctx
+	if req.GetVisiblePartitionsSet() {
+		queryCtx = logengine.WithQueryScope(queryCtx, requestQueryScope(req.GetVisiblePartitions(), true))
+	}
+	records, err := backend.QueryMetrics(queryCtx, logengine.MetricQuery{
 		MetricName:    req.MetricName,
 		Service:       req.GetService(),
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),

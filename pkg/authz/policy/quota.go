@@ -309,9 +309,10 @@ func ResolveQuota(q Quota, profiles map[string]Quota) (Quota, error) {
 	out := Quota{}
 	profile := strings.TrimSpace(q.Profile)
 	if profile != "" {
-		base, ok := profiles[profile]
+		base, ok := lookupQuotaProfile(profile, profiles)
 		if !ok {
-			return Quota{}, fmt.Errorf("unknown quota profile %q", profile)
+			return Quota{}, fmt.Errorf("unknown quota profile %q (built-in classes: %s)",
+				profile, strings.Join(QuotaProfileNames(), ", "))
 		}
 		if strings.TrimSpace(base.Profile) != "" {
 			return Quota{}, fmt.Errorf("quota profile %q must not reference another profile", profile)

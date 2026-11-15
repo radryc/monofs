@@ -147,3 +147,76 @@ func TestQuotaForPartitionFallsBackToDefaults(t *testing.T) {
 		t.Fatalf("payments quota = %#v, want defaults", got)
 	}
 }
+
+func TestBuiltinQuotaProfilesResolveWithoutDeclaration(t *testing.T) {
+	names := QuotaProfileNames()
+	if len(names) < 2 {
+		t.Fatalf("built-in profile names = %#v", names)
+	}
+	for _, name := range names {
+		resolved, err := ResolveQuota(Quota{Profile: name}, nil)
+		if err != nil {
+			t.Fatalf("ResolveQuota(%q): %v", name, err)
+		}
+		if resolved.Profile != name {
+			t.Fatalf("profile = %q, want %q", resolved.Profile, name)
+		}
+		if resolved.Ingest == nil || resolved.Ingest.Traces == nil || resolved.Ingest.Metrics == nil {
+			t.Fatalf("%q missing ingest envelope: %#v", name, resolved)
+		}
+		if resolved.Query == nil || resolved.Query.RequestsPerSecond <= 0 {
+			t.Fatalf("%q missing query envelope: %#v", name, resolved)
+		}
+		if resolved.Storage == nil || resolved.Storage.MaxBytes <= 0 {
+			t.Fatalf("%q missing storage envelope: %#v", name, resolved)
+		}
+	}
+}
+
+func TestBuiltinQuotaProfileOverriddenByLocalDefinition(t *testing.T) {
+	local := map[string]Quota{
+		QuotaProfileSmall: {Query: &QueryQuota{RequestsPerSecond: 7}},
+	}
+	resolved, err := ResolveQuota(Quota{Profile: QuotaProfileSmall}, local)
+	if err != nil {
+		t.Fatalf("ResolveQuota: %v", err)
+	}
+	if resolved.Query == nil || resolved.Query.RequestsPerSecond != 7 {
+		t.Fatalf("local profile did not win: %#v", resolved.Query)
+	}
+}
+
+func TestUnknownQuotaProfileNamesBuiltins(t *testing.T) {
+	if _, err := ResolveQuota(Quota{Profile: "does-not-exist"}, nil); err == nil {
+		t.Fatal("expected an unknown-profile error")
+	}
+}
+
+func TestCompilePartitionUsesBuiltinProfile(t *testing.T) {
+	file, err := ParseFile([]byte(`
+version: 1
+defaults:
+  partitions: allow
+  logs: allow
+  traces: allow
+`))
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	catalog := &Catalog{Partitions: []Partition{{
+		Name:  "small-app",
+		Quota: &Quota{Profile: QuotaProfileSmall},
+	}}}
+	bundle, _, err := Compile(file, catalog, time.Now())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	pol := New(*bundle)
+	got := pol.QuotaForPartition("small-app")
+	if got.Query == nil || got.Query.RequestsPerSecond != 10 {
+		t.Fatalf("quota = %#v, want the small class query envelope", got.Query)
+	}
+	if got.Ingest == nil || got.Ingest.Traces == nil || got.Ingest.Traces.BytesPerSecond != 1<<20 {
+		t.Fatalf("quota = %#v, want the small class ingest envelope", got.Ingest)
+	}
+}

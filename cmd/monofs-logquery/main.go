@@ -543,6 +543,7 @@ func (s *logQueryServer) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.S
 
 func (s *logQueryServer) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
 	from, to := queryRange(req.GetFromUnixNano(), req.GetToUnixNano())
+	ctx = logQueryContext(ctx, req.GetVisiblePartitions(), req.GetVisiblePartitionsSet())
 	records, err := collectUnary(func(yield func(logengine.MetricRecord) error) error {
 		return s.engine.StreamMetrics(ctx, metricQuery(req), from, to, yield)
 	})
@@ -558,8 +559,9 @@ func (s *logQueryServer) QueryMetrics(ctx context.Context, req *pb.QueryMetricsR
 
 func (s *logQueryServer) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
 	from, to := queryRange(req.GetFromUnixNano(), req.GetToUnixNano())
+	ctx := logQueryContext(stream.Context(), req.GetVisiblePartitions(), req.GetVisiblePartitionsSet())
 	sender := newResultSender(stream.Send, int(req.GetBatchSize()))
-	err := s.engine.StreamMetrics(stream.Context(), metricQuery(req), from, to, func(record logengine.MetricRecord) error {
+	err := s.engine.StreamMetrics(ctx, metricQuery(req), from, to, func(record logengine.MetricRecord) error {
 		return sender.add(record)
 	})
 	if err != nil {
@@ -570,7 +572,8 @@ func (s *logQueryServer) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream 
 
 func (s *logQueryServer) StreamMetricSeries(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.MetricSeriesItem]) error {
 	from, to := queryRange(req.GetFromUnixNano(), req.GetToUnixNano())
-	if err := s.engine.StreamMetricSeries(stream.Context(), metricQuery(req), from, to, func(meta logengine.MetricSeriesMeta) error {
+	ctx := logQueryContext(stream.Context(), req.GetVisiblePartitions(), req.GetVisiblePartitionsSet())
+	if err := s.engine.StreamMetricSeries(ctx, metricQuery(req), from, to, func(meta logengine.MetricSeriesMeta) error {
 		return stream.Send(&pb.MetricSeriesItem{
 			MetricName:      meta.MetricName,
 			Service:         meta.Service,
