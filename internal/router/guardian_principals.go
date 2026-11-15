@@ -10,17 +10,16 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 )
 
 type guardianPrincipal struct {
-	PrincipalID string        `json:"principal_id"`
-	TokenHash   string        `json:"token_hash"`
-	Role        string        `json:"role"`
-	DisplayName string        `json:"display_name"`
-	CreatedAt   int64         `json:"created_at"`
-	Disabled    bool          `json:"disabled"`
-	BaseURL     string        `json:"base_url,omitempty"`
+	PrincipalID string `json:"principal_id"`
+	TokenHash   string `json:"token_hash"`
+	Role        string `json:"role"`
+	DisplayName string `json:"display_name"`
+	CreatedAt   int64  `json:"created_at"`
+	Disabled    bool   `json:"disabled"`
+	BaseURL     string `json:"base_url,omitempty"`
 }
 
 type guardianPrincipalStore struct {

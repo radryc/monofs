@@ -20,4 +20,3 @@ type NoopVerifier struct{}
 func (NoopVerifier) Verify(context.Context, string) (Identity, error) {
 	return Identity{}, nil
 }
-

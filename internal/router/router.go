@@ -334,10 +334,10 @@ type Router struct {
 	peerRouterToken   string
 
 	// Authz (partition-level authorization)
-	ownershipResolver  ownershipChecker
-	authzEnforceRead   bool
-	breakGlassAdmins   map[string]bool
-	serviceIdentity    authz.Identity
+	ownershipResolver ownershipChecker
+	authzEnforceRead  bool
+	breakGlassAdmins  map[string]bool
+	serviceIdentity   authz.Identity
 
 	// internalTokenValue is presented on router -> node calls (policy bypass).
 	// Stored atomically because dial paths run while r.mu is write-locked.

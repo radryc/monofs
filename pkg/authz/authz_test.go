@@ -92,4 +92,3 @@ func TestNoopVerifier(t *testing.T) {
 		t.Error("NoopVerifier should return anonymous identity")
 	}
 }
-
