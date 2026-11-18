@@ -296,6 +296,7 @@ services:
       # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
       # Provision KVS_AUTH_TOKEN in production (do not use this flag).
       - KVS_ALLOW_UNAUTHENTICATED=true
+      - KVS_FORWARD_TLS_ALLOW_PLAINTEXT=true
     volumes:
       - node-a-data:/data
     networks:
@@ -345,6 +346,7 @@ services:
       # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
       # Provision KVS_AUTH_TOKEN in production (do not use this flag).
       - KVS_ALLOW_UNAUTHENTICATED=true
+      - KVS_FORWARD_TLS_ALLOW_PLAINTEXT=true
     volumes:
       - node-b-data:/data
     networks:
@@ -394,6 +396,7 @@ services:
       # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
       # Provision KVS_AUTH_TOKEN in production (do not use this flag).
       - KVS_ALLOW_UNAUTHENTICATED=true
+      - KVS_FORWARD_TLS_ALLOW_PLAINTEXT=true
     volumes:
       - node-c-data:/data
     networks:
@@ -443,6 +446,7 @@ services:
       # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
       # Provision KVS_AUTH_TOKEN in production (do not use this flag).
       - KVS_ALLOW_UNAUTHENTICATED=true
+      - KVS_FORWARD_TLS_ALLOW_PLAINTEXT=true
     volumes:
       - node-d-data:/data
     networks:
@@ -492,6 +496,7 @@ services:
       # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
       # Provision KVS_AUTH_TOKEN in production (do not use this flag).
       - KVS_ALLOW_UNAUTHENTICATED=true
+      - KVS_FORWARD_TLS_ALLOW_PLAINTEXT=true
     volumes:
       - node-e-data:/data
     networks:
