@@ -435,7 +435,6 @@ var defaultExemptUIPaths = []string{
 	"/favicon.ico",
 	"/assets",
 	"/static",
-	"/debug",
 }
 
 func (w *WebAuthenticator) isExempt(path string) bool {

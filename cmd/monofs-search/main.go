@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -139,7 +140,8 @@ func main() {
 	case 2:
 		verifier = authz.NewChainVerifier(verifiers...)
 	}
-	authenticator := authz.NewAuthenticator(verifier, logger, false)
+	requireToken := envBool("MONOFS_GRPC_REQUIRE_TOKEN", true)
+	authenticator := authz.NewAuthenticator(verifier, logger, requireToken)
 
 	var policyLoader *policy.Loader
 	if u := strings.TrimSpace(*accessPolicyURL); u != "" {
@@ -241,4 +243,16 @@ func internalAwareInterceptor(authenticator *authz.Authenticator, internalToken 
 		}
 		return base(ctx, req, info, handler)
 	}
+}
+
+func envBool(key string, def bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -457,10 +458,11 @@ func main() {
 		verifier = authz.NewChainVerifier(verifiers...)
 	}
 	// HTTP routes (UI + CLI API) enforce authentication when not in dev mode.
-	// gRPC routes are used for internal service-to-service traffic which already
-	// has its own transport security, so they remain in observe mode.
+	// gRPC routes enforce bearer authentication by default (set
+	// MONOFS_GRPC_REQUIRE_TOKEN=false to fall back to observe mode).
+	grpcRequireToken := !*devDisableAuth && envBool("MONOFS_GRPC_REQUIRE_TOKEN", true)
 	httpAuthenticator := authz.NewAuthenticator(verifier, logger, requireToken)
-	grpcAuthenticator := authz.NewAuthenticator(verifier, logger, false)
+	grpcAuthenticator := authz.NewAuthenticator(verifier, logger, grpcRequireToken)
 
 	// Emit Prometheus metrics for authentication outcomes on both protocols.
 	// outcome is one of: authenticated, anonymous, rejected.
@@ -798,4 +800,16 @@ func parseServerDiagnostics(raw string) map[string]string {
 		}
 	}
 	return result
+}
+
+func envBool(key string, def bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
 }

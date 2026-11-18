@@ -236,6 +236,28 @@ func TestWebAuthRequireLogin(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("login route should work, got %d", rec.Code)
 	}
+
+	// 7. Debug/pprof endpoints are NOT exempt by default when RequireLogin is enabled.
+	for _, p := range []string{"/debug", "/debug/pprof", "/debug/pprof/"} {
+		if wa.isExempt(p) {
+			t.Fatalf("%s must not be in defaultExemptUIPaths", p)
+		}
+		called = false
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusUnauthorized || called {
+			t.Fatalf("anonymous %s should return 401, got %d, called=%v", p, rec.Code, called)
+		}
+
+		called = false
+		rec = httptest.NewRecorder()
+		areq := httptest.NewRequest(http.MethodGet, p, nil)
+		areq.Header.Set("Authorization", "Bearer id-token-alice")
+		h.ServeHTTP(rec, areq)
+		if !called {
+			t.Fatalf("authenticated request to %s should be allowed", p)
+		}
+	}
 }
 
 func TestWebAuthUsesPersistentStoreFromEnv(t *testing.T) {
