@@ -24,6 +24,7 @@ This extension wraps the MonoFS virtual-monorepo development loop inside VS Code
 This extension contributes the following settings:
 
 - `monofs.repoPath`: Absolute path to the MonoFS checkout.
+- `monofs.runtimeProfile`: Runtime profile selector (`auto`, `localCheckout`, or `devWorkspacePartition`).
 - `monofs.scriptsRepoPath`: Absolute path to the sibling Strata tooling checkout used by workflow commands. The setting name is retained for backward compatibility.
 - `monofs.binaryDir`: Directory that contains built MonoFS binaries.
 - `monofs.routerAddress`: Router address used by mount, ingest, and session commands.
@@ -41,7 +42,7 @@ This extension contributes the following settings:
 3. Run `MonoFS: Release Partitions` and choose the common dev partitions or `--all`.
 4. Run `MonoFS: Port-Forward Storage` if the router is not directly reachable.
 5. Run `MonoFS: Ingest Repository` for each repository you want in the workspace.
-6. Run `MonoFS: Mount Virtual Monorepo` and then `MonoFS: Open Mounted Workspace`.
+6. Run `MonoFS: Mount Virtual Monorepo` and then `MonoFS: Open MonoFS Workspace`.
 7. Use the session commands for status, diff, commit, pull, push, and discard.
 
 ## Dev-Workspace Partition

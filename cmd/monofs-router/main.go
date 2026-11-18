@@ -105,7 +105,7 @@ func main() {
 		unhealthyThr                 = flag.Duration("unhealthy-threshold", 15*time.Second, "Time before marking node unhealthy")
 		healthProbeTimeout           = flag.Duration("health-probe-timeout", 2*time.Second, "Timeout for a single node health probe")
 		queryNodeStartTimeout        = flag.Duration("query-node-start-timeout", 30*time.Second, "Max time to wait for any node to start returning telemetry query records")
-		queryNodeGrace               = flag.Duration("query-node-straggler-grace", time.Second, "Extra time allowed for remaining nodes after the first node responds to a telemetry query")
+		queryNodeGrace               = flag.Duration("query-node-straggler-grace", 3*time.Second, "Extra time allowed for remaining nodes after the first node responds to a telemetry query")
 		queryNodeIdleTimeout         = flag.Duration("query-node-idle-timeout", 10*time.Second, "Max gap between records from one node before it is skipped")
 		debug                        = flag.Bool("debug", false, "Enable debug logging (shorthand for --log-level=debug)")
 		logLevel                     = flag.String("log-level", "info", "Log level: debug, info, warn, error")

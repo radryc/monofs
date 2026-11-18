@@ -172,7 +172,7 @@ func (s *accessServerStream) Context() context.Context { return s.ctx }
 
 // isAdmin reports whether the identity bypasses filtering.
 func (a *AccessControl) isAdmin(id authz.Identity) bool {
-	if id.Subject == "break-glass-admin" {
+	if id.Subject == "break-glass-admin" || id.ClientID == "break-glass-admin" {
 		return true
 	}
 	p := a.loader.Get()

@@ -152,6 +152,14 @@ type RouterPeer struct {
 	URL  string
 }
 
+// defaultQueryNodeStragglerGrace is how long the router keeps waiting for the
+// remaining replicas after the first one starts returning telemetry records.
+// Telemetry chunks are only partly shared between nodes, so cutting stragglers
+// off too early drops records. Node query starts have been measured at
+// 0.2-1.2s under load, so 1s was too tight; 3s still bounds tail latency well
+// below the idle timeout and typical caller deadlines.
+const defaultQueryNodeStragglerGrace = 3 * time.Second
+
 // DefaultRouterConfig returns default router configuration.
 func DefaultRouterConfig() RouterConfig {
 	return RouterConfig{
@@ -176,7 +184,7 @@ func DefaultRouterConfig() RouterConfig {
 		AutoRefreshStateDir:            ".monofs-repowatch",
 		AutoRefreshLeaseName:           "monofs-repowatch",
 		QueryNodeStartTimeout:          30 * time.Second,
-		QueryNodeStragglerGrace:        time.Second,
+		QueryNodeStragglerGrace:        defaultQueryNodeStragglerGrace,
 		QueryNodeIdleTimeout:           10 * time.Second,
 		SpanEngine:                     "logengine",
 	}
@@ -574,7 +582,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		cfg.QueryNodeStartTimeout = 30 * time.Second
 	}
 	if cfg.QueryNodeStragglerGrace <= 0 {
-		cfg.QueryNodeStragglerGrace = time.Second
+		cfg.QueryNodeStragglerGrace = defaultQueryNodeStragglerGrace
 	}
 	if cfg.QueryNodeIdleTimeout <= 0 {
 		cfg.QueryNodeIdleTimeout = 10 * time.Second
@@ -2024,18 +2032,44 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 	// Leave room to merge and return partial results before the caller's own
 	// deadline. Without this, a short client deadline (Doctor uses 15s) would
 	// cancel the RPC before the router can shed a straggler.
+	budgetLimited := false
 	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining*8/10 < startTimeout {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			// The caller's budget is already gone (typically a retry or a later
+			// page after an earlier attempt consumed it). Starting a fan-out now
+			// would only log a skip for every node, so report the real cause.
+			return fmt.Errorf("%s: query deadline expired before fan-out", mergeErrPrefix)
+		}
+		if remaining*8/10 < startTimeout {
 			startTimeout = remaining * 8 / 10
+			budgetLimited = true
 		}
 	}
 	stragglerGrace := r.config.QueryNodeStragglerGrace
 	if stragglerGrace <= 0 {
-		stragglerGrace = time.Second
+		stragglerGrace = defaultQueryNodeStragglerGrace
 	}
 	idleTimeout := r.config.QueryNodeIdleTimeout
 	if idleTimeout <= 0 {
 		idleTimeout = 10 * time.Second
+	}
+
+	// skipNode records a replica that did not join the merge. A short caller
+	// budget or an already-cancelled request is not a node fault, so those stay
+	// at debug level; only real stalls deserve a warning.
+	skipNode := func(nodeID, reason string) {
+		if budgetLimited || ctx.Err() != nil {
+			r.logger.Debug("telemetry query skipped node",
+				"operation", mergeErrPrefix,
+				"node", nodeID,
+				"reason", reason)
+			return
+		}
+		r.logger.Warn("telemetry query skipped slow node",
+			"operation", mergeErrPrefix,
+			"node", nodeID,
+			"reason", reason)
 	}
 
 	nodeCtxs := make([]context.Context, len(targets))
@@ -2248,6 +2282,9 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 					}
 				}
 			case <-graceC:
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				for i := range targets {
 					if responded[i] {
 						continue
@@ -2255,13 +2292,13 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 					responded[i] = true
 					received++
 					nodeCancels[i]()
-					r.logger.Warn("telemetry query skipped slow node",
-						"operation", mergeErrPrefix,
-						"node", targets[i].id,
-						"reason", "straggler grace exceeded")
+					skipNode(targets[i].id, "straggler grace exceeded")
 				}
 				graceC = nil
 			case <-startTimer.C:
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				for i := range targets {
 					if responded[i] {
 						continue
@@ -2269,10 +2306,7 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 					responded[i] = true
 					received++
 					nodeCancels[i]()
-					r.logger.Warn("telemetry query skipped slow node",
-						"operation", mergeErrPrefix,
-						"node", targets[i].id,
-						"reason", "start timeout exceeded")
+					skipNode(targets[i].id, "start timeout exceeded")
 				}
 			case <-ctx.Done():
 				return ctx.Err()
@@ -2456,15 +2490,15 @@ loop:
 				cancel()
 			}
 		case <-graceC:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			for i := range targets {
 				if itemNodes[i] || doneNodes[i] {
 					continue
 				}
 				nodeCancels[i]()
-				r.logger.Warn("telemetry query skipped slow node",
-					"operation", mergeErrPrefix,
-					"node", targets[i].id,
-					"reason", "straggler grace exceeded")
+				skipNode(targets[i].id, "straggler grace exceeded")
 			}
 			graceC = nil
 		case <-ctx.Done():

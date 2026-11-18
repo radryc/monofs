@@ -8,14 +8,19 @@ You use it after `monofs-client` has mounted a workspace with `--writable --over
 
 Most day-to-day work comes down to a small set of commands:
 
+- `start`: start or ensure a writable overlay session
 - `status`: see what changed in the current overlay session
-- `branch`: inspect the authoritative tracked refs for the mounted repositories
+- `add` / `rm`: record or remove local overlay changes
+- `branch`: inspect or manage authoritative tracked refs and branches for mounted repositories
+- `refs` / `log` / `tags` / `blame`: inspect upstream Git refs, history, tags, and blame
 - `diff`: inspect the pending source changes
+- `conflicts`: inspect workspace merge/replay conflicts
 - `commit`: publish source-repository changes upstream
 - `pull`: refresh the mounted workspace from upstream state
-- `push`: upload dependency and blob-backed changes under `dependency/**`
+- `push`: push local commits (alias/direct push path); `push-blobs` / `push-deps`: upload dependency and blob-backed changes under `dependency/**`
 - `discard`: throw away the current overlay session
 - `search`: query the MonoFS search index from the CLI
+- `setup` / `blobs-info`: prepare per-tool cache directories and inspect dependency blobs
 
 ## Quick Example
 
@@ -215,5 +220,5 @@ The socket is created by `monofs-client --writable --overlay=...`.
 ## Related Docs
 
 - [../../README.md](../../README.md)
-- [../../docs/usage.md](../../docs/usage.md)
+- [../../docs/logical-flows.md](../../docs/logical-flows.md)
 - [../../docs/architecture.md](../../docs/architecture.md)

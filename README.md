@@ -19,6 +19,7 @@ updated with the code.
 | [docs/logical-flows.md](docs/logical-flows.md) | Ingestion, reads, writes, publish/push, auth, pipelines, search, registry, telemetry |
 | [docs/security-architecture.md](docs/security-architecture.md) | Assets, threat model, trust boundaries, controls, telemetry encryption |
 | [docs/duckdb-logquery.md](docs/duckdb-logquery.md) | DuckDB sidecar, SQL views, limits, ClickHouse parity |
+| [docs/blob-layout-v2.md](docs/blob-layout-v2.md) | Content-addressed sharded blob pack layout v2, manifest CAS, compaction |
 
 ## Repository map
 
@@ -41,10 +42,10 @@ monofs-kmod/          out-of-tree kernel client for the native protocol
 ## Build
 
 ```bash
-make build            # selected binaries into bin/
+make build            # core binaries into bin/ (see Makefile for CGo duckdb targets)
 make proto            # regenerate protobuf
 make test-unit        # go test ./internal/...
-make deploy           # docker compose build/up (requires MONOFS_ENCRYPTION_KEY)
+make deploy           # docker compose build/up (requires MONOFS_ENCRYPTION_KEY and MONOFS_TOKEN)
 ```
 
 The main `Dockerfile` is a multi-stage build for the UI and all runtime images. The checked-in Compose topology is a development harness; review [docs/architecture.md](docs/architecture.md#10-deployment-topology) and [docs/security-architecture.md](docs/security-architecture.md) before using it outside a trusted lab.

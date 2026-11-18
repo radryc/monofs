@@ -123,6 +123,28 @@ type BlobBackend struct {
 	archiveDeletesTotal     atomic.Int64
 	cacheInvalidationsTotal atomic.Int64
 
+	// Blob layout / compaction / batching telemetry. These are surfaced on the
+	// fetcher UI so operators can see whether reads use the deterministic
+	// content-addressed path or the legacy sidecar index.
+	layoutMode                   string
+	v2Objects                    v2ObjectStore
+	v2Cache                      *v2Cache
+	v2PackSeq                    atomic.Uint64
+	directLookupHits             atomic.Int64
+	directLookupMisses           atomic.Int64
+	v2Manifests                  atomic.Int64
+	v2Packs                      atomic.Int64
+	batchPendingBytes            atomic.Int64
+	batchOpenShards              atomic.Int64
+	compactorRunsTotal           atomic.Int64
+	compactorShardsTotal         atomic.Int64
+	compactorPlansTotal          atomic.Int64
+	compactorPacksRetiredTotal   atomic.Int64
+	compactorPacksDeletedTotal   atomic.Int64
+	compactorBytesRewrittenTotal atomic.Int64
+	compactorLastRunUnix         atomic.Int64
+	compactorLastError           atomic.Value // string
+
 	cloudStores    atomic.Int64
 	cloudRetrieves atomic.Int64
 
@@ -159,12 +181,14 @@ func NewBlobBackend() *BlobBackend {
 		cloudBlobIndex:     make(map[string]string),
 		cloudIndexPrefixes: make(map[string]time.Time),
 		blobCache:          make(map[string][]byte),
+		v2Cache:            newV2Cache(),
 		blobCacheMaxBytes:  int64Env("MONOFS_FETCHER_BLOB_CACHE_BYTES", defaultBlobCacheBytes),
 		blobCacheMaxObject: int64Env("MONOFS_FETCHER_BLOB_CACHE_MAX_OBJECT", defaultBlobCacheMaxObject),
 		stats:              storage.NewAtomicStats(),
 	}
 	bb.storageHealthy.Store(true)
 	bb.lastStorageErr.Store("")
+	bb.compactorLastError.Store("")
 	return bb
 }
 
@@ -184,6 +208,7 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 		return fmt.Errorf("failed to create packager pipeline: %w", err)
 	}
 	bb.pipeline = p
+	bb.layoutMode = resolveBlobLayoutMode()
 	bb.initOTelMetrics()
 
 	// Initialize cloud storage client when configured.
@@ -207,6 +232,7 @@ func (bb *BlobBackend) Initialize(ctx context.Context, config storage.BackendCon
 		}
 		bb.s3Client = client
 		bb.gcsClient = nil
+		bb.v2Objects = &s3V2ObjectStore{bb: bb}
 		bb.openCloudReader = bb.openS3Reader
 		bb.uploadArchiveFunc = bb.uploadArchiveToS3
 		bb.headCloudObject = bb.headS3Object

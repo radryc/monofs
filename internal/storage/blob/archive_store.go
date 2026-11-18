@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/radryc/monofs/internal/storage/blob/layout"
 	"github.com/radryc/packager"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -119,6 +120,24 @@ func (bb *BlobBackend) StoreArchive(storageID string, chunkIndex int, data io.Re
 // StoreBlob writes a single blob to a "loose" archive.
 func (bb *BlobBackend) StoreBlob(blobHash string, content []byte) error {
 	if err := bb.keyGuardCheck(); err != nil {
+		return err
+	}
+	if bb.v2WriteEnabled() {
+		_, err, _ := bb.storeGroup.Do(blobHash, func() (any, error) {
+			entry := normalizeV2Entry(blobHash)
+			bb.mu.RLock()
+			_, exists := bb.blobIndex[blobHash]
+			if !exists && entry != "" {
+				_, exists = bb.blobIndex[entry]
+			}
+			bb.mu.RUnlock()
+			if exists {
+				return nil, nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			return nil, bb.v2StoreBlob(ctx, blobHash, content)
+		})
 		return err
 	}
 	bb.mu.RLock()
@@ -235,10 +254,24 @@ type StoreBlobBatchWriter struct {
 	tmpPath     string
 	curHashes   []string
 	archiveSeq  int
+
+	// v2 layout: blobs are buffered per shard and flushed as bounded packs.
+	v2        bool
+	v2Batcher *layout.Batcher
+	v2Content map[string]map[string][]byte // shard -> entry -> content
 }
 
 // NewStoreBlobBatchWriter creates a writer that packs streamed blobs into archives.
 func (bb *BlobBackend) NewStoreBlobBatchWriter() (*StoreBlobBatchWriter, error) {
+	if bb.v2WriteEnabled() {
+		return &StoreBlobBatchWriter{
+			bb:        bb,
+			v2:        true,
+			v2Batcher: layout.NewBatcher(layout.DefaultBatchConfig()),
+			v2Content: make(map[string]map[string][]byte),
+		}, nil
+	}
+
 	archiveDir := filepath.Join(bb.config.CacheDir, "archives", "_batch")
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		return nil, fmt.Errorf("create batch archive dir: %w", err)
@@ -271,6 +304,10 @@ func (w *StoreBlobBatchWriter) startNewArchive() error {
 
 // AddBlob adds one blob entry to the current archive.
 func (w *StoreBlobBatchWriter) AddBlob(blobHash string, content []byte) {
+	if w.v2 {
+		w.addV2Blob(blobHash, content)
+		return
+	}
 	if blobHash == "" || len(content) == 0 {
 		w.result.Failed++
 		return
@@ -312,6 +349,81 @@ func (w *StoreBlobBatchWriter) AddBlob(blobHash string, content []byte) {
 
 	w.curHashes = append(w.curHashes, blobHash)
 	w.result.Stored++
+}
+
+// addV2Blob buffers a blob in the v2 layout and flushes any pack that reaches
+// the batching thresholds.
+func (w *StoreBlobBatchWriter) addV2Blob(blobHash string, content []byte) {
+	entry := normalizeV2Entry(blobHash)
+	if entry == "" || len(content) == 0 {
+		w.result.Failed++
+		return
+	}
+	w.bb.mu.RLock()
+	_, exists := w.bb.blobIndex[blobHash]
+	if !exists {
+		_, exists = w.bb.blobIndex[entry]
+	}
+	w.bb.mu.RUnlock()
+	if exists {
+		w.result.Skipped++
+		return
+	}
+
+	shard := entry[:2]
+	batches, err := w.v2Batcher.Add(blobHash, int64(len(content)))
+	if err != nil {
+		w.result.Failed++
+		return
+	}
+	if w.v2Content[shard] == nil {
+		w.v2Content[shard] = make(map[string][]byte)
+	}
+	w.v2Content[shard][entry] = content
+	for _, batch := range batches {
+		if err := w.flushV2Batch(batch); err != nil {
+			w.result.Failed += len(batch.Blobs)
+		}
+	}
+	w.bb.SetBatchStats(w.v2Batcher.PendingBytes(), int64(len(w.v2Batcher.OpenShards())))
+}
+
+func (w *StoreBlobBatchWriter) flushV2Batch(batch layout.Batch) error {
+	if len(batch.Blobs) == 0 {
+		return nil
+	}
+	shard := batch.Shard
+	blobs := make(map[string][]byte, len(batch.Blobs))
+	for _, blob := range batch.Blobs {
+		entry := normalizeV2Entry(blob.Digest)
+		if data, ok := w.v2Content[shard][entry]; ok {
+			blobs[entry] = data
+		}
+	}
+	if len(blobs) == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	packID := layout.NewPackID(time.Now(), int(w.bb.v2PackSeq.Add(1)))
+	ref, err := w.bb.v2WritePack(ctx, shard, packID, blobs)
+	if err != nil {
+		return err
+	}
+	if err := w.bb.addV2Pack(ctx, shard, ref); err != nil {
+		return err
+	}
+	for entry := range blobs {
+		delete(w.v2Content[shard], entry)
+	}
+	if len(w.v2Content[shard]) == 0 {
+		delete(w.v2Content, shard)
+	}
+	w.result.Stored += len(blobs)
+	w.result.ArchiveBytes += ref.Bytes
+	w.result.ArchivesCreated++
+	return nil
 }
 
 func (w *StoreBlobBatchWriter) sealCurrentArchive() error {
@@ -408,6 +520,16 @@ func (w *StoreBlobBatchWriter) sealCurrentArchive() error {
 
 // Finish seals the last archive and returns the final result.
 func (w *StoreBlobBatchWriter) Finish() (*StoreBlobBatchResult, error) {
+	if w.v2 {
+		var firstErr error
+		for _, batch := range w.v2Batcher.FlushAll() {
+			if err := w.flushV2Batch(batch); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		w.bb.SetBatchStats(0, 0)
+		return &w.result, firstErr
+	}
 	if err := w.sealCurrentArchive(); err != nil {
 		return &w.result, err
 	}

@@ -11,6 +11,7 @@ When a document disagrees with the implementation, fix the document.
 | [logical-flows.md](logical-flows.md) | Engineers, SRE, security reviewers | What happens end-to-end for ingestion, reads, writes, publish/push, search, registry, pipelines, telemetry, and authentication. |
 | [security-architecture.md](security-architecture.md) | Security, platform, reviewers | Assets, threat model, trust boundaries, current controls, and the optional telemetry-encryption model. |
 | [duckdb-logquery.md](duckdb-logquery.md) | Operators, query authors | The DuckDB query sidecar, its SQL views, limits, and ClickHouse parity. |
+| [blob-layout-v2.md](blob-layout-v2.md) | Storage, platform, operators | Sharded v2 blob pack layout, manifest CAS, batching, compaction, and legacy fallback. |
 
 ## One-page architecture
 

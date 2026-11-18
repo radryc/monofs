@@ -172,6 +172,9 @@ func (v *OIDCVerifier) Verify(ctx context.Context, rawToken string) (Identity, e
 		Groups:   stringSliceClaim(custom, v.cfg.GroupsClaim),
 		ClientID: clientIDClaim(custom, v.cfg.ClientIDClaim),
 	}
+	if strings.TrimSpace(id.Subject) == "" && strings.TrimSpace(id.ClientID) == "" {
+		return Identity{}, fmt.Errorf("authz: token missing subject and client_id")
+	}
 
 	// Cache the verified identity. TTL is min(config TTL, token lifetime).
 	v.tokenCacheStore(rawToken, id, std.Expiry)

@@ -169,7 +169,7 @@ router ingestion
             -> queue async cloud upload
 ```
 
-`StoreBlob` writes a loose archive `_loose/<hash>.pack`; batch ingestion packs into `_batch/batch-<time>-*.pack` split at 512 MiB.
+For individual or batched blob writes (`StoreBlob`, `StoreBlobBatch`), Blob Layout v2 is the default (`--blob-layout=v2`): writes target `packs/v2/sha256/<shard>/<packID>.pack` + `.idx` and commit `MANIFEST.json` via CAS; `StoreBlobBatchWriter` accumulates per shard and flushes at 512 MiB / 8192 objects / 2 s (see [blob-layout-v2.md](blob-layout-v2.md)). In `--blob-layout=legacy` mode, `StoreBlob` writes `_loose/<hash>.pack` and `StoreBlobBatch` packs into `_batch/batch-<time>-*.pack`.
 
 ### 4.2 Archive read
 
@@ -178,13 +178,13 @@ node read miss
   -> fetcher.Client.CheckCacheSimple (heuristic)
   -> fetcher.Client.FetchBlob (up to 3 fetchers)
        -> BlobBackend.FetchBlob
-            -> blobIndex[ContentID]
-            -> on miss: findBlobOnDisk scans every archives/*/*.pack
+            -> v2FindBlob (when v2 enabled): GET shard MANIFEST.json (30s cache) -> .idx -> stream pack
+            -> legacy fallback: blobIndex[ContentID] -> HEAD _loose/<id>.pack -> findBlobOnDisk / cloud index
             -> getArchiveReader (local open or cloud download, max 256 readers)
             -> ArchiveReader.GetFile(entryPath)
 ```
 
-There is no content-hash verification at fetch time. Cloud-only archives are not discoverable by content ID if the local index is lost.
+There is no content-hash verification at fetch time. For legacy archives, cloud-only archives are not discoverable by content ID if the local index is lost; v2 resolves directly from `MANIFEST.json` without listing.
 
 ## 5. Read paths
 

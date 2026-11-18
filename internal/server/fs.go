@@ -542,7 +542,11 @@ func (s *Server) Read(req *pb.ReadRequest, stream grpc.ServerStreamingServer[pb.
 	)
 
 	if !ok || filePath == "" {
-		s.logger.ErrorContext(ctx, "read: path resolution failed", "path", path, "ok", ok, "storage_id", storageID, "file_path", filePath)
+		// A path that matches no storage prefix is a normal negative lookup:
+		// callers probe for optional files (e.g. .guardian/OWNERS) and the
+		// router retries relative-path fallbacks. Log at debug so these do not
+		// flood the error stream; the NotFound status still tells the caller.
+		s.logger.DebugContext(ctx, "read: path resolution failed", "path", path, "ok", ok, "storage_id", storageID, "file_path", filePath)
 		span.AddEvent("monofs.read.path_resolution_failed", oteltrace.WithAttributes(
 			attribute.String("monofs.read.path", path),
 			attribute.String("monofs.read.storage_id", storageID),
@@ -1208,7 +1212,7 @@ func (s *Server) StreamQueryLogs(req *pb.QueryLogsRequest, stream grpc.ServerStr
 		queryCtx = logengine.WithQueryScope(queryCtx, requestQueryScope(req.GetVisiblePartitions(), true))
 	}
 	if err := backend.StreamLogs(queryCtx, req.Query, req.Service, from, to, int(req.Limit), yield); err != nil {
-		return telemetryQueryStatus("query logs failed", err)
+		return s.telemetryQueryError(queryCtx, "query logs failed", err)
 	}
 	if batcher != nil {
 		return batcher.flush()
@@ -1281,7 +1285,7 @@ func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 	}
 	records, err := backend.QueryLogs(queryCtx, req.Query, req.Service, from, to, int(req.Limit))
 	if err != nil {
-		return nil, telemetryQueryStatus("query logs failed", err)
+		return nil, s.telemetryQueryError(queryCtx, "query logs failed", err)
 	}
 	b, err := marshalJSON(records)
 	if err != nil {
@@ -1355,7 +1359,7 @@ func (s *Server) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.Ser
 		Service:       req.GetService(),
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
 	}, from, to, yield); err != nil {
-		return telemetryQueryStatus("query metrics failed", err)
+		return s.telemetryQueryError(queryCtx, "query metrics failed", err)
 	}
 	if batcher != nil {
 		return batcher.flush()
@@ -1386,7 +1390,7 @@ func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 		LabelMatchers: protoMetricMatchers(req.GetLabelMatchers()),
 	}, from, to)
 	if err != nil {
-		return nil, telemetryQueryStatus("query metrics failed", err)
+		return nil, s.telemetryQueryError(queryCtx, "query metrics failed", err)
 	}
 	b, err := marshalJSON(records)
 	if err != nil {
@@ -1456,7 +1460,7 @@ func (s *Server) StreamQueryTraces(req *pb.QueryTracesRequest, stream grpc.Serve
 		yield = func(record logengine.SpanRecord) error { return batcher.add(record) }
 	}
 	if err := backend.StreamTraces(traceCtx, req.TraceId, req.Service, from, to, int(req.Limit), yield); err != nil {
-		return telemetryQueryStatus("query traces failed", err)
+		return s.telemetryQueryError(traceCtx, "query traces failed", err)
 	}
 	if batcher != nil {
 		return batcher.flush()
@@ -1523,7 +1527,7 @@ func (s *Server) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*
 	}
 	records, err := backend.QueryTraces(traceCtx, req.TraceId, req.Service, from, to, int(req.Limit))
 	if err != nil {
-		return nil, telemetryQueryStatus("query traces failed", err)
+		return nil, s.telemetryQueryError(traceCtx, "query traces failed", err)
 	}
 	b, err := marshalJSON(records)
 	if err != nil {

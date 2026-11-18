@@ -16,17 +16,23 @@ make build-admin
 
 | Command | Description |
 |---------|-------------|
-| `status` | Show cluster health, nodes, fetchers, and search indexer status |
 | `ingest` | Ingest a Git repository into the cluster |
+| `delete` | Delete a repository from all nodes |
+| `status` | Show cluster health, nodes, fetchers, and search indexer status |
 | `failover` | Show replication status and failover mappings |
 | `fetchers` | Show fetcher cluster status and statistics |
 | `node-files` | List files on a node or across all nodes |
 | `repos` | List all ingested repositories |
+| `rebalance` | Trigger rebalancing for a specific repository |
 | `rebuild-index` | Rebuild directory indexes for a repository |
+| `stats` | Show cluster or node statistics |
 | `drain` | Drain cluster for maintenance |
 | `undrain` | Resume cluster after maintenance |
 | `trigger-failover` | Manually trigger failover for a node |
 | `clear-failover` | Clear failover state after node recovery |
+| `whitelist` | Manage ingestion whitelist (`add`, `remove`, `list`, `enable`, `disable`) |
+| `dogfood` | Ingest all local sibling repositories into MonoFS |
+| `repair-namespace-index` | Rebuild the repository namespace index for an offline database |
 
 ## Command Details
 

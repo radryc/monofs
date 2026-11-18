@@ -1274,6 +1274,23 @@ type fetcherObservabilityTotals struct {
 	CloudDownloadBytes      int64 `json:"cloud_download_bytes"`
 	ArchiveDeletesTotal     int64 `json:"archive_deletes_total"`
 	CacheInvalidationsTotal int64 `json:"cache_invalidations_total"`
+
+	DirectLookupHits   int64 `json:"direct_lookup_hits"`
+	DirectLookupMisses int64 `json:"direct_lookup_misses"`
+	V2Manifests        int64 `json:"v2_manifests"`
+	V2Packs            int64 `json:"v2_packs"`
+
+	BatchPendingBytes int64 `json:"batch_pending_bytes"`
+	BatchOpenShards   int64 `json:"batch_open_shards"`
+
+	CompactorRunsTotal           int64  `json:"compactor_runs_total"`
+	CompactorShardsTotal         int64  `json:"compactor_shards_total"`
+	CompactorPlansTotal          int64  `json:"compactor_plans_total"`
+	CompactorPacksRetiredTotal   int64  `json:"compactor_packs_retired_total"`
+	CompactorPacksDeletedTotal   int64  `json:"compactor_packs_deleted_total"`
+	CompactorBytesRewrittenTotal int64  `json:"compactor_bytes_rewritten_total"`
+	CompactorLastRunUnix         int64  `json:"compactor_last_run_unix"`
+	CompactorLastError           string `json:"compactor_last_error,omitempty"`
 }
 
 // handleFetcherObservability aggregates WAL and S3 read-through state from
@@ -1338,6 +1355,24 @@ func (r *Router) handleFetcherObservability(w http.ResponseWriter, req *http.Req
 		totals.CloudDownloadBytes += entry.Blob.CloudDownloadBytes
 		totals.ArchiveDeletesTotal += entry.Blob.ArchiveDeletesTotal
 		totals.CacheInvalidationsTotal += entry.Blob.CacheInvalidationsTotal
+		totals.DirectLookupHits += entry.Blob.DirectLookupHits
+		totals.DirectLookupMisses += entry.Blob.DirectLookupMisses
+		totals.V2Manifests += entry.Blob.V2Manifests
+		totals.V2Packs += entry.Blob.V2Packs
+		totals.BatchPendingBytes += entry.Blob.BatchPendingBytes
+		totals.BatchOpenShards += entry.Blob.BatchOpenShards
+		totals.CompactorRunsTotal += entry.Blob.CompactorRunsTotal
+		totals.CompactorShardsTotal += entry.Blob.CompactorShardsTotal
+		totals.CompactorPlansTotal += entry.Blob.CompactorPlansTotal
+		totals.CompactorPacksRetiredTotal += entry.Blob.CompactorPacksRetiredTotal
+		totals.CompactorPacksDeletedTotal += entry.Blob.CompactorPacksDeletedTotal
+		totals.CompactorBytesRewrittenTotal += entry.Blob.CompactorBytesRewrittenTotal
+		if entry.Blob.CompactorLastRunUnix > totals.CompactorLastRunUnix {
+			totals.CompactorLastRunUnix = entry.Blob.CompactorLastRunUnix
+		}
+		if entry.Blob.CompactorLastError != "" {
+			totals.CompactorLastError = entry.Blob.CompactorLastError
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

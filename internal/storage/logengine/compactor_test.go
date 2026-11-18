@@ -445,3 +445,44 @@ func TestRunCompactorWithStartupDelay(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// CompactRange holds the compactor mutex for the whole run. GetNodeInfo reads
+// CompactionStats on every router health probe, so Stats must never take that
+// same lock or health checks block for the duration of a compaction.
+func TestCompactorStatsDoesNotBlockOnCompactionMutex(t *testing.T) {
+	tmpDir := t.TempDir()
+	engine := New(NewMockS3Store(filepath.Join(tmpDir, "remote")), Config{
+		LocalCacheDir: filepath.Join(tmpDir, "cache"),
+		ChunkDuration: 5 * time.Minute,
+	})
+	compactor := engine.compactor
+
+	compactor.mu.Lock()
+	done := make(chan CompactionStats, 1)
+	go func() { done <- compactor.Stats() }()
+
+	var stats CompactionStats
+	select {
+	case stats = <-done:
+	case <-time.After(time.Second):
+		compactor.mu.Unlock()
+		t.Fatal("Stats() blocked on the compaction mutex")
+	}
+	compactor.mu.Unlock()
+
+	if stats.Running {
+		t.Fatalf("Stats().Running = true with no compaction running")
+	}
+	if stats.TargetBytes != defaultCompactionMaxBytes {
+		t.Fatalf("Stats().TargetBytes = %d, want %d", stats.TargetBytes, defaultCompactionMaxBytes)
+	}
+
+	// The snapshot must pick up state published while holding the lock.
+	compactor.mu.Lock()
+	compactor.running = true
+	compactor.publishStatsLocked()
+	compactor.mu.Unlock()
+	if !compactor.Stats().Running {
+		t.Fatal("Stats().Running = false after publishing a running compaction")
+	}
+}

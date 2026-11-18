@@ -137,6 +137,18 @@ func TestAccessControlAuthorizeRead(t *testing.T) {
 	if err := ac.AuthorizeRead(bgCtx, "github.com/acme/orders-api/x.go"); err != nil {
 		t.Fatalf("break-glass read must bypass policy: %v", err)
 	}
+
+	// Break-glass ClientID (e.g., from authz.NewBreakGlassVerifier) also bypasses.
+	bgClientCtx := authz.ContextWithIdentity(context.Background(), authz.Identity{ClientID: "break-glass-admin"})
+	if err := ac.AuthorizeRead(bgClientCtx, "github.com/acme/orders-api/x.go"); err != nil {
+		t.Fatalf("break-glass ClientID read must bypass policy: %v", err)
+	}
+
+	// Non-break-glass ClientID must not bypass.
+	otherClientCtx := authz.ContextWithIdentity(context.Background(), authz.Identity{ClientID: "regular-svc"})
+	if err := ac.AuthorizeRead(otherClientCtx, "github.com/acme/orders-api/x.go"); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("non-break-glass ClientID read: got %v, want PermissionDenied", err)
+	}
 }
 
 func TestAccessControlUnaryInterceptorAttachesIdentity(t *testing.T) {

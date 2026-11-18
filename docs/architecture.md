@@ -117,14 +117,16 @@ flowchart TB
 | FUSE client | `cmd/monofs-client` | Unix socket under overlay | Overlay session DB, local files, metadata cache, persistent client ID | Mount, read path, overlay writes, local virtual commits, session control |
 | Session CLI | `cmd/monofs-session` | none (connects to client socket) | none | `add`, `commit`, `push`, `pull`, `branch`, `diff`, `blobs-info`, etc. |
 | Search | `cmd/monofs-search` | gRPC `:9100`, diagnostics `:9101` | Zoekt index and clone cache | Index repositories from MonoFS or Git; query code; symbol extraction |
-| Registry | `cmd/monofs-registry` | HTTP `:5000` | MonoFS namespace `docker-registry` | OCI Distribution API; pull-through proxy; manifests/tags/blobs |
+| Registry | `cmd/monofs-registry` | HTTP `:5000`, diagnostics `:5001` | MonoFS namespace `docker-registry` | OCI Distribution API; pull-through proxy; manifests/tags/blobs |
 | Pipeline worker | `cmd/monofs-pipeline-worker` | optional executor HTTP port | none (task state in Guardian queue) | Execute builder/docker/deployer/bazel jobs; report results |
 | Bazel cache | `cmd/monofs-cache` | HTTP `:9092` | local disk (`--dir`) | Bazel AC/CAS remote cache |
 | Admin CLI | `cmd/monofs-admin` | none | none | Ingest, delete, status, rebalance, failover, drain, whitelist, index rebuild |
 | Bazel CLI | `cmd/monofs-bazelctl` | none | workspace manifest/lock | Generate Bazel workspace, dependency graph, migration states |
 | Load test | `cmd/monofs-loadtest` | none | temp files in mount | Filesystem load generation |
+| Load generator | `cmd/monofs-loadgen` | optional metrics HTTP | none | gRPC load generator (`read`, `meta`, `ingest`, `mixed`, `cleanup`) |
 | Trace dump | `cmd/monofs-trace-dump` | none | none | Query Doctor traces from router or server |
 | Log compactor | `cmd/monofs-logengine-compact` | none | Doctor log directory | Offline compaction |
+| Log query sidecar | `cmd/monofs-logquery` | gRPC `:9101` | reads local logengine dir | DuckDB SQL query sidecar for logs, metrics, traces, and SQL console |
 | FUSE device plugin | `cmd/k8s-fuse-device-plugin` | kubelet device plugin socket | none | Advertise `/dev/fuse` as a Kubernetes resource |
 | Kernel module | `monofs-kmod/` | none | none | Out-of-tree filesystem client speaking the native protocol |
 | Native build tool | `tools/monofs-native-build` | none | output marker | Bazel genrule fallback for non-migrated repos |
@@ -338,15 +340,19 @@ The node's Doctor backend wraps `internal/storage/logengine`, configured with a 
 
 ### 6.2 Blob backend
 
-`internal/storage/blob/backend.go` implements a content-addressed store on top of `github.com/radryc/packager`:
+`internal/storage/blob/` implements a content-addressed store on top of `github.com/radryc/packager`.
+
+By default (`--blob-layout=v2`, opt out with `--blob-layout=legacy` or `MONOFS_BLOB_LAYOUT_V2=false`), blobs are stored in 256 sharded packs with versioned manifests (`internal/storage/blob/layout/` and `v2.go`):
 
 ```text
-<CacheDir>/archives/<storageID>/chunk-0000.pack
-<CacheDir>/archives/_loose/<blobHash>.pack
-<CacheDir>/archives/_batch/batch-<unixNano>-0000.pack
+packs/v2/sha256/<shard>/<packID>.pack
+packs/v2/sha256/<shard>/<packID>.pack.idx
+packs/v2/sha256/<shard>/MANIFEST.json
 ```
 
-Archives are encrypted with a 32-byte key (ChaCha20-Poly1305 in the packager pipeline) and compressed. A process-local `blobIndex` maps content hash to archive path and entry path. It is rebuilt by scanning local `.pack` files at startup; cloud-only archives with no local index entry are not discoverable.
+Reads resolve a digest in O(1) bounded GETs via the shard `MANIFEST.json` and `.idx` files without object-store listings, falling back to the legacy layout (`_loose/<blobHash>.pack`, `_batch/`, `archives/<storageID>/chunk-0000.pack`) on miss. An optional background compactor (`--blob-compactor`) merges small or dead-heavy packs per shard using compare-and-swap on `MANIFEST.json`. See [blob-layout-v2.md](blob-layout-v2.md) for details.
+
+Archives are encrypted with a 32-byte key (ChaCha20-Poly1305 in the packager pipeline) and compressed. For legacy archives, a process-local `blobIndex` maps content hash to archive path and entry path and is rebuilt by scanning local `.pack` files at startup.
 
 Cloud replication is asynchronous. The backup scanner only checks that an object exists via HEAD; it does not compare size or checksum.
 
@@ -452,7 +458,7 @@ Writable mounts create a session automatically. Writes go to ordinary files unde
 - `internal/bazel` generates `MODULE.bazel`, `WORKSPACE`, `.bazelrc`, `BUILD.bazel`, and `.bazelversion`.
 - `deps` discovers go.mod imports, writes a lockfile, builds a dependency resolver, and detects cycles.
 - `gazelle` invokes Gazelle or a simple fallback to generate BUILD files.
-- `cache` is a standalone Bazel AC/CAS HTTP server (not wired into the Makefile/Docker deployment).
+- `cache` is a standalone Bazel AC/CAS HTTP server (built by `make build-cache`; not wired into the Docker Compose deployment).
 - `migration` tracks fallback genrules and state transitions.
 
 ## 9. Data model and addressing
@@ -495,8 +501,8 @@ The checked-in `docker-compose.yml` describes a 14-service development cluster:
 | `search-index` | main `search` | internal `:9100`/`:9101` | no compose dependency on router |
 | `haproxy` | external `../lb` build | host `9090`, `8080` | plain TCP/HTTP; stats not published |
 | `router-a`, `router-b` | main `router` | via HAProxy | no state volume; independent local state |
-| `node-a` ... `node-e` | main `server` | host `9001`-`9005` directly | `/data` volume; `node-a` bootstraps KVS raft |
-| `client`, `client2`, `client3` | main `client` | SSH `2222`-`2224` | privileged, SYS_ADMIN, `/dev/fuse`, known `monofs` password |
+| `node-a` ... `node-e` | main `server` | `127.0.0.1:9001`-`9005` | `/data` volume; `node-a` bootstraps KVS raft |
+| `client`, `client2`, `client3` | main `client` | SSH `127.0.0.1:2222`-`2224` | privileged, SYS_ADMIN, `/dev/fuse`, known `monofs` password |
 | `minio` (S3 overlay) | MinIO | host `19000`/`19001` | default `minioadmin` credentials; bucket made public-read |
 
 The `Dockerfile` is a 19-stage multi-target build for UI, Go builders, and runtime images. `Dockerfile.search` duplicates the search image with a different base and healthcheck. `Dockerfile.pipeline-worker` and `Dockerfile.guardianctl` require an external `guardian` build context that is not in this repository.
@@ -507,7 +513,7 @@ Deployment guarantees verified in the current tree:
 - **[fixed]** Routers required auth config that Compose did not pass; `MONOFS_TOKEN` is now required.
 - **[fixed]** The fetcher entrypoint passed `monofs-fetcher` as a positional argument, so later flags (including `--config`) were ignored.
 - **[fixed]** Node ports bypassed the router/HAProxy boundary; host mappings are now loopback-only.
-- **[fixed]** CI built the wrong Docker target and did not build most binaries; the matrix now builds server/router/search and `make build` covers all binaries.
+- **[fixed]** CI built the wrong Docker target and did not build most binaries; the matrix now builds server/router/search and `make build` covers the core binaries (with separate targets for `monofs-logquery` and `monofs-server-duckdb`).
 - **[fixed]** `go.sum` was deleted on release; the workflow/action are removed. KVS/CFG pins still differ between images.
 
 ## 11. Consistency, durability, and failure model
@@ -611,7 +617,7 @@ This is a coarse map of the main areas.
 | Workspace write-back | `internal/router/workspace_*.go`, `internal/router/autopush.go`, `internal/router/autorefresh.go`, `internal/fetcher/workspace_*.go` |
 | Guardian | `internal/router/guardian_*.go`, `pipeline_kvs.go`, `internal/router/pipeline/` |
 | Storage node | `internal/server/fs.go`, `directory.go`, `direntry.go`, `server.go`, `proxy.go`, `failover.go`, `predictor.go` |
-| Storage backends | `internal/storage/blob/backend.go`, `internal/storage/workspacestore/`, `internal/metastore/store.go` |
+| Storage backends | `internal/storage/blob/`, `internal/storage/workspacestore/`, `internal/metastore/store.go` |
 | FUSE | `internal/fuse/*.go` (ops, session, overlay, commit, workspace) |
 | Client | `internal/client/sharded.go`, `workspace_*.go`, `internal/fetcher/client.go` |
 | Auth library | `pkg/authz/`, `pkg/authz/policy/` |

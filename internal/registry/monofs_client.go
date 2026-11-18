@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -486,6 +487,60 @@ func (c *Client) ListDir(ctx context.Context, path string) ([]string, error) {
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("list %s: no nodes", path)
+}
+
+// ListDirAll merges directory listings across every healthy node. Registry
+// metadata files are sharded per node, so a single-node listing is incomplete
+// and makes repos appear to have no tags. Read paths that enumerate (tags,
+// catalog) must use this instead of ListDir.
+func (c *Client) ListDirAll(ctx context.Context, path string) ([]string, error) {
+	nodes, err := c.healthyNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	fullPath := c.dataPath(path)
+	seen := make(map[string]struct{})
+	var lastErr error
+	anySuccess := false
+	for _, node := range nodes {
+		callCtx, cancel := context.WithTimeout(ctx, c.rpcTimeout)
+		stream, err := node.client.ReadDir(callCtx, &pb.ReadDirRequest{Path: fullPath})
+		if err != nil {
+			cancel()
+			if status.Code(err) != codes.NotFound {
+				lastErr = err
+			}
+			continue
+		}
+		complete := true
+		for {
+			entry, recvErr := stream.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			if recvErr != nil {
+				lastErr = recvErr
+				complete = false
+				break
+			}
+			if name := entry.GetName(); name != "" {
+				seen[name] = struct{}{}
+			}
+		}
+		cancel()
+		if complete {
+			anySuccess = true
+		}
+	}
+	if !anySuccess && lastErr != nil {
+		return nil, lastErr
+	}
+	entries := make([]string, 0, len(seen))
+	for name := range seen {
+		entries = append(entries, name)
+	}
+	sort.Strings(entries)
+	return entries, nil
 }
 
 // CreateDir ensures a directory path exists.

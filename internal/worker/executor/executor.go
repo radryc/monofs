@@ -237,7 +237,7 @@ func (e *Executor) Execute(ctx context.Context, req *ExecuteRequest) (*ExecuteRe
 	}
 	cmd := exec.CommandContext(execCtx, req.Arguments[0], req.Arguments[1:]...)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), req.EnvironmentVariables...)
+	cmd.Env = append(filteredHostEnv(), req.EnvironmentVariables...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -402,4 +402,31 @@ func (e *Executor) Status() map[string]interface{} {
 		"active_execs": e.activeExecs.Load(),
 		"max_jobs":     e.cfg.MaxJobs,
 	}
+}
+
+var allowedHostEnvVars = map[string]bool{
+	"PATH":          true,
+	"HOME":          true,
+	"TMPDIR":        true,
+	"TEMP":          true,
+	"TMP":           true,
+	"LANG":          true,
+	"LC_ALL":        true,
+	"USER":          true,
+	"LOGNAME":       true,
+	"SSL_CERT_FILE": true,
+	"SSL_CERT_DIR":  true,
+}
+
+// filteredHostEnv returns host environment variables matching the safe allowlist
+// so worker secrets are not leaked to executed build actions.
+func filteredHostEnv() []string {
+	var env []string
+	for _, entry := range os.Environ() {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && allowedHostEnvVars[key] {
+			env = append(env, entry)
+		}
+	}
+	return env
 }
