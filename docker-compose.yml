@@ -112,6 +112,9 @@ services:
       # by default and the router presents this token on re-index/delete calls.
       - MONOFS_TOKEN=${MONOFS_TOKEN:-}
       - MONOFS_CLUSTER_TOKEN=${MONOFS_CLUSTER_TOKEN:-}
+      # LOCAL DEVELOPMENT ONLY: keeps the shipped compose stack bootable
+      # without a token/IdP. Never enable this in production.
+      - MONOFS_INSECURE_DEV_DISABLE_AUTH=true
     volumes:
       - search-index-data:/data
     networks:
