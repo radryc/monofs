@@ -310,13 +310,12 @@ ENV PATH=$GOROOT/bin:$PATH
 
 # Create monofs user
 RUN adduser -D -s /bin/bash monofs && \
-    echo "monofs:monofs" | chpasswd && \
-    echo "monofs ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+    echo "monofs:monofs" | chpasswd
 
 # Configure SSH
 RUN ssh-keygen -A && \
-    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
-    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 
 COPY --from=client-builder /bin/monofs-client /usr/local/bin/monofs-client
 COPY --from=admin-builder /bin/monofs-admin /usr/local/bin/monofs-admin
