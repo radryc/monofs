@@ -264,6 +264,30 @@ func TestExecutorStoreDirectory(t *testing.T) {
 	}
 }
 
+func TestFilteredHostEnvAllowlist(t *testing.T) {
+	t.Setenv("MONOFS_SECRET_TOKEN", "secret")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("SOME_PASSWORD", "secret")
+	t.Setenv("PRIVATE_KEY", "secret")
+	t.Setenv("GOMODCACHE", "/go/pkg/mod")
+	t.Setenv("BUILDKIT_HOST", "tcp://buildkit:1234")
+	t.Setenv("HTTPS_PROXY", "http://proxy:8080")
+	t.Setenv("LANG", "C.UTF-8")
+
+	env := FilteredHostEnv()
+	joined := strings.Join(env, "\n")
+	for _, forbidden := range []string{"MONOFS_SECRET_TOKEN", "AWS_SECRET_ACCESS_KEY", "SOME_PASSWORD", "PRIVATE_KEY"} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("FilteredHostEnv leaked %q", forbidden)
+		}
+	}
+	for _, required := range []string{"GOMODCACHE=/go/pkg/mod", "BUILDKIT_HOST=tcp://buildkit:1234", "HTTPS_PROXY=http://proxy:8080", "LANG=C.UTF-8", "PATH="} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("FilteredHostEnv missing %q", required)
+		}
+	}
+}
+
 func TestExecutorEnvIsolation(t *testing.T) {
 	t.Setenv("MONOFS_SECRET_TOKEN", "super-secret-value")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret-aws-key")

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -36,6 +37,50 @@ func TestBuilderHandlerShellStep(t *testing.T) {
 	output := buf.String()
 	if output == "" {
 		t.Fatal("expected output, got empty")
+	}
+}
+
+func TestWorkerHandlersDoNotInheritSecrets(t *testing.T) {
+	t.Setenv("MONOFS_SECRET_TOKEN", "super-secret")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("LANG", "C.UTF-8")
+
+	logger := slog.New(slog.DiscardHandler)
+	task := &TaskData{
+		TaskID:  "env-isolation",
+		JobName: "env",
+		Steps:   []StepData{{Run: "env"}},
+	}
+
+	handlers := map[string]Handler{
+		"builder":  NewBuilderHandler(t.TempDir(), logger),
+		"docker":   NewDockerHandler(logger),
+		"deployer": NewDeployerHandler(t.TempDir(), logger),
+		"bazel":    NewBazelHandler(t.TempDir(), "", "", logger),
+	}
+	for name, handler := range handlers {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			code, _, err := handler.Execute(context.Background(), task, &buf)
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0", code)
+			}
+			out := buf.String()
+			for _, forbidden := range []string{"MONOFS_SECRET_TOKEN", "AWS_SECRET_ACCESS_KEY", "super-secret", "aws-secret"} {
+				if strings.Contains(out, forbidden) {
+					t.Errorf("child environment leaked %q:\n%s", forbidden, out)
+				}
+			}
+			if !strings.Contains(out, "LANG=C.UTF-8") {
+				t.Errorf("child environment missing LANG:\n%s", out)
+			}
+			if !strings.Contains(out, "PATH=") {
+				t.Errorf("child environment missing PATH:\n%s", out)
+			}
+		})
 	}
 }
 

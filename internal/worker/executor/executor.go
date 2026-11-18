@@ -404,6 +404,9 @@ func (e *Executor) Status() map[string]interface{} {
 	}
 }
 
+// allowedHostEnvVars is an allowlist, not a denylist: worker credentials
+// (AWS_*, MONOFS_*, TOKEN, PASSWORD, KEY, ...) must never be inherited by an
+// executed build action, including variables added in the future.
 var allowedHostEnvVars = map[string]bool{
 	"PATH":          true,
 	"HOME":          true,
@@ -414,13 +417,30 @@ var allowedHostEnvVars = map[string]bool{
 	"LC_ALL":        true,
 	"USER":          true,
 	"LOGNAME":       true,
+	"SHELL":         true,
 	"SSL_CERT_FILE": true,
 	"SSL_CERT_DIR":  true,
+
+	// Build tooling needs module caches and proxy configuration. These are
+	// locations/endpoints, not credentials.
+	"HTTP_PROXY":    true,
+	"HTTPS_PROXY":   true,
+	"NO_PROXY":      true,
+	"ALL_PROXY":     true,
+	"http_proxy":    true,
+	"https_proxy":   true,
+	"no_proxy":      true,
+	"all_proxy":     true,
+	"GOMODCACHE":    true,
+	"GOPATH":        true,
+	"GOCACHE":       true,
+	"GOFLAGS":       true,
+	"BUILDKIT_HOST": true,
 }
 
-// filteredHostEnv returns host environment variables matching the safe allowlist
-// so worker secrets are not leaked to executed build actions.
-func filteredHostEnv() []string {
+// FilteredHostEnv returns host environment variables matching the safe
+// allowlist so worker secrets are not leaked to executed build actions.
+func FilteredHostEnv() []string {
 	var env []string
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
@@ -430,3 +450,6 @@ func filteredHostEnv() []string {
 	}
 	return env
 }
+
+// filteredHostEnv is kept as the package-local name used by the executor.
+func filteredHostEnv() []string { return FilteredHostEnv() }
