@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/radryc/monofs/internal/monopath"
+	"github.com/radryc/monofs/pkg/audit"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 	"google.golang.org/grpc"
@@ -38,6 +40,7 @@ type AccessControl struct {
 	enforce       bool
 	loader        *policy.Loader
 	logger        *slog.Logger
+	auditEmitter  atomic.Pointer[audit.WALSpoolEmitter]
 }
 
 // AccessControlOptions configures the node-side access control.
@@ -100,6 +103,49 @@ func (a *AccessControl) Enabled() bool { return a != nil }
 // SetAccessControl installs node-side access control (nil disables it).
 func (s *Server) SetAccessControl(ac *AccessControl) { s.access = ac }
 
+// SetAuditEmitter attaches an optional WAL-backed audit emitter to AccessControl.
+func (a *AccessControl) SetAuditEmitter(emitter *audit.WALSpoolEmitter) {
+	if a == nil {
+		return
+	}
+	a.auditEmitter.Store(emitter)
+}
+
+func (a *AccessControl) emitAudit(ctx context.Context, id authz.Identity, action audit.Action, resource string, decision audit.Decision) error {
+	if a == nil {
+		return nil
+	}
+	emitter := a.auditEmitter.Load()
+	if emitter == nil {
+		return nil
+	}
+	err := emitter.Emit(ctx, audit.Event{
+		ActorSubject:  id.Subject,
+		ActorClientID: id.ClientID,
+		Action:        action,
+		Resource:      resource,
+		Decision:      decision,
+	})
+	if err != nil {
+		a.logger.Warn("access control: audit emit failed", "error", err)
+	}
+	return err
+}
+
+func (a *AccessControl) emitGRPCDecision(ctx context.Context, fullMethod string, err error) {
+	if a == nil || a.auditEmitter.Load() == nil {
+		return
+	}
+	id, _ := authz.IdentityFromContext(ctx)
+	code := status.Code(err)
+	switch {
+	case code == codes.PermissionDenied || code == codes.Unauthenticated:
+		_ = a.emitAudit(ctx, id, audit.ActionAuth, fullMethod, audit.DecisionDeny)
+	case err == nil:
+		_ = a.emitAudit(ctx, id, audit.ActionAuth, fullMethod, audit.DecisionAllow)
+	}
+}
+
 // authenticate resolves the caller identity from metadata: the cluster-internal
 // token marks internal calls (they bypass policy), otherwise a bearer token is
 // verified and attached (anonymous when absent or invalid).
@@ -152,14 +198,28 @@ func (a *AccessControl) authenticate(ctx context.Context) context.Context {
 // UnaryInterceptor authenticates unary calls.
 func (a *AccessControl) UnaryInterceptor() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		return handler(a.authenticate(ctx), req)
+		authCtx := a.authenticate(ctx)
+		resp, err := handler(authCtx, req)
+		var method string
+		if info != nil {
+			method = info.FullMethod
+		}
+		a.emitGRPCDecision(authCtx, method, err)
+		return resp, err
 	}
 }
 
 // StreamInterceptor authenticates streaming calls.
 func (a *AccessControl) StreamInterceptor() grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		return handler(srv, &accessServerStream{ServerStream: ss, ctx: a.authenticate(ss.Context())})
+		authCtx := a.authenticate(ss.Context())
+		err := handler(srv, &accessServerStream{ServerStream: ss, ctx: authCtx})
+		var method string
+		if info != nil {
+			method = info.FullMethod
+		}
+		a.emitGRPCDecision(authCtx, method, err)
+		return err
 	}
 }
 
@@ -186,20 +246,31 @@ func (a *AccessControl) AuthorizeRead(ctx context.Context, fullPath string) erro
 	if a == nil || !a.enforce {
 		return nil
 	}
+	id, _ := authz.IdentityFromContext(ctx)
 	if isInternalCall(ctx) {
+		if err := a.emitAudit(ctx, id, audit.ActionRead, fullPath, audit.DecisionAllow); err != nil {
+			return status.Errorf(codes.Internal, "audit log failure: %v", err)
+		}
 		return nil
 	}
-	id, _ := authz.IdentityFromContext(ctx)
 	if a.isAdmin(id) {
+		if err := a.emitAudit(ctx, id, audit.ActionRead, fullPath, audit.DecisionAllow); err != nil {
+			return status.Errorf(codes.Internal, "audit log failure: %v", err)
+		}
 		return nil
 	}
 	p := a.loader.Get()
 	if p == nil {
+		_ = a.emitAudit(ctx, id, audit.ActionRead, fullPath, audit.DecisionDeny)
 		return status.Error(codes.PermissionDenied, "access policy unavailable")
 	}
 	if PolicyAllowsPath(p, id, fullPath) {
+		if err := a.emitAudit(ctx, id, audit.ActionRead, fullPath, audit.DecisionAllow); err != nil {
+			return status.Errorf(codes.Internal, "audit log failure: %v", err)
+		}
 		return nil
 	}
+	_ = a.emitAudit(ctx, id, audit.ActionRead, fullPath, audit.DecisionDeny)
 	a.logger.Warn("access control: read denied",
 		"principal", id.PrincipalID(), "path", fullPath)
 	return status.Errorf(codes.PermissionDenied, "principal %q is not authorized to read %q", id.PrincipalID(), fullPath)

@@ -2,11 +2,14 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/radryc/monofs/pkg/audit"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 	"google.golang.org/grpc"
@@ -171,5 +174,129 @@ func TestAccessControlUnaryInterceptorAttachesIdentity(t *testing.T) {
 	}
 	if !seen.IsAnonymous() {
 		t.Fatalf("expected anonymous identity, got %+v", seen)
+	}
+}
+
+func readWALEvents(t *testing.T, walPath string) []audit.Event {
+	t.Helper()
+	raw, err := os.ReadFile(walPath)
+	if err != nil {
+		t.Fatalf("read WAL %q: %v", walPath, err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	events := make([]audit.Event, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var ev audit.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unmarshal WAL event: %v", err)
+		}
+		events = append(events, ev)
+	}
+	return events
+}
+
+func TestAccessControlAuthorizeReadEmitsAuditEvents(t *testing.T) {
+	file, err := policy.ParseFile([]byte(accessTestPolicyYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, _, err := policy.Compile(file, nil, time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := policy.MarshalBundle(*bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(policyPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ac := NewAccessControl(AccessControlOptions{
+		PolicyFile: policyPath,
+		Enforce:    true,
+		Interval:   time.Minute,
+	})
+	if ac == nil {
+		t.Fatal("expected access control")
+	}
+	if err := ac.loader.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	walPath := filepath.Join(t.TempDir(), "audit.wal")
+	emitter, err := audit.NewWALSpoolEmitter(walPath, audit.WithFailClosed(true))
+	if err != nil {
+		t.Fatalf("NewWALSpoolEmitter: %v", err)
+	}
+	defer emitter.Close()
+	ac.SetAuditEmitter(emitter)
+
+	fooCtx := authz.ContextWithIdentity(context.Background(), authz.Identity{
+		Subject:  "foo-sub",
+		Email:    "foo@example.com",
+		ClientID: "cli-reader",
+	})
+	allowedResource := "github.com/acme/payments-api/x.go"
+	if err := ac.AuthorizeRead(fooCtx, allowedResource); err != nil {
+		t.Fatalf("allowed repo read rejected: %v", err)
+	}
+
+	deniedResource := "github.com/acme/orders-api/x.go"
+	if err := ac.AuthorizeRead(fooCtx, deniedResource); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("denied repo read: got %v, want PermissionDenied", err)
+	}
+
+	// UnaryInterceptor should also emit allow/deny decisions.
+	interceptor := ac.UnaryInterceptor()
+	if _, err := interceptor(fooCtx, nil, &grpc.UnaryServerInfo{FullMethod: "/monofs.MonoFS/Read"},
+		func(_ context.Context, _ any) (any, error) {
+			return nil, nil
+		}); err != nil {
+		t.Fatalf("interceptor allow: %v", err)
+	}
+	if _, err := interceptor(fooCtx, nil, &grpc.UnaryServerInfo{FullMethod: "/monofs.MonoFS/Write"},
+		func(_ context.Context, _ any) (any, error) {
+			return nil, status.Error(codes.PermissionDenied, "denied")
+		}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("interceptor deny: got %v, want PermissionDenied", err)
+	}
+
+	if err := emitter.Close(); err != nil {
+		t.Fatalf("close emitter: %v", err)
+	}
+
+	count, err := audit.VerifyChain(walPath)
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("VerifyChain count = %d, want 4", count)
+	}
+
+	events := readWALEvents(t, walPath)
+	if len(events) != 4 {
+		t.Fatalf("got %d WAL events, want 4", len(events))
+	}
+
+	if events[0].Action != audit.ActionRead || events[0].Decision != audit.DecisionAllow ||
+		events[0].Resource != allowedResource || events[0].ActorSubject != "foo-sub" || events[0].ActorClientID != "cli-reader" {
+		t.Fatalf("event[0] = %+v, want allow read for foo-sub/cli-reader on %q", events[0], allowedResource)
+	}
+	if events[1].Action != audit.ActionRead || events[1].Decision != audit.DecisionDeny ||
+		events[1].Resource != deniedResource || events[1].ActorSubject != "foo-sub" || events[1].ActorClientID != "cli-reader" {
+		t.Fatalf("event[1] = %+v, want deny read for foo-sub/cli-reader on %q", events[1], deniedResource)
+	}
+	if events[2].Action != audit.ActionAuth || events[2].Decision != audit.DecisionAllow ||
+		events[2].Resource != "/monofs.MonoFS/Read" {
+		t.Fatalf("event[2] = %+v, want allow auth for /monofs.MonoFS/Read", events[2])
+	}
+	if events[3].Action != audit.ActionAuth || events[3].Decision != audit.DecisionDeny ||
+		events[3].Resource != "/monofs.MonoFS/Write" {
+		t.Fatalf("event[3] = %+v, want deny auth for /monofs.MonoFS/Write", events[3])
 	}
 }
