@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	kvsv1 "github.com/radryc/kvs/api/proto/kvs/v1"
 	kvsgrpc "github.com/radryc/kvs/pkg/grpcserver"
 	"github.com/radryc/kvs/pkg/kvsapi"
 	"github.com/radryc/kvs/pkg/raftstore"
@@ -141,6 +142,8 @@ func main() {
 	kvsRaftAdvertiseAddr := flag.String("kvs-raft-advertise-addr", "", "Advertised Raft address for the embedded KVS store (defaults to --kvs-raft-addr)")
 	kvsBootstrap := flag.Bool("kvs-bootstrap", false, "Bootstrap this node as the initial embedded KVS raft cluster member")
 	kvsMaxHotVersions := flag.Int("kvs-max-hot-versions", 5, "Maximum number of hot versions retained in the embedded KVS store")
+	kvsAuthToken := flag.String("kvs-auth-token", strings.TrimSpace(os.Getenv("KVS_AUTH_TOKEN")), "Bearer token required by the embedded KVS gRPC service (env KVS_AUTH_TOKEN)")
+	kvsAllowUnauthenticated := flag.Bool("kvs-allow-unauthenticated", strings.EqualFold(strings.TrimSpace(os.Getenv("KVS_ALLOW_UNAUTHENTICATED")), "true"), "Serve the embedded KVS without authentication (development only; insecure)")
 	var kvsPeers stringSlice
 	flag.Var(&kvsPeers, "kvs-peer", "Embedded KVS peer in the form nodeID,apiAddress,raftAddress (repeatable)")
 
@@ -300,34 +303,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create gRPC server with raised message limits for inline dep blobs
-	serverOpts := []grpc.ServerOption{
-		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
-		grpc.MaxRecvMsgSize(1024 * 1024 * 1024), // 1 GB
-		grpc.MaxSendMsgSize(1024 * 1024 * 1024),
-		// Accept keepalive pings from long-idle clients (e.g. guardian's
-		// result-processor) without kicking them with ENHANCE_YOUR_CALM.
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             5 * time.Second,
-			PermitWithoutStream: true,
-		}),
-	}
-	if accessControl != nil {
-		serverOpts = append(serverOpts,
-			grpc.ChainUnaryInterceptor(accessControl.UnaryInterceptor()),
-			grpc.ChainStreamInterceptor(accessControl.StreamInterceptor()),
-		)
-	}
-	grpcServer := grpc.NewServer(serverOpts...)
-
-	// Create server with NutsDB backend
-	srv, err := server.NewServer(*nodeID, *addr, *dbPath, *gitCache, *dbSync, logger)
-	if err != nil {
-		logger.Error("failed to create server", "error", err)
-		os.Exit(1)
-	}
-	srv.SetAccessControl(accessControl)
-
 	if *kvsBootstrap && *kvsRaftAddr == "" {
 		logger.Error("invalid kvs configuration", "error", "--kvs-bootstrap requires --kvs-raft-addr")
 		os.Exit(1)
@@ -352,17 +327,22 @@ func main() {
 		}
 	}
 
+	// Initialize the embedded KVS store before the gRPC server so its
+	// authentication interceptors can be installed at construction time.
+	var kvsStore *raftstore.Store
+	var kvsService kvsv1.KVStoreServer
+	var kvsServerOpts []grpc.ServerOption
 	if strings.TrimSpace(*kvsDataDir) != "" {
-		peerDefs, err := parseKVSPeers(kvsPeers)
-		if err != nil {
-			logger.Error("failed to parse kvs peers", "error", err)
+		peerDefs, peerErr := parseKVSPeers(kvsPeers)
+		if peerErr != nil {
+			logger.Error("failed to parse kvs peers", "error", peerErr)
 			os.Exit(1)
 		}
 		apiAddr := strings.TrimSpace(*kvsAPIAddr)
 		if apiAddr == "" {
 			apiAddr = *addr
 		}
-		kvsStore, err := raftstore.Open(raftstore.Config{
+		kvsStore, err = raftstore.Open(raftstore.Config{
 			NodeID:         *nodeID,
 			DataDir:        *kvsDataDir,
 			RaftAddress:    strings.TrimSpace(*kvsRaftAddr),
@@ -378,17 +358,64 @@ func main() {
 			logger.Error("failed to create embedded kvs store", "error", err)
 			os.Exit(1)
 		}
-		srv.SetKVSStore(kvsStore)
-		kvsgrpc.Register(grpcServer, kvsStore, kvsgrpc.Config{})
-		kvsStore.StartPurge(context.Background(), 5*time.Minute)
-		logger.Info("embedded kvs enabled",
+		switch {
+		case strings.TrimSpace(*kvsAuthToken) != "":
+			kvsService, kvsServerOpts, err = kvsgrpc.NewWithAuth(kvsStore, kvsgrpc.Config{AuthToken: strings.TrimSpace(*kvsAuthToken)})
+			if err != nil {
+				logger.Error("failed to configure embedded kvs authentication", "error", err)
+				os.Exit(1)
+			}
+		case *kvsAllowUnauthenticated:
+			logger.Warn("embedded kvs authentication disabled via --kvs-allow-unauthenticated; do not use in production")
+			kvsService = kvsgrpc.New(kvsStore, kvsgrpc.Config{})
+		default:
+			logger.Error("embedded kvs requires authentication: set --kvs-auth-token or KVS_AUTH_TOKEN (or --kvs-allow-unauthenticated for local development)")
+			os.Exit(1)
+		}
+		logger.Info("embedded kvs store initialized",
 			"data_dir", *kvsDataDir,
 			"api_addr", apiAddr,
 			"raft_addr", strings.TrimSpace(*kvsRaftAddr),
-			"raft_advertise_addr", strings.TrimSpace(*kvsRaftAdvertiseAddr),
 			"peer_count", len(peerDefs),
 			"bootstrap", *kvsBootstrap,
-			"offloader", kvsOffloader != nil)
+			"authenticated", strings.TrimSpace(*kvsAuthToken) != "")
+	}
+
+	// Create gRPC server with raised message limits for inline dep blobs
+	serverOpts := []grpc.ServerOption{
+		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
+		grpc.MaxRecvMsgSize(1024 * 1024 * 1024), // 1 GB
+		grpc.MaxSendMsgSize(1024 * 1024 * 1024),
+		// Accept keepalive pings from long-idle clients (e.g. guardian's
+		// result-processor) without kicking them with ENHANCE_YOUR_CALM.
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second,
+			PermitWithoutStream: true,
+		}),
+	}
+	if accessControl != nil {
+		serverOpts = append(serverOpts,
+			grpc.ChainUnaryInterceptor(accessControl.UnaryInterceptor()),
+			grpc.ChainStreamInterceptor(accessControl.StreamInterceptor()),
+		)
+	}
+	serverOpts = append(serverOpts, kvsServerOpts...)
+	grpcServer := grpc.NewServer(serverOpts...)
+
+	// Create server with NutsDB backend
+	srv, err := server.NewServer(*nodeID, *addr, *dbPath, *gitCache, *dbSync, logger)
+	if err != nil {
+		logger.Error("failed to create server", "error", err)
+		os.Exit(1)
+	}
+	srv.SetAccessControl(accessControl)
+
+	if kvsStore != nil {
+		srv.SetKVSStore(kvsStore)
+		kvsv1.RegisterKVStoreServer(grpcServer, kvsService)
+		kvsStore.StartPurge(context.Background(), 5*time.Minute)
+		logger.Info("embedded kvs enabled",
+			"authenticated", strings.TrimSpace(*kvsAuthToken) != "")
 	}
 
 	// Configure fetcher client and prediction if enabled

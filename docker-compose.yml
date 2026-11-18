@@ -292,6 +292,10 @@ services:
       - "--enable-prediction"
       - "--db-sync=true"
       - "--debug"
+    environment:
+      # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
+      # Provision KVS_AUTH_TOKEN in production (do not use this flag).
+      - KVS_ALLOW_UNAUTHENTICATED=true
     volumes:
       - node-a-data:/data
     networks:
@@ -337,6 +341,10 @@ services:
       - "--enable-prediction"
       - "--db-sync=true"
       - "--debug"
+    environment:
+      # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
+      # Provision KVS_AUTH_TOKEN in production (do not use this flag).
+      - KVS_ALLOW_UNAUTHENTICATED=true
     volumes:
       - node-b-data:/data
     networks:
@@ -382,6 +390,10 @@ services:
       - "--enable-prediction"
       - "--db-sync=true"
       - "--debug"
+    environment:
+      # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
+      # Provision KVS_AUTH_TOKEN in production (do not use this flag).
+      - KVS_ALLOW_UNAUTHENTICATED=true
     volumes:
       - node-c-data:/data
     networks:
@@ -427,6 +439,10 @@ services:
       - "--enable-prediction"
       - "--db-sync=true"
       - "--debug"
+    environment:
+      # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
+      # Provision KVS_AUTH_TOKEN in production (do not use this flag).
+      - KVS_ALLOW_UNAUTHENTICATED=true
     volumes:
       - node-d-data:/data
     networks:
@@ -472,6 +488,10 @@ services:
       - "--enable-prediction"
       - "--db-sync=true"
       - "--debug"
+    environment:
+      # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
+      # Provision KVS_AUTH_TOKEN in production (do not use this flag).
+      - KVS_ALLOW_UNAUTHENTICATED=true
     volumes:
       - node-e-data:/data
     networks:
