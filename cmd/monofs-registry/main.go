@@ -36,7 +36,7 @@ func main() {
 		upstreamPassword = flag.String("upstream-password", os.Getenv("MONOFS_REGISTRY_UPSTREAM_PASSWORD"), "Password for upstream registry auth")
 		upstreamCooldown = flag.Duration("upstream-cooldown", 10*time.Minute, "Time before re-checking upstream for updates")
 
-		diagnosticsAddr = flag.String("diagnostics-addr", ":5001", "Listen address for Prometheus /metrics and pprof endpoints (empty disables)")
+		diagnosticsAddr = flag.String("diagnostics-addr", ":5001", "Listen address for Prometheus /metrics (pprof only when MONOFS_DIAGNOSTICS_PPROF=true; empty disables)")
 	)
 	flag.Parse()
 

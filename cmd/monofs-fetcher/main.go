@@ -128,7 +128,7 @@ func main() {
 	prefetchWorkers := flag.Int("prefetch-workers", 0, "Number of background prefetch workers")
 	encryptionKeyHex := flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
 	enableGit := flag.Bool("enable-git", false, "Enable optional Git backend")
-	diagnosticsAddr := flag.String("diagnostics-addr", ":9201", "Listen address for Prometheus /metrics and pprof endpoints (empty disables)")
+	diagnosticsAddr := flag.String("diagnostics-addr", ":9201", "Listen address for Prometheus /metrics (pprof only when MONOFS_DIAGNOSTICS_PPROF=true; empty disables)")
 	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
 	blobLayout := flag.String("blob-layout", "", "Blob layout: v2 (default, content-addressed sharded packs) or legacy (per-object archives)")
 	blobCompactor := flag.Bool("blob-compactor", false, "Run the background v2 pack compactor")

@@ -1,4 +1,5 @@
-// Package diagnostics exposes Prometheus metrics and pprof handlers for MonoFS binaries.
+// Package diagnostics exposes Prometheus metrics and, when explicitly enabled,
+// pprof handlers for MonoFS binaries.
 package diagnostics
 
 import (
@@ -7,16 +8,37 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// NewHandler returns a diagnostics HTTP handler exposing /metrics and pprof routes.
+// PprofEnv is the environment variable that enables pprof handlers. It is off
+// by default because pprof exposes process internals and must not be reachable
+// unauthenticated on a production network.
+const PprofEnv = "MONOFS_DIAGNOSTICS_PPROF"
+
+// PprofEnabled reports whether pprof routes should be registered.
+func PprofEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv(PprofEnv))
+	if raw == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(raw)
+	return err == nil && enabled
+}
+
+// NewHandler returns a diagnostics HTTP handler exposing /metrics and,
+// when MONOFS_DIAGNOSTICS_PPROF=true, the pprof routes.
 func NewHandler() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
+	if !PprofEnabled() {
+		return mux
+	}
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
@@ -46,7 +68,10 @@ func StartServerWithMux(logger *slog.Logger, component, addr string, mux *http.S
 	}
 	server := &http.Server{Addr: addr, Handler: mux}
 	go func() {
-		logger.Info("diagnostics server listening", "component", component, "addr", addr, "pprof_path", "/debug/pprof/")
+		logger.Info("diagnostics server listening",
+			"component", component,
+			"addr", addr,
+			"pprof_enabled", PprofEnabled())
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("diagnostics server error", "component", component, "error", err)
 		}

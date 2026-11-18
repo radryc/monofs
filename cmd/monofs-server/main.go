@@ -605,7 +605,8 @@ func main() {
 	// Enable reflection for debugging with grpcurl
 	reflection.Register(grpcServer)
 
-	// Start diagnostics HTTP server (metrics + pprof), separate from gRPC.
+	// Start diagnostics HTTP server (metrics; pprof only when
+	// MONOFS_DIAGNOSTICS_PPROF=true), separate from gRPC.
 	diagServer := diagnostics.StartServer(logger, "monofs-server", strings.TrimSpace(*metricsAddr))
 	defer diagnostics.ShutdownServer(logger, "monofs-server", diagServer)
 

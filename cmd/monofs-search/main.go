@@ -44,7 +44,7 @@ func main() {
 	queueSize := flag.Int("queue-size", 100, "Size of indexing job queue")
 	routerAddr := flag.String("router-addr", "", "Router address for cluster access (optional, enables fetching from storage nodes)")
 	indexGuardian := flag.Bool("index-guardian", strings.EqualFold(os.Getenv("MONOFS_SEARCH_INDEX_GUARDIAN"), "true"), "Index Guardian-managed partitions (default false: no clonable upstream)")
-	diagnosticsAddr := flag.String("diagnostics-addr", ":9101", "Listen address for Prometheus /metrics and pprof endpoints (empty disables)")
+	diagnosticsAddr := flag.String("diagnostics-addr", ":9101", "Listen address for Prometheus /metrics (pprof only when MONOFS_DIAGNOSTICS_PPROF=true; empty disables)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 
