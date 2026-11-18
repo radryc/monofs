@@ -21,7 +21,15 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/radryc/monofs/pkg/authz"
 )
+
+// guardianAdminContext returns a verified break-glass identity for tests that
+// exercise registration paths requiring an authenticated caller.
+func guardianAdminContext() context.Context {
+	return authz.ContextWithIdentity(context.Background(), authz.Identity{ClientID: "break-glass-admin"})
+}
 
 func TestGuardianReadRepairsContentVersionMismatch(t *testing.T) {
 	router, _, node, cleanup := newGuardianRouterTestHarness(t)
@@ -261,7 +269,7 @@ func TestDoctorPathsWriteReadAndHistory(t *testing.T) {
 	router, nodeClient, _, cleanup := newGuardianRouterTestHarness(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	ctx := guardianAdminContext()
 	resp, err := router.RegisterClient(ctx, &pb.RegisterClientRequest{
 		ClientId: "doctor-query-1",
 		GuardianConfig: &pb.GuardianConfig{
@@ -425,10 +433,11 @@ func TestRegisterGuardianClientWithoutBaseURL(t *testing.T) {
 	router := NewRouter(cfg, nil)
 	defer router.Close()
 
-	resp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+	resp, err := router.RegisterClient(guardianAdminContext(), &pb.RegisterClientRequest{
 		ClientId: "guardian-pusher-local",
 		GuardianConfig: &pb.GuardianConfig{
-			AuthToken: "secret-token",
+			AuthToken:   "secret-token",
+			PrincipalId: "guardian-pusher-local",
 		},
 	})
 	if err != nil {
@@ -459,7 +468,7 @@ func TestRegisterGuardianClientUsesConfiguredPrincipal(t *testing.T) {
 	router := NewRouter(cfg, nil)
 	defer router.Close()
 
-	resp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+	resp, err := router.RegisterClient(guardianAdminContext(), &pb.RegisterClientRequest{
 		ClientId: "guardian-pusher-docker-12345",
 		GuardianConfig: &pb.GuardianConfig{
 			AuthToken:   "secret-token",
@@ -503,7 +512,7 @@ func TestClientHeartbeatRefreshesGuardianClientHeartbeat(t *testing.T) {
 	defer router.Close()
 
 	const clientID = "guardian-pusher-local"
-	resp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+	resp, err := router.RegisterClient(guardianAdminContext(), &pb.RegisterClientRequest{
 		ClientId: clientID,
 		GuardianConfig: &pb.GuardianConfig{
 			AuthToken: "secret-token",
@@ -595,7 +604,7 @@ func TestAuthenticateGuardianMutationUsesRequestedPrincipal(t *testing.T) {
 			},
 		},
 	} {
-		resp, err := router.RegisterClient(context.Background(), req)
+		resp, err := router.RegisterClient(guardianAdminContext(), req)
 		if err != nil {
 			t.Fatalf("RegisterClient(%s) error = %v", req.GetClientId(), err)
 		}
@@ -1495,7 +1504,7 @@ func newGuardianRouterTestHarness(t *testing.T) (*Router, pb.MonoFSClient, *guar
 		status: NodeActive,
 	}
 
-	registerResp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+	registerResp, err := router.RegisterClient(guardianAdminContext(), &pb.RegisterClientRequest{
 		ClientId: "guardian-cli",
 		GuardianConfig: &pb.GuardianConfig{
 			BaseUrl:   "http://guardian.local",
@@ -1547,7 +1556,7 @@ func newGuardianMultiNodeRouterTestHarness(t *testing.T, kvsStatuses map[string]
 		stops = append(stops, stopNode)
 	}
 
-	registerResp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+	registerResp, err := router.RegisterClient(guardianAdminContext(), &pb.RegisterClientRequest{
 		ClientId: "guardian-cli",
 		GuardianConfig: &pb.GuardianConfig{
 			BaseUrl:   "http://guardian.local",

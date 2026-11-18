@@ -133,14 +133,21 @@ func main() {
 	if bg := strings.TrimSpace(*breakGlassToken); bg != "" {
 		verifiers = append(verifiers, authz.NewBreakGlassVerifier(bg, "break-glass-admin"))
 	}
-	var verifier authz.TokenVerifier = authz.NoopVerifier{}
+	// Authentication is mandatory by default. Refuse to start without a
+	// verifier rather than silently accepting anonymous calls; development
+	// environments must opt out explicitly.
+	requireToken := !envBool("MONOFS_INSECURE_DEV_DISABLE_AUTH", false) && envBool("MONOFS_GRPC_REQUIRE_TOKEN", true)
+	if requireToken && len(verifiers) == 0 {
+		logger.Error("no authentication configured: set --break-glass-token or MONOFS_TOKEN, configure OIDC, or use MONOFS_INSECURE_DEV_DISABLE_AUTH=true for local development")
+		os.Exit(1)
+	}
+	var verifier authz.TokenVerifier
 	switch len(verifiers) {
 	case 1:
 		verifier = verifiers[0]
 	case 2:
 		verifier = authz.NewChainVerifier(verifiers...)
 	}
-	requireToken := envBool("MONOFS_GRPC_REQUIRE_TOKEN", true)
 	authenticator := authz.NewAuthenticator(verifier, logger, requireToken)
 
 	var policyLoader *policy.Loader

@@ -32,7 +32,9 @@ import (
 	"github.com/radryc/monofs/pkg/repowatch"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // RouterConfig holds configuration for the Router service.
@@ -4563,6 +4565,21 @@ func (r *Router) RegisterClient(ctx context.Context, req *pb.RegisterClientReque
 		}, nil
 	}
 
+	// Registration establishes a principal and, for guardian clients, the
+	// token used for later managed-path writes. The caller-supplied principal
+	// and role are therefore security-sensitive: derive them from the verified
+	// bearer identity and only let break-glass/admin callers assert another
+	// principal (for example Guardian's "guardiand" control-plane id).
+	caller, _ := authz.IdentityFromContext(ctx)
+	if caller.IsAnonymous() {
+		return nil, status.Error(codes.PermissionDenied, "client registration requires an authenticated identity")
+	}
+	callerPrincipalID := strings.TrimSpace(caller.PrincipalID())
+	if callerPrincipalID == "" {
+		return nil, status.Error(codes.PermissionDenied, "client registration requires a verified principal")
+	}
+	callerIsAdmin := caller.Subject == "break-glass-admin" || caller.ClientID == "break-glass-admin" || r.accessAdmin(caller)
+
 	r.clientsMu.Lock()
 	defer r.clientsMu.Unlock()
 
@@ -4574,13 +4591,29 @@ func (r *Router) RegisterClient(ctx context.Context, req *pb.RegisterClientReque
 				Message: "guardian_config with auth_token is required",
 			}, nil
 		}
-		principalID := strings.TrimSpace(req.GuardianConfig.GetPrincipalId())
-		if principalID == "" {
-			principalID = req.ClientId
+		principalID := callerPrincipalID
+		requestedPrincipalID := strings.TrimSpace(req.GuardianConfig.GetPrincipalId())
+		switch {
+		case requestedPrincipalID == "" || requestedPrincipalID == principalID:
+			// Use the verified identity.
+		case callerIsAdmin:
+			// Break-glass/admin identities may assert known control-plane
+			// principals (Guardian's registrations and the seeded
+			// control-plane id).
+			principalID = requestedPrincipalID
+		case requestedPrincipalID == GuardianControlPlanePrincipalID:
+			return nil, status.Errorf(codes.PermissionDenied,
+				"principal %q may only be asserted by a break-glass or admin identity", requestedPrincipalID)
 		}
-		role := strings.TrimSpace(req.GuardianConfig.GetRole())
-		if role == "" {
-			role = inferGuardianPrincipalRole(principalID)
+		// A caller-supplied role is untrusted. Only admins may choose it;
+		// everyone else is registered as a viewer.
+		role := string(authz.RoleViewer)
+		if callerIsAdmin {
+			if requestedRole := strings.TrimSpace(req.GuardianConfig.GetRole()); requestedRole != "" {
+				role = requestedRole
+			} else {
+				role = inferGuardianPrincipalRole(principalID)
+			}
 		}
 		displayName := strings.TrimSpace(req.GuardianConfig.GetDisplayName())
 		if displayName == "" {
