@@ -4578,7 +4578,7 @@ func (r *Router) RegisterClient(ctx context.Context, req *pb.RegisterClientReque
 	if callerPrincipalID == "" {
 		return nil, status.Error(codes.PermissionDenied, "client registration requires a verified principal")
 	}
-	callerIsAdmin := caller.Subject == "break-glass-admin" || caller.ClientID == "break-glass-admin" || r.accessAdmin(caller)
+	callerIsAdmin := r.accessAdmin(caller)
 
 	r.clientsMu.Lock()
 	defer r.clientsMu.Unlock()

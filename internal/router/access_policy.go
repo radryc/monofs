@@ -86,7 +86,7 @@ func (r *Router) policyInstance() *policy.Policy {
 
 // accessAdmin reports whether the identity bypasses policy filtering.
 func (r *Router) accessAdmin(id authz.Identity) bool {
-	if id.Subject == "break-glass-admin" {
+	if id.Subject == "break-glass-admin" || id.ClientID == "break-glass-admin" || r.isBreakGlassAdmin(id) {
 		return true
 	}
 	p := r.policyInstance()
