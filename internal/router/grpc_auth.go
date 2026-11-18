@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -22,6 +23,44 @@ func (r *Router) internalDialOptions() []grpc.DialOption {
 	return []grpc.DialOption{
 		grpc.WithChainUnaryInterceptor(internalUnaryClientInterceptor(token)),
 		grpc.WithChainStreamInterceptor(internalStreamClientInterceptor(token)),
+	}
+}
+
+// withSearchAuthorization attaches the router bearer credential to a
+// router -> search RPC unless the context already carries an authorization
+// header (a forwarded caller token, for example). It never adds an insecure
+// fallback: when no token is configured the context is returned unchanged and
+// an enforcing search service rejects the call.
+func (r *Router) withSearchAuthorization(ctx context.Context) context.Context {
+	token, _ := r.searchTokenValue.Load().(string)
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ctx
+	}
+	if md, ok := metadata.FromOutgoingContext(ctx); ok {
+		for _, value := range md.Get("authorization") {
+			if strings.TrimSpace(value) != "" {
+				return ctx
+			}
+		}
+	}
+	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+}
+
+// searchDialOptions attaches the router bearer credential to every RPC on a
+// search connection. Nil when no token is configured.
+func (r *Router) searchDialOptions() []grpc.DialOption {
+	token, _ := r.searchTokenValue.Load().(string)
+	if strings.TrimSpace(token) == "" {
+		return nil
+	}
+	return []grpc.DialOption{
+		grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			return invoker(r.withSearchAuthorization(ctx), method, req, reply, cc, opts...)
+		}),
+		grpc.WithChainStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			return streamer(r.withSearchAuthorization(ctx), desc, cc, method, opts...)
+		}),
 	}
 }
 

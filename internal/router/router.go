@@ -135,6 +135,12 @@ type RouterConfig struct {
 	// treat control-plane traffic as internal when read enforcement is on.
 	InternalToken string
 
+	// SearchToken is presented as a bearer token on router -> search calls
+	// (re-indexing, deletion, UI search). Search requires authentication by
+	// default; an empty token means no credential is attached and calls fail
+	// closed on an enforcing search service.
+	SearchToken string
+
 	// Telemetry query fan-out limits. The router fans log/metric/trace queries
 	// out to every healthy node; these bounds stop one slow or wedged node from
 	// stalling the whole query while still returning results from the rest.
@@ -250,6 +256,9 @@ type Router struct {
 	searchClient pb.MonoFSSearchClient
 	searchConn   *grpc.ClientConn
 	searchAddr   string
+	// searchTokenValue is the bearer credential attached to router -> search
+	// RPCs. Stored atomically so dial/interceptor paths never take r.mu.
+	searchTokenValue atomic.Value
 
 	// Search re-index debounce (guardian partitions)
 	searchReindexDebounceMu sync.Mutex
@@ -664,6 +673,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 	// goroutine when Kubernetes is configured.
 	r.startGuardianCoordinatorLease(logger)
 	r.internalTokenValue.Store(strings.TrimSpace(cfg.InternalToken))
+	r.searchTokenValue.Store(strings.TrimSpace(cfg.SearchToken))
 	r.version.Store(1)
 	r.namespaceGeneration.Store(1)
 
@@ -846,12 +856,15 @@ func (r *Router) SetSearchClient(addr string) error {
 		return nil
 	}
 
-	// Try initial connection
-	conn, err := grpc.NewClient(addr,
+	// Try initial connection. Search requires bearer authentication by
+	// default, so attach the configured router credential.
+	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
-	)
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256 * 1024 * 1024)),
+	}
+	dialOpts = append(dialOpts, r.searchDialOptions()...)
+	conn, err := grpc.NewClient(addr, dialOpts...)
 	if err != nil {
 		r.logger.Warn("failed to connect to search service, will retry in background",
 			"addr", addr,
@@ -903,11 +916,13 @@ func (r *Router) retrySearchConnection(addr string) {
 			return
 		}
 
-		conn, err := grpc.NewClient(addr,
+		dialOpts := []grpc.DialOption{
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
-			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
-		)
+			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256 * 1024 * 1024)),
+		}
+		dialOpts = append(dialOpts, r.searchDialOptions()...)
+		conn, err := grpc.NewClient(addr, dialOpts...)
 		if err != nil {
 			r.logger.Debug("retry search connection failed",
 				"addr", addr,

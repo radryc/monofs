@@ -54,7 +54,7 @@ func main() {
 	oidcIssuer := flag.String("oidc-issuer", "", "OIDC issuer for bearer token verification (enables OIDC when set with --oidc-audience)")
 	oidcAudience := flag.String("oidc-audience", "", "OIDC audience for bearer token verification")
 	oidcJWKSURL := flag.String("oidc-jwks-url", "", "Explicit JWKS URL (defaults to OIDC discovery on the issuer)")
-	breakGlassToken := flag.String("break-glass-token", "", "Break-glass admin bearer token (resolves to client id break-glass-admin)")
+	breakGlassToken := flag.String("break-glass-token", searchClusterToken(), "Break-glass admin bearer token (resolves to client id break-glass-admin; defaults to MONOFS_CLUSTER_TOKEN or MONOFS_TOKEN)")
 	accessPolicyURL := flag.String("access-policy-url", "", "URL of the compiled access policy bundle (e.g. the router /api/access/policy endpoint)")
 	accessPolicyFile := flag.String("access-policy-file", "", "Path to a compiled access policy bundle (dev)")
 	accessPolicyToken := flag.String("access-policy-token", "", "Bearer token for --access-policy-url")
@@ -250,6 +250,16 @@ func internalAwareInterceptor(authenticator *authz.Authenticator, internalToken 
 		}
 		return base(ctx, req, info, handler)
 	}
+}
+
+// searchClusterToken returns the service-to-service bearer token accepted by
+// the search service. It mirrors the router's credential selection so both
+// sides authenticate without an insecure fallback.
+func searchClusterToken() string {
+	if token := strings.TrimSpace(os.Getenv("MONOFS_CLUSTER_TOKEN")); token != "" {
+		return token
+	}
+	return strings.TrimSpace(os.Getenv("MONOFS_TOKEN"))
 }
 
 func envBool(key string, def bool) bool {

@@ -299,6 +299,7 @@ func main() {
 		AccessEnforce:                  *accessEnforce,
 		AccessPolicyServeToken:         strings.TrimSpace(*accessPolicyServeToken),
 		InternalToken:                  strings.TrimSpace(*internalToken),
+		SearchToken:                    routerSearchToken(),
 	}
 	r := router.NewRouter(cfg, logger)
 	r.SetVersion(Version, Commit, BuildTime)
@@ -800,6 +801,16 @@ func parseServerDiagnostics(raw string) map[string]string {
 		}
 	}
 	return result
+}
+
+// routerSearchToken returns the bearer credential presented to the search
+// service. MONOFS_CLUSTER_TOKEN is preferred when an operator rotates the
+// service-to-service credential independently of the break-glass token.
+func routerSearchToken() string {
+	if token := strings.TrimSpace(os.Getenv("MONOFS_CLUSTER_TOKEN")); token != "" {
+		return token
+	}
+	return strings.TrimSpace(os.Getenv("MONOFS_TOKEN"))
 }
 
 func envBool(key string, def bool) bool {

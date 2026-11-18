@@ -107,6 +107,11 @@ services:
       - "--workers=2"
       - "--queue-size=20"
       - "--router-addr=router-a:9090"
+    environment:
+      # Shared service-to-service bearer token. Search requires authentication
+      # by default and the router presents this token on re-index/delete calls.
+      - MONOFS_TOKEN=${MONOFS_TOKEN:-}
+      - MONOFS_CLUSTER_TOKEN=${MONOFS_CLUSTER_TOKEN:-}
     volumes:
       - search-index-data:/data
     networks:
@@ -177,6 +182,7 @@ services:
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
       - MONOFS_TOKEN=${MONOFS_TOKEN:-}
+      - MONOFS_CLUSTER_TOKEN=${MONOFS_CLUSTER_TOKEN:-}
     networks:
       - monofs-net
     depends_on:
@@ -222,6 +228,7 @@ services:
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
       - MONOFS_TOKEN=${MONOFS_TOKEN:-}
+      - MONOFS_CLUSTER_TOKEN=${MONOFS_CLUSTER_TOKEN:-}
     networks:
       - monofs-net
     depends_on:
