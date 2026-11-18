@@ -490,7 +490,6 @@ services:
       - monofs-net
     depends_on:
       - haproxy
-    privileged: true
     cap_add:
       - SYS_ADMIN
     devices:
@@ -522,7 +521,6 @@ services:
       - monofs-net
     depends_on:
       - haproxy
-    privileged: true
     cap_add:
       - SYS_ADMIN
     devices:
@@ -554,7 +552,6 @@ services:
       - monofs-net
     depends_on:
       - haproxy
-    privileged: true
     cap_add:
       - SYS_ADMIN
     devices:
