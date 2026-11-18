@@ -183,6 +183,11 @@ services:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
       - MONOFS_TOKEN=${MONOFS_TOKEN:-}
       - MONOFS_CLUSTER_TOKEN=${MONOFS_CLUSTER_TOKEN:-}
+      # LOCAL DEVELOPMENT ONLY: the shipped compose file is intentionally
+      # usable without provisioning an identity provider. This disables all
+      # UI/API authentication and must never be enabled in production; remove
+      # it (and configure OIDC or MONOFS_TOKEN) for any real deployment.
+      - MONOFS_INSECURE_DEV_DISABLE_AUTH=true
     networks:
       - monofs-net
     depends_on:
@@ -229,6 +234,11 @@ services:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
       - MONOFS_TOKEN=${MONOFS_TOKEN:-}
       - MONOFS_CLUSTER_TOKEN=${MONOFS_CLUSTER_TOKEN:-}
+      # LOCAL DEVELOPMENT ONLY: the shipped compose file is intentionally
+      # usable without provisioning an identity provider. This disables all
+      # UI/API authentication and must never be enabled in production; remove
+      # it (and configure OIDC or MONOFS_TOKEN) for any real deployment.
+      - MONOFS_INSECURE_DEV_DISABLE_AUTH=true
     networks:
       - monofs-net
     depends_on:
