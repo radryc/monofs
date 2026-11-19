@@ -45,14 +45,22 @@ func hasErrors(issues []Issue) bool {
 // versioned bundle. Structural problems are returned as an error; lint
 // findings (warnings/infos) are returned alongside the bundle.
 func Compile(file *File, catalog *Catalog, now time.Time) (*Bundle, []Issue, error) {
+	return CompileWithPartitions(file, catalog, nil, now)
+}
+
+// CompileWithPartitions compiles access policy and per-partition definitions
+// into one bundle. The partition definitions are optional; older callers can
+// keep using Compile.
+func CompileWithPartitions(file *File, catalog *Catalog, partitions []PartitionPolicy, now time.Time) (*Bundle, []Issue, error) {
 	if file == nil {
 		return nil, nil, fmt.Errorf("policy: no policy file")
 	}
 	issues := validate(file, catalog)
+	issues = append(issues, ValidatePartitions(partitions)...)
 	if hasErrors(issues) {
 		return nil, issues, fmt.Errorf("policy: validation failed with %d error(s)", countErrors(issues))
 	}
-	bundle, err := build(file, catalog, now)
+	bundle, err := build(file, catalog, partitions, now)
 	if err != nil {
 		return nil, issues, err
 	}
@@ -232,7 +240,23 @@ func (c *compileCtx) validateSubjects(kind string, subjects map[string]Subject) 
 				c.warnf("%s denies scope %q but does not grant it anywhere", label, scope)
 			}
 		}
-		if len(sub.Partitions)+len(sub.Logs)+len(sub.Traces)+len(sub.MonoFS) == 0 && sub.Role == "" && len(sub.Deny) == 0 {
+		for _, backend := range sub.Backends {
+			if strings.TrimSpace(backend) == "" {
+				c.errorf("%s backends: empty entry", label)
+				continue
+			}
+			if !knownBackend(backend) {
+				c.warnf("%s backends: unknown backend %q", label, backend)
+			}
+		}
+		if sub.Shards != nil {
+			for _, matcher := range append(append([]AttributeMatcher(nil), sub.Shards.Include...), sub.Shards.Exclude...) {
+				if len(matcher.Attributes) == 0 {
+					c.warnf("%s shards: an empty matcher matches every shard", label)
+				}
+			}
+		}
+		if len(sub.Partitions)+len(sub.Logs)+len(sub.Traces)+len(sub.SQL)+len(sub.MonoFS) == 0 && sub.Role == "" && len(sub.Deny) == 0 {
 			c.warnf("%s has no scopes and no role", label)
 		}
 	}
@@ -309,7 +333,7 @@ func (c *compileCtx) infof(format string, args ...any) {
 	c.issues = append(c.issues, Issue{Severity: "info", Message: fmt.Sprintf(format, args...)})
 }
 
-func build(file *File, catalog *Catalog, now time.Time) (*Bundle, error) {
+func build(file *File, catalog *Catalog, partitions []PartitionPolicy, now time.Time) (*Bundle, error) {
 	defaults := Defaults{}
 	for scope, value := range file.Defaults {
 		allow := value == "allow"
@@ -320,6 +344,8 @@ func build(file *File, catalog *Catalog, now time.Time) (*Bundle, error) {
 			defaults.Logs = allow
 		case ScopeTraces:
 			defaults.Traces = allow
+		case ScopeSQL:
+			defaults.SQL = allow
 		case ScopeMonoFS:
 			defaults.MonoFS = allow
 		}
@@ -331,10 +357,11 @@ func build(file *File, catalog *Catalog, now time.Time) (*Bundle, error) {
 		Defaults:      defaults,
 	}
 
-	resolve := func(sub Subject) (partitions, logs, traces, monoFS []string) {
+	resolve := func(sub Subject) (partitions, logs, traces, sql, monoFS []string) {
 		partitions = resolveScope(file, catalog, sub.Partitions)
 		logs = resolveScope(file, catalog, sub.Logs)
 		traces = resolveScope(file, catalog, sub.Traces)
+		sql = resolveScope(file, catalog, sub.SQL)
 		monoFS = dedupeSorted(sub.MonoFS)
 		return
 	}
@@ -342,34 +369,38 @@ func build(file *File, catalog *Catalog, now time.Time) (*Bundle, error) {
 	groupNames := sortedKeys(file.Groups)
 	for _, name := range groupNames {
 		sub := file.Groups[name]
-		p, l, t, m := resolve(sub)
+		p, l, t, s, m := resolve(sub)
 		bundle.Grants = append(bundle.Grants, Grant{
-			Group: name, Partitions: p, Logs: l, Traces: t, MonoFS: m,
+			Group: name, Partitions: p, Logs: l, Traces: t, SQL: s, MonoFS: m,
+			Backends: dedupeSorted(sub.Backends), Shards: sub.Shards,
 			Role: sub.Role, Deny: dedupeSorted(sub.Deny),
 		})
 	}
 	userNames := sortedKeys(file.Users)
 	for _, name := range userNames {
 		sub := file.Users[name]
-		p, l, t, m := resolve(sub)
+		p, l, t, s, m := resolve(sub)
 		bundle.Grants = append(bundle.Grants, Grant{
-			User: name, Partitions: p, Logs: l, Traces: t, MonoFS: m,
+			User: name, Partitions: p, Logs: l, Traces: t, SQL: s, MonoFS: m,
+			Backends: dedupeSorted(sub.Backends), Shards: sub.Shards,
 			Role: sub.Role, Deny: dedupeSorted(sub.Deny),
 		})
 	}
 	clientNames := sortedKeys(file.Clients)
 	for _, name := range clientNames {
 		sub := file.Clients[name]
-		p, l, t, m := resolve(sub)
+		p, l, t, s, m := resolve(sub)
 		bundle.Grants = append(bundle.Grants, Grant{
-			Client: name, Partitions: p, Logs: l, Traces: t, MonoFS: m,
+			Client: name, Partitions: p, Logs: l, Traces: t, SQL: s, MonoFS: m,
+			Backends: dedupeSorted(sub.Backends), Shards: sub.Shards,
 			Role: sub.Role, Deny: dedupeSorted(sub.Deny),
 		})
 	}
 
 	bundle.CatalogDigest = catalogDigest(catalog)
 	bundle.AWSBindings = compileAWSBindings(file, catalog)
-	bundle.Quotas = buildQuotaBundle(file, catalog)
+	bundle.Partitions = append([]PartitionPolicy(nil), partitions...)
+	bundle.Quotas = buildQuotaBundle(file, catalog, partitions)
 	bundle.Version = computeVersion(bundle)
 	return bundle, nil
 }
@@ -377,7 +408,7 @@ func build(file *File, catalog *Catalog, now time.Time) (*Bundle, error) {
 // buildQuotaBundle resolves profiles and partition overrides into effective
 // quotas. Partitions that match the defaults are omitted to keep the bundle
 // small for large catalogs.
-func buildQuotaBundle(file *File, catalog *Catalog) *QuotaBundle {
+func buildQuotaBundle(file *File, catalog *Catalog, partitions []PartitionPolicy) *QuotaBundle {
 	defaults := Quota{}
 	if file.QuotaDefaults != nil {
 		resolved, err := ResolveQuota(*file.QuotaDefaults, file.QuotaProfiles)
@@ -386,10 +417,10 @@ func buildQuotaBundle(file *File, catalog *Catalog) *QuotaBundle {
 		}
 	}
 	out := &QuotaBundle{Defaults: defaults}
+	known := map[string]struct{}{}
 	if catalog != nil {
-		out.KnownPartitions = make([]string, 0, len(catalog.Partitions))
 		for _, partition := range catalog.Partitions {
-			out.KnownPartitions = append(out.KnownPartitions, partition.Name)
+			known[partition.Name] = struct{}{}
 			if partition.Quota == nil {
 				continue
 			}
@@ -404,6 +435,29 @@ func buildQuotaBundle(file *File, catalog *Catalog) *QuotaBundle {
 				}
 				out.Partitions[partition.Name] = effective
 			}
+		}
+	}
+	for _, partition := range partitions {
+		known[partition.Name] = struct{}{}
+		if partition.Quota == nil {
+			continue
+		}
+		resolved, err := ResolveQuota(*partition.Quota, file.QuotaProfiles)
+		if err != nil {
+			continue
+		}
+		effective := MergeQuota(defaults, resolved)
+		if !effective.IsZero() {
+			if out.Partitions == nil {
+				out.Partitions = map[string]Quota{}
+			}
+			out.Partitions[partition.Name] = effective
+		}
+	}
+	if len(known) > 0 {
+		out.KnownPartitions = make([]string, 0, len(known))
+		for name := range known {
+			out.KnownPartitions = append(out.KnownPartitions, name)
 		}
 		sort.Strings(out.KnownPartitions)
 	}

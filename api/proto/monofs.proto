@@ -72,6 +72,9 @@ service MonoFSRouter {
     rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
     rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
     rpc QueryDuckDBSQL(QueryDuckDBSQLRequest) returns (QueryDuckDBSQLResponse);
+    // QuerySQL federates one generic SELECT across disjoint shards and merges
+    // the partial aggregates on the router.
+    rpc QuerySQL(QuerySQLRequest) returns (QuerySQLResponse);
     // AggregateTelemetry performs a shard-local partial aggregation. The
     // router fans this out and merges the partial rows.
     rpc AggregateTelemetry(AggregateTelemetryRequest) returns (AggregateTelemetryResponse);
@@ -181,6 +184,9 @@ service MonoFS {
     rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
     rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
     rpc QueryDuckDBSQL(QueryDuckDBSQLRequest) returns (QueryDuckDBSQLResponse);
+    // QueryPartial executes one generated pushdown and returns typed partial
+    // rows. It is intentionally not user-facing.
+    rpc QueryPartial(QueryPartialRequest) returns (QueryPartialResponse);
     // AggregateTelemetry performs a shard-local partial aggregation. The
     // router fans this out and merges the partial rows.
     rpc AggregateTelemetry(AggregateTelemetryRequest) returns (AggregateTelemetryResponse);
@@ -1693,5 +1699,56 @@ message QueryDuckDBSQLRequest {
 }
 
 message QueryDuckDBSQLResponse {
+    string results_json = 1;
+}
+
+// BackendMatcher selects endpoints. All populated fields must match.
+message BackendMatcher {
+    repeated string ids = 1;
+    repeated string backends = 2;
+    map<string, string> tags = 3;
+    repeated string roles = 4;
+    repeated string groups = 5;
+}
+
+message BackendSelector {
+    repeated BackendMatcher include = 1;
+    repeated BackendMatcher exclude = 2;
+    repeated BackendMatcher treat_as_replica = 3;
+    bool include_replicas = 4;
+    int32 max = 5;
+    double min_coverage = 6;
+}
+
+// QuerySQLRequest runs one generic SELECT over disjoint shards.
+message QuerySQLRequest {
+    string dataset = 1;
+    string query = 2;
+    int64 from_unix_nano = 3;
+    int64 to_unix_nano = 4;
+    int32 limit = 5;
+    repeated string visible_partitions = 6;
+    bool visible_partitions_set = 7;
+    BackendSelector backends = 8;
+    bool allow_partial = 9;
+}
+
+message QuerySQLResponse {
+    string results_json = 1;
+}
+
+// QueryPartialRequest runs one generated pushdown on a shard.
+message QueryPartialRequest {
+    string dataset = 1;
+    string sql = 2;
+    int64 from_unix_nano = 3;
+    int64 to_unix_nano = 4;
+    int32 limit = 5;
+    repeated string visible_partitions = 6;
+    bool visible_partitions_set = 7;
+    repeated string expected_columns = 8;
+}
+
+message QueryPartialResponse {
     string results_json = 1;
 }

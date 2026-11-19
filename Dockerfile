@@ -17,9 +17,11 @@ WORKDIR /app
 RUN apk add --no-cache git ca-certificates
 
 ARG KVS_REPO_URL=https://github.com/radryc/kvs.git
-ARG KVS_REF=e1bfc66516aa76d2d28962d231f455321571c34a
+ARG KVS_REF=e0e1989021bc63a61a33c533b76e2e2102f6ca1d
 ARG CFG_REPO_URL=https://github.com/radryc/cfg.git
-ARG CFG_REF=1772380a1c25a39e0fe06cd0c4265c5b45fb5930
+ARG CFG_REF=ec6599daaf24885c1f8f3804ba477f2fe6c4022b
+ARG SQLAGREGATOR_REPO_URL=https://github.com/radryc/sqlagregator.git
+ARG SQLAGREGATOR_REF=54702312cd7fc96681c237576577cb21ea53dadd
 
 # Copy Monofs manifests from the local build context and fetch only the pinned module revisions.
 COPY go.mod go.sum ./
@@ -30,7 +32,11 @@ RUN git init /kvs && \
     git init /cfg && \
     git -C /cfg remote add origin "$CFG_REPO_URL" && \
     git -C /cfg fetch --depth 1 origin "$CFG_REF" && \
-    git -C /cfg checkout --detach FETCH_HEAD
+    git -C /cfg checkout --detach FETCH_HEAD && \
+    git init /sqlagregator && \
+    git -C /sqlagregator remote add origin "$SQLAGREGATOR_REPO_URL" && \
+    git -C /sqlagregator fetch --depth 1 origin "$SQLAGREGATOR_REF" && \
+    git -C /sqlagregator checkout --detach FETCH_HEAD
 
 # Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
 RUN set -eu; \

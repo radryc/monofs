@@ -21,6 +21,7 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/router"
+	"github.com/radryc/monofs/internal/sqlfederation"
 	"github.com/radryc/monofs/internal/storage"
 	filestorage "github.com/radryc/monofs/internal/storage/file"
 	gitstorage "github.com/radryc/monofs/internal/storage/git"
@@ -30,6 +31,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/reflection"
 )
 
 var (
@@ -80,6 +82,15 @@ func init() {
 		storage.IngestionTypeFile,
 		filestorage.NewFileIngestionBackend,
 	)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func main() {
@@ -150,9 +161,9 @@ func main() {
 		ownershipGate       = flag.Bool("ownership-gate", false, "Enable subtree-ownership review gate on source push (Phase 3 VCS governance)")
 		searchIndexGuardian = flag.Bool("search-index-guardian", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_SEARCH_INDEX_GUARDIAN")), "true"), "Index Guardian-managed partitions in search (default false: no clonable upstream)")
 		ownershipTeamMap    = flag.String("ownership-team-mapping", "", "Path to team->IdP group mapping YAML for OWNERS '@team' handles (optional)")
-		oidcIssuer          = flag.String("oidc-issuer", "", "OIDC issuer URL for SSO token verification")
-		oidcAudience        = flag.String("oidc-audience", "", "Expected OIDC audience for SSO tokens")
-		oidcJWKSURL         = flag.String("oidc-jwks-url", "", "OIDC JWKS URL (discovered from issuer when empty)")
+		oidcIssuer          = flag.String("oidc-issuer", strings.TrimSpace(os.Getenv("MONOFS_OIDC_ISSUER")), "OIDC issuer URL for SSO token verification")
+		oidcAudience        = flag.String("oidc-audience", strings.TrimSpace(os.Getenv("MONOFS_OIDC_AUDIENCE")), "Expected OIDC audience for SSO tokens")
+		oidcJWKSURL         = flag.String("oidc-jwks-url", strings.TrimSpace(os.Getenv("MONOFS_OIDC_JWKS_URL")), "OIDC JWKS URL (discovered from issuer when empty)")
 		devDisableAuth      = flag.Bool("insecure-dev-disable-auth", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_INSECURE_DEV_DISABLE_AUTH")), "true"), "Disable all UI/API authentication (development only; insecure)")
 
 		// Access policy (repo-managed ACL)
@@ -161,9 +172,26 @@ func main() {
 		accessPolicyToken      = flag.String("access-policy-token", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_POLICY_TOKEN")), "Bearer token for fetching the access policy bundle")
 		accessPolicyInterval   = flag.Duration("access-policy-interval", 30*time.Second, "Access policy refresh interval")
 		accessEnforce          = flag.Bool("access-enforce", strings.EqualFold(strings.TrimSpace(os.Getenv("MONOFS_ACCESS_ENFORCE")), "true"), "Enforce access policy filtering on reads (default: observe only)")
+		sqlRequirePolicy       = flag.Bool("sql-require-policy", envBool("MONOFS_SQL_REQUIRE_POLICY", true), "Require a loaded access policy for telemetry SQL RPCs (fail closed; default true)")
 		accessPolicyServeToken = flag.String("access-policy-serve-token", strings.TrimSpace(os.Getenv("MONOFS_ACCESS_SERVE_TOKEN")), "Bearer token required by the internal /api/access/policy endpoint (empty allows unauthenticated)")
 		internalToken          = flag.String("internal-token", strings.TrimSpace(os.Getenv("MONOFS_TOKEN")), "Cluster-internal token presented on router -> node calls so nodes bypass read enforcement for control-plane traffic (defaults to MONOFS_TOKEN)")
 		spanEngine             = flag.String("spanengine", strings.TrimSpace(os.Getenv("MONOFS_SPANENGINE")), "Telemetry storage engine: logengine (fan out) or clickhouse (shared, one node read)")
+		omniRegion             = flag.String("omni-region", strings.TrimSpace(os.Getenv("MONOFS_OMNI_REGION")), "Default AWS region for CloudWatch Omni placements (a shard region wins)")
+		omniProfile            = flag.String("omni-profile", strings.TrimSpace(os.Getenv("MONOFS_OMNI_PROFILE")), "AWS shared config profile for Omni (empty uses the default chain)")
+		omniEndpoint           = flag.String("omni-endpoint", strings.TrimSpace(os.Getenv("MONOFS_OMNI_ENDPOINT")), "CloudWatch Omni endpoint override")
+		omniSessionPrefix      = flag.String("omni-session-prefix", strings.TrimSpace(os.Getenv("MONOFS_OMNI_SESSION_PREFIX")), "Omni session name prefix (default monofs)")
+		omniTimeout            = flag.Duration("omni-timeout", envDuration("MONOFS_OMNI_TIMEOUT", 20*time.Second), "Per-query CloudWatch Omni timeout")
+		insightsRegion         = flag.String("insights-region", strings.TrimSpace(os.Getenv("MONOFS_INSIGHTS_REGION")), "Default AWS region for Logs Insights placements (a shard region wins; falls back to --omni-region)")
+		insightsProfile        = flag.String("insights-profile", strings.TrimSpace(os.Getenv("MONOFS_INSIGHTS_PROFILE")), "AWS shared config profile for Logs Insights (falls back to --omni-profile)")
+		insightsEndpoint       = flag.String("insights-endpoint", strings.TrimSpace(os.Getenv("MONOFS_INSIGHTS_ENDPOINT")), "CloudWatch Logs Insights endpoint override")
+		insightsTimeout        = flag.Duration("insights-timeout", envDuration("MONOFS_INSIGHTS_TIMEOUT", 90*time.Second), "Per-query CloudWatch Logs Insights timeout")
+		insightsMaxRows        = flag.Int("insights-max-rows", envInt("MONOFS_INSIGHTS_MAX_ROWS", 10000), "Maximum rows returned by one Logs Insights partial query")
+		bqProject              = flag.String("bigquery-project", strings.TrimSpace(os.Getenv("MONOFS_BIGQUERY_PROJECT")), "Billing project for BigQuery placements (empty derives it from the shard source)")
+		bqLocation             = flag.String("bigquery-location", firstNonEmpty(strings.TrimSpace(os.Getenv("MONOFS_BIGQUERY_LOCATION")), "US"), "BigQuery dataset location")
+		bqCredentials          = flag.String("bigquery-credentials", strings.TrimSpace(os.Getenv("MONOFS_BIGQUERY_CREDENTIALS")), "Service-account JSON for BigQuery (empty uses Application Default Credentials)")
+		bqEndpoint             = flag.String("bigquery-endpoint", strings.TrimSpace(os.Getenv("MONOFS_BIGQUERY_ENDPOINT")), "BigQuery API endpoint override (emulators/tests)")
+		bqTimeout              = flag.Duration("bigquery-timeout", envDuration("MONOFS_BIGQUERY_TIMEOUT", 60*time.Second), "Per-query BigQuery timeout")
+		bqMaxRows              = flag.Int("bigquery-max-rows", envInt("MONOFS_BIGQUERY_MAX_ROWS", 200000), "Maximum rows returned by one BigQuery partial query")
 	)
 	flag.Parse()
 	switch strings.ToLower(strings.TrimSpace(*spanEngine)) {
@@ -278,6 +306,7 @@ func main() {
 		SourcePushMode:                 *sourcePushMode,
 		PolicyGateEnabled:              *policyGateEnabled,
 		PolicyConfigPath:               *policyConfigPath,
+		RequireSQLPolicy:               *sqlRequirePolicy,
 		AutoPushEnabled:                *autoPushEnabled,
 		AutoPushInterval:               *autoPushInterval,
 		AutoRefreshEnabled:             *autoRefreshEnabled,
@@ -312,6 +341,59 @@ func main() {
 	}
 	r := router.NewRouter(cfg, logger)
 	r.SetVersion(Version, Commit, BuildTime)
+	insightsDefaultRegion := firstNonEmpty(*insightsRegion, *omniRegion)
+	insightsDefaultProfile := firstNonEmpty(*insightsProfile, *omniProfile)
+	r.SetPlacementBackendResolver(sqlfederation.MultiResolver{Resolvers: map[string]sqlfederation.BackendResolver{
+		"monofs_local": sqlfederation.LocalResolver{Nodes: r.FederationNodes},
+		"omni": sqlfederation.NewOmniResolver(sqlfederation.OmniResolverConfig{
+			DefaultRegion: strings.TrimSpace(*omniRegion),
+			Profile:       strings.TrimSpace(*omniProfile),
+			Endpoint:      strings.TrimSpace(*omniEndpoint),
+			SessionPrefix: strings.TrimSpace(*omniSessionPrefix),
+			Timeout:       *omniTimeout,
+		}),
+		"bigquery": sqlfederation.NewBigQueryResolver(sqlfederation.BigQueryResolverConfig{
+			ProjectID:       strings.TrimSpace(*bqProject),
+			Location:        strings.TrimSpace(*bqLocation),
+			CredentialsFile: strings.TrimSpace(*bqCredentials),
+			Endpoint:        strings.TrimSpace(*bqEndpoint),
+			Timeout:         *bqTimeout,
+			MaxRows:         *bqMaxRows,
+		}),
+		"cloudwatch_logs_insights": sqlfederation.NewInsightsResolver(sqlfederation.InsightsResolverConfig{
+			DefaultRegion: strings.TrimSpace(insightsDefaultRegion),
+			Profile:       strings.TrimSpace(insightsDefaultProfile),
+			Endpoint:      strings.TrimSpace(*insightsEndpoint),
+			Timeout:       *insightsTimeout,
+			MaxRows:       *insightsMaxRows,
+		}),
+	}})
+	if strings.TrimSpace(*omniRegion) != "" || strings.TrimSpace(*omniEndpoint) != "" {
+		logger.Info("federated SQL Omni resolver configured",
+			"region", strings.TrimSpace(*omniRegion),
+			"endpoint", strings.TrimSpace(*omniEndpoint))
+	}
+	if strings.TrimSpace(insightsDefaultRegion) != "" || strings.TrimSpace(*insightsEndpoint) != "" {
+		logger.Info("federated SQL Logs Insights resolver configured",
+			"region", strings.TrimSpace(insightsDefaultRegion),
+			"endpoint", strings.TrimSpace(*insightsEndpoint))
+	}
+	if strings.TrimSpace(*bqProject) != "" || strings.TrimSpace(*bqCredentials) != "" {
+		logger.Info("federated SQL BigQuery resolver configured",
+			"project", strings.TrimSpace(*bqProject),
+			"location", strings.TrimSpace(*bqLocation),
+			"credentials", strings.TrimSpace(*bqCredentials) != "")
+	}
+
+	// GCP BigQuery credentials come from a mounted service-account JSON when
+	// configured; the drivers otherwise use Application Default Credentials.
+	if path := strings.TrimSpace(*bqCredentials); path != "" {
+		if _, err := os.Stat(path); err != nil {
+			logger.Warn("BigQuery credentials file is not readable", "path", path, "error", err)
+		} else if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") == "" {
+			_ = os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", path)
+		}
+	}
 
 	// Enable the subtree-ownership review gate when requested. It reads
 	// OWNERS files from the managed partition store and gates direct pushes
@@ -515,6 +597,7 @@ func main() {
 		}),
 	)
 	pb.RegisterMonoFSRouterServer(grpcServer, r)
+	reflection.Register(grpcServer)
 
 	// Start gRPC server in background
 	go func() {
@@ -839,4 +922,28 @@ func envBool(key string, def bool) bool {
 		return def
 	}
 	return b
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
+func envInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }

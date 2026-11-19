@@ -24,6 +24,7 @@ import (
 	"github.com/radryc/monofs/internal/router/pipeline"
 	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/sqlfederation"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
 	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/internal/transport"
@@ -77,6 +78,10 @@ type RouterConfig struct {
 	// Policy gate (Phase 3)
 	PolicyGateEnabled bool
 	PolicyConfigPath  string
+	// RequireSQLPolicy makes the SQL RPCs fail closed: they need a loaded
+	// access policy even when read enforcement is in observe mode. Disable
+	// only for development clusters.
+	RequireSQLPolicy bool
 
 	// Auto-push (Phase 3)
 	AutoPushEnabled  bool
@@ -200,6 +205,7 @@ func DefaultRouterConfig() RouterConfig {
 		QueryNodeStragglerGrace:        defaultQueryNodeStragglerGrace,
 		QueryNodeIdleTimeout:           10 * time.Second,
 		SpanEngine:                     "logengine",
+		RequireSQLPolicy:               true,
 	}
 }
 
@@ -370,6 +376,9 @@ type Router struct {
 	// Access policy (repo-managed ACL) for UI/API read filtering.
 	accessPolicyMu sync.RWMutex
 	accessPolicy   *accessPolicyState
+
+	placementMu       sync.RWMutex
+	placementResolver sqlfederation.BackendResolver
 
 	// Ownership gate (Phase 3 VCS governance)
 	ownershipResolverFull *authz.OwnershipResolver // concrete resolver (OwnersOf, Governed)
@@ -1123,9 +1132,11 @@ func (r *Router) RegisterNode(nodeID, address string, weight uint32) error {
 		return fmt.Errorf("configure transport for node %s: %w", nodeID, err)
 	}
 	conn, err := grpc.NewClient(address,
-		transportOpt,
-		grpcx.IPv4DialerOption(),
-		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
+		append([]grpc.DialOption{
+			transportOpt,
+			grpcx.IPv4DialerOption(),
+			grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
+		}, r.internalDialOptions()...)...,
 	)
 	if err != nil {
 		return fmt.Errorf("connect to node %s: %w", nodeID, err)
@@ -1629,14 +1640,12 @@ func (r *Router) QueryDuckDBSQL(ctx context.Context, req *pb.QueryDuckDBSQLReque
 	default:
 		return nil, fmt.Errorf("unsupported SQL dataset %q", req.GetDataset())
 	}
-	if partitions, restricted := r.queryScope(ctx, signal); restricted {
-		if req.GetVisiblePartitionsSet() {
-			req.VisiblePartitions = intersectPartitions(req.GetVisiblePartitions(), partitions)
-		} else {
-			req.VisiblePartitions = partitions
-		}
-		req.VisiblePartitionsSet = true
+	partitions, restricted, err := r.querySQLScope(ctx, signal, req.GetVisiblePartitions(), req.GetVisiblePartitionsSet())
+	if err != nil {
+		return nil, err
 	}
+	req.VisiblePartitions = partitions
+	req.VisiblePartitionsSet = restricted
 
 	type nodeClient struct {
 		id      string

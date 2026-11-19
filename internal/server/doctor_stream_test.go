@@ -110,6 +110,10 @@ func (s *doctorStreamBackendStub) QueryDuckDBSQL(context.Context, string, string
 	return logengine.DuckDBSQLResult{}, nil
 }
 
+func (s *doctorStreamBackendStub) QueryPartial(context.Context, string, string, time.Time, time.Time, int, logengine.QueryScope) (logengine.DuckDBSQLResult, error) {
+	return logengine.DuckDBSQLResult{}, nil
+}
+
 func TestStreamQueryLogsStreamsIndividualJSONItems(t *testing.T) {
 	listener := bufconn.Listen(1 << 20)
 	backend := &doctorStreamBackendStub{logs: []logengine.LogRecord{

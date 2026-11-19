@@ -53,6 +53,7 @@ const (
 	MonoFSRouter_QueryMetrics_FullMethodName                = "/monofs.MonoFSRouter/QueryMetrics"
 	MonoFSRouter_QueryTraces_FullMethodName                 = "/monofs.MonoFSRouter/QueryTraces"
 	MonoFSRouter_QueryDuckDBSQL_FullMethodName              = "/monofs.MonoFSRouter/QueryDuckDBSQL"
+	MonoFSRouter_QuerySQL_FullMethodName                    = "/monofs.MonoFSRouter/QuerySQL"
 	MonoFSRouter_AggregateTelemetry_FullMethodName          = "/monofs.MonoFSRouter/AggregateTelemetry"
 	MonoFSRouter_IngestLogs_FullMethodName                  = "/monofs.MonoFSRouter/IngestLogs"
 	MonoFSRouter_IngestMetrics_FullMethodName               = "/monofs.MonoFSRouter/IngestMetrics"
@@ -137,6 +138,9 @@ type MonoFSRouterClient interface {
 	QueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (*QueryMetricsResponse, error)
 	QueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (*QueryTracesResponse, error)
 	QueryDuckDBSQL(ctx context.Context, in *QueryDuckDBSQLRequest, opts ...grpc.CallOption) (*QueryDuckDBSQLResponse, error)
+	// QuerySQL federates one generic SELECT across disjoint shards and merges
+	// the partial aggregates on the router.
+	QuerySQL(ctx context.Context, in *QuerySQLRequest, opts ...grpc.CallOption) (*QuerySQLResponse, error)
 	// AggregateTelemetry performs a shard-local partial aggregation. The
 	// router fans this out and merges the partial rows.
 	AggregateTelemetry(ctx context.Context, in *AggregateTelemetryRequest, opts ...grpc.CallOption) (*AggregateTelemetryResponse, error)
@@ -573,6 +577,16 @@ func (c *monoFSRouterClient) QueryDuckDBSQL(ctx context.Context, in *QueryDuckDB
 	return out, nil
 }
 
+func (c *monoFSRouterClient) QuerySQL(ctx context.Context, in *QuerySQLRequest, opts ...grpc.CallOption) (*QuerySQLResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QuerySQLResponse)
+	err := c.cc.Invoke(ctx, MonoFSRouter_QuerySQL_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *monoFSRouterClient) AggregateTelemetry(ctx context.Context, in *AggregateTelemetryRequest, opts ...grpc.CallOption) (*AggregateTelemetryResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AggregateTelemetryResponse)
@@ -895,6 +909,9 @@ type MonoFSRouterServer interface {
 	QueryMetrics(context.Context, *QueryMetricsRequest) (*QueryMetricsResponse, error)
 	QueryTraces(context.Context, *QueryTracesRequest) (*QueryTracesResponse, error)
 	QueryDuckDBSQL(context.Context, *QueryDuckDBSQLRequest) (*QueryDuckDBSQLResponse, error)
+	// QuerySQL federates one generic SELECT across disjoint shards and merges
+	// the partial aggregates on the router.
+	QuerySQL(context.Context, *QuerySQLRequest) (*QuerySQLResponse, error)
 	// AggregateTelemetry performs a shard-local partial aggregation. The
 	// router fans this out and merges the partial rows.
 	AggregateTelemetry(context.Context, *AggregateTelemetryRequest) (*AggregateTelemetryResponse, error)
@@ -1035,6 +1052,9 @@ func (UnimplementedMonoFSRouterServer) QueryTraces(context.Context, *QueryTraces
 }
 func (UnimplementedMonoFSRouterServer) QueryDuckDBSQL(context.Context, *QueryDuckDBSQLRequest) (*QueryDuckDBSQLResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method QueryDuckDBSQL not implemented")
+}
+func (UnimplementedMonoFSRouterServer) QuerySQL(context.Context, *QuerySQLRequest) (*QuerySQLResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QuerySQL not implemented")
 }
 func (UnimplementedMonoFSRouterServer) AggregateTelemetry(context.Context, *AggregateTelemetryRequest) (*AggregateTelemetryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AggregateTelemetry not implemented")
@@ -1682,6 +1702,24 @@ func _MonoFSRouter_QueryDuckDBSQL_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFSRouter_QuerySQL_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QuerySQLRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSRouterServer).QuerySQL(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFSRouter_QuerySQL_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSRouterServer).QuerySQL(ctx, req.(*QuerySQLRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _MonoFSRouter_AggregateTelemetry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AggregateTelemetryRequest)
 	if err := dec(in); err != nil {
@@ -2144,6 +2182,10 @@ var MonoFSRouter_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _MonoFSRouter_QueryDuckDBSQL_Handler,
 		},
 		{
+			MethodName: "QuerySQL",
+			Handler:    _MonoFSRouter_QuerySQL_Handler,
+		},
+		{
 			MethodName: "AggregateTelemetry",
 			Handler:    _MonoFSRouter_AggregateTelemetry_Handler,
 		},
@@ -2313,6 +2355,7 @@ const (
 	MonoFS_QueryMetrics_FullMethodName             = "/monofs.MonoFS/QueryMetrics"
 	MonoFS_QueryTraces_FullMethodName              = "/monofs.MonoFS/QueryTraces"
 	MonoFS_QueryDuckDBSQL_FullMethodName           = "/monofs.MonoFS/QueryDuckDBSQL"
+	MonoFS_QueryPartial_FullMethodName             = "/monofs.MonoFS/QueryPartial"
 	MonoFS_AggregateTelemetry_FullMethodName       = "/monofs.MonoFS/AggregateTelemetry"
 	MonoFS_IngestLogs_FullMethodName               = "/monofs.MonoFS/IngestLogs"
 	MonoFS_IngestMetrics_FullMethodName            = "/monofs.MonoFS/IngestMetrics"
@@ -2382,6 +2425,9 @@ type MonoFSClient interface {
 	QueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (*QueryMetricsResponse, error)
 	QueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (*QueryTracesResponse, error)
 	QueryDuckDBSQL(ctx context.Context, in *QueryDuckDBSQLRequest, opts ...grpc.CallOption) (*QueryDuckDBSQLResponse, error)
+	// QueryPartial executes one generated pushdown and returns typed partial
+	// rows. It is intentionally not user-facing.
+	QueryPartial(ctx context.Context, in *QueryPartialRequest, opts ...grpc.CallOption) (*QueryPartialResponse, error)
 	// AggregateTelemetry performs a shard-local partial aggregation. The
 	// router fans this out and merges the partial rows.
 	AggregateTelemetry(ctx context.Context, in *AggregateTelemetryRequest, opts ...grpc.CallOption) (*AggregateTelemetryResponse, error)
@@ -2807,6 +2853,16 @@ func (c *monoFSClient) QueryDuckDBSQL(ctx context.Context, in *QueryDuckDBSQLReq
 	return out, nil
 }
 
+func (c *monoFSClient) QueryPartial(ctx context.Context, in *QueryPartialRequest, opts ...grpc.CallOption) (*QueryPartialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryPartialResponse)
+	err := c.cc.Invoke(ctx, MonoFS_QueryPartial_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *monoFSClient) AggregateTelemetry(ctx context.Context, in *AggregateTelemetryRequest, opts ...grpc.CallOption) (*AggregateTelemetryResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AggregateTelemetryResponse)
@@ -2928,6 +2984,9 @@ type MonoFSServer interface {
 	QueryMetrics(context.Context, *QueryMetricsRequest) (*QueryMetricsResponse, error)
 	QueryTraces(context.Context, *QueryTracesRequest) (*QueryTracesResponse, error)
 	QueryDuckDBSQL(context.Context, *QueryDuckDBSQLRequest) (*QueryDuckDBSQLResponse, error)
+	// QueryPartial executes one generated pushdown and returns typed partial
+	// rows. It is intentionally not user-facing.
+	QueryPartial(context.Context, *QueryPartialRequest) (*QueryPartialResponse, error)
 	// AggregateTelemetry performs a shard-local partial aggregation. The
 	// router fans this out and merges the partial rows.
 	AggregateTelemetry(context.Context, *AggregateTelemetryRequest) (*AggregateTelemetryResponse, error)
@@ -3048,6 +3107,9 @@ func (UnimplementedMonoFSServer) QueryTraces(context.Context, *QueryTracesReques
 }
 func (UnimplementedMonoFSServer) QueryDuckDBSQL(context.Context, *QueryDuckDBSQLRequest) (*QueryDuckDBSQLResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method QueryDuckDBSQL not implemented")
+}
+func (UnimplementedMonoFSServer) QueryPartial(context.Context, *QueryPartialRequest) (*QueryPartialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryPartial not implemented")
 }
 func (UnimplementedMonoFSServer) AggregateTelemetry(context.Context, *AggregateTelemetryRequest) (*AggregateTelemetryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AggregateTelemetry not implemented")
@@ -3640,6 +3702,24 @@ func _MonoFS_QueryDuckDBSQL_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MonoFS_QueryPartial_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryPartialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MonoFSServer).QueryPartial(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MonoFS_QueryPartial_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MonoFSServer).QueryPartial(ctx, req.(*QueryPartialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _MonoFS_AggregateTelemetry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AggregateTelemetryRequest)
 	if err := dec(in); err != nil {
@@ -3858,6 +3938,10 @@ var MonoFS_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "QueryDuckDBSQL",
 			Handler:    _MonoFS_QueryDuckDBSQL_Handler,
+		},
+		{
+			MethodName: "QueryPartial",
+			Handler:    _MonoFS_QueryPartial_Handler,
 		},
 		{
 			MethodName: "AggregateTelemetry",

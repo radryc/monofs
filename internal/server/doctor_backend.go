@@ -28,6 +28,7 @@ type DoctorBackend interface {
 	QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]logengine.SpanRecord, error)
 	Aggregate(ctx context.Context, query logengine.AggregateQuery) ([]logengine.AggregateRow, error)
 	QueryDuckDBSQL(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope) (logengine.DuckDBSQLResult, error)
+	QueryPartial(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope) (logengine.DuckDBSQLResult, error)
 	Stats(ctx context.Context) (logengine.LogEngineStats, error)
 }
 

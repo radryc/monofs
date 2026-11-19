@@ -1298,6 +1298,9 @@ func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 // scope is applied inside the DuckDB view, so the statement itself cannot
 // widen access.
 func (s *Server) QueryDuckDBSQL(ctx context.Context, req *pb.QueryDuckDBSQLRequest) (*pb.QueryDuckDBSQLResponse, error) {
+	if err := s.requireInternalSQL(ctx); err != nil {
+		return nil, err
+	}
 	backend, err := s.doctorBackendOrErr()
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)

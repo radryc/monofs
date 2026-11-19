@@ -295,3 +295,34 @@ func TestDuckDBSQLASTRejectsExternalReaders(t *testing.T) {
 		}
 	}
 }
+
+func TestQueryPartialReturnsTypesAndRejectsTruncation(t *testing.T) {
+	ctx := context.Background()
+	engine := newDuckTestEngine(t)
+	base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	if err := engine.IngestLogs(ctx, "chunk-partial", []LogRecord{
+		{Timestamp: base.Add(time.Minute), Level: "error", Service: "guardian", RawMessage: "a", Labels: map[string]string{"guardian.partition": "prod-eu"}},
+		{Timestamp: base.Add(2 * time.Minute), Level: "error", Service: "doctor", RawMessage: "b", Labels: map[string]string{"guardian.partition": "prod-us"}},
+	}); err != nil {
+		t.Fatalf("IngestLogs() error = %v", err)
+	}
+	statement := `SELECT CAST("service" AS VARCHAR) AS "k0", COUNT(*) AS "p0" FROM "logs" ` +
+		`WHERE "time" >= TIMESTAMP '2026-11-02 12:00:00.000000' AND "time" < TIMESTAMP '2026-11-02 13:00:00.000000' ` +
+		`GROUP BY CAST("service" AS VARCHAR)`
+	result, err := engine.QueryPartial(ctx, "logs", statement, base, base.Add(time.Hour), 100, QueryScope{})
+	if err != nil {
+		t.Fatalf("QueryPartial() error = %v", err)
+	}
+	if len(result.Types) != 2 {
+		t.Fatalf("types = %#v, want two typed columns", result.Types)
+	}
+	if result.Types[0] != "VARCHAR" && result.Types[0] != "STRING" {
+		t.Fatalf("type[0] = %q", result.Types[0])
+	}
+	if result.RowCount != 2 {
+		t.Fatalf("rows = %#v, want two groups", result.Rows)
+	}
+	if _, err := engine.QueryPartial(ctx, "logs", statement, base, base.Add(time.Hour), 1, QueryScope{}); err == nil {
+		t.Fatal("expected truncation error for a 1-row partial budget")
+	}
+}

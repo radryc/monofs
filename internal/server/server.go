@@ -54,6 +54,10 @@ type Server struct {
 	// (nil when disabled).
 	access *AccessControl
 
+	// internalToken gates the node-local SQL RPCs (QueryDuckDBSQL and
+	// QueryPartial). Empty means SQL RPCs are disabled.
+	internalToken string
+
 	// Cache for intermediate directories (path -> exists)
 	intermediateDirCache sync.Map
 

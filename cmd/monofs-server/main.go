@@ -438,6 +438,10 @@ func main() {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)
 	}
+	srv.SetInternalToken(strings.TrimSpace(*internalToken))
+	if strings.TrimSpace(*internalToken) == "" {
+		logger.Warn("telemetry SQL RPCs are disabled: set --internal-token or MONOFS_TOKEN")
+	}
 	srv.SetTransport(tlsTransport)
 	srv.SetAccessControl(accessControl)
 

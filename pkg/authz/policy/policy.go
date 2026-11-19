@@ -16,11 +16,12 @@ const (
 	ScopePartitions = "partitions"
 	ScopeLogs       = "logs"
 	ScopeTraces     = "traces"
+	ScopeSQL        = "sql"
 	ScopeMonoFS     = "monofs"
 )
 
 // AllScopes lists the configurable scopes (metrics deliberately excluded).
-var AllScopes = []string{ScopePartitions, ScopeLogs, ScopeTraces, ScopeMonoFS}
+var AllScopes = []string{ScopePartitions, ScopeLogs, ScopeTraces, ScopeSQL, ScopeMonoFS}
 
 // Signal is a telemetry signal for read decisions.
 type Signal string
@@ -37,6 +38,7 @@ type Defaults struct {
 	Partitions bool `json:"partitions"`
 	Logs       bool `json:"logs"`
 	Traces     bool `json:"traces"`
+	SQL        bool `json:"sql"`
 	MonoFS     bool `json:"monofs"`
 }
 
@@ -49,6 +51,8 @@ func (d Defaults) allows(scope string) bool {
 		return d.Logs
 	case ScopeTraces:
 		return d.Traces
+	case ScopeSQL:
+		return d.SQL
 	case ScopeMonoFS:
 		return d.MonoFS
 	}
@@ -67,26 +71,90 @@ type AWSBinding struct {
 // Scope lists contain concrete partition names (or "*"); MonoFS entries are
 // display-path patterns. Deny lists scope names denied wholesale.
 type Grant struct {
-	Group      string   `json:"group,omitempty"`
-	User       string   `json:"user,omitempty"`
-	Client     string   `json:"client,omitempty"`
-	Partitions []string `json:"partitions,omitempty"`
-	Logs       []string `json:"logs,omitempty"`
-	Traces     []string `json:"traces,omitempty"`
-	MonoFS     []string `json:"monofs,omitempty"`
-	Role       string   `json:"role,omitempty"`
-	Deny       []string `json:"deny,omitempty"`
+	Group      string         `json:"group,omitempty"`
+	User       string         `json:"user,omitempty"`
+	Client     string         `json:"client,omitempty"`
+	Partitions []string       `json:"partitions,omitempty"`
+	Logs       []string       `json:"logs,omitempty"`
+	Traces     []string       `json:"traces,omitempty"`
+	SQL        []string       `json:"sql,omitempty"`
+	MonoFS     []string       `json:"monofs,omitempty"`
+	Backends   []string       `json:"backends,omitempty"`
+	Shards     *ShardSelector `json:"shards,omitempty"`
+	Role       string         `json:"role,omitempty"`
+	Deny       []string       `json:"deny,omitempty"`
+}
+
+// AttributeMatcher matches shard attributes. All populated fields must match.
+type AttributeMatcher struct {
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// ShardSelector narrows a grant to a subset of a partition's shards. Include
+// is OR across matchers, AND within one matcher; Exclude subtracts.
+type ShardSelector struct {
+	Include []AttributeMatcher `json:"include,omitempty"`
+	Exclude []AttributeMatcher `json:"exclude,omitempty"`
+}
+
+// Permits reports whether attrs is in scope. A nil selector permits all.
+func (s *ShardSelector) Permits(attrs map[string]string) bool {
+	if s == nil {
+		return true
+	}
+	if len(s.Include) > 0 {
+		included := false
+		for _, m := range s.Include {
+			if m.matches(attrs) {
+				included = true
+				break
+			}
+		}
+		if !included {
+			return false
+		}
+	}
+	for _, m := range s.Exclude {
+		if m.matches(attrs) {
+			return false
+		}
+	}
+	return true
+}
+
+// Excludes reports whether attrs is explicitly excluded. Exclusions take
+// precedence across multiple grants.
+func (s *ShardSelector) Excludes(attrs map[string]string) bool {
+	if s == nil {
+		return false
+	}
+	for _, m := range s.Exclude {
+		if m.matches(attrs) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m AttributeMatcher) matches(attrs map[string]string) bool {
+	for key, value := range m.Attributes {
+		if attrs[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // Bundle is the compiled, versioned policy consumed by services.
 type Bundle struct {
-	FormatVersion int          `json:"format_version"`
-	Version       string       `json:"version"`
-	GeneratedAt   string       `json:"generated_at,omitempty"`
-	Defaults      Defaults     `json:"defaults"`
-	Grants        []Grant      `json:"grants"`
-	AWSBindings   []AWSBinding `json:"aws_bindings,omitempty"`
-	CatalogDigest string       `json:"catalog_digest,omitempty"`
+	FormatVersion int               `json:"format_version"`
+	Version       string            `json:"version"`
+	GeneratedAt   string            `json:"generated_at,omitempty"`
+	Defaults      Defaults          `json:"defaults"`
+	Grants        []Grant           `json:"grants"`
+	Partitions    []PartitionPolicy `json:"partitions,omitempty"`
+	AWSBindings   []AWSBinding      `json:"aws_bindings,omitempty"`
+	CatalogDigest string            `json:"catalog_digest,omitempty"`
 	// Quotas is optional. Keeping FormatVersion at 1 means older consumers
 	// ignore the field during a rolling upgrade instead of rejecting the
 	// whole policy bundle.
@@ -320,6 +388,88 @@ func (p *Policy) CanReadSignal(id authz.Identity, partition string, signal Signa
 	return false
 }
 
+// CanReadSQL reports whether the identity may run federated SQL over the
+// partition.
+func (p *Policy) CanReadSQL(id authz.Identity, partition string) bool {
+	return p.can(id, ScopeSQL, partition)
+}
+
+// ResolveVisibleSQLPartitions is VisiblePartitions filtered by the SQL scope.
+func (p *Policy) ResolveVisibleSQLPartitions(id authz.Identity, catalog []string) []string {
+	names := p.ResolveVisiblePartitions(id, catalog)
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if p.CanReadSQL(id, name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// AllowedBackends returns the union of backends granted for the partition.
+// A nil slice with ok=true means no backend restriction; ok=false means the
+// partition is not granted.
+func (p *Policy) AllowedBackends(id authz.Identity, partition string) ([]string, bool) {
+	if p == nil || id.IsAnonymous() {
+		return nil, false
+	}
+	if p.IsAdmin(id) {
+		return nil, true
+	}
+	seen := map[string]struct{}{}
+	unrestricted := false
+	granted := false
+	for _, g := range p.matching(id) {
+		if !scopeAllows(g.Partitions, partition) {
+			continue
+		}
+		granted = true
+		if len(g.Backends) == 0 {
+			unrestricted = true
+			continue
+		}
+		for _, backend := range g.Backends {
+			seen[backend] = struct{}{}
+		}
+	}
+	if !granted {
+		return nil, false
+	}
+	if unrestricted {
+		return nil, true
+	}
+	out := make([]string, 0, len(seen))
+	for backend := range seen {
+		out = append(out, backend)
+	}
+	sort.Strings(out)
+	return out, true
+}
+
+// ShardAllowed reports whether the identity may read a shard with the given
+// effective attributes. Excludes take precedence across grants.
+func (p *Policy) ShardAllowed(id authz.Identity, partition string, attrs map[string]string) bool {
+	if p == nil || id.IsAnonymous() {
+		return false
+	}
+	if p.IsAdmin(id) {
+		return true
+	}
+	permitted := false
+	for _, g := range p.matching(id) {
+		if !scopeAllows(g.Partitions, partition) {
+			continue
+		}
+		if g.Shards.Excludes(attrs) {
+			return false
+		}
+		if g.Shards.Permits(attrs) {
+			permitted = true
+		}
+	}
+	return permitted
+}
+
 // CanReadPath reports whether the identity may read a MonoFS display path.
 func (p *Policy) CanReadPath(id authz.Identity, displayPath string) bool {
 	if p == nil || id.IsAnonymous() {
@@ -438,6 +588,8 @@ func (p *Policy) can(id authz.Identity, scope, partition string) bool {
 			list = g.Logs
 		case ScopeTraces:
 			list = g.Traces
+		case ScopeSQL:
+			list = g.SQL
 		}
 		if scopeAllows(list, partition) {
 			return true

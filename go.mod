@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/storage v1.61.3
 	github.com/RoaringBitmap/roaring v1.9.4
 	github.com/apache/arrow-go/v18 v18.5.2
-	github.com/aws/aws-sdk-go-v2 v1.41.5
+	github.com/aws/aws-sdk-go-v2 v1.48.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.3
 	github.com/blugelabs/bluge v0.2.2
 	github.com/cockroachdb/pebble v1.1.5
@@ -44,7 +44,15 @@ require (
 	k8s.io/kubelet v0.32.3
 )
 
-require github.com/radryc/tlsx v0.0.0-20261119062528-06e96b34334f
+require (
+	github.com/radryc/sqlagregator/drivers/omni v0.0.0-00010101000000-000000000000
+	github.com/radryc/tlsx v0.0.0-20261119062528-06e96b34334f
+)
+
+require (
+	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.78.2 // indirect
+	github.com/aws/aws-sdk-go-v2/service/cloudwatchomni v1.4.0 // indirect
+)
 
 replace github.com/radryc/kvs => ../kvs
 
@@ -70,23 +78,22 @@ require (
 	github.com/antlabs/timer v0.1.4 // indirect
 	github.com/apache/thrift v0.22.0 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
-	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.8 // indirect
-	github.com/aws/aws-sdk-go-v2/config v1.32.12 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.19.12 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.20 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.21 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.21 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.6 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.22 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.7 // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 // indirect
+	github.com/aws/aws-sdk-go-v2/config v1.33.20 // indirect
+	github.com/aws/aws-sdk-go-v2/credentials v1.21.2 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.9 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.12 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.12 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.12 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.25 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.13 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.21 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.12 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.21 // indirect
-	github.com/aws/aws-sdk-go-v2/service/signin v1.0.8 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sso v1.30.13 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.17 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.41.9 // indirect
-	github.com/aws/smithy-go v1.24.2
+	github.com/aws/aws-sdk-go-v2/service/signin v1.14.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.39.5 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.5 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.52.0 // indirect
+	github.com/aws/smithy-go v1.28.9
 	github.com/axiomhq/hyperloglog v0.2.6 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
@@ -181,6 +188,9 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/procfs v0.19.2 // indirect
+	github.com/radryc/sqlagregator v0.0.0
+	github.com/radryc/sqlagregator/drivers/bigquery v0.0.0
+	github.com/radryc/sqlagregator/drivers/cloudwatchlogsinsights v0.0.0
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
@@ -218,3 +228,11 @@ require (
 )
 
 replace github.com/hashicorp/memberlist => github.com/grafana/memberlist v0.3.1-0.20251126142931-6f9f62ab6f86
+
+replace github.com/radryc/sqlagregator => ../sqlagregator
+
+replace github.com/radryc/sqlagregator/drivers/omni => ../sqlagregator/drivers/omni
+
+replace github.com/radryc/sqlagregator/drivers/cloudwatchlogsinsights => ../sqlagregator/drivers/cloudwatchlogsinsights
+
+replace github.com/radryc/sqlagregator/drivers/bigquery => ../sqlagregator/drivers/bigquery
