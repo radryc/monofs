@@ -24,7 +24,6 @@ require (
 	github.com/radryc/cfg v0.0.0
 	github.com/radryc/kvs v0.0.0
 	github.com/radryc/packager v0.0.0-20260731073206-39f33592a2fd
-	github.com/radryc/tlsx v0.0.0-00010101000000-000000000000
 	github.com/sourcegraph/zoekt v0.0.0-20260114143800-c747a3bccc2a
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.65.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0
@@ -44,6 +43,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/kubelet v0.32.3
 )
+
+require github.com/radryc/tlsx v0.0.0-20261119062528-06e96b34334f
 
 replace github.com/radryc/kvs => ../kvs
 
@@ -217,5 +218,3 @@ require (
 )
 
 replace github.com/hashicorp/memberlist => github.com/grafana/memberlist v0.3.1-0.20251126142931-6f9f62ab6f86
-
-replace github.com/radryc/tlsx => ../tlsx
