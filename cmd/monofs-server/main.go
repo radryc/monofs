@@ -341,6 +341,10 @@ func main() {
 	var kvsStore *raftstore.Store
 	var kvsService kvsv1.KVStoreServer
 	var kvsServerOpts []grpc.ServerOption
+	// kvsHandlesTransport is set when the KVS constructor installed the
+	// transport credentials for the whole gRPC server, so the storage service
+	// does not add a second grpc.Creds option.
+	kvsHandlesTransport := false
 	if strings.TrimSpace(*kvsDataDir) != "" {
 		peerDefs, peerErr := parseKVSPeers(kvsPeers)
 		if peerErr != nil {
@@ -369,7 +373,14 @@ func main() {
 		}
 		switch {
 		case strings.TrimSpace(*kvsAuthToken) != "":
-			kvsService, kvsServerOpts, err = kvsgrpc.NewWithAuth(kvsStore, kvsgrpc.Config{AuthToken: strings.TrimSpace(*kvsAuthToken)})
+			if tlsTransport.Required() {
+				// Required mode: KVS installs the shared TLS/mTLS server
+				// options alongside bearer auth.
+				kvsService, kvsServerOpts, err = kvsgrpc.NewWithAuthAndTLS(kvsStore, kvsgrpc.Config{AuthToken: strings.TrimSpace(*kvsAuthToken)})
+				kvsHandlesTransport = true
+			} else {
+				kvsService, kvsServerOpts, err = kvsgrpc.NewWithAuth(kvsStore, kvsgrpc.Config{AuthToken: strings.TrimSpace(*kvsAuthToken)})
+			}
 			if err != nil {
 				logger.Error("failed to configure embedded kvs authentication", "error", err)
 				os.Exit(1)
@@ -390,14 +401,10 @@ func main() {
 			"authenticated", strings.TrimSpace(*kvsAuthToken) != "")
 	}
 
-	// Create gRPC server with raised message limits for inline dep blobs
-	transportServerOpt, err := tlsTransport.ServerOption()
-	if err != nil {
-		logger.Error("failed to configure transport security", "error", err)
-		os.Exit(1)
-	}
+	// Create gRPC server with raised message limits for inline dep blobs.
+	// When the embedded KVS installed TLS options, they cover every service on
+	// this server, so adding our own grpc.Creds would be a duplicate.
 	serverOpts := []grpc.ServerOption{
-		transportServerOpt,
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
 		grpc.MaxRecvMsgSize(1024 * 1024 * 1024), // 1 GB
 		grpc.MaxSendMsgSize(1024 * 1024 * 1024),
@@ -413,6 +420,14 @@ func main() {
 			grpc.ChainUnaryInterceptor(accessControl.UnaryInterceptor()),
 			grpc.ChainStreamInterceptor(accessControl.StreamInterceptor()),
 		)
+	}
+	if !kvsHandlesTransport {
+		transportServerOpt, transportErr := tlsTransport.ServerOption()
+		if transportErr != nil {
+			logger.Error("failed to configure transport security", "error", transportErr)
+			os.Exit(1)
+		}
+		serverOpts = append(serverOpts, transportServerOpt)
 	}
 	serverOpts = append(serverOpts, kvsServerOpts...)
 	grpcServer := grpc.NewServer(serverOpts...)
