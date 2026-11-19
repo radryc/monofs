@@ -461,6 +461,7 @@ func (s *Server) ConfigureFetcher(fetcherAddrs []string) error {
 
 	config := fetcher.DefaultClientConfig()
 	config.FetcherAddresses = fetcherAddrs
+	config.Transport = s.transport
 
 	client, err := fetcher.NewClient(config, s.logger)
 	if err != nil {

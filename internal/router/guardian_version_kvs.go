@@ -22,7 +22,6 @@ import (
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -179,8 +178,12 @@ func (b *kvsGuardianVersionBackend) clientFor(candidate kvsGuardianCandidate) (k
 	if client := b.clients[candidate.address]; client != nil {
 		return client, nil
 	}
+	transportOpt, err := b.router.config.Transport.DialOption()
+	if err != nil {
+		return nil, fmt.Errorf("configure transport for KVS node %s: %w", candidate.address, err)
+	}
 	conn, err := grpc.NewClient(candidate.address, append([]grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpcx.IPv4DialerOption(),
 		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 	}, b.router.internalDialOptions()...)...)

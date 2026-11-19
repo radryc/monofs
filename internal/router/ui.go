@@ -915,12 +915,17 @@ func (r *Router) handleGuardianClientsAPI(w http.ResponseWriter, req *http.Reque
 	r.mu.RLock()
 	peerToken := strings.TrimSpace(r.peerRouterToken)
 	r.mu.RUnlock()
+	peerClient, peerClientErr := r.config.Transport.HTTPClient(&http.Client{Timeout: 2 * time.Second})
+	if peerClientErr != nil {
+		r.logger.Warn("failed to configure peer http transport", "error", peerClientErr)
+		peerClient = &http.Client{Timeout: 2 * time.Second}
+	}
 	for _, peer := range r.config.PeerRouters {
-		peerURL, err := normalizeRouterURL(peer.URL)
+		peerURL, err := r.peerURL(peer.URL)
 		if err != nil {
 			continue
 		}
-		peerClients := fetchPeerGuardianClients(peerURL, peer.Name, peerToken)
+		peerClients := fetchPeerGuardianClients(peerClient, peerURL, peer.Name, peerToken)
 		clients = append(clients, peerClients...)
 	}
 
@@ -948,12 +953,17 @@ func (r *Router) handleClientsAPI(w http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
 	peerToken := strings.TrimSpace(r.peerRouterToken)
 	r.mu.RUnlock()
+	peerClient, peerClientErr := r.config.Transport.HTTPClient(&http.Client{Timeout: 2 * time.Second})
+	if peerClientErr != nil {
+		r.logger.Warn("failed to configure peer http transport", "error", peerClientErr)
+		peerClient = &http.Client{Timeout: 2 * time.Second}
+	}
 	for _, peer := range r.config.PeerRouters {
-		peerURL, err := normalizeRouterURL(peer.URL)
+		peerURL, err := r.peerURL(peer.URL)
 		if err != nil {
 			continue
 		}
-		peerClients := fetchPeerClients(peerURL, peerToken)
+		peerClients := fetchPeerClients(peerClient, peerURL, peerToken)
 		if peerClients != nil {
 			resp.Clients = append(resp.Clients, peerClients...)
 		}
@@ -1661,7 +1671,7 @@ func (r *Router) handleRegistryStats(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	body, _, err := r.proxyRegistryGET(req.Context(), "http://"+addr+"/api/v1/stats")
+	body, _, err := r.proxyRegistryGET(req.Context(), r.config.Transport.HTTPURL(addr)+"/api/v1/stats")
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
@@ -1688,7 +1698,7 @@ func (r *Router) handleRegistryRepos(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	u := "http://" + addr + "/api/v1/repos"
+	u := r.config.Transport.HTTPURL(addr) + "/api/v1/repos"
 	if q := req.URL.RawQuery; q != "" {
 		u += "?" + q
 	}
@@ -1726,7 +1736,7 @@ func (r *Router) handleRegistryRepoDetail(w http.ResponseWriter, req *http.Reque
 		return
 	}
 
-	u := "http://" + addr + "/api/v1/repos/" + repo
+	u := r.config.Transport.HTTPURL(addr) + "/api/v1/repos/" + repo
 	if q := req.URL.RawQuery; q != "" {
 		u += "?" + q
 	}
@@ -1763,7 +1773,11 @@ func (r *Router) proxyRegistryGET(parentCtx context.Context, endpoint string) ([
 		req.Header.Set("Authorization", "Bearer "+bearerToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client, err := r.config.Transport.HTTPClient(http.DefaultClient)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2479,7 +2493,7 @@ func (r *Router) collectPprofTargets(req *http.Request) []pprofTarget {
 		})
 	}
 	for _, peer := range r.config.PeerRouters {
-		peerURL, err := normalizeRouterURL(peer.URL)
+		peerURL, err := r.peerURL(peer.URL)
 		if err != nil {
 			continue
 		}
@@ -2818,7 +2832,7 @@ func diagnosticsEndpoint(raw string) (baseURL string, address string) {
 
 // fetchPeerClients fetches FUSE clients from a peer router's /api/local-clients endpoint.
 // Returns nil on any error (best-effort aggregation).
-func fetchPeerClients(peerURL, bearerToken string) []*pb.ClientInfo {
+func fetchPeerClients(client *http.Client, peerURL, bearerToken string) []*pb.ClientInfo {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -2829,7 +2843,6 @@ func fetchPeerClients(peerURL, bearerToken string) []*pb.ClientInfo {
 	if token := strings.TrimSpace(bearerToken); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
-	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(request)
 	if err != nil {
 		return nil
@@ -2885,7 +2898,7 @@ func dedupeGuardianClients(clients []guardianClientJSON) []guardianClientJSON {
 }
 
 // fetchPeerGuardianClients fetches guardian clients from a peer router.
-func fetchPeerGuardianClients(peerURL, peerName, bearerToken string) []guardianClientJSON {
+func fetchPeerGuardianClients(client *http.Client, peerURL, peerName, bearerToken string) []guardianClientJSON {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -2896,7 +2909,6 @@ func fetchPeerGuardianClients(peerURL, peerName, bearerToken string) []guardianC
 	if token := strings.TrimSpace(bearerToken); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
-	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(request)
 	if err != nil {
 		return nil

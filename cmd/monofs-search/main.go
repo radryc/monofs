@@ -183,6 +183,7 @@ func main() {
 		AccessPolicy:  policyLoader,
 		EnforceRead:   *accessEnforce,
 		InternalToken: strings.TrimSpace(*token),
+		Transport:     tlsTransport,
 	}
 
 	svc, err := search.NewService(cfg)

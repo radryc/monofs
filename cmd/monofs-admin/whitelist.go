@@ -6,17 +6,17 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/transport"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // manageWhitelist performs whitelist operations via gRPC.
-func manageWhitelist(routerAddr, action, clientID, label string) error {
+func manageWhitelist(tr transport.Config, routerAddr, action, clientID, label string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 	)
 	if err != nil {

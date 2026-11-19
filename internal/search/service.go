@@ -15,6 +15,7 @@ import (
 	"github.com/nutsdb/nutsdb"
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/client"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/authz/policy"
 )
 
@@ -118,6 +119,9 @@ type Config struct {
 	// InternalToken presents the cluster-internal identity on node reads so
 	// index builds keep working on policy-enforcing clusters.
 	InternalToken string
+	// Transport carries the resolved STRATA_TLS_* contract for storage-node
+	// connections. The zero value is plaintext.
+	Transport transport.Config
 }
 
 // NewService creates a new search service
@@ -175,6 +179,7 @@ func NewService(cfg Config) (*Service, error) {
 				Hostname:             "search-service",
 				Version:              "indexer",
 				Token:                cfg.InternalToken,
+				Transport:            cfg.Transport,
 			})
 			cancel()
 

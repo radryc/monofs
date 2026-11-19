@@ -89,6 +89,7 @@ func main() {
 			Token:      *token,
 			DataNS:     *dataNS,
 			Logger:     logger,
+			Transport:  tlsTransport,
 		})
 		if err == nil {
 			break

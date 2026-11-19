@@ -325,6 +325,7 @@ func main() {
 	if len(fetcherAddrs) > 0 {
 		kvsClientCfg := fetcher.DefaultClientConfig()
 		kvsClientCfg.FetcherAddresses = []string(fetcherAddrs)
+		kvsClientCfg.Transport = tlsTransport
 		if fc, fcErr := fetcher.NewClient(kvsClientCfg, logger); fcErr != nil {
 			logger.Warn("failed to create fetcher client for KVS offloading, archived blobs will stay local",
 				"error", fcErr)
@@ -673,7 +674,7 @@ func main() {
 
 	// Attempt graceful failover if router address is configured
 	if *routerAddr != "" {
-		if err := requestFailover(*routerAddr, *nodeID, logger); err != nil {
+		if err := requestFailover(tlsTransport, *routerAddr, *nodeID, logger); err != nil {
 			logger.Warn("failover request failed", "error", err)
 		} else {
 			logger.Info("failover completed successfully")
@@ -705,14 +706,18 @@ func newMetricsHandler() http.Handler {
 	return diagnostics.NewHandler()
 }
 
-func requestFailover(routerAddr, nodeID string, logger *slog.Logger) error {
+func requestFailover(tr transport.Config, routerAddr, nodeID string, logger *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	logger.Info("connecting to router for failover", "router", routerAddr)
 
+	transportOpt, err := tr.DialOption()
+	if err != nil {
+		return fmt.Errorf("configure transport for router: %w", err)
+	}
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpc.WithBlock())
 	if err != nil {
 		return fmt.Errorf("failed to connect to router: %w", err)

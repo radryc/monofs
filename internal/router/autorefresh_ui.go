@@ -136,9 +136,13 @@ func (r *Router) proxyAutoRefreshStats(local map[string]any) map[string]any {
 	r.mu.RLock()
 	token := strings.TrimSpace(r.peerRouterToken)
 	r.mu.RUnlock()
-	client := &http.Client{Timeout: 2 * time.Second}
+	client, clientErr := r.config.Transport.HTTPClient(&http.Client{Timeout: 2 * time.Second})
+	if clientErr != nil {
+		r.logger.Warn("failed to configure peer http transport", "error", clientErr)
+		client = &http.Client{Timeout: 2 * time.Second}
+	}
 	for _, peer := range r.config.PeerRouters {
-		baseURL, err := normalizeRouterURL(peer.URL)
+		baseURL, err := r.peerURL(peer.URL)
 		if err != nil {
 			continue
 		}

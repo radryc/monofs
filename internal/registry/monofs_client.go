@@ -16,10 +16,10 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -36,6 +36,10 @@ type ClientConfig struct {
 	DataNS            string
 	Logger            *slog.Logger
 	ReplicationFactor int // Number of nodes to replicate writes to (0 or 1 = primary only, 2+ = primary + replicas)
+
+	// Transport carries the resolved STRATA_TLS_* contract for router and
+	// node connections. The zero value is plaintext.
+	Transport transport.Config
 }
 
 type Client struct {
@@ -46,6 +50,7 @@ type Client struct {
 	logger            *slog.Logger
 	rpcTimeout        time.Duration
 	replicationFactor int
+	transport         transport.Config
 
 	mu          sync.Mutex
 	routerConn  *grpc.ClientConn
@@ -78,9 +83,13 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
+	transportOpt, err := cfg.Transport.DialOption()
+	if err != nil {
+		return nil, fmt.Errorf("configure transport for monofs router: %w", err)
+	}
 	conn, err := grpc.NewClient(
 		cfg.RouterAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpcx.IPv4DialerOption(),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(1024*1024*1024),
@@ -104,6 +113,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		logger:            logger,
 		rpcTimeout:        defaultRPCTimeout,
 		replicationFactor: rf,
+		transport:         cfg.Transport,
 		routerConn:        conn,
 		router:            pb.NewMonoFSRouterClient(conn),
 		nodeConns:         map[string]*grpc.ClientConn{},
@@ -608,9 +618,14 @@ func (c *Client) refreshNodes(ctx context.Context) error {
 			delete(c.nodeClients, nodeID)
 			delete(c.nodeAddrs, nodeID)
 		}
+		transportOpt, transportErr := c.transport.DialOption()
+		if transportErr != nil {
+			c.logger.Warn("failed to configure node transport", "node_id", nodeID, "error", transportErr)
+			continue
+		}
 		nodeConn, dialErr := grpc.NewClient(
 			nodeAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			transportOpt,
 			grpcx.IPv4DialerOption(),
 			grpc.WithDefaultCallOptions(
 				grpc.MaxCallRecvMsgSize(1024*1024*1024),

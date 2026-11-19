@@ -22,6 +22,7 @@ import (
 	"github.com/radryc/monofs/internal/cache"
 	"github.com/radryc/monofs/internal/client"
 	monofuse "github.com/radryc/monofs/internal/fuse"
+	"github.com/radryc/monofs/internal/transport"
 )
 
 var (
@@ -72,6 +73,12 @@ func main() {
 	if *showVersion {
 		fmt.Printf("monofs-client version=%s commit=%s build_time=%s\n", Version, Commit, BuildTime)
 		return
+	}
+
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", err)
+		os.Exit(1)
 	}
 
 	if *mountpoint == "" {
@@ -163,6 +170,7 @@ func main() {
 		logger.With("component", "sharded-client"),
 		*useExternalAddrs,
 		*token,
+		tlsTransport,
 	)
 	c, err := client.NewShardedClient(ctx, clientCfg)
 	if err != nil {
@@ -409,6 +417,7 @@ func newShardedClientConfig(
 	logger *slog.Logger,
 	useExternalAddresses bool,
 	token string,
+	tr transport.Config,
 ) client.ShardedClientConfig {
 	return client.ShardedClientConfig{
 		RouterAddr:           routerAddr,
@@ -420,6 +429,7 @@ func newShardedClientConfig(
 		MountPoint:           mountpoint,
 		Writable:             writable,
 		Token:                token,
+		Transport:            tr,
 	}
 }
 

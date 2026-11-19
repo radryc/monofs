@@ -32,8 +32,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/transport"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -93,18 +93,23 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var err error
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: load transport config:", err)
+		os.Exit(1)
+	}
+
 	switch os.Args[1] {
 	case "read":
-		err = runRead(ctx, os.Args[2:], false)
+		err = runRead(ctx, tlsTransport, os.Args[2:], false)
 	case "meta":
-		err = runRead(ctx, os.Args[2:], true)
+		err = runRead(ctx, tlsTransport, os.Args[2:], true)
 	case "mixed":
-		err = runMixed(ctx, os.Args[2:])
+		err = runMixed(ctx, tlsTransport, os.Args[2:])
 	case "ingest":
-		err = runIngest(ctx, os.Args[2:])
+		err = runIngest(ctx, tlsTransport, os.Args[2:])
 	case "cleanup":
-		err = runCleanup(ctx, os.Args[2:])
+		err = runCleanup(ctx, tlsTransport, os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -173,7 +178,7 @@ func parseCommon(name string, args []string) (*options, *flag.FlagSet) {
 	return o, fs
 }
 
-func runRead(ctx context.Context, args []string, metaOnly bool) error {
+func runRead(ctx context.Context, tr transport.Config, args []string, metaOnly bool) error {
 	o, fs := parseCommon("read", args)
 	fs.Parse(args)
 	if metaOnly {
@@ -184,7 +189,7 @@ func runRead(ctx context.Context, args []string, metaOnly bool) error {
 	}
 	startMetrics(o.metricsAddr)
 
-	cluster, err := discover(ctx, o)
+	cluster, err := discover(ctx, tr, o)
 	if err != nil {
 		return err
 	}
@@ -249,7 +254,7 @@ func runRead(ctx context.Context, args []string, metaOnly bool) error {
 	return finish(o, result)
 }
 
-func runMixed(ctx context.Context, args []string) error {
+func runMixed(ctx context.Context, tr transport.Config, args []string) error {
 	o, fs := parseCommon("mixed", args)
 	fs.Parse(args)
 	if err := o.validate(); err != nil {
@@ -257,7 +262,7 @@ func runMixed(ctx context.Context, args []string) error {
 	}
 	startMetrics(o.metricsAddr)
 
-	cluster, err := discover(ctx, o)
+	cluster, err := discover(ctx, tr, o)
 	if err != nil {
 		return err
 	}
@@ -302,14 +307,14 @@ func runMixed(ctx context.Context, args []string) error {
 	return finish(o, result)
 }
 
-func runIngest(ctx context.Context, args []string) error {
+func runIngest(ctx context.Context, tr transport.Config, args []string) error {
 	o, fs := parseCommon("ingest", args)
 	fs.Parse(args)
 	if err := o.validate(); err != nil {
 		return err
 	}
 	startMetrics(o.metricsAddr)
-	cluster, err := discover(ctx, o)
+	cluster, err := discover(ctx, tr, o)
 	if err != nil {
 		return err
 	}
@@ -392,13 +397,13 @@ func runIngest(ctx context.Context, args []string) error {
 	return finish(o, result)
 }
 
-func runCleanup(ctx context.Context, args []string) error {
+func runCleanup(ctx context.Context, tr transport.Config, args []string) error {
 	o, fs := parseCommon("cleanup", args)
 	fs.Parse(args)
 	if o.storageID == "" {
 		return errors.New("-storage-id is required")
 	}
-	cluster, err := discover(ctx, o)
+	cluster, err := discover(ctx, tr, o)
 	if err != nil {
 		return err
 	}
@@ -448,8 +453,8 @@ func (c *clusterState) close() {
 	}
 }
 
-func discover(ctx context.Context, o *options) (*clusterState, error) {
-	routerConn, err := dial(ctx, o.router)
+func discover(ctx context.Context, tr transport.Config, o *options) (*clusterState, error) {
+	routerConn, err := dial(ctx, tr, o.router)
 	if err != nil {
 		return nil, fmt.Errorf("dial router %s: %w", o.router, err)
 	}
@@ -473,7 +478,7 @@ func discover(ctx context.Context, o *options) (*clusterState, error) {
 		if v, ok := overrides[ni.GetNodeId()]; ok {
 			addr = v
 		}
-		conn, err := dial(ctx, addr)
+		conn, err := dial(ctx, tr, addr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "dial node %s (%s): %v\n", ni.GetNodeId(), addr, err)
 			continue
@@ -515,11 +520,15 @@ func discoverRepos(ctx context.Context, n *nodeTarget) error {
 	}
 }
 
-func dial(ctx context.Context, addr string) (*grpc.ClientConn, error) {
+func dial(ctx context.Context, tr transport.Config, addr string) (*grpc.ClientConn, error) {
 	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	transportOpt, err := tr.DialOption()
+	if err != nil {
+		return nil, err
+	}
 	return grpc.DialContext(dctx, addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpc.WithBlock(),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256<<20)),
 	)

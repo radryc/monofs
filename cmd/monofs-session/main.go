@@ -14,8 +14,8 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/transport"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -188,6 +188,7 @@ type BranchMappingInfo struct {
 // SessionCommand handles write session management via Unix socket
 type SessionCommand struct {
 	socketPath string
+	transport  transport.Config
 }
 
 func defaultSessionSocketPath() string {
@@ -228,7 +229,13 @@ func main() {
 		socketPath = defaultSessionSocketPath()
 	}
 
-	cmd := &SessionCommand{socketPath: socketPath}
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: transport configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	cmd := &SessionCommand{socketPath: socketPath, transport: tlsTransport}
 
 	// Get command from args
 	if err := cmd.Execute(args); err != nil {
@@ -1564,8 +1571,12 @@ func (sc *SessionCommand) searchCode(args []string) error {
 	}
 
 	// Connect to search service
+	transportOpt, err := sc.transport.DialOption()
+	if err != nil {
+		return fmt.Errorf("configure transport for search service: %w", err)
+	}
 	conn, err := grpc.DialContext(ctx, *searchAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpc.WithBlock(),
 	)
 	if err != nil {

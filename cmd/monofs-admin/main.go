@@ -17,8 +17,8 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/server"
+	"github.com/radryc/monofs/internal/transport"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	grpcmd "google.golang.org/grpc/metadata"
 )
@@ -127,6 +127,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: transport configuration: %v\n", err)
+		os.Exit(1)
+	}
+
 	switch os.Args[1] {
 	case "ingest":
 		ingestCmd.Parse(os.Args[2:])
@@ -136,7 +142,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := ingestRepository(*routerAddr, *source, *ref, *sourceID, *ingestionType, *fetchType, *replicateData, *ingestClientID, *ingestToken); err != nil {
+		if err := ingestRepository(tlsTransport, *routerAddr, *source, *ref, *sourceID, *ingestionType, *fetchType, *replicateData, *ingestClientID, *ingestToken); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: ingestion failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -149,7 +155,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := deleteRepository(*deleteRouter, *deleteStorageID); err != nil {
+		if err := deleteRepository(tlsTransport, *deleteRouter, *deleteStorageID); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: deletion failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -157,7 +163,7 @@ func main() {
 	case "status":
 		statusCmd.Parse(os.Args[2:])
 
-		if err := showClusterStatus(*statusRouter); err != nil {
+		if err := showClusterStatus(tlsTransport, *statusRouter); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: status check failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -165,7 +171,7 @@ func main() {
 	case "failover": // NEW
 		failoverCmd.Parse(os.Args[2:])
 
-		if err := showFailoverStatus(*failoverRouter); err != nil {
+		if err := showFailoverStatus(tlsTransport, *failoverRouter); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failover status check failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -179,7 +185,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := rebuildDirectoryIndex(*rebuildRouter, *rebuildStorageID, *rebuildExternal, *rebuildDebug); err != nil {
+		if err := rebuildDirectoryIndex(tlsTransport, *rebuildRouter, *rebuildStorageID, *rebuildExternal, *rebuildDebug); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: rebuild index failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -187,7 +193,7 @@ func main() {
 	case "repos":
 		reposCmd.Parse(os.Args[2:])
 
-		if err := showRepositories(*reposRouter); err != nil {
+		if err := showRepositories(tlsTransport, *reposRouter); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: repos check failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -201,7 +207,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := triggerRebalance(*rebalanceRouter, *rebalanceStorageID); err != nil {
+		if err := triggerRebalance(tlsTransport, *rebalanceRouter, *rebalanceStorageID); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: rebalance failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -209,7 +215,7 @@ func main() {
 	case "stats":
 		statsCmd.Parse(os.Args[2:])
 
-		if err := showStatistics(*statsRouter, *statsType, *statsFormat); err != nil {
+		if err := showStatistics(tlsTransport, *statsRouter, *statsType, *statsFormat); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: stats failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -217,7 +223,7 @@ func main() {
 	case "drain":
 		drainCmd.Parse(os.Args[2:])
 
-		if err := drainCluster(*drainRouter, *drainReason); err != nil {
+		if err := drainCluster(tlsTransport, *drainRouter, *drainReason); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: drain failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -225,7 +231,7 @@ func main() {
 	case "undrain":
 		undrainCmd.Parse(os.Args[2:])
 
-		if err := undrainCluster(*undrainRouter); err != nil {
+		if err := undrainCluster(tlsTransport, *undrainRouter); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: undrain failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -239,7 +245,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := triggerFailover(*triggerFailoverRouter, *triggerFailoverNodeID); err != nil {
+		if err := triggerFailover(tlsTransport, *triggerFailoverRouter, *triggerFailoverNodeID); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: trigger-failover failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -253,7 +259,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := clearFailover(*clearFailoverRouter, *clearFailoverNodeID); err != nil {
+		if err := clearFailover(tlsTransport, *clearFailoverRouter, *clearFailoverNodeID); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: clear-failover failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -267,7 +273,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := showNodeFiles(*nodeFilesRouter, *nodeFilesNodeID, *nodeFilesStorageID, *nodeFilesFormat); err != nil {
+		if err := showNodeFiles(tlsTransport, *nodeFilesRouter, *nodeFilesNodeID, *nodeFilesStorageID, *nodeFilesFormat); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: node-files failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -275,7 +281,7 @@ func main() {
 	case "fetchers":
 		fetchersCmd.Parse(os.Args[2:])
 
-		if err := showFetchers(*fetchersRouter, *fetchersFormat, *fetchersDetailed); err != nil {
+		if err := showFetchers(tlsTransport, *fetchersRouter, *fetchersFormat, *fetchersDetailed); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: fetchers failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -283,7 +289,7 @@ func main() {
 	case "whitelist":
 		whitelistCmd.Parse(os.Args[2:])
 
-		if err := manageWhitelist(*whitelistRouter, *whitelistAction, *whitelistClientID, *whitelistLabel); err != nil {
+		if err := manageWhitelist(tlsTransport, *whitelistRouter, *whitelistAction, *whitelistClientID, *whitelistLabel); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: whitelist failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -291,7 +297,7 @@ func main() {
 	case "dogfood":
 		dogfoodCmd.Parse(os.Args[2:])
 
-		if err := dogfoodRepositories(*dogfoodRouter, *dogfoodRepos, *dogfoodExclude); err != nil {
+		if err := dogfoodRepositories(tlsTransport, *dogfoodRouter, *dogfoodRepos, *dogfoodExclude); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: dogfood failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -531,7 +537,7 @@ func validateIngestionParams(source, ref, ingestionType string) error {
 }
 
 // ingestRepository ingests a source via the router.
-func ingestRepository(routerAddr, rawSource, ref, customSourceID, ingestionType, fetchType string, replicateData bool, clientID, token string) error {
+func ingestRepository(tr transport.Config, routerAddr, rawSource, ref, customSourceID, ingestionType, fetchType string, replicateData bool, clientID, token string) error {
 	// Validate parameters
 	if err := validateIngestionParams(rawSource, ref, ingestionType); err != nil {
 		return err
@@ -573,7 +579,7 @@ func ingestRepository(routerAddr, rawSource, ref, customSourceID, ingestionType,
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                1 * time.Minute,
@@ -683,7 +689,7 @@ func parseFetchType(s string) pb.SourceType {
 }
 
 // deleteRepository deletes a repository from all nodes (cleanup to free memory).
-func deleteRepository(routerAddr, storageID string) error {
+func deleteRepository(tr transport.Config, routerAddr, storageID string) error {
 	fmt.Printf("Deleting repository %s from router %s\n", storageID, routerAddr)
 
 	// Connect to router
@@ -691,7 +697,7 @@ func deleteRepository(routerAddr, storageID string) error {
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                1 * time.Minute,
@@ -730,12 +736,12 @@ func deleteRepository(routerAddr, storageID string) error {
 }
 
 // showClusterStatus displays cluster health and node information.
-func showClusterStatus(routerAddr string) error {
+func showClusterStatus(tr transport.Config, routerAddr string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 	)
 	if err != nil {
@@ -933,7 +939,7 @@ func showClusterStatus(routerAddr string) error {
 	}
 
 	// Fetch and display Fetcher status summary
-	fetcherStats := fetchFetcherStatsSummary(routerAddr)
+	fetcherStats := fetchFetcherStatsSummary(tr, routerAddr)
 	if fetcherStats != nil {
 		healthIcon := "[OK]"
 		if fetcherStats.healthyFetchers < fetcherStats.totalFetchers {
@@ -954,7 +960,7 @@ func showClusterStatus(routerAddr string) error {
 	}
 
 	// Fetch and display Search/Indexer status summary
-	searchStats := fetchSearchStatsSummary(routerAddr)
+	searchStats := fetchSearchStatsSummary(tr, routerAddr)
 	if searchStats != nil {
 		healthIcon := "[OK]"
 		if searchStats.failedJobs > 0 {
@@ -977,7 +983,7 @@ func showClusterStatus(routerAddr string) error {
 	}
 
 	// Fetch and display Predictor status summary
-	predictorStats := fetchPredictorStatsSummary(routerAddr)
+	predictorStats := fetchPredictorStatsSummary(tr, routerAddr)
 	if predictorStats != nil {
 		fmt.Printf("PREDICTOR (Prefetch Intelligence)\n")
 		if predictorStats.enabledNodes == 0 {
@@ -1015,12 +1021,12 @@ type fetcherStatsSummary struct {
 }
 
 // fetchFetcherStatsSummary fetches fetcher cluster stats via HTTP
-func fetchFetcherStatsSummary(routerAddr string) *fetcherStatsSummary {
+func fetchFetcherStatsSummary(tr transport.Config, routerAddr string) *fetcherStatsSummary {
 	// Convert gRPC address (host:9090) to HTTP address (host:8080)
 	httpAddr := strings.Replace(routerAddr, ":9090", ":8080", 1)
-	apiURL := fmt.Sprintf("http://%s/api/fetchers", httpAddr)
+	apiURL := tr.HTTPURL(httpAddr) + "/api/fetchers"
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := transportHTTPClient(tr, &http.Client{Timeout: 5 * time.Second})
 	resp, err := client.Get(apiURL)
 	if err != nil {
 		return nil
@@ -1055,12 +1061,12 @@ type searchStatsSummary struct {
 }
 
 // fetchSearchStatsSummary fetches search stats via HTTP
-func fetchSearchStatsSummary(routerAddr string) *searchStatsSummary {
+func fetchSearchStatsSummary(tr transport.Config, routerAddr string) *searchStatsSummary {
 	// Convert gRPC address (host:9090) to HTTP address (host:8080)
 	httpAddr := strings.Replace(routerAddr, ":9090", ":8080", 1)
-	apiURL := fmt.Sprintf("http://%s/api/search/stats", httpAddr)
+	apiURL := tr.HTTPURL(httpAddr) + "/api/search/stats"
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := transportHTTPClient(tr, &http.Client{Timeout: 5 * time.Second})
 	resp, err := client.Get(apiURL)
 	if err != nil {
 		return &searchStatsSummary{} // Return empty to show "unavailable"
@@ -1106,12 +1112,12 @@ type predictorStatsSummary struct {
 }
 
 // fetchPredictorStatsSummary fetches predictor stats via router HTTP API
-func fetchPredictorStatsSummary(routerAddr string) *predictorStatsSummary {
+func fetchPredictorStatsSummary(tr transport.Config, routerAddr string) *predictorStatsSummary {
 	// Convert gRPC address (host:9090) to HTTP address (host:8080)
 	httpAddr := strings.Replace(routerAddr, ":9090", ":8080", 1)
-	apiURL := fmt.Sprintf("http://%s/api/predictor", httpAddr)
+	apiURL := tr.HTTPURL(httpAddr) + "/api/predictor"
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := transportHTTPClient(tr, &http.Client{Timeout: 5 * time.Second})
 	resp, err := client.Get(apiURL)
 	if err != nil {
 		return nil
@@ -1147,12 +1153,12 @@ func fetchPredictorStatsSummary(routerAddr string) *predictorStatsSummary {
 }
 
 // showFailoverStatus displays failover mappings and node backup status.
-func showFailoverStatus(routerAddr string) error {
+func showFailoverStatus(tr transport.Config, routerAddr string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 	)
 	if err != nil {
@@ -1291,7 +1297,7 @@ func showFailoverStatus(routerAddr string) error {
 	return nil
 }
 
-func rebuildDirectoryIndex(routerAddr, storageID string, useExternal, debug bool) error {
+func rebuildDirectoryIndex(tr transport.Config, routerAddr, storageID string, useExternal, debug bool) error {
 	if storageID == "" {
 		return fmt.Errorf("storage-id is required")
 	}
@@ -1301,7 +1307,7 @@ func rebuildDirectoryIndex(routerAddr, storageID string, useExternal, debug bool
 		fmt.Printf("Connecting to router at %s...\n", routerAddr)
 	}
 
-	conn, err := grpc.Dial(routerAddr, grpc.WithInsecure())
+	conn, err := grpc.Dial(routerAddr, transportDialOption(tr))
 	if err != nil {
 		return fmt.Errorf("failed to connect to router: %w", err)
 	}
@@ -1353,7 +1359,7 @@ func rebuildDirectoryIndex(routerAddr, storageID string, useExternal, debug bool
 			fmt.Printf("Connecting to node %s at %s...\n", node.NodeId, nodeAddr)
 		}
 
-		nodeConn, err := grpc.Dial(nodeAddr, grpc.WithInsecure())
+		nodeConn, err := grpc.Dial(nodeAddr, transportDialOption(tr))
 		if err != nil {
 			fmt.Printf("❌ Failed to connect to node %s: %v\n", node.NodeId, err)
 			failedNodes++
@@ -1394,11 +1400,11 @@ func rebuildDirectoryIndex(routerAddr, storageID string, useExternal, debug bool
 }
 
 // showRepositories displays all repositories in the cluster via HTTP API.
-func showRepositories(routerAddr string) error {
+func showRepositories(tr transport.Config, routerAddr string) error {
 	// Use HTTP API to get repositories (same as UI)
-	url := fmt.Sprintf("http://%s/api/repositories", routerAddr)
+	url := tr.HTTPURL(routerAddr) + "/api/repositories"
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := transportHTTPClient(tr, &http.Client{Timeout: 10 * time.Second})
 	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("failed to fetch repositories: %w", err)
@@ -1501,12 +1507,12 @@ func showRepositories(routerAddr string) error {
 }
 
 // triggerRebalance triggers rebalancing for a repository via HTTP API.
-func triggerRebalance(routerAddr, storageID string) error {
-	url := fmt.Sprintf("http://%s/api/rebalance", routerAddr)
+func triggerRebalance(tr transport.Config, routerAddr, storageID string) error {
+	url := tr.HTTPURL(routerAddr) + "/api/rebalance"
 
 	data := strings.NewReader(fmt.Sprintf("storage_id=%s", storageID))
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := transportHTTPClient(tr, &http.Client{Timeout: 10 * time.Second})
 	resp, err := client.Post(url, "application/x-www-form-urlencoded", data)
 	if err != nil {
 		return fmt.Errorf("failed to trigger rebalance: %w", err)
@@ -1537,13 +1543,13 @@ func triggerRebalance(routerAddr, storageID string) error {
 }
 
 // showStatistics displays cluster or node statistics
-func showStatistics(routerAddr, statsType, format string) error {
+func showStatistics(tr transport.Config, routerAddr, statsType, format string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Create gRPC connection
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
@@ -1697,12 +1703,12 @@ func truncate(s string, maxLen int) string {
 }
 
 // triggerFailover manually triggers graceful failover for a node
-func triggerFailover(routerAddr, nodeID string) error {
+func triggerFailover(tr transport.Config, routerAddr, nodeID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
@@ -1751,13 +1757,13 @@ func triggerFailover(routerAddr, nodeID string) error {
 }
 
 // clearFailover clears failover state for a recovered node
-func clearFailover(routerAddr, nodeID string) error {
+func clearFailover(tr transport.Config, routerAddr, nodeID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// First, get cluster info to find the node's address
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
@@ -1804,7 +1810,7 @@ func clearFailover(routerAddr, nodeID string) error {
 
 	// Connect to the node directly to clear its failover cache
 	nodeConn, err := grpc.DialContext(ctx, nodeAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 	)
 	if err != nil {
@@ -1832,13 +1838,13 @@ func clearFailover(routerAddr, nodeID string) error {
 }
 
 // showNodeFiles lists files owned by a specific node (or all nodes if nodeID="all")
-func showNodeFiles(routerAddr, nodeID, storageID, format string) error {
+func showNodeFiles(tr transport.Config, routerAddr, nodeID, storageID, format string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// First, get cluster info to find the node's address
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
@@ -1865,7 +1871,7 @@ func showNodeFiles(routerAddr, nodeID, storageID, format string) error {
 		if storageID == "" {
 			return fmt.Errorf("--storage-id is required when using --node-id=all")
 		}
-		return showAllNodesFiles(ctx, routerAddr, clusterInfo, storageID, format)
+		return showAllNodesFiles(ctx, tr, routerAddr, clusterInfo, storageID, format)
 	}
 
 	// Find the node address
@@ -1883,7 +1889,7 @@ func showNodeFiles(routerAddr, nodeID, storageID, format string) error {
 
 	// Connect to the node directly
 	nodeConn, err := grpc.DialContext(ctx, nodeAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 	)
 	if err != nil {
@@ -2058,7 +2064,7 @@ func showNodeOverview(ctx context.Context, nodeClient pb.MonoFSClient, routerAdd
 }
 
 // showAllNodesFiles lists files for a storage ID across ALL nodes
-func showAllNodesFiles(ctx context.Context, routerAddr string, clusterInfo *pb.ClusterInfoResponse, storageID, format string) error {
+func showAllNodesFiles(ctx context.Context, tr transport.Config, routerAddr string, clusterInfo *pb.ClusterInfoResponse, storageID, format string) error {
 	type nodeFiles struct {
 		nodeID string
 		files  []string
@@ -2071,7 +2077,7 @@ func showAllNodesFiles(ctx context.Context, routerAddr string, clusterInfo *pb.C
 	for _, node := range clusterInfo.Nodes {
 		go func(n *pb.NodeInfo) {
 			nodeConn, err := grpc.DialContext(ctx, n.Address,
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				transportDialOption(tr),
 				grpc.WithBlock(),
 			)
 			if err != nil {
@@ -2230,14 +2236,15 @@ type SourceStatsInfo struct {
 	CachedItems  int64   `json:"cached_items"`
 }
 
-func showFetchers(routerHTTP, format string, detailed bool) error {
+func showFetchers(tr transport.Config, routerHTTP, format string, detailed bool) error {
 	// Build URL
-	apiURL := fmt.Sprintf("http://%s/api/fetchers", routerHTTP)
+	apiURL := tr.HTTPURL(routerHTTP) + "/api/fetchers"
 	if detailed {
 		apiURL += "?detailed=true"
 	}
 
-	resp, err := http.Get(apiURL)
+	client := transportHTTPClient(tr, &http.Client{Timeout: 10 * time.Second})
+	resp, err := client.Get(apiURL)
 	if err != nil {
 		return fmt.Errorf("failed to connect to router: %w", err)
 	}
@@ -2360,7 +2367,7 @@ func formatBytesShort(bytes int64) string {
 }
 
 // dogfoodRepositories discovers sibling repos and ingests them into MonoFS.
-func dogfoodRepositories(routerAddr, reposFilter, excludeFilter string) error {
+func dogfoodRepositories(tr transport.Config, routerAddr, reposFilter, excludeFilter string) error {
 	siblingRepos := map[string]string{
 		"guardian": "https://github.com/radryc/guardian.git",
 		"doctor":   "https://github.com/radryc/doctor.git",
@@ -2433,7 +2440,7 @@ func dogfoodRepositories(routerAddr, reposFilter, excludeFilter string) error {
 
 		fmt.Fprintf(os.Stderr, "=== ingest repo: %s (%s) ===\n", name, ref)
 
-		if err := ingestRepository(routerAddr, source, ref, "", "git", "blob", false, "", os.Getenv("MONOFS_TOKEN")); err != nil {
+		if err := ingestRepository(tr, routerAddr, source, ref, "", "git", "blob", false, "", os.Getenv("MONOFS_TOKEN")); err != nil {
 			failures = append(failures, name)
 			fmt.Fprintf(os.Stderr, "WARNING: ingest failed for %s: %v\n", name, err)
 			continue

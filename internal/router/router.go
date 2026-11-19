@@ -34,7 +34,6 @@ import (
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -864,8 +863,12 @@ func (r *Router) SetSearchClient(addr string) error {
 
 	// Try initial connection. Search requires bearer authentication by
 	// default, so attach the configured router credential.
+	transportOpt, err := r.config.Transport.DialOption()
+	if err != nil {
+		return fmt.Errorf("configure transport for search: %w", err)
+	}
 	dialOpts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256 * 1024 * 1024)),
 	}
@@ -922,8 +925,15 @@ func (r *Router) retrySearchConnection(addr string) {
 			return
 		}
 
+		transportOpt, err := r.config.Transport.DialOption()
+		if err != nil {
+			r.logger.Warn("retry search connection: bad transport config",
+				"addr", addr,
+				"error", err)
+			continue
+		}
 		dialOpts := []grpc.DialOption{
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			transportOpt,
 			grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256 * 1024 * 1024)),
 		}
@@ -969,6 +979,7 @@ func (r *Router) SetFetcherClient(addrs []string) error {
 
 	config := fetcher.DefaultClientConfig()
 	config.FetcherAddresses = normalized
+	config.Transport = r.config.Transport
 
 	client, err := fetcher.NewClient(config, r.logger)
 	if err != nil {
@@ -1061,6 +1072,7 @@ func (r *Router) startFetcherReconnectLoop(addrs []string) {
 			case <-ticker.C:
 				config := fetcher.DefaultClientConfig()
 				config.FetcherAddresses = expectedAddrs
+				config.Transport = r.config.Transport
 
 				client, err := fetcher.NewClient(config, r.logger)
 				if err != nil {
@@ -1106,8 +1118,12 @@ func (r *Router) RegisterNode(nodeID, address string, weight uint32) error {
 	defer r.mu.Unlock()
 
 	// Connect to the node to verify it's reachable
+	transportOpt, err := r.config.Transport.DialOption()
+	if err != nil {
+		return fmt.Errorf("configure transport for node %s: %w", nodeID, err)
+	}
 	conn, err := grpc.NewClient(address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpcx.IPv4DialerOption(),
 		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 	)
@@ -2983,9 +2999,14 @@ func (r *Router) checkAllNodes() {
 		}
 
 		if state.client == nil && state.conn == nil {
+			transportOpt, transportErr := r.config.Transport.DialOption()
+			if transportErr != nil {
+				r.logger.Warn("failed to configure node transport", "node_id", nodeID, "error", transportErr)
+				continue
+			}
 			conn, err := grpc.NewClient(state.info.Address,
 				append([]grpc.DialOption{
-					grpc.WithTransportCredentials(insecure.NewCredentials()),
+					transportOpt,
 					grpcx.IPv4DialerOption(),
 					grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 				}, r.internalDialOptions()...)...,

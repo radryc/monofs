@@ -6,17 +6,17 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/transport"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // drainCluster puts the cluster into drain mode.
-func drainCluster(routerAddr, reason string) error {
+func drainCluster(tr transport.Config, routerAddr, reason string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 	)
 	if err != nil {
@@ -61,12 +61,12 @@ func drainCluster(routerAddr, reason string) error {
 }
 
 // undrainCluster exits drain mode.
-func undrainCluster(routerAddr string) error {
+func undrainCluster(tr transport.Config, routerAddr string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportDialOption(tr),
 		grpc.WithBlock(),
 	)
 	if err != nil {
