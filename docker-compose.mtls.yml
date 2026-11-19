@@ -1,0 +1,129 @@
+# Local mTLS override for the development stack.
+#
+#   go run github.com/radryc/tlsx/cmd/tlsx gen --dir .tls --reuse-ca
+#   docker compose -f docker-compose.yml -f docker-compose.mtls.yml up -d
+#
+# Each container mounts its own certificate directory (tls.crt, tls.key,
+# ca.crt) at the tlsx default path and serves gRPC/HTTP with mTLS. Server-side
+# STRATA_TLS_ALLOWED_SPIFFE_IDS lists the workloads allowed to connect; the
+# client containers present the router identity because the tlsx local bundle
+# generates one certificate per service type, not per replica.
+#
+# The diagnostics/pprof HTTP endpoints and the DuckDB logquery sidecars are
+# deliberately not switched to TLS here: they are plaintext by design, and the
+# storage node still dials its sidecar over plaintext.
+
+x-spiffe-router: &spiffe-router "spiffe://strata.local/ns/monofs/sa/monofs-router"
+x-spiffe-server: &spiffe-server "spiffe://strata.local/ns/monofs/sa/monofs-server"
+x-spiffe-search: &spiffe-search "spiffe://strata.local/ns/monofs/sa/monofs-search"
+x-spiffe-fetcher: &spiffe-fetcher "spiffe://strata.local/ns/monofs/sa/monofs-fetcher"
+x-spiffe-registry: &spiffe-registry "spiffe://strata.local/ns/monofs/sa/monofs-registry"
+
+# Routers accept peer routers, storage nodes, the search indexer, and the
+# registry (which reads and writes image layers through the router).
+x-allow-router: &allow-router "spiffe://strata.local/ns/monofs/sa/monofs-router,spiffe://strata.local/ns/monofs/sa/monofs-server,spiffe://strata.local/ns/monofs/sa/monofs-search,spiffe://strata.local/ns/monofs/sa/monofs-registry"
+
+# Storage nodes accept the router (health, ingestion, forwarding), peers
+# (replication/failover), the search indexer, and the registry.
+x-allow-server: &allow-server "spiffe://strata.local/ns/monofs/sa/monofs-router,spiffe://strata.local/ns/monofs/sa/monofs-server,spiffe://strata.local/ns/monofs/sa/monofs-search,spiffe://strata.local/ns/monofs/sa/monofs-registry"
+
+# Fetchers are dialed by storage nodes and by the router monitor.
+x-allow-fetcher: &allow-fetcher "spiffe://strata.local/ns/monofs/sa/monofs-router,spiffe://strata.local/ns/monofs/sa/monofs-server"
+
+# Clients verify that they reached a router or a storage node.
+x-expected-client: &expected-client "spiffe://strata.local/ns/monofs/sa/monofs-router,spiffe://strata.local/ns/monofs/sa/monofs-server"
+
+services:
+  fetcher-a:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: *allow-fetcher
+    volumes:
+      - ./.tls/monofs-fetcher:/var/run/secrets/strata-tls:ro
+
+  fetcher-b:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: *allow-fetcher
+    volumes:
+      - ./.tls/monofs-fetcher:/var/run/secrets/strata-tls:ro
+
+  search-index:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: *spiffe-router
+    volumes:
+      - ./.tls/monofs-search:/var/run/secrets/strata-tls:ro
+
+  router-a:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: *allow-router
+    volumes:
+      - ./.tls/monofs-router:/var/run/secrets/strata-tls:ro
+
+  router-b:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: *allow-router
+    volumes:
+      - ./.tls/monofs-router:/var/run/secrets/strata-tls:ro
+
+  node-a:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: *allow-server
+    volumes:
+      - ./.tls/monofs-server:/var/run/secrets/strata-tls:ro
+
+  node-b:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: *allow-server
+    volumes:
+      - ./.tls/monofs-server:/var/run/secrets/strata-tls:ro
+
+  node-c:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: *allow-server
+    volumes:
+      - ./.tls/monofs-server:/var/run/secrets/strata-tls:ro
+
+  node-d:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: *allow-server
+    volumes:
+      - ./.tls/monofs-server:/var/run/secrets/strata-tls:ro
+
+  node-e:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: *allow-server
+    volumes:
+      - ./.tls/monofs-server:/var/run/secrets/strata-tls:ro
+
+  # FUSE clients dial the router and, after topology discovery, the nodes
+  # directly. They present the router certificate and pin both server
+  # identities.
+  client:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_EXPECTED_SPIFFE_IDS: *expected-client
+    volumes:
+      - ./.tls/monofs-router:/var/run/secrets/strata-tls:ro
+
+  client2:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_EXPECTED_SPIFFE_IDS: *expected-client
+    volumes:
+      - ./.tls/monofs-router:/var/run/secrets/strata-tls:ro
+
+  client3:
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_EXPECTED_SPIFFE_IDS: *expected-client
+    volumes:
+      - ./.tls/monofs-router:/var/run/secrets/strata-tls:ro
