@@ -9,9 +9,10 @@
 // Modes:
 //
 //	off       plaintext gRPC and HTTP (default)
-//	optional  servers terminate TLS when a certificate and key are configured;
-//	          clients use TLS when a CA bundle is configured. Missing CA
-//	          bundles fall back to plaintext, so migration is not forced.
+//	optional  gRPC servers terminate TLS when a certificate and key are
+//	          configured and clients use TLS when a CA bundle is configured;
+//	          HTTP stays plaintext so local UIs and probes keep working.
+//	          Missing CA bundles fall back to plaintext.
 //	required  servers terminate mTLS (client certificates verified unless
 //	          STRATA_TLS_REQUIRE_CLIENT_CERT=false); clients use TLS and
 //	          verify the configured CA. Missing certificates are an error.
@@ -77,7 +78,7 @@ func (c Config) ServerUsesTLS() bool {
 	}
 }
 
-// ClientUsesTLS reports whether an outgoing connection should use TLS. In
+// ClientUsesTLS reports whether an outgoing gRPC connection should use TLS. In
 // optional mode clients use TLS only when a CA bundle is configured.
 func (c Config) ClientUsesTLS() bool {
 	switch c.Mode() {
@@ -89,6 +90,15 @@ func (c Config) ClientUsesTLS() bool {
 		return false
 	}
 }
+
+// HTTPUsesTLS reports whether HTTP listeners should terminate TLS. Optional
+// mode keeps HTTP plaintext so local UIs, port-forwards and probes keep
+// working while gRPC uses mTLS; required mode enables TLS for HTTP as well.
+func (c Config) HTTPUsesTLS() bool { return c.Mode() == tlsx.ModeRequired }
+
+// HTTPClientUsesTLS reports whether outbound HTTP should use TLS. Like
+// HTTPUsesTLS, optional mode stays plaintext for compatibility.
+func (c Config) HTTPClientUsesTLS() bool { return c.Mode() == tlsx.ModeRequired }
 
 // ServerTLSConfig returns the server *tls.Config, or nil for plaintext.
 func (c Config) ServerTLSConfig() (*tls.Config, error) {
@@ -154,7 +164,7 @@ func (c Config) DialOption() (grpc.DialOption, error) {
 
 // Scheme returns "https" when outgoing HTTP should use TLS, else "http".
 func (c Config) Scheme() string {
-	if c.ClientUsesTLS() {
+	if c.HTTPClientUsesTLS() {
 		return "https"
 	}
 	return "http"
@@ -169,7 +179,7 @@ func (c Config) HTTPURL(raw string) string {
 		return ""
 	}
 	if i := strings.Index(raw, "://"); i >= 0 {
-		if c.ClientUsesTLS() && strings.EqualFold(raw[:i], "http") {
+		if c.HTTPClientUsesTLS() && strings.EqualFold(raw[:i], "http") {
 			return c.Scheme() + raw[i:]
 		}
 		return raw
@@ -180,6 +190,12 @@ func (c Config) HTTPURL(raw string) string {
 // HTTPClient returns an HTTP client configured for TLS when enabled. The
 // supplied base client is copied, never mutated; nil uses http.DefaultClient.
 func (c Config) HTTPClient(base *http.Client) (*http.Client, error) {
+	if !c.HTTPClientUsesTLS() {
+		if base != nil {
+			return base, nil
+		}
+		return http.DefaultClient, nil
+	}
 	tlsCfg, err := c.ClientTLSConfig()
 	if err != nil {
 		return nil, err
@@ -220,6 +236,9 @@ func (c Config) ListenAndServe(srv *http.Server) error {
 
 // Serve serves srv on lis, wrapping the listener with TLS when configured.
 func (c Config) Serve(srv *http.Server, lis net.Listener) error {
+	if !c.HTTPUsesTLS() {
+		return srv.Serve(lis)
+	}
 	tlsCfg, err := c.ServerTLSConfig()
 	if err != nil {
 		_ = lis.Close()
