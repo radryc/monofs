@@ -1290,7 +1290,7 @@ func showFailoverStatus(tr transport.Config, routerAddr string) error {
 		fmt.Printf("      • When failed node recovers, it reclaims its files\n")
 		fmt.Printf("\n")
 		fmt.Printf("  [i] Tip: Check the web UI for detailed replication metrics:\n")
-		fmt.Printf("      http://%s/replication\n", routerAddr)
+		fmt.Printf("      %s/replication\n", tr.HTTPURL(routerAddr))
 	}
 
 	fmt.Printf("\n")
