@@ -19,6 +19,7 @@ import (
 	"github.com/radryc/monofs/internal/diagnostics"
 	"github.com/radryc/monofs/internal/search"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -65,6 +66,11 @@ func main() {
 	if *showVersion {
 		fmt.Printf("monofs-search %s (commit: %s, built: %s)\n", Version, Commit, BuildTime)
 		os.Exit(0)
+	}
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", err)
+		os.Exit(1)
 	}
 	telemetryCfg, err := telemetry.LoadConfig("monofs-search")
 	if err != nil {
@@ -187,7 +193,13 @@ func main() {
 	defer svc.Close()
 
 	// Create gRPC server
+	transportServerOpt, err := tlsTransport.ServerOption()
+	if err != nil {
+		logger.Error("failed to configure transport security", "error", err)
+		os.Exit(1)
+	}
 	grpcServer := grpc.NewServer(
+		transportServerOpt,
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.MaxRecvMsgSize(100*1024*1024), // 100MB max message size
 		grpc.MaxSendMsgSize(100*1024*1024),

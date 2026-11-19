@@ -46,6 +46,7 @@ import (
 	"github.com/radryc/monofs/internal/storage/blob/layout"
 	storagegit "github.com/radryc/monofs/internal/storage/git"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/internal/transport"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -149,6 +150,12 @@ func main() {
 	cfg, err := loadConfigFile(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -509,7 +516,13 @@ func main() {
 	})
 
 	// Create gRPC server
+	transportServerOpt, err := tlsTransport.ServerOption()
+	if err != nil {
+		logger.Error("failed to configure transport security", "error", err)
+		os.Exit(1)
+	}
 	grpcServer := grpc.NewServer(
+		transportServerOpt,
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.MaxRecvMsgSize(100*1024*1024),
 		grpc.MaxSendMsgSize(100*1024*1024),

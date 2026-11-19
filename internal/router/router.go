@@ -26,6 +26,7 @@ import (
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/radryc/monofs/pkg/grpcx"
@@ -152,6 +153,11 @@ type RouterConfig struct {
 	// every node because trace chunks are shard-local. "clickhouse" reads from
 	// one node because all nodes share the same ClickHouse table.
 	SpanEngine string
+
+	// Transport carries the resolved STRATA_TLS_* contract used for every
+	// dial the router makes to nodes, fetchers, search, and peer services.
+	// The zero value is plaintext.
+	Transport transport.Config
 }
 
 // RouterPeer identifies another router instance to aggregate UI data from.

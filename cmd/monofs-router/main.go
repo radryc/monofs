@@ -25,6 +25,7 @@ import (
 	filestorage "github.com/radryc/monofs/internal/storage/file"
 	gitstorage "github.com/radryc/monofs/internal/storage/git"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/authz"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
@@ -171,6 +172,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unsupported --spanengine %q (want logengine or clickhouse)\n", *spanEngine)
 		os.Exit(2)
 	}
+	// Resolve transport security once and pass it to every component that
+	// serves or dials traffic.
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", err)
+		os.Exit(1)
+	}
 	telemetryCfg, err := telemetry.LoadConfig("monofs-router")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load telemetry config: %v\n", err)
@@ -300,6 +308,7 @@ func main() {
 		AccessPolicyServeToken:         strings.TrimSpace(*accessPolicyServeToken),
 		InternalToken:                  strings.TrimSpace(*internalToken),
 		SearchToken:                    routerSearchToken(),
+		Transport:                      tlsTransport,
 	}
 	r := router.NewRouter(cfg, logger)
 	r.SetVersion(Version, Commit, BuildTime)
@@ -481,7 +490,14 @@ func main() {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
+	transportServerOpt, err := tlsTransport.ServerOption()
+	if err != nil {
+		logger.Error("failed to configure transport security", "error", err)
+		os.Exit(1)
+	}
+
 	grpcServer := grpc.NewServer(
+		transportServerOpt,
 		grpc.MaxRecvMsgSize(1024*1024*1024),
 		grpc.MaxSendMsgSize(1024*1024*1024),
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
@@ -672,8 +688,8 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("monofs router http ui listening", "port", *httpPort)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Info("monofs router http ui listening", "port", *httpPort, "scheme", tlsTransport.Scheme())
+		if err := tlsTransport.ListenAndServe(httpServer); err != nil && err != http.ErrServerClosed {
 			logger.Error("failed to serve http", "error", err)
 			os.Exit(1)
 		}

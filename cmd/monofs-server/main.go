@@ -29,6 +29,7 @@ import (
 	"github.com/radryc/monofs/internal/storage/logengine"
 	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/internal/telemetrycrypto"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/authz"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -199,6 +200,13 @@ func main() {
 	if *nodeID == "" {
 		fmt.Fprintln(os.Stderr, "Error: --node-id is required")
 		flag.Usage()
+		os.Exit(1)
+	}
+	// Resolve transport security once; the gRPC listener, the fetcher client,
+	// and server-side forwarding all use this configuration.
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", err)
 		os.Exit(1)
 	}
 	telemetryCfg, err := telemetry.LoadConfig("monofs-server")
@@ -382,7 +390,13 @@ func main() {
 	}
 
 	// Create gRPC server with raised message limits for inline dep blobs
+	transportServerOpt, err := tlsTransport.ServerOption()
+	if err != nil {
+		logger.Error("failed to configure transport security", "error", err)
+		os.Exit(1)
+	}
 	serverOpts := []grpc.ServerOption{
+		transportServerOpt,
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
 		grpc.MaxRecvMsgSize(1024 * 1024 * 1024), // 1 GB
 		grpc.MaxSendMsgSize(1024 * 1024 * 1024),
@@ -408,6 +422,7 @@ func main() {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)
 	}
+	srv.SetTransport(tlsTransport)
 	srv.SetAccessControl(accessControl)
 
 	if kvsStore != nil {

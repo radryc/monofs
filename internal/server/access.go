@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/internal/monopath"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/audit"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
@@ -102,6 +103,11 @@ func (a *AccessControl) Enabled() bool { return a != nil }
 
 // SetAccessControl installs node-side access control (nil disables it).
 func (s *Server) SetAccessControl(ac *AccessControl) { s.access = ac }
+
+// SetTransport configures the STRATA_TLS_* contract used for outgoing
+// connections (router topology refresh, peer forwarding, fetcher traffic).
+// Call it before EnableForwarding and ConfigureFetcher.
+func (s *Server) SetTransport(cfg transport.Config) { s.transport = cfg }
 
 // SetAuditEmitter attaches an optional WAL-backed audit emitter to AccessControl.
 func (a *AccessControl) SetAuditEmitter(emitter *audit.WALSpoolEmitter) {

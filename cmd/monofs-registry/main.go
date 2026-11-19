@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/radryc/monofs/internal/diagnostics"
 	"github.com/radryc/monofs/internal/registry"
+	"github.com/radryc/monofs/internal/transport"
 )
 
 var (
@@ -39,6 +41,12 @@ func main() {
 		diagnosticsAddr = flag.String("diagnostics-addr", ":5001", "Listen address for Prometheus /metrics (pprof only when MONOFS_DIAGNOSTICS_PPROF=true; empty disables)")
 	)
 	flag.Parse()
+
+	tlsTransport, transportErr := transport.Load()
+	if transportErr != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", transportErr)
+		os.Exit(1)
+	}
 
 	level := slog.LevelInfo
 	switch *logLevel {
@@ -117,8 +125,8 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("monofs-registry listening", "addr", *listen)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Info("monofs-registry listening", "addr", *listen, "scheme", tlsTransport.Scheme())
+		if err := tlsTransport.ListenAndServe(httpServer); err != nil && err != http.ErrServerClosed {
 			logger.Error("http server error", "error", err)
 			os.Exit(1)
 		}
