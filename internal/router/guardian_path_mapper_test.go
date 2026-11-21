@@ -52,6 +52,12 @@ func TestGuardianPathMappingRoundTrip(t *testing.T) {
 			relative:    ".access/envs/dev.yaml",
 		},
 		{
+			name:        "display profile file",
+			logicalPath: "/.display/profiles/engineering.json",
+			displayPath: "guardian-system",
+			relative:    ".display/profiles/engineering.json",
+		},
+		{
 			name:        "doctor catalog file",
 			logicalPath: "/doctor/v1/catalog/manifests/traces/default/2026-04-09/15/trace-1.json",
 			displayPath: "doctor/v1",
