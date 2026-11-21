@@ -158,3 +158,35 @@ func TestCanonicalBypass(t *testing.T) {
 		t.Fatal("canonical must bypass mapping")
 	}
 }
+
+func TestMapJSONKeepCanonical(t *testing.T) {
+	p := &CompiledProfile{ID: "eng", Keys: map[string]string{"partition": "eng_service"}}
+	out, err := MapJSONWithOptions([]byte(`{"partition":"p0","labels":{"guardian_partition":"p0"}}`), p, MapOptions{KeepCanonical: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	_ = json.Unmarshal(out, &got)
+	if got["eng_service"] != "p0" || got["partition"] != "p0" {
+		t.Fatalf("keep-canonical mapping = %v", got)
+	}
+}
+
+func TestMapJSONSQLKeepCanonical(t *testing.T) {
+	p := &CompiledProfile{ID: "eng", Keys: map[string]string{"partition": "eng_service"}}
+	out, err := MapJSONWithOptions([]byte(`{"columns":["partition","count"],"rows":[["p0",42]]}`), p, MapOptions{KeepCanonical: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Columns []string `json:"columns"`
+		Rows    [][]any  `json:"rows"`
+	}
+	_ = json.Unmarshal(out, &got)
+	if len(got.Columns) != 3 || got.Columns[0] != "eng_service" || got.Columns[1] != "count" || got.Columns[2] != "partition" {
+		t.Fatalf("columns = %v", got.Columns)
+	}
+	if len(got.Rows[0]) != 3 || got.Rows[0][0] != "p0" || got.Rows[0][1] != float64(42) || got.Rows[0][2] != "p0" {
+		t.Fatalf("rows = %v", got.Rows)
+	}
+}

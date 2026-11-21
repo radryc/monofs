@@ -14,9 +14,10 @@ import (
 
 // HeaderName and QueryParam are the two ways a caller requests a profile.
 const (
-	HeaderName    = "X-Strata-Display-Profile"
-	QueryParam    = "displayProfile"
-	VersionHeader = "X-Strata-Display-Version"
+	HeaderName          = "X-Strata-Display-Profile"
+	QueryParam          = "displayProfile"
+	VersionHeader       = "X-Strata-Display-Version"
+	KeepCanonicalHeader = "X-Strata-Display-Keep-Canonical"
 )
 
 // Known canonical keys that may be renamed.
@@ -188,9 +189,24 @@ func (b *Bundle) Profile(subject, id string) (*CompiledProfile, bool) {
 	return nil, false
 }
 
+// MapOptions controls one rendering pass.
+type MapOptions struct {
+	// Surface selects a per-surface override map (sql, metrics, logs, traces).
+	Surface string
+	// KeepCanonical keeps the original canonical key alongside the display key.
+	// The web UIs use this so their data accessors keep working while labels
+	// and exported JSON can still show the user's vocabulary.
+	KeepCanonical bool
+}
+
 // MapJSON renames known display keys in a JSON document. Unknown keys and all
 // values are preserved.
 func MapJSON(raw []byte, p *CompiledProfile, surface string) ([]byte, error) {
+	return MapJSONWithOptions(raw, p, MapOptions{Surface: surface})
+}
+
+// MapJSONWithOptions is MapJSON with UI-safe canonical companions.
+func MapJSONWithOptions(raw []byte, p *CompiledProfile, opts MapOptions) ([]byte, error) {
 	if p == nil || len(raw) == 0 {
 		return raw, nil
 	}
@@ -200,8 +216,12 @@ func MapJSON(raw []byte, p *CompiledProfile, surface string) ([]byte, error) {
 	if err := dec.Decode(&value); err != nil {
 		return nil, err
 	}
-	keys := p.KeysFor(surface)
-	mapped := mapValue(value, keys, p.IncludeCanonical)
+	ctx := mapCtx{
+		keys:             p.KeysFor(opts.Surface),
+		includeCanonical: p.IncludeCanonical,
+		keepCanonical:    opts.KeepCanonical,
+	}
+	mapped := mapValue(value, ctx)
 	out, err := json.Marshal(mapped)
 	if err != nil {
 		return nil, err
@@ -209,14 +229,35 @@ func MapJSON(raw []byte, p *CompiledProfile, surface string) ([]byte, error) {
 	return out, nil
 }
 
-func mapValue(value any, keys map[string]string, includeCanonical bool) any {
+type mapCtx struct {
+	keys             map[string]string
+	includeCanonical bool
+	keepCanonical    bool
+}
+
+func (c mapCtx) put(out map[string]any, key string, value any) {
+	if display, ok := c.keys[key]; ok {
+		out[display] = value
+		if c.keepCanonical {
+			out[key] = value
+		}
+		if c.includeCanonical {
+			canonicalKey := "canonical_" + key
+			if _, exists := out[canonicalKey]; !exists {
+				out[canonicalKey] = value
+			}
+		}
+		return
+	}
+	out[key] = value
+}
+
+func mapValue(value any, ctx mapCtx) any {
 	switch v := value.(type) {
 	case map[string]any:
-		// SQL result sets need the canonical companions appended to every row,
-		// not just to the column-name array.
 		if columns, ok := v["columns"]; ok {
 			if rows, ok := v["rows"]; ok {
-				mappedColumns, companions := mapSQLColumns(columns, keys, includeCanonical)
+				mappedColumns, companions := mapSQLColumns(columns, ctx)
 				out := make(map[string]any, len(v))
 				for key, child := range v {
 					switch key {
@@ -225,7 +266,7 @@ func mapValue(value any, keys map[string]string, includeCanonical bool) any {
 					case "rows":
 						out[key] = appendSQLCompanions(rows, companions)
 					default:
-						out[mapKey(key, keys)] = mapValue(child, keys, includeCanonical)
+						ctx.put(out, key, mapValue(child, ctx))
 					}
 				}
 				return out
@@ -235,31 +276,23 @@ func mapValue(value any, keys map[string]string, includeCanonical bool) any {
 		for key, child := range v {
 			switch key {
 			case "labels", "attributes", "resource_attributes", "metric":
-				out[mapKey(key, keys)] = mapLabelMap(child, keys, includeCanonical)
+				ctx.put(out, key, mapLabelMap(child, ctx))
 			case "columns":
-				out[mapKey(key, keys)] = mapColumns(child, keys, includeCanonical)
+				ctx.put(out, key, mapColumns(child, ctx))
 			case "partitions", "intents", "assets", "recentEvents", "nodes", "rows",
 				"data", "result", "results", "series":
-				out[mapKey(key, keys)] = mapValue(child, keys, includeCanonical)
+				ctx.put(out, key, mapValue(child, ctx))
 			case "body", "payload", "metadata":
-				out[mapKey(key, keys)] = child
+				ctx.put(out, key, child)
 			default:
-				out[mapKey(key, keys)] = mapValue(child, keys, includeCanonical)
-			}
-			if includeCanonical {
-				if display, ok := keys[key]; ok {
-					canonicalKey := "canonical_" + key
-					if _, exists := out[canonicalKey]; !exists {
-						out[canonicalKey] = out[display]
-					}
-				}
+				ctx.put(out, key, mapValue(child, ctx))
 			}
 		}
 		return out
 	case []any:
 		out := make([]any, len(v))
 		for i, child := range v {
-			out[i] = mapValue(child, keys, includeCanonical)
+			out[i] = mapValue(child, ctx)
 		}
 		return out
 	default:
@@ -267,24 +300,14 @@ func mapValue(value any, keys map[string]string, includeCanonical bool) any {
 	}
 }
 
-func mapLabelMap(value any, keys map[string]string, includeCanonical bool) any {
+func mapLabelMap(value any, ctx mapCtx) any {
 	obj, ok := value.(map[string]any)
 	if !ok {
-		return mapValue(value, keys, includeCanonical)
+		return mapValue(value, ctx)
 	}
 	out := make(map[string]any, len(obj))
 	for key, child := range obj {
-		if display, ok := keys[key]; ok {
-			out[display] = child
-			if includeCanonical {
-				canonicalKey := "canonical_" + key
-				if _, exists := out[canonicalKey]; !exists {
-					out[canonicalKey] = child
-				}
-			}
-			continue
-		}
-		out[key] = child
+		ctx.put(out, key, child)
 	}
 	return out
 }
@@ -294,7 +317,7 @@ type sqlCompanion struct {
 	name  string
 }
 
-func mapSQLColumns(value any, keys map[string]string, includeCanonical bool) (any, []sqlCompanion) {
+func mapSQLColumns(value any, ctx mapCtx) (any, []sqlCompanion) {
 	list, ok := value.([]any)
 	if !ok {
 		return value, nil
@@ -307,21 +330,26 @@ func mapSQLColumns(value any, keys map[string]string, includeCanonical bool) (an
 			out = append(out, child)
 			continue
 		}
-		if display, ok := keys[name]; ok {
-			companions = append(companions, sqlCompanion{index: len(out), name: "canonical_" + name})
+		if display, ok := ctx.keys[name]; ok {
+			sourceIndex := len(out)
 			out = append(out, display)
+			if ctx.keepCanonical {
+				companions = append(companions, sqlCompanion{index: sourceIndex, name: name})
+			}
+			if ctx.includeCanonical {
+				companions = append(companions, sqlCompanion{index: sourceIndex, name: "canonical_" + name})
+			}
 			continue
 		}
 		out = append(out, name)
 	}
-	if includeCanonical {
+	if len(companions) > 0 {
 		for _, companion := range companions {
 			out = append(out, companion.name)
 		}
 	}
-	if !includeCanonical {
-		companions = nil
-	}
+	// The companion entries above are appended to the column list; rows are
+	// extended using the same indexes in order.
 	return out, companions
 }
 
@@ -354,8 +382,8 @@ func appendSQLCompanions(value any, companions []sqlCompanion) any {
 	return out
 }
 
-func mapColumns(value any, keys map[string]string, includeCanonical bool) any {
-	out, _ := mapSQLColumns(value, keys, includeCanonical)
+func mapColumns(value any, ctx mapCtx) any {
+	out, _ := mapSQLColumns(value, ctx)
 	return out
 }
 
