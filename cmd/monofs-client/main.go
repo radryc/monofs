@@ -53,6 +53,8 @@ func main() {
 	overlayDir := flag.String("overlay", "", "Override default overlay storage location (~/.monofs/overlay)")
 	useExternalAddrs := flag.Bool("use-external-addrs", false, "Request router-advertised external node addresses (for host/WSL clients)")
 	writable := flag.Bool("writable", false, "Enable write support (changes stored client-side)")
+	headless := flag.Bool("headless", false, "Run without mounting FUSE; serve list/read/stat/write/mkdir over the session socket")
+	noMount := flag.Bool("no-mount", false, "Alias for --headless")
 	virtualMonorepo := flag.Bool("virtual-monorepo", false, "Project a source-first workspace root that keeps dependency visible but hides doctor, guardian, guardian-system, and nested .git paths")
 	debug := flag.Bool("debug", false, "Enable MonoFS layer DEBUG logs (written to --log-file if set, else stdout)")
 	fuseDebug := flag.Bool("fuse-debug", false, "Enable go-fuse C layer debug output (very verbose, written to <log-file>.fuse or stderr)")
@@ -75,13 +77,28 @@ func main() {
 		return
 	}
 
+	headlessMode := *headless || *noMount
+	if headlessMode {
+		// A headless client is write-capable by definition: its only surface
+		// is the session socket. A mount point, if supplied, is ignored.
+		*writable = true
+		if strings.TrimSpace(*overlayDir) == "" {
+			homeDir, _ := os.UserHomeDir()
+			*overlayDir = filepath.Join(homeDir, ".monofs", "overlay")
+		}
+		if strings.TrimSpace(*mountpoint) != "" {
+			fmt.Fprintf(os.Stderr, "[monofs-client] --headless ignores --mount %s\n", *mountpoint)
+			*mountpoint = ""
+		}
+	}
+
 	tlsTransport, err := transport.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load transport config: %v\n", err)
 		os.Exit(1)
 	}
 
-	if *mountpoint == "" {
+	if !headlessMode && *mountpoint == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -140,6 +157,7 @@ func main() {
 		"overlay", *overlayDir,
 		"use_external_addrs", *useExternalAddrs,
 		"writable", *writable,
+		"headless", headlessMode,
 		"virtual_monorepo", *virtualMonorepo,
 		"debug", *debug,
 		"fuse_debug", *fuseDebug,
@@ -332,9 +350,11 @@ func main() {
 				"include", includeGlobs, "exclude", excludeGlobs)
 		}
 
-		if err := root.EnableWorkspaceGitProjection(*mountpoint, workspaceGitStateDir); err != nil {
-			logger.Error("failed to enable workspace git projection", "error", err)
-			os.Exit(1)
+		if !headlessMode {
+			if err := root.EnableWorkspaceGitProjection(*mountpoint, workspaceGitStateDir); err != nil {
+				logger.Error("failed to enable workspace git projection", "error", err)
+				os.Exit(1)
+			}
 		}
 		logger.Info("virtual monorepo mode enabled")
 		if commitMgr != nil {
@@ -350,6 +370,25 @@ func main() {
 	}
 	if socketHandler != nil {
 		socketHandler.SetRootNode(root)
+		socketHandler.SetWorkspaceFS(monofuse.NewWorkspaceFS(
+			c,
+			sessionMgr,
+			root.WorkspaceManifest(),
+			logger.With("component", "workspace-fs"),
+		))
+	}
+
+	if headlessMode {
+		logger.Info("headless workspace client ready",
+			"router", *routerAddr,
+			"overlay", *overlayDir,
+			"session_socket", filepath.Join(*overlayDir, "session.sock"),
+		)
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-sigCh
+		logger.Info("received signal, stopping headless client", "signal", sig)
+		return
 	}
 
 	// Mount options
@@ -442,11 +481,6 @@ func workspaceGitStateDir(overlayDir string) string {
 }
 
 func validateClientPaths(mountpoint, overlayDir, cacheDir, workspaceGitStateDir string) error {
-	mountAbs, err := absoluteCleanPath(mountpoint)
-	if err != nil {
-		return fmt.Errorf("resolve mount path: %w", err)
-	}
-
 	checks := []struct {
 		label string
 		path  string
@@ -454,6 +488,16 @@ func validateClientPaths(mountpoint, overlayDir, cacheDir, workspaceGitStateDir 
 		{label: "overlay", path: overlayDir},
 		{label: "cache", path: cacheDir},
 		{label: "workspace git state", path: workspaceGitStateDir},
+	}
+
+	// Headless mode has no mount point to compare against; still reject empty
+	// paths only where a value was explicitly supplied.
+	if strings.TrimSpace(mountpoint) == "" {
+		return nil
+	}
+	mountAbs, err := absoluteCleanPath(mountpoint)
+	if err != nil {
+		return fmt.Errorf("resolve mount path: %w", err)
 	}
 
 	for _, check := range checks {

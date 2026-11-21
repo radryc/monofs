@@ -25,11 +25,6 @@ func (r *Router) QuerySQL(ctx context.Context, req *pb.QuerySQLRequest) (*pb.Que
 	if !ok {
 		return nil, status.Errorf(codes.InvalidArgument, "unsupported SQL dataset %q", dataset)
 	}
-	if r.sharedTelemetryReads() {
-		return nil, status.Error(codes.Unimplemented,
-			"federated SQL is not enabled for shared telemetry backends; use the direct ClickHouse driver")
-	}
-
 	partitions, restricted, err := r.querySQLScope(ctx, signal, req.GetVisiblePartitions(), req.GetVisiblePartitionsSet())
 	if err != nil {
 		return nil, err
@@ -42,7 +37,14 @@ func (r *Router) QuerySQL(ctx context.Context, req *pb.QuerySQLRequest) (*pb.Que
 		limit = 5000
 	}
 	if pol := r.policyInstance(); pol != nil && len(pol.Partitions()) > 0 {
+		// Policy-routed shards are explicit backend placements, not node
+		// replicas, so they remain valid when telemetry reads are shared via
+		// ClickHouse. The legacy node fan-out below does not.
 		return r.querySQLPolicy(ctx, req, pol, dataset, scope, from, to, limit)
+	}
+	if r.sharedTelemetryReads() {
+		return nil, status.Error(codes.Unimplemented,
+			"federated SQL is not enabled for shared telemetry backends; use the direct ClickHouse driver")
 	}
 	nodes := r.healthyFederationNodes()
 	if len(nodes) == 0 {

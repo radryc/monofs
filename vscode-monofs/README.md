@@ -47,14 +47,23 @@ This extension contributes the following settings:
 
 ## Dev-Workspace Partition
 
-The `dev-workspace` image now bakes this extension into OpenVSCode Server.
+The extension has a `devWorkspacePartition` runtime profile for VS Code servers
+running inside a prepared workspace image.
 
-- `uv run st-image build --partition dev-workspace` from the sibling `stratatools` checkout packages the extension into the `dev-workspace-vscode` image.
-- The partition entrypoint passes MonoFS mount, overlay, cache, router, and workspace-root values into the VS Code server process.
-- When the extension detects that runtime, it switches to the `devWorkspacePartition` profile automatically.
-- In that profile, the extension uses `/usr/local/bin`, `/mnt/monofs`, `/home/monofs/.monofs/overlay`, and `/var/cache/monofs` by default.
-- Bootstrap, release, port-forward, local build, and manual mount commands stay hidden because the partition already manages those concerns.
-- Session and workspace-opening commands stay available so the remote development environment remains useful without a local MonoFS checkout.
+- A workspace image enables the profile by setting
+  `MONOFS_VSCODE_PROFILE=devWorkspacePartition` or by shipping the marker file
+  `/etc/dev-workspace-buildinfo`.
+- The image supplies MonoFS mount, overlay, cache, router, workspace-root, and
+  binary-directory values through `MONOFS_*` and `ROUTER_ADDR` environment
+  variables.
+- When the extension detects that runtime, it switches to the
+  `devWorkspacePartition` profile automatically.
+- In that profile, the extension uses `/usr/local/bin`, `/mnt/monofs`,
+  `/home/monofs/.monofs/overlay`, and `/var/cache/monofs` by default.
+- Bootstrap, release, port-forward, local build, and manual mount commands stay
+  hidden because the image already manages those concerns.
+- Session and workspace-opening commands stay available so the remote
+  development environment remains useful without a local MonoFS checkout.
 
 ## Using It In dev-workspace
 

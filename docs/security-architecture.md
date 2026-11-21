@@ -53,18 +53,18 @@ of an older tree.
 
 | Boundary | Current enforcement | Problem |
 |---|---|---|
-| Network → router gRPC `:9090` | Optional bearer interceptor in observe mode; per-method checks | Most RPCs have no authentication or authorization |
-| Network → router HTTP `:8080` | OIDC/bearer middleware; public path exemption | Coarse authorization; any authenticated user can mutate admin state |
-| Network → native gateway | None | Full namespace read if enabled |
-| Network → storage node gRPC `:9000` | Optional policy source; otherwise none | Compose publishes nodes directly, bypassing router policy |
-| Network → fetcher gRPC `:9200` | None | Read/write/delete content, stage/publish/push workspaces |
-| Network → registry `:5000` | None | Pull, push, overwrite, delete images |
-| Network → search `:9100` | Observe-only authenticator | Unfiltered code search; delete/index operations |
-| Network → pipeline executor | None | Arbitrary command execution |
-| Network → Bazel cache `:9092` | None | Cache poisoning/read/write |
-| Router → node/search | Shared `x-monofs-internal` token over plaintext | Token leak compromises policy bypass |
-| Router → fetcher | None | Any fetcher can be impersonated or poisoned |
-| Guardian client → router | Payload token | Token transmitted in messages, not protected by transport |
+| Network → router gRPC `:9090` | Optional bearer interceptor in observe mode; per-method checks; mTLS optional | Most RPCs have no authentication or authorization |
+| Network → router HTTP `:8080` | OIDC/bearer middleware; public path exemption; TLS when required | Coarse authorization; any authenticated user can mutate admin state |
+| Network → native gateway | Shared mount token (when configured) | No per-principal authorization or read-only enforcement; plaintext TCP |
+| Network → storage node gRPC `:9000` | Optional policy source; otherwise none; mTLS optional | Compose publishes nodes on loopback, still bypassing router policy |
+| Network → fetcher gRPC `:9200` | No application authentication; mTLS optional | Read/write/delete content, stage/publish/push workspaces |
+| Network → registry `:5000` | No application authentication; TLS when required | Pull, push, overwrite, delete images |
+| Network → search `:9100` | Observe-only authenticator; mTLS optional | Unfiltered code search; delete/index operations |
+| Network → pipeline executor | Bearer/`X-Monofs-Executor-Token`; mTLS optional | Any authenticated caller can still execute arbitrary commands |
+| Network → Bazel cache `:9092` | No application authentication; TLS when required | Cache poisoning/read/write |
+| Router → node/search | Shared `x-monofs-internal` token; plaintext unless mTLS is required | Token leak compromises policy bypass |
+| Router → fetcher | No application authentication; plaintext unless mTLS is required | Any fetcher can be impersonated or poisoned |
+| Guardian client → router | Payload token; plaintext unless TLS is required | Token transmitted in messages |
 | Browser → router | Session cookie containing raw ID token | Replayable until expiry; no revocation/nonce |
 | Container → host | Privileged/SYS_ADMIN clients, `/dev/fuse`, host ports | Container escape/credential access |
 
@@ -78,7 +78,7 @@ of an older tree.
 
 **Machine tokens.** `pkg/authz` supports client credentials and a static break-glass verifier. `MONOFS_TOKEN` maps to `Identity{ClientID:"break-glass-admin"}`. There is no token minting, scoping, rotation, or expiry for internal tokens.
 
-**Guardian tokens.** Opaque tokens are carried in message fields (`GuardianConfig.auth_token`, `guardian_token`, `token`) or the `X-Guardian-Token` header. The router stores unsalted SHA-256 hashes in `guardian_principals.json`, validates by hash lookup, and infers a role from the client ID. `RegisterClient` is unauthenticated and accepts a `GuardianConfig` for any client ID.
+**Guardian tokens.** Opaque tokens are carried in message fields (`GuardianConfig.auth_token`, `guardian_token`, `token`) or the `X-Guardian-Token` header. The router stores unsalted SHA-256 hashes in `guardian_principals.json`, validates by hash lookup, and infers a role from the client ID. `RegisterClient` requires a verified caller identity; only break-glass/admin callers may assert another principal or role, and other callers register themselves as `viewer`.
 
 **Internal cluster token.** `x-monofs-internal` (or a bearer equal to the token) marks a call internal on storage nodes/search and bypasses read policy. The default value is `MONOFS_TOKEN`.
 
@@ -96,16 +96,13 @@ Runtime authorization has one source of truth:
 
 ### 4.3 Transport security
 
-There is **no TLS/mTLS in the Go control or data planes**:
+Transport security is available through `internal/transport`, which resolves the shared `STRATA_TLS_*` contract (`github.com/radryc/tlsx`) and is wired into the router, storage nodes, fetcher, search, registry, admin, client, session, cache, and load generator:
 
-- all gRPC servers use `grpc.NewServer()` with no `grpc.Creds`;
-- all clients dial with `insecure.NewCredentials()`;
-- HTTP servers have no TLS;
-- the native gateway is raw TCP;
-- HAProxy is plain TCP/HTTP;
-- the checked-in Compose topology assumes an external TLS terminator that is not defined in the repository.
+- `STRATA_TLS_MODE=off` is the default and keeps gRPC and HTTP plaintext;
+- `optional` terminates TLS/mTLS on gRPC when a certificate/key exist and keeps HTTP plaintext for local UIs and probes;
+- `required` serves TLS/mTLS on gRPC and HTTP and verifies client certificates unless `STRATA_TLS_REQUIRE_CLIENT_CERT=false`.
 
-This means bearer tokens, session cookies, Guardian tokens, internal tokens, Git credentials used by the fetcher, and file content are cleartext on the network unless an external proxy/mesh terminates TLS. Several code comments claim transport credentials exist; they do not.
+The native gateway remains raw TCP, and diagnostics servers are not wrapped. HAProxy in the checked-in Compose topology is still plain TCP/HTTP. The repository now includes `docker-compose.mtls.yml` for the local stack, but the default deployment is plaintext, so bearer tokens, session cookies, Guardian tokens, internal tokens, Git credentials used by the fetcher, and file content are cleartext unless an operator enables TLS or adds an external terminator.
 
 ### 4.4 Secrets and key management
 
@@ -142,31 +139,31 @@ This means bearer tokens, session cookies, Guardian tokens, internal tokens, Git
 - Server/router/registry/fuse-plugin images run as root.
 - Client containers run privileged with `SYS_ADMIN`, `/dev/fuse`, unconfined AppArmor, SSH enabled, a known `monofs` password, and passwordless sudo.
 - MinIO uses `minioadmin/minioadmin` and makes the bucket publicly readable.
-- Node gRPC ports `9001`-`9005` are published directly.
+- Node gRPC ports `9001`-`9005` are published on loopback; they are no longer reachable on external interfaces but still bypass the router/HAProxy path locally.
 - CI checks out `radryc/kvs`/`cfg` default branches while Docker pins different SHAs.
 - `go.sum` was deleted on release and Docker builds disabled checksum verification. **Fixed in the working tree**; see the remediation decisions.
 - Base images and tools are mostly tags/`latest`; GitHub Actions use mutable major tags.
-- The Docker CI matrix does not pass `target:`, so the `monofs` entry builds the final `fuse-plugin` stage, not server/router.
+- The Docker CI matrix now builds `server`, `router`, `search`, and `logquery` with explicit `target:` values.
 - `Dockerfile.pipeline-worker` and `Dockerfile.guardianctl` depend on an external `guardian` build context not in this repository.
 
 ## 5. Component control matrix
 
 | Component | Authentication | Authorization | Transport | Secrets | Audit |
 |---|---|---|---|---|---|
-| Router gRPC | Observe-only bearer | Per-method; many RPCs none | Plaintext | `MONOFS_TOKEN`, OIDC secret | Partial metrics |
-| Router HTTP | OIDC/bearer | Any authenticated user for many mutations; repo ACL reads | Plaintext | Session cookie, OIDC secret | Partial |
+| Router gRPC | Observe-only bearer | Per-method; many RPCs none | Plaintext default; mTLS optional | `MONOFS_TOKEN`, OIDC secret | Partial metrics |
+| Router HTTP | OIDC/bearer | Any authenticated user for many mutations; repo ACL reads | Plaintext default; TLS when required | Session cookie, OIDC secret | Partial |
 | Router native | Shared mount token (when enabled) | None | Plaintext TCP | `MONOFS_TOKEN`/`--native-auth-token` | Native metrics only |
-| Storage node | Optional policy source; internal token | Read policy only; no ingest/delete authz | Plaintext | Internal token, policy token | Partial |
-| Fetcher | None | None | Plaintext | Git tokens, encryption key | Counters only |
-| FUSE client | None locally | OS file permissions + mount owner | Plaintext to router/nodes | Client token in memory | Local metrics |
-| Search | Observe-only token | Post-query filter; off by default | Plaintext | Internal token, Git token | Partial |
-| Registry | None | None | Plaintext | Guardian token | Process counters |
-| Pipeline worker | Guardian token on queue | Task claim; no executor auth | Plaintext | Worker env/cloud creds | Task results only |
-| Pipeline executor | Bearer/dedicated token required | None (any authenticated caller can execute) | Plaintext HTTP | Inherits worker env | None |
-| Bazel cache | None | None | Plaintext HTTP | None | Counters |
-| Doctor | Depends on node/router auth | None on node Doctor RPCs | Plaintext | None | Log data |
-| UI | OIDC/bearer | No admin role for mutations | Plaintext | Raw ID token cookie | Partial |
-| Kernel module | Token option ignored | None | Plaintext TCP | Token in mount option | None |
+| Storage node | Optional policy source; internal token | Read policy only; no ingest/delete authz | Plaintext default; mTLS optional | Internal token, policy token | Partial |
+| Fetcher | None | None | Plaintext default; mTLS optional | Git tokens, encryption key | Counters only |
+| FUSE client | None locally | OS file permissions + mount owner | Plaintext default; TLS optional | Client token in memory | Local metrics |
+| Search | Observe-only token | Post-query filter; off by default | Plaintext default; mTLS optional | Internal token, Git token | Partial |
+| Registry | None | None | HTTP plaintext default; TLS when required | Guardian token | Process counters |
+| Pipeline worker | Guardian token on queue | Task claim; no executor auth | Plaintext default; mTLS optional | Worker env/cloud creds | Task results only |
+| Pipeline executor | Bearer/dedicated token required | None (any authenticated caller can execute) | Plaintext default; TLS optional | Inherits worker env | None |
+| Bazel cache | None | None | HTTP plaintext default; TLS when required | None | Counters |
+| Doctor | Depends on node/router auth | None on node Doctor RPCs | Plaintext default; mTLS optional | None | Log data |
+| UI | OIDC/bearer | No admin role for mutations | Plaintext default; TLS when required | Raw ID token cookie | Partial |
+| Kernel module | Token option enforced by gateway | None | Plaintext TCP | Token in mount option | None |
 
 ## 6. Findings
 
@@ -180,32 +177,32 @@ This means bearer tokens, session cookies, Guardian tokens, internal tokens, Git
 - `DrainCluster` / `UndrainCluster` (`drain.go`)
 - `RequestFailover` (`router.go`)
 - whitelist CRUD/toggle (`whitelist.go`)
-- `RegisterClient` / `UnregisterClient` (`router.go`)
+- `UnregisterClient` (`router.go`; `RegisterClient` now requires a verified identity)
 - `UploadWorkspaceBundle` / `PublishWorkspace` / `PushWorkspaceCommits` / `RefreshWorkspace`
 - `GetWorkspaceSyncJob` / `ListWorkspaceSyncJobs` / `CancelWorkspaceSyncJob`
 - `QueryLedger`, `GetUpstream*`, `GetClusterStats`, `GetNodeStats`
 
-Anyone who can reach `:9090` can delete data, disable failover behavior, register clients, read telemetry/upstream data, and start workspace writes.
+Anyone who can reach `:9090` can delete data, disable failover behavior, unregister clients, read telemetry/upstream data, and start workspace writes.
 
-#### C2. Guardian principal registration is an unauthenticated path to control-plane
+#### C2. Guardian principal registration is self-service and cannot be revoked
 
-`RegisterClient` accepts a `GuardianConfig` for any `ClientId`, persists a principal, and infers role `control-plane` for any ID not containing `pusher`/`cli` (`guardian_principals.go`). `authorizeGuardianMutation` allows `control-plane` everything. An attacker can self-register with a chosen token and then write/delete every Guardian path, including pipeline configs, queues, and partitions.
+`RegisterClient` now requires a verified caller identity. Break-glass/admin callers may assert another principal or role (for example `guardiand`); other callers are persisted as `viewer` and cannot self-assign `control-plane`. The remaining problem is lifecycle: any authenticated identity can persist its own Guardian token, and there is no disable/delete/rotate/revoke RPC; `UnregisterClient` removes the client record but leaves the persisted principal token valid (`guardian_principals.go`). A leaked control-plane token therefore remains usable for every Guardian path, including pipeline configs, queues, and partitions.
 
-#### C3. No TLS/mTLS anywhere in the Go control/data plane
+#### C3. TLS/mTLS is implemented but off by default
 
-All gRPC servers have no credentials and all clients use `insecure.NewCredentials()`. HTTP has no TLS. Native is raw TCP. Tokens, cookies, Git credentials, and content cross the network in cleartext unless an external terminator is added. The code comments claiming otherwise are wrong.
+`internal/transport` wraps the gRPC and HTTP listeners and clients in the router, storage nodes, fetcher, search, registry, admin, client, session, cache, and load generator with the shared `STRATA_TLS_*` contract. With the default `STRATA_TLS_MODE=off`, all of those connections stay plaintext; `optional` encrypts only gRPC and leaves HTTP plaintext. The native gateway, diagnostics servers, and checked-in HAProxy config are not covered. Tokens, cookies, Git credentials, and content therefore cross the network in cleartext unless the operator sets `required` (or an external terminator is added).
 
 #### C4. Native gateway has no authorization and only a shared token
 
 `router.NativeGateway` now checks `MountRequest.AuthToken` against the configured shared token and fails startup when the native listener is enabled without one. It still has no per-principal authorization; `MountFlags` are ignored, so read-only mount semantics are not enforced; `Lookup` accepts `.` and `..`; and reads can exceed the advertised 256 KiB limit. **Status:** token enforcement implemented; authorization/read-only enforcement remains open.
 
-#### C5. Fetcher plane has no authentication, TLS, or integrity binding
+#### C5. Fetcher plane has no application authentication
 
-`BlobFetcher` and `RepoSyncWorker` expose `StoreBlob`, `StoreBlobBatchStream`, `DeleteBlobs`, `StoreArchive`, workspace staging, publish, source push, and upstream reads with no auth. Any network client can read/poison/delete content, stage bundles, and push to upstream repositories using the fetcher's credentials. `fetcher.Client` has no token field and uses insecure credentials.
+`BlobFetcher` and `RepoSyncWorker` expose `StoreBlob`, `StoreBlobBatchStream`, `DeleteBlobs`, `StoreArchive`, workspace staging, publish, source push, and upstream reads with no application auth. Any network client that can reach `:9200` can read/poison/delete content, stage bundles, and push to upstream repositories using the fetcher's credentials; mTLS protects the channel only when `STRATA_TLS_MODE=required`. `fetcher.Client` has no token field.
 
 #### C6. Pipeline executor is authenticated remote code execution
 
-`POST /execute` accepts arbitrary `arguments`, environment variables, input/output files, working directory, and timeout. It now requires a bearer/`X-Monofs-Executor-Token` credential and bounds the request body, but still runs `exec.CommandContext` with the worker's full environment, no sandbox, no TLS, and no resource limits. **Status:** authentication implemented; sandboxing/limits remain open.
+`POST /execute` accepts arbitrary `arguments`, environment variables, input/output files, working directory, and timeout. It now requires a bearer/`X-Monofs-Executor-Token` credential and bounds the request body, but still runs `exec.CommandContext` with the worker's full environment, no sandbox and no resource limits; transport TLS applies only when `STRATA_TLS_MODE=required`. **Status:** authentication implemented; sandboxing/limits remain open.
 
 #### C7. Client containers are privileged SSH boxes with a known password
 
@@ -227,7 +224,7 @@ The release workflow used to delete every `go.sum` and Docker builds disabled ch
 
 #### H3. Storage node read policy is optional and bypassable
 
-`server.NewAccessControl` returns nil without a policy file/URL, so no interceptor and no read checks are installed. Compose publishes nodes directly. When policy is installed:
+`server.NewAccessControl` returns nil without a policy file/URL, so no interceptor and no read checks are installed. Compose publishes nodes on loopback. When policy is installed:
 
 - `PolicyAllowsPath` allows root and any path shape that `SplitDisplayPath` cannot parse (including short repo paths such as `myrepo` or `docker-registry/foo`).
 - `ReadDir` of root/intermediate dirs is allowed to everyone.
@@ -238,9 +235,9 @@ The release workflow used to delete every `go.sum` and Docker builds disabled ch
 
 The authenticator is `requireToken=false`; `applyReadPolicy` returns all hits when no policy is configured, when enforcement is off, or when the caller is anonymous in observe mode. `Search` does not require a storage ID and supports repository filters. `DeleteIndex` with an empty/unknown storage ID removes every `.zoekt` shard. `IndexRepository` accepts arbitrary `StorageID`/`DisplayPath`/source, enabling local path deletion and Git SSRF.
 
-#### H5. Registry has no authentication or TLS
+#### H5. Registry has no application authentication
 
-Every `/v2/` route is open, including push, tag overwrite, and delete. Blobs are global by digest, so deleting one repository's layer can break another; any client can replace `latest`. There is no `WWW-Authenticate` challenge, so standard Docker auth cannot be negotiated without protocol changes. The proxy stores upstream blobs without digest verification and accepts HTTP upstreams.
+Every `/v2/` route is open, including push, tag overwrite, and delete. TLS is available when `STRATA_TLS_MODE=required`, but the API itself has no auth. Blobs are global by digest, so deleting one repository's layer can break another; any client can replace `latest`. There is no `WWW-Authenticate` challenge, so standard Docker auth cannot be negotiated without protocol changes. The proxy stores upstream blobs without digest verification and accepts HTTP upstreams.
 
 #### H6. Access-policy read controls are bypassed or dead
 
@@ -255,9 +252,8 @@ Every `/v2/` route is open, including push, tag overwrite, and delete. Blobs are
 
 #### H7. Any authenticated user can perform administrative/security mutations
 
-No admin role is required for:
+The access-policy enforcement toggle is admin-gated, but no admin role is required for:
 
-- authz ingest toggle (`/api/authz/ingest/toggle`);
 - whitelist add/remove/toggle;
 - rebalance, repository refresh, pprof collection;
 - Guardian partition inject/delete (any Guardian token);
@@ -293,15 +289,15 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 #### H14. OIDC identity handling has authorization-relevant flaws
 
 - `azp` is used as machine `ClientID`; human tokens can inherit machine grants, and `PrincipalID()` prefers `ClientID` for audit.
-- `sub`/`exp`/`iat`/`nbf` are not required; a signed token without `sub`/`client_id` becomes anonymous with a nil error, and enforce-mode authentication accepts that result.
+- A token without `sub` and `client_id` is rejected, but `exp`/`iat`/`nbf` are not required (`jwt.Claims.Validate` only checks claims that are present).
 - `email_verified` is ignored while email is an authorization subject.
 - No nonce, no ID-token type check, no revocation; the session cookie is the raw ID token.
 - A persistent session file trusts any unexpired identity on disk.
-- `/debug` is exempt from login, exposing pprof anonymously in browser-OIDC mode.
+- `/debug` is not a default OIDC exemption, but it sits outside `/api/` and is therefore anonymously reachable in token-only mode.
 
 #### H15. Authorization model duplicates and disagrees with itself
 
-- Three break-glass implementations use different fields (`Subject` vs `ClientID`), so the operator token is not consistently admin.
+- Three break-glass checks (`accessAdmin`, `isBreakGlassAdmin`, server `isAdmin`) plus the `AddBreakGlassAdmin` seed list still duplicate the same decision. They now accept both `Subject` and `ClientID`, but each reimplements the magic-string rule and there is no role-based replacement.
 - Admin semantics are now scope-aware: wildcard admin is global, explicit partition lists are scoped. Missing `logs`/`traces`/`monofs` lists still deny those signals even for an admin.
 - Policy `defaults.partitions: allow` makes `CanSeePartition` true but `VisiblePartitions` returns empty.
 - Empty selector labels match absent labels; selectors can shadow partition names; missing catalog silently drops rules.
@@ -331,11 +327,10 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 
 #### H18. Supply chain and deployment defaults
 
-- Compose publishes node ports directly and both networks are ordinary bridges; the “DMZ” is conceptual.
+- Compose publishes node ports on loopback and both networks are ordinary bridges; the “DMZ” is conceptual.
 - MinIO default credentials and public-read bucket.
 - Server/router/registry/plugin images run as root.
 - CI checks out unpinned sibling repos; Docker pins different SHAs. `go.sum` deletion is fixed, but the pinning/signing work remains.
-- Docker CI builds the wrong target.
 - Base images/tools are unpinned.
 - Pipeline examples invoke non-existent targets, encouraging unsafe ad-hoc deployment.
 
@@ -348,7 +343,7 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 - **CODEOWNERS matcher:** recursive `**` can be exponential; no memoization.
 - **Ownership TOCTOU:** OWNERS are read from the live store then the write proceeds; a concurrent OWNERS change can invalidate the decision.
 - **Grant store:** whole-file rewrite with no lock/fsync; two replicas can lose updates; load bypasses validation.
-- **Guardian versions:** content is not durable; history is in-memory; directory/prefix listing is exact-path only; deletions leave child versions “current.”
+- **Guardian versions:** asset version metadata is persisted in Pebble (bounded to 50 versions per path) but content is only a bounded in-memory cache; machinery paths (dot-prefixed) are ephemeral; deletions leave child versions “current.”
 - **Guardian upsert/delete not transactional:** node writes happen before version commits; partial groups can diverge.
 - **Workspace jobs/bundles:** replayable for 30 minutes, unbounded memory, not removed by fetcher after publish/push; no job retention.
 - **Workspace WAL:** default `FsyncEnabled=false`; snapshots/checkpoints not fsynced; corrupt checkpoint can lose compacted history.
@@ -358,12 +353,12 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 - **Search:** indexes/caches world-readable; unbounded queries/results; no query timeout; full clone per job.
 - **Registry:** no timeouts, no range support, no pagination/catalog, no manifest validation, no referrers, no upload resume.
 - **Pipeline:** retry task loses steps and runner type; matrix jobs collapse into one status; failed/cancelled dependencies count as satisfied; cancelled runs can be overwritten to succeeded; runs are in-memory; webhooks under `/api/` are unreachable by real forges; tag events never have a SHA.
-- **Pipeline KVS:** `List(prefix)` is exact-path, so task claiming/config discovery is broken against the real router; claims are not atomic; no claim expiry.
+- **Pipeline KVS:** claims are not atomic and have no expiry, so a crashed worker can leave a task stuck.
 - **Bazel cache:** unauthenticated AC/CAS; AC PUT accepted without validation; CAS PUT buffers whole body before size check.
 - **Bazel migration:** `GenerateFallbackGenrule` interpolates repo-controlled action into a Bazel command; `RemoveFallbackGenrules` deletes any BUILD containing the marker; display paths are joined without containment.
 - **Pipeline executor:** lexical `resolveWithin`; `.`/empty working dir can delete the executor root; symlink output exfiltration; no process-group kill; env leakage.
 - **Native protocol:** `DecodeReadDirResponse` allocation amplification (~40 MB from 1 MiB), `MaxReadBytes`/`MaxBytes` not enforced, 32-bit length overflow. A shared mount token is now required, but the transport is still unencrypted.
-- **Diagnostics:** pprof and metrics unauthenticated on all interfaces; no HTTP timeouts.
+- **Diagnostics:** `/metrics` is unauthenticated on all interfaces; pprof is added only with `MONOFS_DIAGNOSTICS_PPROF=true` and is then also unauthenticated; no HTTP timeouts.
 - **FUSE:** socket `rm` accepts `..` (arbitrary remove/chmod), `current` symlink escape (chmod/RemoveAll outside overlay), dependency symlink exfiltration, world-readable overlays, hardcoded writable path, write-then-crash invisibility, backend error treated as empty file.
 - **Registry proxy:** token realm trusted from `WWW-Authenticate` (blind SSRF); no size limits on manifests/tags; upstream credentials parsed but unused.
 - **Kernel module:** `FS_USERNS_MOUNT` allows unprivileged mounts; plaintext token; no frame-size limit in kmod; no reply request-ID validation; partial send desync; readdir capped at 256 entries.
@@ -392,60 +387,24 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 - Ingest authorization fails closed when enforcement is on and the policy bundle is missing.
 - The ownership gate fails closed on resolver errors (when it is enabled and correctly wired).
 - Blob archives are encrypted at rest and use content-addressed entry names.
+- The shared `internal/transport` helper implements verified TLS/mTLS (including optional SPIFFE allowlists) for gRPC and HTTP; it is off by default but needs no new code to enable.
 - Workspace bundles validate relative paths, reject `.git` components, and reject `.`/`..` escapes for operation paths.
 - The embedded KVS test demonstrates repository namespace isolation.
 - The fetcher key guard refuses writes when the key fingerprint is pending (except the streaming batch path).
 - Guardian mutation roles are namespace-scoped for pusher/doctor/pipeline (though the pipeline role is over-broad).
 
-## 8. Remediation roadmap
-
-### P0 — before exposing any service to an untrusted network
-
-1. **Turn on authentication enforcement.** Set router gRPC `RequireToken=true`; remove the observe-mode default. Add explicit authorization to every destructive/control RPC. Remove or gate `RegisterClient`; require an admin/control-plane credential to create principals.
-2. **Add TLS/mTLS.** Use `grpc.Creds`/certificates or a service mesh for router, nodes, fetcher, search, and registry. Do not accept plaintext internal traffic. If TLS termination is external, make it mandatory and validate it in startup.
-3. **Remove the native gateway from untrusted networks** or implement its token/session authorization, read-only flags, and frame limits. Prefer Unix-domain sockets or mTLS.
-4. **Lock down the fetcher plane.** Authenticate every RPC, bind tokens to services, validate `storageID`/hash, verify content hashes, reject path traversal, and restrict repository URLs by scheme/host allowlist. Do not apply the global Git token to arbitrary hosts.
-5. **Authenticate the pipeline executor or delete it.** If retained, require mTLS/token auth, a sandbox, resource limits, a fixed working-directory policy, and no inherited secrets.
-6. **Remove privileged client containers** and the known SSH password. Run unprivileged, drop capabilities, use keys only, and avoid `SYS_ADMIN` where possible.
-7. **Stop deleting `go.sum`; restore checksum verification.** Pin base images and CI dependencies; sign release artifacts.
-8. **Remove public MinIO defaults and direct node port publishing.** Use a private network, strong credentials, and no public bucket.
-
-### P1 — before multi-tenant or production use
-
-1. **Unify authorization.** One identity model; one policy evaluator; one break-glass mechanism keyed by an explicit role/claim, not a magic string. (Runtime policy consolidation is done; break-glass remains.)
-2. **Fix read enforcement.** Require a policy source when enforcement is on; fail startup otherwise. Apply ACLs to `/api/routers`, merge requests, registry, search, telemetry, upstream reads, native reads, and workspace cancellation.
-3. **Fix Guardian authorization.** Role/scope checks on read/history/subscriptions; role checks on HTTP deletes; validate paths; make principal lifecycle revocable; make version content durable; persist dot-prefixed machinery paths or separate them from ephemeral state.
-4. **Close registry authentication/integrity gaps.** Auth, TLS, repo ownership, per-repo blob namespaces or reference counting, digest verification on proxy, upload limits, chunk completion markers, and OCI conformance fixes.
-5. **Fix search authorization and `DeleteIndex`.** Require auth, reject empty/unknown storage IDs, validate `StorageID`/`DisplayPath`, and apply policy before indexing/querying rather than after.
-6. **Fix workspace security.** Sign/authenticate bundles; bind author/principal to the authenticated identity; reject symlink targets outside the worktree; apply the sensitive-path filter to source push; make publish follow the same policy/ownership gates as push; make autopush update job state/ledger/PR.
-7. **Fix secret handling.** Split `MONOFS_TOKEN` into per-service short-lived credentials; rotate; bind Git tokens to hosts; remove the global fallback; redact URLs/errors; stop logging source config.
-8. **Harden the UI.** Admin checks on every mutation; CSRF tokens/Origin checks; no raw ID token in a cookie (or short-lived opaque sessions); CSP/security headers; remove `/debug` exemption; sanitize `marked` output.
-9. **Fix path/tenant isolation.** Canonicalize and reject `..`/empty/NUL at every boundary; namespace every key by tenant; add a tenant dimension or explicitly document single-tenancy.
-10. **Harden CI/CD and deployment.** Pin sibling repos and base images; fix Docker targets and build all binaries; run integration/security tests; add SBOM/signing; add network policies.
-
-### P2 — hardening and operability
-
-1. Add security audit events and metrics for allow/deny, admin actions, deletes, failover, whitelist, and policy changes.
-2. Add rate limits, request size limits, timeouts, and admission control everywhere.
-3. Make health/readiness honest; fix failover-cache TTL and deletion cleanup.
-4. Add per-repository and per-tenant quotas.
-5. Add negative/security tests: authn/authz deny, traversal, oversized inputs, malformed bundles, digest mismatch, symlink escape, registry conformance.
-6. Remove dead/unused security abstractions that give false confidence (unused session store, unused upstream credentials).
-7. Harden browser sessions (nonce, refresh, revocation, `__Host-` cookies, per-mount names).
-8. Harden the kernel module (frame size, reply matching, partial send, namespace auth).
-
-## 9. Secure deployment checklist
+## 8. Secure deployment checklist
 
 Before running MonoFS outside a trusted lab:
 
-- [ ] TLS/mTLS on every listener; no plaintext internal traffic.
+- [ ] TLS/mTLS enabled (`STRATA_TLS_MODE=required`), including the native gateway and diagnostics; no plaintext internal traffic.
 - [ ] Router gRPC `RequireToken=true`; every destructive RPC authorized.
 - [ ] Guardian principal registration requires admin/control-plane credentials.
 - [ ] Native gateway disabled or authenticated and network-restricted.
 - [ ] Fetcher, search, registry, pipeline executor, and Bazel cache on private networks with auth.
 - [ ] `MONOFS_TOKEN` split into scoped secrets; no reuse across services.
 - [ ] Git tokens host-bound; repository URL allowlist; `file://`/SSH policy explicit.
-- [ ] Storage node ports not published; only HAProxy/ingress exposed.
+- [ ] Storage node ports not published beyond loopback; only HAProxy/ingress exposed.
 - [ ] Client containers unprivileged; no SSH password; no `SYS_ADMIN` unless required.
 - [ ] MinIO/S3 private, strong credentials, encryption, no public bucket.
 - [ ] Registry auth + TLS + per-repo ownership; image signature verification.
@@ -455,10 +414,10 @@ Before running MonoFS outside a trusted lab:
 - [ ] Audit logging and metrics for security decisions.
 - [ ] Backups and restore tests for Pebble, workspace WAL, blob archives, and KVS.
 
-## 10. Open questions and residual risks
+## 9. Open questions and residual risks
 
-- The repository does not include the external TLS terminator, HAProxy image, or Guardian deployment that production may rely on. If those exist outside this repository, their controls are not verifiable here.
-- Several findings depend on configuration: for example, node auth is absent only when no policy source is configured; search filtering is absent when enforcement is off. The default checked-in configuration is permissive.
-- The code comments and old docs contain claims that are contradicted by the code (transport credentials, stateless fetchers, “DMZ” isolation, implemented S3 ingestion, Guardian grants). Treat comments as intent, not evidence.
+- The repository now includes the shared `STRATA_TLS_*` helper and `docker-compose.mtls.yml`; an external TLS terminator, HAProxy image, or Guardian deployment that production may rely on is not verifiable here.
+- Several findings depend on configuration: for example, node auth is absent only when no policy source is configured; search filtering is absent when enforcement is off; transport is plaintext unless `STRATA_TLS_MODE` is `optional` or `required`. The default checked-in configuration is permissive.
+- Some code comments and older docs still describe behavior that has since changed (stateless fetchers, “DMZ” isolation, implemented S3 ingestion, Guardian grants). Treat comments as intent, not evidence.
 - No penetration test, fuzzing, or dynamic analysis was performed. The assessment is static and code-derived.
 - The kernel module was reviewed statically; no runtime exploitability testing was performed.

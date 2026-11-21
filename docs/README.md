@@ -18,7 +18,7 @@ When a document disagrees with the implementation, fix the document.
 ```mermaid
 flowchart LR
     subgraph Clients
-        FUSE[monofs-client<br/>FUSE mount]
+        FUSE[monofs-client<br/>FUSE or headless]
         SESSION[monofs-session<br/>overlay/session CLI]
         SDK[internal/client<br/>ShardedClient]
         UI[Router web UI]
@@ -83,7 +83,7 @@ MonoFS separates three things that are often one filesystem:
 
 Telemetry is a separate storage plane. `monofs-server` keeps logs, metrics, and traces in local Parquet chunks by default, or routes all three signals to shared ClickHouse tables with `--spanengine=clickhouse`. An optional `monofs-logquery` DuckDB sidecar serves SQL queries against either engine.
 
-The writable client path is **not** a server-side POSIX write implementation. `monofs-client` writes into a local overlay (NutsDB plus ordinary files), records local virtual commits, and `monofs-session` publishes or pushes the result through the router and fetcher to a Git remote. The server's `Create`/`Write` RPCs exist but are not implemented; the active write model is overlay + bundle sync.
+The writable client path is **not** a server-side POSIX write implementation. `monofs-client` writes into a local overlay (NutsDB plus ordinary files), records local virtual commits, and `monofs-session` publishes or pushes the result through the router and fetcher to a Git remote. The server's `Create`/`Write` RPCs exist but are not implemented; the active write model is overlay + bundle sync. `monofs-client --headless` runs the same overlay and session without mounting FUSE, and exposes `list`/`stat`/`read`/`write`/`mkdir` over the session socket; see [architecture.md](architecture.md#71-fuse-client).
 
 ## Source-of-truth notes
 

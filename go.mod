@@ -45,6 +45,7 @@ require (
 )
 
 require (
+	github.com/radryc/sqlagregator/drivers/clickhouse v0.0.0-20261119102149-54702312cd7f
 	github.com/radryc/sqlagregator/drivers/omni v0.0.0-00010101000000-000000000000
 	github.com/radryc/tlsx v0.0.0-20261119062528-06e96b34334f
 )
@@ -236,3 +237,5 @@ replace github.com/radryc/sqlagregator/drivers/omni => ../sqlagregator/drivers/o
 replace github.com/radryc/sqlagregator/drivers/cloudwatchlogsinsights => ../sqlagregator/drivers/cloudwatchlogsinsights
 
 replace github.com/radryc/sqlagregator/drivers/bigquery => ../sqlagregator/drivers/bigquery
+
+replace github.com/radryc/sqlagregator/drivers/clickhouse => ../sqlagregator/drivers/clickhouse

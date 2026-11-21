@@ -2,8 +2,8 @@
 
 `monofs-logquery` is the DuckDB query sidecar for a MonoFS storage node. It
 reads the same logengine data directory as `monofs-server` and serves the
-telemetry query RPCs (`QueryLogs`, `StreamQueryLogs`, metrics, traces and
-metric series). The router and UI keep using `monofs-server`; the server
+telemetry query RPCs (`QueryLogs`/`StreamQueryLogs`, metrics, traces, metric
+series, and `QueryDuckDBSQL`). The router and UI keep using `monofs-server`; the server
 proxies read queries to the sidecar and keeps ingest and compaction local.
 
 ## Storage layout
@@ -140,8 +140,11 @@ dataset view. Queries are limited to seven days and 5,000 rows.
 
 When MonoFS uses `--spanengine=clickhouse`, the same `logs`, `metrics`, and
 `traces` views are rendered over the ClickHouse tables and the same partition
-scope is applied before the user's SQL runs. The router executes the statement
-on one healthy node in that mode because the ClickHouse tables are shared.
+scope is applied before the user's SQL runs. `QueryDuckDBSQL` executes the
+statement on one healthy node in that mode because the ClickHouse tables are
+shared. The separate federated `QuerySQL` path does not fan out nodes in that
+mode; it requires a partition policy with explicit placements (see
+[architecture.md](architecture.md#86-federated-sql)).
 
 ## Metric schema v3 migration
 

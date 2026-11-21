@@ -32,11 +32,11 @@ RUN git init /kvs && \
     git init /cfg && \
     git -C /cfg remote add origin "$CFG_REPO_URL" && \
     git -C /cfg fetch --depth 1 origin "$CFG_REF" && \
-    git -C /cfg checkout --detach FETCH_HEAD && \
-    git init /sqlagregator && \
-    git -C /sqlagregator remote add origin "$SQLAGREGATOR_REPO_URL" && \
-    git -C /sqlagregator fetch --depth 1 origin "$SQLAGREGATOR_REF" && \
-    git -C /sqlagregator checkout --detach FETCH_HEAD
+    git -C /cfg checkout --detach FETCH_HEAD
+
+# sqlagregator is a sibling build context so local dialect/SQL changes are
+# included in the image. Pass --build-context sqlagregator=<repo>.
+COPY --from=sqlagregator . /sqlagregator
 
 # Retry proxy fetches and fall back to direct VCS downloads when proxy.golang.org is flaky.
 RUN set -eu; \

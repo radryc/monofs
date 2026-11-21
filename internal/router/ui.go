@@ -342,20 +342,47 @@ func (r *Router) handleIngest(w http.ResponseWriter, req *http.Request) {
 	fetchConfig := make(map[string]string)
 	// Form parsing for nested configs would go here if needed
 
-	// Start ingestion asynchronously to avoid blocking HTTP request
-	go func() {
-		stream := &mockIngestStream{ctx: detachedIngestContext(req)}
+	ingestReq := &pb.IngestRequest{
+		Source:          source,
+		Ref:             ref,
+		SourceId:        sourceID,
+		IngestionType:   parseIngestionTypeString(ingestionType),
+		FetchType:       parseFetchTypeString(fetchType),
+		ReplicateData:   replicateData,
+		IngestionConfig: ingestionConfig,
+		FetchConfig:     fetchConfig,
+	}
 
-		err := r.IngestRepository(&pb.IngestRequest{
-			Source:          source,
-			Ref:             ref,
-			SourceId:        sourceID,
-			IngestionType:   parseIngestionTypeString(ingestionType),
-			FetchType:       parseFetchTypeString(fetchType),
-			ReplicateData:   replicateData,
-			IngestionConfig: ingestionConfig,
-			FetchConfig:     fetchConfig,
-		}, stream)
+	// Authorize before returning "started": IngestRepository runs in a
+	// goroutine, so a denial there would only reach the router log and the UI
+	// would falsely report success. This mirrors the display-path derivation
+	// inside IngestRepository; the authoritative check still runs there.
+	displayPath := sourceID
+	if displayPath == "" {
+		displayPath = normalizeRepoID(source)
+	}
+	if err := r.authorizeIngest(req.Context(), ingestReq, displayPath); err != nil {
+		r.logger.Warn("ingest rejected before start",
+			"source", source,
+			"display_path", displayPath,
+			"error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Start ingestion asynchronously to avoid blocking HTTP request. The
+	// detached context is created before returning so the goroutine does not
+	// race with the request's cancellation.
+	ingestCtx := detachedIngestContext(req)
+	go func() {
+		stream := &mockIngestStream{ctx: ingestCtx}
+
+		err := r.IngestRepository(ingestReq, stream)
 
 		if err != nil {
 			r.logger.Error("async ingestion failed",
@@ -596,6 +623,7 @@ func (r *Router) handleRepositoriesList(w http.ResponseWriter, req *http.Request
 	}
 
 	if repos, ok := data.(*RepositoriesData); ok {
+		r.mergePeerRepositories(req, repos)
 		r.repoCacheMu.Lock()
 		r.repoCache = repos
 		r.repoCacheAt = time.Now()
@@ -605,6 +633,83 @@ func (r *Router) handleRepositoriesList(w http.ResponseWriter, req *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+// mergePeerRepositories fills per-repository ingest counts from peer routers.
+// The async ingest snapshot lives only on the router that accepted the POST;
+// without this merge the UI reports "0 files" whenever the load balancer
+// answers from the other router, even though the files are on the nodes.
+func (r *Router) mergePeerRepositories(req *http.Request, data *RepositoriesData) {
+	if data == nil || req.Header.Get("X-MonoFS-Peer-Merge") != "" {
+		return
+	}
+	r.mu.RLock()
+	peers := append([]RouterPeer(nil), r.config.PeerRouters...)
+	r.mu.RUnlock()
+	if len(peers) == 0 {
+		return
+	}
+	index := make(map[string]int, len(data.Repositories))
+	for i, repo := range data.Repositories {
+		if id, ok := repo["storage_id"].(string); ok && id != "" {
+			index[id] = i
+		}
+	}
+	authorization := strings.TrimSpace(req.Header.Get("Authorization"))
+	for _, peer := range peers {
+		base := strings.TrimRight(strings.TrimSpace(peer.URL), "/")
+		if base == "" || base == "http://"+req.Host || base == "https://"+req.Host {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+		peerReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/repositories", nil)
+		if err != nil {
+			cancel()
+			continue
+		}
+		peerReq.Header.Set("X-MonoFS-Peer-Merge", "1")
+		if authorization != "" {
+			peerReq.Header.Set("Authorization", authorization)
+		}
+		resp, err := http.DefaultClient.Do(peerReq)
+		if err != nil {
+			cancel()
+			continue
+		}
+		var peerData RepositoriesData
+		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&peerData)
+		_ = resp.Body.Close()
+		cancel()
+		if decodeErr != nil {
+			continue
+		}
+		for _, peerRepo := range peerData.Repositories {
+			id, _ := peerRepo["storage_id"].(string)
+			if id == "" {
+				continue
+			}
+			i, ok := index[id]
+			if !ok {
+				data.Repositories = append(data.Repositories, peerRepo)
+				index[id] = len(data.Repositories) - 1
+				continue
+			}
+			local := data.Repositories[i]
+			peerCount, _ := peerRepo["files_count"].(float64)
+			localCount, _ := local["files_count"].(float64)
+			if peerCount > localCount {
+				local["files_count"] = peerCount
+			}
+			for _, key := range []string{"in_progress", "stage", "message", "total_files"} {
+				if _, ok := local[key]; ok {
+					continue
+				}
+				if value, ok := peerRepo[key]; ok {
+					local[key] = value
+				}
+			}
+		}
+	}
 }
 
 func (r *Router) handleRouters(w http.ResponseWriter, req *http.Request) {

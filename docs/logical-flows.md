@@ -65,11 +65,12 @@
 1. Resolve visible owner from the nearest existing ancestor of `--overlay`.
 2. Build a sharded client; if the router is unavailable, use `NewDisconnectedClient` and retry.
 3. Optionally create the metadata cache (NutsDB, 30 s TTL); delete the cache directory unless `--keep-cache`.
-4. If writable, create `SessionManager`, `CommitManager`, and the Unix socket handler.
-5. Build the root node, enable virtual monorepo/repo filter/Git projection as requested.
-6. `fs.Mount` with `AllowOther`, 30 s attr/entry timeouts, and negative timeout 0 when writable.
-7. Sync the synthetic Git workspace after mount.
-8. On unmount, close socket/cache/client. No session commit or discard is performed.
+4. If writable, create `SessionManager`, `CommitManager`, and the Unix socket handler. `--headless`/`--no-mount` forces writable mode, defaults `--overlay` to `~/.monofs/overlay`, and ignores any `--mount`.
+5. Build the root node, enable virtual monorepo/repo filter/Git projection as requested. Headless mode skips the synthetic Git projection because there is no mount point.
+6. Attach `WorkspaceFS` to the session socket. In headless mode, wait for SIGINT/SIGTERM and exit without mounting FUSE; no session commit or discard is performed.
+7. Otherwise `fs.Mount` with `AllowOther`, 30 s attr/entry timeouts, and negative timeout 0 when writable.
+8. Sync the synthetic Git workspace after mount.
+9. On unmount, close socket/cache/client. No session commit or discard is performed.
 
 ## 3. Ingestion
 
@@ -109,6 +110,7 @@ IngestRepository (internal/router/ingest.go)
 - `goModuleVersion` splits a trailing `@version` for non-URL sources and uses the version as the Git ref.
 - `validateGitRef` rejects whitespace, `..`, revision operators, leading/trailing `/`, `.lock`, and trailing `.`.
 - Guardian ingestion forces `guardian/<source_id>` and rejects reserved `guardian*`/`doctor*` paths for ordinary ingestion.
+- `authorizeIngest` evaluates the first display-path segment (the source host, e.g. `github.com`), so an ingesting principal needs a host grant; repo read visibility is still governed by the normal repository/partition scope. The HTTP ingest handler runs the same check before returning, so a denial is a synchronous `403` rather than an async log line.
 
 **Key limits:**
 
@@ -118,12 +120,11 @@ IngestRepository (internal/router/ingest.go)
 
 **Failure behavior:**
 
-- HTTP ingestion returns 200 before validation/clone; failures are only logged.
+- HTTP ingestion returns 200 before validation/clone; authorization failures are surfaced synchronously as HTTP 403, other async failures are only logged.
 - Partial primary failures are counted but still end in `COMPLETED`; only every-batch failure fails the RPC.
 - Replica failures never fail the request.
 - Archives written before a later failure are not cleaned up.
 - Concurrent ingests of the same display path share a single `inProgressIngestions[storageID]` slot and can clobber each other's progress.
-- File/HTTP ingestion is broken by an enum-string mismatch: `INGESTION_FILE` becomes `"ingestion_file"` instead of `"file"`, so backend lookup fails asynchronously.
 
 ### 3.2 HTTP ingestion
 
@@ -132,15 +133,16 @@ IngestRepository (internal/router/ingest.go)
 1. POST only.
 2. If the whitelist is enabled, check `client_id` form or `X-Client-ID` (caller-controlled).
 3. Parse `source`, `ref`, `source_id`, `ingestion_type`, `fetch_type`, `replicate_data`; reject Guardian type.
-4. Start a goroutine with a detached context that preserves the caller identity but not gRPC metadata.
-5. Return `200 {"status":"in_progress"}` immediately.
+4. Pre-authorize the display path with `authorizeIngest`; on denial return `403 {"success":false,"message":...}`.
+5. Start a goroutine with a detached context that preserves the caller identity but not gRPC metadata.
+6. Return `200 {"status":"in_progress"}` immediately.
 
 `POST /api/ingest/file` (`handleIngestFileUpload`):
 
 1. Parse multipart with a 500 MiB memory threshold (not a total request cap).
 2. Create `/tmp/monofs-upload-*`.
 3. Write each `header.Filename` with `filepath.Join(tempDir, name)`; no explicit `filepath.Base`.
-4. Ingest the temp directory as `INGESTION_FILE` (which fails as above).
+4. Ingest the temp directory as `INGESTION_FILE`. Local filesystem ingestion must be enabled on the router (`--local-ingest`, default true).
 5. Delete the temp directory when the goroutine finishes.
 
 ### 3.3 Guardian partition injection
@@ -305,6 +307,8 @@ Flush (every close)
 
 **Crash window:** a process kill between `write(2)` and `close(2)` leaves the file on disk but no DB entry. `RebuildFromDisk` only runs when the DB is completely empty, so repository-path files remain invisible.
 
+The headless `WorkspaceFS.Write`/`Mkdir` path uses the same `SessionManager` and overlay but records `ChangeCreate`/`ChangeModify`/`ChangeMkdir` immediately after writing, without a FUSE `Flush`. Reads merge overlay state with backend metadata in the same order as `MonoNode.Lookup`.
+
 **Delete/rename/symlink:**
 
 - `Unlink` removes local content and records a tombstone, or removes the DB entry outright for session-created paths.
@@ -449,7 +453,7 @@ Router gRPC uses `RequireToken=false`, so missing/invalid tokens become anonymou
 
 ### 7.4 Guardian token
 
-Guardian tokens travel in message fields/headers, are hashed with SHA-256 in the principal store, and map to a principal/role. `RegisterClient` can persist a principal without authentication; role inference defaults to `control-plane`.
+Guardian tokens travel in message fields/headers, are hashed with SHA-256 in the principal store, and map to a principal/role. `RegisterClient` requires a verified caller identity; admin callers may assert another principal/role, and role inference defaults unknown IDs to `control-plane`; non-admin callers are registered as `viewer`.
 
 ## 8. Guardian flows
 
@@ -484,6 +488,8 @@ DeleteGuardianPaths
 ### 8.3 Read/version/subscribe
 
 `ListGuardianVersions`, `GetGuardianVersion`, and `SubscribeGuardianChanges` validate the token but do not authorize by role/scope. A subscriber with an empty prefix receives all events. Change delivery is at-most-once; slow subscribers are dropped.
+
+`ReadGuardianPath` returns content verified against the authoritative version. When no node can answer, it first serves the version store's bounded recent-content cache (after verifying the SHA-256), then reports `Unavailable` while the version is younger than a 10-minute grace window. Only a version that stays unreadable past that window is tombstoned, so ingest/replication lag never turns into a delete.
 
 ### 8.4 Version storage
 
@@ -605,7 +611,7 @@ PUT /v2/<repo>/manifests/<tag|digest>
   -> write tag + rewrite _catalog
 ```
 
-There is no auth, no TLS, no cross-repo mount, no range support, and no reference counting. Blobs are global by digest.
+The registry's router and node gRPC clients attach the cluster token (`authorization: Bearer <token>`, `x-monofs-internal: <token>`), so an enforcing router answers `GetClusterInfo` and `/v2/` works; without it the handshake fails `Unauthenticated` and clients see an EOF. The registry HTTP API itself has no application auth, no cross-repo mount, no range support, and no reference counting; TLS is available when `STRATA_TLS_MODE=required`. Blobs are global by digest.
 
 ## 12. Doctor telemetry flow
 
@@ -634,6 +640,25 @@ StreamQueryLogs/Metrics/Traces
 ```
 
 Unknown pipe stages are silently ignored by the query parser.
+
+### 12.3 Federated SQL
+
+```text
+QuerySQL(dataset, query, from, to, limit, visible partitions)
+  -> datasetSignal(dataset); reject unknown
+  -> querySQLScope -> sqlag.Scope (restricted + partitions)
+  -> policy has partitions?
+       yes -> Route(policy, identity, visible)
+              -> one placement per shard (primary, or an allowed replica
+                 when no allowed primary exists)
+              -> BackendResolver.Resolve -> dialect emitter -> partial query
+       no  -> shared telemetry reads? -> Unimplemented (use the ClickHouse driver)
+              -> BuildCatalog over healthy nodes -> NodeBackend.QueryPartial
+  -> merge partials, apply limit, collect coverage gaps/warnings
+  -> ResultsJson
+```
+
+Policy-routed placements are explicit backends (MonoFS local, Omni, BigQuery, ClickHouse, Logs Insights), so they remain valid when ClickHouse serves shared telemetry. The legacy node fan-out treats nodes as disjoint data shards and is rejected in that mode. A fresh route for a partition outside the caller's grant is omitted before any backend call.
 
 ## 13. Failure and failover flows
 
@@ -671,6 +696,7 @@ make build
 
 docker build (main Dockerfile)
   -> router-ui-builder -> builder -> per-binary builders -> runtime stages
+  -> sqlagregator arrives as a named build context (--build-context sqlagregator=<repo>)
   -> server/router/registry/fuse-plugin run as root
   -> search/fetcher run as monofs
 

@@ -7,6 +7,28 @@ MonoFS is a distributed filesystem and workspace service for large monorepos. It
 - **The router** (`monofs-router`) coordinates topology, ingestion, workspace publish/push/refresh, Guardian control paths, Doctor telemetry queries, pipelines, and the web UI.
 - **Clients** (`monofs-client`, `monofs-session`) expose a FUSE mount and a local-overlay write model with local virtual commits.
 
+### Headless workspace client
+
+`monofs-client --headless` (alias `--no-mount`) runs the same write session,
+overlay, and cluster client **without mounting FUSE**. It serves filesystem
+operations over the existing session socket:
+
+```bash
+monofs-client --headless --router localhost:9090 \
+  --overlay /var/lib/monofs/overlay --writable --virtual-monorepo
+
+monofs-session list github.com/acme/repo
+monofs-session read github.com/acme/repo/main.go
+monofs-session write github.com/acme/repo/main.go --content 'package main'
+monofs-session stat github.com/acme/repo/main.go
+monofs-session mkdir github.com/acme/repo/internal
+```
+
+This path needs no `/dev/fuse` and no `SYS_ADMIN`. Reads merge the local
+overlay with cluster content (read-your-writes); writes land in the overlay and
+are committed/pushed with the normal `add`/`commit`/`push` flow. The JSON
+socket verbs are also usable directly by non-Go clients.
+
 ## Documentation
 
 The documentation in this repository is derived from the source code and is
@@ -52,9 +74,10 @@ The main `Dockerfile` is a multi-stage build for the UI and all runtime images. 
 
 ## Transport security (mTLS)
 
-All services read the shared `STRATA_TLS_*` contract implemented by
+The Go services (router, storage nodes, fetcher, search, registry, clients, admin, session, and cache) read the shared `STRATA_TLS_*` contract implemented by
 [`github.com/radryc/tlsx`](../tlsx). `STRATA_TLS_MODE=off` is the default and
-keeps gRPC and HTTP plaintext, so existing deployments are unchanged.
+keeps gRPC and HTTP plaintext, so existing deployments are unchanged. The native
+gateway and diagnostics listeners are not covered by this layer.
 
 | Variable | Default | Meaning |
 |---|---|---|

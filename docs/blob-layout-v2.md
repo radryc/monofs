@@ -1,10 +1,10 @@
 # Blob Layout v2 — durable digest→pack index, batching, compaction
 
-Status: proposed / first slice implemented in `internal/storage/blob/layout`.
+Status: implemented; `BlobBackend` uses v2 by default. Legacy remains a read fallback and an opt-out (`--blob-layout=legacy`).
 Goal: keep the number of pack objects small and the number of listings bounded
 (ideally zero) on the read path, at 10^4–10^6 images and parallel deployments.
 
-## Problems with the current layout
+## Problems with the legacy layout
 
 - `_loose/<digest>.pack` — one archive + `.idx` per small object (tags, manifests,
   small blobs). Object count grows with every metadata write.
@@ -12,8 +12,9 @@ Goal: keep the number of pack objects small and the number of listings bounded
   same `StoreBlobBatch` call; one-object writes never batch.
 - Reads resolve a digest by listing `_batch/` + `_loose/` (capped at 5000
   objects) and reading every `.idx` sidecar. O(N) per miss, and it times out.
-- There is no background compactor for blob archives. `DeleteBlobs(compact)`
+- The legacy layout has no background compactor for blob archives. `DeleteBlobs(compact)`
   only rewrites archives on delete; `monofs-logengine-compact` is telemetry.
+  v2 provides an optional compactor (`--blob-compactor`).
 
 ## Layout
 

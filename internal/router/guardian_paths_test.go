@@ -98,7 +98,7 @@ func TestGuardianReadRepairsContentVersionMismatch(t *testing.T) {
 	}
 }
 
-func TestGuardianReadTombstonesVersionWhenContentIsMissing(t *testing.T) {
+func TestGuardianReadDoesNotRetireRecentVersionWhenContentIsTemporarilyMissing(t *testing.T) {
 	router, _, node, cleanup := newGuardianRouterTestHarness(t)
 	defer cleanup()
 
@@ -114,8 +114,10 @@ func TestGuardianReadTombstonesVersionWhenContentIsMissing(t *testing.T) {
 		t.Fatalf("UpsertGuardianPaths() error = %v", err)
 	}
 
-	// Simulate content loss after a replica/router failover: the version record
-	// survives but the bytes are gone from every node.
+	// Simulate replication/ingest lag: the version record is committed but no
+	// replica has the bytes yet. A read must report the miss as transient and
+	// must not delete the version (that made Guardian drop and rewrite the
+	// state file on every reconcile).
 	mapped, err := mapGuardianLogicalPath(logicalPath)
 	if err != nil {
 		t.Fatalf("mapGuardianLogicalPath() error = %v", err)
@@ -128,12 +130,29 @@ func TestGuardianReadTombstonesVersionWhenContentIsMissing(t *testing.T) {
 	delete(node.fileMode, mapped.RelativePath)
 	node.mu.Unlock()
 
+	if _, err := router.ReadGuardianPath(ctx, &pb.ReadGuardianPathRequest{
+		GuardianToken: "secret-token",
+		LogicalPath:   logicalPath,
+	}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("ReadGuardianPath() error = %v, want Unavailable while the version is recent", err)
+	}
+	current, exists, err := router.guardianVersions.CurrentVersionWithError(logicalPath)
+	if err != nil || !exists || current == nil || current.Tombstone {
+		t.Fatalf("recent version was retired by a read: exists=%v record=%+v err=%v", exists, current, err)
+	}
+
+	// Once the version is older than the grace window and is still unreadable,
+	// a read retires it so the next CAS create can recreate the file.
+	grace := guardianContentMissingGrace
+	guardianContentMissingGrace = 0
+	t.Cleanup(func() { guardianContentMissingGrace = grace })
+
 	readResp, err := router.ReadGuardianPath(ctx, &pb.ReadGuardianPathRequest{
 		GuardianToken: "secret-token",
 		LogicalPath:   logicalPath,
 	})
 	if err != nil {
-		t.Fatalf("ReadGuardianPath() error = %v (want Found=false instead of Unavailable)", err)
+		t.Fatalf("ReadGuardianPath() after grace error = %v (want Found=false instead of Unavailable)", err)
 	}
 	if readResp.GetFound() {
 		t.Fatal("expected Found=false after the content disappeared")

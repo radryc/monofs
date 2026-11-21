@@ -192,6 +192,12 @@ func main() {
 		bqEndpoint             = flag.String("bigquery-endpoint", strings.TrimSpace(os.Getenv("MONOFS_BIGQUERY_ENDPOINT")), "BigQuery API endpoint override (emulators/tests)")
 		bqTimeout              = flag.Duration("bigquery-timeout", envDuration("MONOFS_BIGQUERY_TIMEOUT", 60*time.Second), "Per-query BigQuery timeout")
 		bqMaxRows              = flag.Int("bigquery-max-rows", envInt("MONOFS_BIGQUERY_MAX_ROWS", 200000), "Maximum rows returned by one BigQuery partial query")
+		chURL                  = flag.String("clickhouse-url", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_URL")), "ClickHouse HTTP endpoint for clickhouse placements")
+		chDatabase             = flag.String("clickhouse-database", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_DATABASE")), "ClickHouse database for clickhouse placements")
+		chUser                 = flag.String("clickhouse-user", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_USER")), "ClickHouse user")
+		chPassword             = flag.String("clickhouse-password", strings.TrimSpace(os.Getenv("MONOFS_CLICKHOUSE_PASSWORD")), "ClickHouse password")
+		chTimeout              = flag.Duration("clickhouse-timeout", envDuration("MONOFS_CLICKHOUSE_TIMEOUT", 20*time.Second), "Per-query ClickHouse timeout")
+		chMaxRows              = flag.Int("clickhouse-max-rows", envInt("MONOFS_CLICKHOUSE_MAX_ROWS", 200000), "Maximum rows returned by one ClickHouse partial query")
 	)
 	flag.Parse()
 	switch strings.ToLower(strings.TrimSpace(*spanEngine)) {
@@ -351,6 +357,14 @@ func main() {
 			Endpoint:      strings.TrimSpace(*omniEndpoint),
 			SessionPrefix: strings.TrimSpace(*omniSessionPrefix),
 			Timeout:       *omniTimeout,
+		}),
+		"clickhouse": sqlfederation.NewClickHouseResolver(sqlfederation.ClickHouseResolverConfig{
+			URL:      strings.TrimSpace(*chURL),
+			Database: strings.TrimSpace(*chDatabase),
+			User:     *chUser,
+			Password: *chPassword,
+			Timeout:  *chTimeout,
+			MaxRows:  *chMaxRows,
 		}),
 		"bigquery": sqlfederation.NewBigQueryResolver(sqlfederation.BigQueryResolverConfig{
 			ProjectID:       strings.TrimSpace(*bqProject),

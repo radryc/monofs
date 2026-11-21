@@ -20,6 +20,7 @@ import (
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -67,6 +68,34 @@ type Client struct {
 	heartbeatWG   sync.WaitGroup
 }
 
+// tokenDialOptions attaches the cluster token to every router and node RPC.
+// Without it an enforcing router rejects GetClusterInfo with Unauthenticated
+// and the registry never starts serving /v2/, which surfaces to docker push as
+// an EOF.
+func tokenDialOptions(token string) []grpc.DialOption {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	attach := func(ctx context.Context) context.Context {
+		// x-monofs-internal lets storage nodes treat the registry as a
+		// control-plane client; authorization covers the router and any
+		// break-glass verifier on the node.
+		return metadata.AppendToOutgoingContext(ctx,
+			"authorization", "Bearer "+token,
+			"x-monofs-internal", token,
+		)
+	}
+	return []grpc.DialOption{
+		grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			return invoker(attach(ctx), method, req, reply, cc, opts...)
+		}),
+		grpc.WithChainStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			return streamer(attach(ctx), desc, cc, method, opts...)
+		}),
+	}
+}
+
 func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 	if cfg.RouterAddr == "" {
 		return nil, fmt.Errorf("router address is required")
@@ -89,12 +118,14 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 	}
 	conn, err := grpc.NewClient(
 		cfg.RouterAddr,
-		transportOpt,
-		grpcx.IPv4DialerOption(),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(1024*1024*1024),
-			grpc.MaxCallSendMsgSize(1024*1024*1024),
-		),
+		append([]grpc.DialOption{
+			transportOpt,
+			grpcx.IPv4DialerOption(),
+			grpc.WithDefaultCallOptions(
+				grpc.MaxCallRecvMsgSize(1024*1024*1024),
+				grpc.MaxCallSendMsgSize(1024*1024*1024),
+			),
+		}, tokenDialOptions(cfg.Token)...)...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connect to monofs router: %w", err)
@@ -625,12 +656,14 @@ func (c *Client) refreshNodes(ctx context.Context) error {
 		}
 		nodeConn, dialErr := grpc.NewClient(
 			nodeAddr,
-			transportOpt,
-			grpcx.IPv4DialerOption(),
-			grpc.WithDefaultCallOptions(
-				grpc.MaxCallRecvMsgSize(1024*1024*1024),
-				grpc.MaxCallSendMsgSize(1024*1024*1024),
-			),
+			append([]grpc.DialOption{
+				transportOpt,
+				grpcx.IPv4DialerOption(),
+				grpc.WithDefaultCallOptions(
+					grpc.MaxCallRecvMsgSize(1024*1024*1024),
+					grpc.MaxCallSendMsgSize(1024*1024*1024),
+				),
+			}, tokenDialOptions(c.token)...)...,
 		)
 		if dialErr != nil {
 			continue
