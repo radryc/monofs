@@ -18,10 +18,11 @@ const (
 	ScopeTraces     = "traces"
 	ScopeSQL        = "sql"
 	ScopeMonoFS     = "monofs"
+	ScopeAudit      = "audit"
 )
 
 // AllScopes lists the configurable scopes (metrics deliberately excluded).
-var AllScopes = []string{ScopePartitions, ScopeLogs, ScopeTraces, ScopeSQL, ScopeMonoFS}
+var AllScopes = []string{ScopePartitions, ScopeLogs, ScopeTraces, ScopeSQL, ScopeMonoFS, ScopeAudit}
 
 // Signal is a telemetry signal for read decisions.
 type Signal string
@@ -40,6 +41,7 @@ type Defaults struct {
 	Traces     bool `json:"traces"`
 	SQL        bool `json:"sql"`
 	MonoFS     bool `json:"monofs"`
+	Audit      bool `json:"audit"`
 }
 
 // allows reports the default decision for a scope name.
@@ -55,6 +57,8 @@ func (d Defaults) allows(scope string) bool {
 		return d.SQL
 	case ScopeMonoFS:
 		return d.MonoFS
+	case ScopeAudit:
+		return d.Audit
 	}
 	return false
 }
@@ -79,6 +83,7 @@ type Grant struct {
 	Traces     []string       `json:"traces,omitempty"`
 	SQL        []string       `json:"sql,omitempty"`
 	MonoFS     []string       `json:"monofs,omitempty"`
+	Audit      []string       `json:"audit,omitempty"`
 	Backends   []string       `json:"backends,omitempty"`
 	Shards     *ShardSelector `json:"shards,omitempty"`
 	Role       string         `json:"role,omitempty"`
@@ -394,6 +399,16 @@ func (p *Policy) CanReadSQL(id authz.Identity, partition string) bool {
 	return p.can(id, ScopeSQL, partition)
 }
 
+// CanReadAudit reports whether the identity may read the immutable audit trail.
+// Unlike telemetry scopes, this is a global capability rather than a partition
+// read: a grant lists "*" or the deployment name.
+func (p *Policy) CanReadAudit(id authz.Identity) bool {
+	if p == nil {
+		return false
+	}
+	return p.can(id, ScopeAudit, "*")
+}
+
 // ResolveVisibleSQLPartitions is VisiblePartitions filtered by the SQL scope.
 func (p *Policy) ResolveVisibleSQLPartitions(id authz.Identity, catalog []string) []string {
 	names := p.ResolveVisiblePartitions(id, catalog)
@@ -590,6 +605,8 @@ func (p *Policy) can(id authz.Identity, scope, partition string) bool {
 			list = g.Traces
 		case ScopeSQL:
 			list = g.SQL
+		case ScopeAudit:
+			list = g.Audit
 		}
 		if scopeAllows(list, partition) {
 			return true

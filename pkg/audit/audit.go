@@ -25,10 +25,16 @@ type Action string
 
 const (
 	ActionRead   Action = "read"
+	ActionList   Action = "list"
+	ActionSearch Action = "search"
+	ActionQuery  Action = "query"
+	ActionExport Action = "export"
 	ActionWrite  Action = "write"
 	ActionDelete Action = "delete"
+	ActionDeploy Action = "deploy"
 	ActionAdmin  Action = "admin"
 	ActionAuth   Action = "auth"
+	ActionAudit  Action = "audit_read"
 )
 
 // Decision represents the outcome of an audited operation.
@@ -48,25 +54,71 @@ const maxWALLineBytes = 1024 * 1024 // 1 MiB
 // ErrEmitterClosed is returned when Emit is called on a closed WALSpoolEmitter.
 var ErrEmitterClosed = errors.New("audit: emitter closed")
 
-// Event represents a single hash-chained audit record.
+// Event represents a single hash-chained audit record. The JSON field names are
+// the wire contract shared by the WAL, the ClickHouse sink, the Doctor read API,
+// and the Guardian anchor job.
 type Event struct {
-	EventID       string    `json:"event_id"`
-	Timestamp     time.Time `json:"timestamp"`
-	ActorSubject  string    `json:"actor_subject"`
-	ActorClientID string    `json:"actor_client_id,omitempty"`
-	Action        Action    `json:"action"`
-	Resource      string    `json:"resource"`
-	Partition     string    `json:"partition,omitempty"`
-	Decision      Decision  `json:"decision"`
-	CorrelationID string    `json:"correlation_id,omitempty"`
-	SourceIP      string    `json:"source_ip,omitempty"`
-	PrevHash      string    `json:"prev_hash"`
-	Hash          string    `json:"hash,omitempty"`
+	// Identity of the record.
+	EventID   string    `json:"event_id"`
+	Timestamp time.Time `json:"timestamp"`
+	WriterID  string    `json:"writer_id,omitempty"`
+	Seq       uint64    `json:"seq"`
+	PrevHash  string    `json:"prev_hash"`
+	Hash      string    `json:"hash,omitempty"`
+
+	// What happened.
+	Service      string   `json:"service,omitempty"`
+	Env          string   `json:"env,omitempty"`
+	Scope        string   `json:"scope,omitempty"`
+	Action       Action   `json:"action"`
+	Decision     Decision `json:"decision"`
+	Reason       string   `json:"reason,omitempty"`
+	ResourceType string   `json:"resource_type,omitempty"`
+
+	// Who.
+	ActorSubject  string   `json:"actor_subject"`
+	ActorClientID string   `json:"actor_client_id,omitempty"`
+	Email         string   `json:"email,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
+
+	// Which data.
+	Tenant       string `json:"tenant,omitempty"`
+	Resource     string `json:"resource"`
+	Partition    string `json:"partition,omitempty"`
+	ResourceHash string `json:"resource_hash,omitempty"`
+
+	// Correlation and request shape.
+	RequestID     string `json:"request_id,omitempty"`
+	TraceID       string `json:"trace_id,omitempty"`
+	Method        string `json:"method,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Status        int    `json:"status,omitempty"`
+	ResultCount   uint64 `json:"result_count,omitempty"`
+	Bytes         uint64 `json:"bytes,omitempty"`
+	Occurrences   uint32 `json:"occurrences,omitempty"`
+	SourceIP      string `json:"source_ip,omitempty"`
+	UserAgent     string `json:"user_agent,omitempty"`
+	PolicyVersion string `json:"policy_version,omitempty"`
+	Detail        string `json:"detail,omitempty"`
+
+	// Compatibility aliases used by earlier callers.
+	CorrelationID string `json:"correlation_id,omitempty"`
+
+	// RawJSON is the exact canonical bytes that were hashed (without hash and
+	// raw_json). The anchor and offline verifier use it as the evidence.
+	RawJSON string `json:"raw_json,omitempty"`
 }
 
 // Sink receives batches of audit events flushed from the WAL.
 type Sink interface {
 	WriteBatch(ctx context.Context, events []Event) error
+}
+
+// Emitter is the minimal audit surface used by service hooks. Both the raw WAL
+// emitter and the managed ServiceEmitter implement it.
+type Emitter interface {
+	Emit(ctx context.Context, ev Event) error
+	EmitDurable(ctx context.Context, ev Event) error
 }
 
 // WALOption configures a WALSpoolEmitter.
@@ -93,6 +145,29 @@ func WithSyncOnWrite(syncOnWrite bool) WALOption {
 	}
 }
 
+// WithWriterID sets the stable writer identity used for the per-writer hash
+// chain. A writer should be unique per process lifetime (for example
+// "monofs-server-<pod-uid>").
+func WithWriterID(writerID string) WALOption {
+	return func(e *WALSpoolEmitter) {
+		e.writerID = writerID
+	}
+}
+
+// WithService and WithEnv stamp every event with the emitting service and
+// deployment environment when the caller leaves them empty.
+func WithService(service string) WALOption {
+	return func(e *WALSpoolEmitter) {
+		e.service = service
+	}
+}
+
+func WithEnv(env string) WALOption {
+	return func(e *WALSpoolEmitter) {
+		e.env = env
+	}
+}
+
 // WALSpoolEmitter appends hash-chained audit events to a disk-backed JSONL WAL
 // file and supports flushing buffered events to a downstream Sink.
 type WALSpoolEmitter struct {
@@ -101,6 +176,10 @@ type WALSpoolEmitter struct {
 	walPath       string
 	file          *os.File
 	lastHash      string
+	nextSeq       uint64
+	writerID      string
+	service       string
+	env           string
 	flushedOffset int64
 	droppedCount  atomic.Int64
 	FailClosed    bool
@@ -117,7 +196,7 @@ func NewWALSpoolEmitter(walPath string, opts ...WALOption) (*WALSpoolEmitter, er
 		return nil, errors.New("audit: walPath must not be empty")
 	}
 
-	lastHash, err := recoverLastHash(walPath)
+	lastHash, nextSeq, err := recoverChainState(walPath)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +204,7 @@ func NewWALSpoolEmitter(walPath string, opts ...WALOption) (*WALSpoolEmitter, er
 	e := &WALSpoolEmitter{
 		walPath:  walPath,
 		lastHash: lastHash,
+		nextSeq:  nextSeq,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -137,8 +217,18 @@ func NewWALSpoolEmitter(walPath string, opts ...WALOption) (*WALSpoolEmitter, er
 // Emit assigns defaults (EventID, Timestamp) if unset, links PrevHash and Hash,
 // and appends the event as a JSONL line to the WAL.
 func (e *WALSpoolEmitter) Emit(ctx context.Context, ev Event) error {
+	return e.emit(ctx, ev, e.FailClosed)
+}
+
+// EmitDurable appends a mutation/delete/deploy event fail-closed regardless of
+// the emitter's default fail mode.
+func (e *WALSpoolEmitter) EmitDurable(ctx context.Context, ev Event) error {
+	return e.emit(ctx, ev, true)
+}
+
+func (e *WALSpoolEmitter) emit(ctx context.Context, ev Event, failClosed bool) error {
 	if err := ctx.Err(); err != nil {
-		return e.handleError(err)
+		return e.handleError(err, failClosed)
 	}
 
 	if ev.EventID == "" {
@@ -149,6 +239,15 @@ func (e *WALSpoolEmitter) Emit(ctx context.Context, ev Event) error {
 	} else {
 		ev.Timestamp = ev.Timestamp.UTC()
 	}
+	if ev.WriterID == "" {
+		ev.WriterID = e.writerID
+	}
+	if ev.Service == "" {
+		ev.Service = e.service
+	}
+	if ev.Env == "" {
+		ev.Env = e.env
+	}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -158,25 +257,28 @@ func (e *WALSpoolEmitter) Emit(ctx context.Context, ev Event) error {
 	}
 
 	ev.PrevHash = e.lastHash
-	hash, err := computeEventHash(ev)
+	ev.Seq = e.nextSeq
+	hash, canonical, err := computeEventHash(ev)
 	if err != nil {
-		return e.handleError(err)
+		return e.handleError(err, failClosed)
 	}
 	ev.Hash = hash
+	ev.RawJSON = canonical
 
 	line, err := json.Marshal(ev)
 	if err != nil {
-		return e.handleError(fmt.Errorf("audit: marshal event: %w", err))
+		return e.handleError(fmt.Errorf("audit: marshal event: %w", err), failClosed)
 	}
 	line = append(line, '\n')
 
 	if err := e.appendLineLocked(line); err != nil {
-		return e.handleError(err)
+		return e.handleError(err, failClosed)
 	}
 
-	// Advance lastHash only after the WAL write succeeds so failed writes in
+	// Advance the chain only after the WAL write succeeds so failed writes in
 	// fail-open mode do not break the persisted hash chain.
 	e.lastHash = ev.Hash
+	e.nextSeq++
 	return nil
 }
 
@@ -264,8 +366,8 @@ func (e *WALSpoolEmitter) appendLineLocked(line []byte) error {
 	return nil
 }
 
-func (e *WALSpoolEmitter) handleError(err error) error {
-	if e.FailClosed {
+func (e *WALSpoolEmitter) handleError(err error, failClosed bool) error {
+	if failClosed {
 		return err
 	}
 	e.droppedCount.Add(1)
@@ -342,6 +444,7 @@ func VerifyChain(walPath string) (int, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), maxWALLineBytes)
 
 	expectedPrevHash := GenesisPrevHash
+	var expectedSeq uint64
 	count := 0
 	lineNum := 0
 
@@ -360,8 +463,11 @@ func VerifyChain(walPath string) (int, error) {
 		if ev.PrevHash != expectedPrevHash {
 			return count, fmt.Errorf("audit: line %d: prev_hash mismatch: got %q, want %q", lineNum, ev.PrevHash, expectedPrevHash)
 		}
+		if ev.Seq != expectedSeq {
+			return count, fmt.Errorf("audit: line %d: seq mismatch: got %d, want %d", lineNum, ev.Seq, expectedSeq)
+		}
 
-		expectedHash, err := computeEventHash(ev)
+		expectedHash, _, err := computeEventHash(ev)
 		if err != nil {
 			return count, fmt.Errorf("audit: line %d: %w", lineNum, err)
 		}
@@ -370,6 +476,7 @@ func VerifyChain(walPath string) (int, error) {
 		}
 
 		expectedPrevHash = ev.Hash
+		expectedSeq++
 		count++
 	}
 
@@ -379,28 +486,28 @@ func VerifyChain(walPath string) (int, error) {
 	return count, nil
 }
 
-func computeEventHash(ev Event) (string, error) {
+func computeEventHash(ev Event) (string, string, error) {
 	ev.Hash = ""
+	ev.RawJSON = ""
 	ev.Timestamp = ev.Timestamp.UTC()
 	canonical, err := json.Marshal(ev)
 	if err != nil {
-		return "", fmt.Errorf("audit: marshal canonical event: %w", err)
+		return "", "", fmt.Errorf("audit: marshal canonical event: %w", err)
 	}
 
 	h := sha256.New()
 	h.Write([]byte(ev.PrevHash))
-	h.Write([]byte("|"))
 	h.Write(canonical)
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), string(canonical), nil
 }
 
-func recoverLastHash(walPath string) (string, error) {
+func recoverChainState(walPath string) (string, uint64, error) {
 	f, err := os.Open(walPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return GenesisPrevHash, nil
+			return GenesisPrevHash, 0, nil
 		}
-		return "", fmt.Errorf("audit: open existing wal %q: %w", walPath, err)
+		return "", 0, fmt.Errorf("audit: open existing wal %q: %w", walPath, err)
 	}
 	defer f.Close()
 
@@ -408,6 +515,7 @@ func recoverLastHash(walPath string) (string, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), maxWALLineBytes)
 
 	lastHash := GenesisPrevHash
+	var lastSeq uint64
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
@@ -417,15 +525,16 @@ func recoverLastHash(walPath string) (string, error) {
 		}
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil {
-			return "", fmt.Errorf("audit: recover wal line %d: invalid json: %w", lineNum, err)
+			return "", 0, fmt.Errorf("audit: recover wal line %d: invalid json: %w", lineNum, err)
 		}
 		if ev.Hash == "" {
-			return "", fmt.Errorf("audit: recover wal line %d: missing hash", lineNum)
+			return "", 0, fmt.Errorf("audit: recover wal line %d: missing hash", lineNum)
 		}
 		lastHash = ev.Hash
+		lastSeq = ev.Seq
 	}
 	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("audit: scan existing wal: %w", err)
+		return "", 0, fmt.Errorf("audit: scan existing wal: %w", err)
 	}
-	return lastHash, nil
+	return lastHash, lastSeq + 1, nil
 }

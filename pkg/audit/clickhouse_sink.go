@@ -9,27 +9,58 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // AuditEventsDDL is the append-only ClickHouse MergeTree schema for audit.events.
-const AuditEventsDDL = `CREATE TABLE IF NOT EXISTS audit.events (
-    event_id String,
-    timestamp DateTime64(6, 'UTC'),
-    actor_subject String,
+// It matches the Event JSON contract and keeps raw JSON as the evidence of
+// record: verification re-hashes raw_json and cross-checks the indexed columns.
+const AuditEventsDDL = `CREATE DATABASE IF NOT EXISTS audit;
+
+CREATE TABLE IF NOT EXISTS audit.events
+(
+    timestamp      DateTime64(6, 'UTC'),
+    day            Date DEFAULT toDate(timestamp),
+    event_id       String,
+    writer_id      LowCardinality(String),
+    seq            UInt64,
+    prev_hash      String,
+    hash           String,
+    service        LowCardinality(String),
+    env            LowCardinality(String),
+    scope          LowCardinality(String),
+    action         LowCardinality(String),
+    decision       LowCardinality(String),
+    reason         String,
+    resource_type  LowCardinality(String),
+    actor_subject  String,
     actor_client_id String,
-    action LowCardinality(String),
-    resource String,
-    partition LowCardinality(String),
-    decision LowCardinality(String),
+    email          String,
+    groups         Array(String),
+    tenant         LowCardinality(String),
+    resource       String CODEC(ZSTD(3)),
+    partition      LowCardinality(String),
+    resource_hash  String,
+    request_id     String,
+    trace_id       String,
+    method         LowCardinality(String),
+    path           String,
+    status         UInt16,
+    result_count   UInt64,
+    bytes          UInt64,
+    occurrences    UInt32 DEFAULT 1,
+    source_ip      String,
+    user_agent     String CODEC(ZSTD(3)),
+    policy_version String,
+    detail         String CODEC(ZSTD(3)),
     correlation_id String,
-    source_ip String,
-    prev_hash String,
-    hash String
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(timestamp)
-ORDER BY (timestamp, event_id)`
+    raw_json       String CODEC(ZSTD(3))
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(day)
+ORDER BY (day, service, scope, actor_subject, resource_hash, seq)
+SETTINGS index_granularity = 8192`
 
 // ClickHouseSink ships batches of audit events to ClickHouse over its HTTP
 // interface using INSERT INTO <database>.events FORMAT JSONEachRow.
@@ -77,12 +108,26 @@ func (s *ClickHouseSink) WriteBatch(ctx context.Context, events []Event) error {
 	sql := fmt.Sprintf("INSERT INTO %s.events FORMAT JSONEachRow", s.database)
 	q := u.Query()
 	q.Set("query", sql)
+	q.Set("date_time_input_format", "best_effort")
 	u.RawQuery = q.Encode()
 
 	var body bytes.Buffer
 	enc := json.NewEncoder(&body)
 	for _, ev := range events {
-		if err := enc.Encode(ev); err != nil {
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			return fmt.Errorf("audit: marshal event for clickhouse: %w", err)
+		}
+		row := map[string]json.RawMessage{}
+		if err := json.Unmarshal(raw, &row); err != nil {
+			return fmt.Errorf("audit: decode event row: %w", err)
+		}
+		rawJSON := ev.RawJSON
+		if rawJSON == "" {
+			rawJSON = string(raw)
+		}
+		row["raw_json"] = json.RawMessage(strconv.Quote(rawJSON))
+		if err := enc.Encode(row); err != nil {
 			return fmt.Errorf("audit: marshal event for clickhouse: %w", err)
 		}
 	}

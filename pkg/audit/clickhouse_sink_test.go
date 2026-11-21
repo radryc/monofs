@@ -17,8 +17,8 @@ func TestAuditEventsDDL(t *testing.T) {
 	if !strings.Contains(AuditEventsDDL, "CREATE TABLE IF NOT EXISTS audit.events") {
 		t.Fatalf("AuditEventsDDL missing CREATE TABLE IF NOT EXISTS audit.events: %s", AuditEventsDDL)
 	}
-	if !strings.Contains(AuditEventsDDL, "ENGINE = MergeTree()") {
-		t.Fatalf("AuditEventsDDL missing ENGINE = MergeTree(): %s", AuditEventsDDL)
+	if !strings.Contains(AuditEventsDDL, "ENGINE = MergeTree") {
+		t.Fatalf("AuditEventsDDL missing ENGINE = MergeTree: %s", AuditEventsDDL)
 	}
 }
 

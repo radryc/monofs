@@ -348,6 +348,8 @@ func build(file *File, catalog *Catalog, partitions []PartitionPolicy, now time.
 			defaults.SQL = allow
 		case ScopeMonoFS:
 			defaults.MonoFS = allow
+		case ScopeAudit:
+			defaults.Audit = allow
 		}
 	}
 
@@ -357,21 +359,22 @@ func build(file *File, catalog *Catalog, partitions []PartitionPolicy, now time.
 		Defaults:      defaults,
 	}
 
-	resolve := func(sub Subject) (partitions, logs, traces, sql, monoFS []string) {
+	resolve := func(sub Subject) (partitions, logs, traces, sql, monoFS, audit []string) {
 		partitions = resolveScope(file, catalog, sub.Partitions)
 		logs = resolveScope(file, catalog, sub.Logs)
 		traces = resolveScope(file, catalog, sub.Traces)
 		sql = resolveScope(file, catalog, sub.SQL)
 		monoFS = dedupeSorted(sub.MonoFS)
+		audit = dedupeSorted(sub.Audit)
 		return
 	}
 
 	groupNames := sortedKeys(file.Groups)
 	for _, name := range groupNames {
 		sub := file.Groups[name]
-		p, l, t, s, m := resolve(sub)
+		p, l, t, s, m, a := resolve(sub)
 		bundle.Grants = append(bundle.Grants, Grant{
-			Group: name, Partitions: p, Logs: l, Traces: t, SQL: s, MonoFS: m,
+			Group: name, Partitions: p, Logs: l, Traces: t, SQL: s, MonoFS: m, Audit: a,
 			Backends: dedupeSorted(sub.Backends), Shards: sub.Shards,
 			Role: sub.Role, Deny: dedupeSorted(sub.Deny),
 		})
@@ -379,9 +382,9 @@ func build(file *File, catalog *Catalog, partitions []PartitionPolicy, now time.
 	userNames := sortedKeys(file.Users)
 	for _, name := range userNames {
 		sub := file.Users[name]
-		p, l, t, s, m := resolve(sub)
+		p, l, t, s, m, a := resolve(sub)
 		bundle.Grants = append(bundle.Grants, Grant{
-			User: name, Partitions: p, Logs: l, Traces: t, SQL: s, MonoFS: m,
+			User: name, Partitions: p, Logs: l, Traces: t, SQL: s, MonoFS: m, Audit: a,
 			Backends: dedupeSorted(sub.Backends), Shards: sub.Shards,
 			Role: sub.Role, Deny: dedupeSorted(sub.Deny),
 		})
@@ -389,9 +392,9 @@ func build(file *File, catalog *Catalog, partitions []PartitionPolicy, now time.
 	clientNames := sortedKeys(file.Clients)
 	for _, name := range clientNames {
 		sub := file.Clients[name]
-		p, l, t, s, m := resolve(sub)
+		p, l, t, s, m, a := resolve(sub)
 		bundle.Grants = append(bundle.Grants, Grant{
-			Client: name, Partitions: p, Logs: l, Traces: t, SQL: s, MonoFS: m,
+			Client: name, Partitions: p, Logs: l, Traces: t, SQL: s, MonoFS: m, Audit: a,
 			Backends: dedupeSorted(sub.Backends), Shards: sub.Shards,
 			Role: sub.Role, Deny: dedupeSorted(sub.Deny),
 		})

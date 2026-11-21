@@ -45,6 +45,7 @@ type Subject struct {
 	Traces     []string
 	SQL        []string
 	MonoFS     []string
+	Audit      []string
 	Backends   []string
 	Shards     *ShardSelector
 	Role       string
@@ -82,6 +83,7 @@ type rawSubject struct {
 	Traces     []string          `yaml:"traces"`
 	SQL        []string          `yaml:"sql"`
 	MonoFS     []string          `yaml:"monofs"`
+	Audit      []string          `yaml:"audit"`
 	Backends   []string          `yaml:"backends"`
 	Shards     *rawShardSelector `yaml:"shards"`
 	Role       string            `yaml:"role"`
@@ -175,6 +177,7 @@ func convertSubjects(in map[string]rawSubject) map[string]Subject {
 			Traces:     sub.Traces,
 			SQL:        sub.SQL,
 			MonoFS:     sub.MonoFS,
+			Audit:      sub.Audit,
 			Backends:   sub.Backends,
 			Shards:     convertShardSelector(sub.Shards),
 			Role:       sub.Role,
