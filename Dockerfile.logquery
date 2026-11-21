@@ -1,6 +1,6 @@
 # DuckDB query sidecar for MonoFS storage nodes. Built on glibc because the
 # prebuilt duckdb-go bindings do not support musl/Alpine.
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.26.11-bookworm AS builder
 
 WORKDIR /app
 

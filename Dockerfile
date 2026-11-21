@@ -9,7 +9,7 @@ COPY internal/router/ui/ ./
 RUN npm run build
 
 # Build stage
-FROM golang:1.26.10-alpine AS builder
+FROM golang:1.26.11-alpine AS builder
 
 WORKDIR /app
 
@@ -309,7 +309,7 @@ RUN apk add --no-cache rust cargo
 COPY --from=builder /usr/local/bin/bazelisk /usr/local/bin/bazelisk
 RUN ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
 
-# Copy Go 1.26.10 toolchain from the builder stage
+# Copy Go 1.26.11 toolchain from the builder stage
 COPY --from=builder /usr/local/go /usr/local/go
 ENV GOROOT=/usr/local/go
 ENV PATH=$GOROOT/bin:$PATH
