@@ -74,10 +74,11 @@ func (r *Router) ReadGuardianPath(ctx context.Context, req *pb.ReadGuardianPathR
 	content, ok, conclusive := r.readGuardianContentVerified(ctx, mapped, current.ContentSHA256)
 	if !ok {
 		// The version store keeps recently committed content in a bounded
-		// in-memory cache. Prefer it over the nodes while ingest/replication
-		// catches up: the committed bytes are authoritative for this version,
-		// and the nodes can be briefly unable to answer right after a write.
-		if len(current.Content) > 0 {
+		// in-memory cache. Prefer it over the nodes only when a replica was
+		// unreachable: an investigative read that got a conclusive answer
+		// (content present but mismatched, or absent on every replica) must
+		// still follow the repair/transient path below.
+		if !conclusive && len(current.Content) > 0 {
 			sum := sha256.Sum256(current.Content)
 			if current.ContentSHA256 == "" || strings.EqualFold(hex.EncodeToString(sum[:]), current.ContentSHA256) {
 				guardianVersionStoreRecoveriesTotal.WithLabelValues("content-cache").Inc()
