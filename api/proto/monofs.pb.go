@@ -5066,8 +5066,12 @@ type PublishWorkspaceRequest struct {
 	AuthorName              string                 `protobuf:"bytes,4,opt,name=author_name,json=authorName,proto3" json:"author_name,omitempty"`
 	AuthorEmail             string                 `protobuf:"bytes,5,opt,name=author_email,json=authorEmail,proto3" json:"author_email,omitempty"`
 	RequestedBranchStrategy string                 `protobuf:"bytes,6,opt,name=requested_branch_strategy,json=requestedBranchStrategy,proto3" json:"requested_branch_strategy,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	// Optional pull/merge request title and body. When empty, MonoFS derives
+	// both from the commit message and the published operations.
+	PullRequestTitle string `protobuf:"bytes,7,opt,name=pull_request_title,json=pullRequestTitle,proto3" json:"pull_request_title,omitempty"`
+	PullRequestBody  string `protobuf:"bytes,8,opt,name=pull_request_body,json=pullRequestBody,proto3" json:"pull_request_body,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *PublishWorkspaceRequest) Reset() {
@@ -5138,6 +5142,20 @@ func (x *PublishWorkspaceRequest) GetAuthorEmail() string {
 func (x *PublishWorkspaceRequest) GetRequestedBranchStrategy() string {
 	if x != nil {
 		return x.RequestedBranchStrategy
+	}
+	return ""
+}
+
+func (x *PublishWorkspaceRequest) GetPullRequestTitle() string {
+	if x != nil {
+		return x.PullRequestTitle
+	}
+	return ""
+}
+
+func (x *PublishWorkspaceRequest) GetPullRequestBody() string {
+	if x != nil {
+		return x.PullRequestBody
 	}
 	return ""
 }
@@ -14331,7 +14349,7 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12%\n" +
 	"\x0ebytes_received\x18\x03 \x01(\x03R\rbytesReceived\x12)\n" +
 	"\x10repository_count\x18\x04 \x01(\x05R\x0frepositoryCount\x12&\n" +
-	"\x0fexpires_at_unix\x18\x05 \x01(\x03R\rexpiresAtUnix\"\x8f\x02\n" +
+	"\x0fexpires_at_unix\x18\x05 \x01(\x03R\rexpiresAtUnix\"\xe9\x02\n" +
 	"\x17PublishWorkspaceRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1b\n" +
 	"\tbundle_id\x18\x02 \x01(\tR\bbundleId\x124\n" +
@@ -14339,7 +14357,9 @@ const file_api_proto_monofs_proto_rawDesc = "" +
 	"\vauthor_name\x18\x04 \x01(\tR\n" +
 	"authorName\x12!\n" +
 	"\fauthor_email\x18\x05 \x01(\tR\vauthorEmail\x12:\n" +
-	"\x19requested_branch_strategy\x18\x06 \x01(\tR\x17requestedBranchStrategy\"\xc6\x01\n" +
+	"\x19requested_branch_strategy\x18\x06 \x01(\tR\x17requestedBranchStrategy\x12,\n" +
+	"\x12pull_request_title\x18\a \x01(\tR\x10pullRequestTitle\x12*\n" +
+	"\x11pull_request_body\x18\b \x01(\tR\x0fpullRequestBody\"\xc6\x01\n" +
 	"\x1bPushWorkspaceCommitsRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1b\n" +
 	"\tbundle_id\x18\x02 \x01(\tR\bbundleId\x12%\n" +

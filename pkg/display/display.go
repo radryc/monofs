@@ -10,6 +10,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // HeaderName and QueryParam are the two ways a caller requests a profile.
@@ -48,6 +51,33 @@ var ReservedKeys = map[string]bool{
 
 var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+var (
+	applyTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "strata_display_apply_total",
+		Help: "Display-key rendering passes by surface and result.",
+	}, []string{"surface", "result"})
+	lookupMisses = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "strata_display_lookup_misses_total",
+		Help: "Display profile lookups that did not resolve to a visible profile.",
+	})
+	bundleVersion = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "strata_display_bundle_version",
+		Help: "Unix timestamp of the current display bundle build (0 when unknown).",
+	})
+)
+
+// SetBundleVersion records the current display bundle version for metrics.
+func SetBundleVersion(version string) {
+	if version == "" {
+		bundleVersion.Set(0)
+		return
+	}
+	var ts int64
+	if _, err := fmt.Sscanf(version, "%d", &ts); err == nil {
+		bundleVersion.Set(float64(ts))
+	}
+}
+
 // Profile is the stored DisplayProfile document.
 type Profile struct {
 	APIVersion       string                       `json:"apiVersion,omitempty" yaml:"apiVersion,omitempty"`
@@ -77,10 +107,12 @@ type CompiledProfile struct {
 // Assignment binds display keys to one repo-owned partition assignment.
 // Request-key aliases are accepted only for the assigned partition.
 type Assignment struct {
-	Repo      string            `json:"repo,omitempty"`
-	Partition string            `json:"partition"`
-	Profile   string            `json:"profile,omitempty"`
-	Keys      map[string]string `json:"keys,omitempty"`
+	Repo             string                       `json:"repo,omitempty"`
+	Partition        string                       `json:"partition"`
+	Profile          string                       `json:"profile,omitempty"`
+	Keys             map[string]string            `json:"keys,omitempty"`
+	Surfaces         map[string]map[string]string `json:"surfaces,omitempty"`
+	IncludeCanonical bool                         `json:"includeCanonical,omitempty"`
 }
 
 // Bundle is the compiled, versioned profile set consumed by Guardian and
@@ -188,8 +220,14 @@ func (b *Bundle) AssignmentFor(partition string) (*CompiledProfile, bool) {
 		if len(keys) == 0 {
 			continue
 		}
-		return &CompiledProfile{ID: assignment.Profile, Keys: keys}, true
+		return &CompiledProfile{
+			ID:               assignment.Profile,
+			Keys:             keys,
+			Surfaces:         assignment.Surfaces,
+			IncludeCanonical: assignment.IncludeCanonical,
+		}, true
 	}
+	lookupMisses.Inc()
 	return nil, false
 }
 
@@ -260,8 +298,10 @@ func (b *Bundle) ProfileFor(subjects []string, id string) (*CompiledProfile, boo
 				}
 			}
 		}
+		lookupMisses.Inc()
 		return nil, false
 	}
+	lookupMisses.Inc()
 	return nil, false
 }
 
@@ -290,6 +330,7 @@ func MapJSONWithOptions(raw []byte, p *CompiledProfile, opts MapOptions) ([]byte
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	if err := dec.Decode(&value); err != nil {
+		applyTotal.WithLabelValues(opts.Surface, "error").Inc()
 		return nil, err
 	}
 	ctx := mapCtx{
@@ -300,8 +341,10 @@ func MapJSONWithOptions(raw []byte, p *CompiledProfile, opts MapOptions) ([]byte
 	mapped := mapValue(value, ctx)
 	out, err := json.Marshal(mapped)
 	if err != nil {
+		applyTotal.WithLabelValues(opts.Surface, "error").Inc()
 		return nil, err
 	}
+	applyTotal.WithLabelValues(opts.Surface, "ok").Inc()
 	return out, nil
 }
 

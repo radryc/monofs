@@ -35,7 +35,7 @@ func TestOpenPullRequestFabricatesURLWithoutToken(t *testing.T) {
 		}},
 	}
 
-	r.attachPublishPullRequest(context.Background(), repoResult, repo, "Guardian adoption: demo", "job-1")
+	r.attachPublishPullRequest(context.Background(), repoResult, repo, "Guardian adoption: demo", "", "", "job-1")
 
 	if repoResult.GetPullRequestUrl() == "" {
 		t.Fatal("expected a pull request URL to be fabricated")
@@ -131,8 +131,26 @@ func TestPublishPullRequestBodyListsFiles(t *testing.T) {
 		Operations: []workspacebundle.Operation{
 			{Kind: workspacebundle.OperationUpsert, Path: "guardian/partitions/demo/config.yaml"},
 		},
-	}, "job-9")
+	}, "", "job-9")
 	for _, want := range []string{"github.com/example/strata", "upsert guardian/partitions/demo/config.yaml", "MonoFS-Job: job-9"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestPublishPullRequestBodyUsesCustomBody(t *testing.T) {
+	body := publishPullRequestBody(workspacebundle.RepositoryBundle{
+		StorageID:   "repo-1",
+		DisplayPath: "github.com/example/strata",
+		Operations: []workspacebundle.Operation{
+			{Kind: workspacebundle.OperationUpsert, Path: "partitions/checkout/config.yaml"},
+		},
+	}, "## Plan\n- create Compute api\n", "job-9")
+	if !strings.HasPrefix(body, "## Plan\n- create Compute api\n\n") {
+		t.Fatalf("body does not start with the custom body:\n%s", body)
+	}
+	for _, want := range []string{"MonoFS-Job: job-9", "upsert partitions/checkout/config.yaml"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q:\n%s", want, body)
 		}
