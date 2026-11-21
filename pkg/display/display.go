@@ -56,7 +56,9 @@ type Profile struct {
 	Name             string                       `json:"name,omitempty" yaml:"name,omitempty"`
 	Scope            string                       `json:"scope,omitempty" yaml:"scope,omitempty"` // personal | team | global
 	Owner            string                       `json:"owner,omitempty" yaml:"owner,omitempty"`
+	Team             string                       `json:"team,omitempty" yaml:"team,omitempty"`
 	Readers          []string                     `json:"readers,omitempty" yaml:"readers,omitempty"`
+	Maintainers      []string                     `json:"maintainers,omitempty" yaml:"maintainers,omitempty"`
 	IncludeCanonical bool                         `json:"includeCanonical,omitempty" yaml:"includeCanonical,omitempty"`
 	Keys             map[string]string            `json:"keys" yaml:"keys"`
 	Surfaces         map[string]map[string]string `json:"surfaces,omitempty" yaml:"surfaces,omitempty"`
@@ -66,17 +68,28 @@ type Profile struct {
 type CompiledProfile struct {
 	ID               string                       `json:"id"`
 	Subjects         []string                     `json:"subjects,omitempty"`
+	Maintainers      []string                     `json:"maintainers,omitempty"`
 	Keys             map[string]string            `json:"keys"`
 	Surfaces         map[string]map[string]string `json:"surfaces,omitempty"`
 	IncludeCanonical bool                         `json:"includeCanonical,omitempty"`
 }
 
+// Assignment binds display keys to one repo-owned partition assignment.
+// Request-key aliases are accepted only for the assigned partition.
+type Assignment struct {
+	Repo      string            `json:"repo,omitempty"`
+	Partition string            `json:"partition"`
+	Profile   string            `json:"profile,omitempty"`
+	Keys      map[string]string `json:"keys,omitempty"`
+}
+
 // Bundle is the compiled, versioned profile set consumed by Guardian and
 // Doctor.
 type Bundle struct {
-	Version  string            `json:"version"`
-	Profiles []CompiledProfile `json:"profiles"`
-	Defaults map[string]string `json:"defaults,omitempty"`
+	Version     string            `json:"version"`
+	Profiles    []CompiledProfile `json:"profiles"`
+	Defaults    map[string]string `json:"defaults,omitempty"`
+	Assignments []Assignment      `json:"assignments,omitempty"`
 }
 
 // Validate normalizes and validates a profile.
@@ -95,6 +108,9 @@ func (p *Profile) Validate() error {
 	case "personal", "team", "global":
 	default:
 		return fmt.Errorf("display profile scope %q must be personal, team, or global", p.Scope)
+	}
+	if p.Scope == "team" && strings.TrimSpace(p.Team) == "" {
+		return fmt.Errorf("display profile scope team requires a team name")
 	}
 	if len(p.Keys) == 0 && len(p.Surfaces) == 0 {
 		return fmt.Errorf("display profile has no key mappings")
@@ -158,15 +174,70 @@ func (p *CompiledProfile) KeysFor(surface string) map[string]string {
 	return out
 }
 
+// AssignmentFor returns the repo-owned display profile for a partition.
+func (b *Bundle) AssignmentFor(partition string) (*CompiledProfile, bool) {
+	if b == nil {
+		return nil, false
+	}
+	partition = strings.TrimSpace(partition)
+	for _, assignment := range b.Assignments {
+		if assignment.Partition != partition {
+			continue
+		}
+		keys := assignment.Keys
+		if len(keys) == 0 {
+			continue
+		}
+		return &CompiledProfile{ID: assignment.Profile, Keys: keys}, true
+	}
+	return nil, false
+}
+
+// TranslateQuery rewrites display-key query parameters to their canonical key
+// only when the value matches the partition assignment that owns the alias.
+func (b *Bundle) TranslateQuery(values map[string][]string) map[string][]string {
+	if b == nil || len(values) == 0 {
+		return values
+	}
+	for _, assignment := range b.Assignments {
+		for canonical, display := range assignment.Keys {
+			raw, ok := values[display]
+			if !ok {
+				continue
+			}
+			for _, value := range raw {
+				if strings.TrimSpace(value) != assignment.Partition {
+					continue
+				}
+				if _, exists := values[canonical]; !exists {
+					out := make(map[string][]string, len(values)+1)
+					for k, v := range values {
+						out[k] = v
+					}
+					out[canonical] = append([]string(nil), raw...)
+					values = out
+				}
+			}
+		}
+	}
+	return values
+}
+
 // Profile returns the named compiled profile, or the caller's default when id
 // is empty. The second result is false when no profile applies.
 func (b *Bundle) Profile(subject, id string) (*CompiledProfile, bool) {
+	return b.ProfileFor([]string{subject}, id)
+}
+
+// ProfileFor resolves a profile for any of the caller's subjects (user: and
+// team: entries) or for the primary subject's default.
+func (b *Bundle) ProfileFor(subjects []string, id string) (*CompiledProfile, bool) {
 	if b == nil {
 		return nil, false
 	}
 	id = strings.TrimSpace(id)
-	if id == "" && subject != "" && b.Defaults != nil {
-		id = strings.TrimSpace(b.Defaults[subject])
+	if id == "" && len(subjects) > 0 && b.Defaults != nil {
+		id = strings.TrimSpace(b.Defaults[subjects[0]])
 	}
 	if id == "" || id == "canonical" {
 		return nil, false
@@ -179,9 +250,14 @@ func (b *Bundle) Profile(subject, id string) (*CompiledProfile, bool) {
 		if len(p.Subjects) == 0 {
 			return p, true
 		}
-		for _, s := range p.Subjects {
-			if s == subject || s == "*" {
+		for _, candidate := range p.Subjects {
+			if candidate == "*" {
 				return p, true
+			}
+			for _, subject := range subjects {
+				if candidate == subject {
+					return p, true
+				}
 			}
 		}
 		return nil, false
