@@ -201,7 +201,7 @@ func MapJSON(raw []byte, p *CompiledProfile, surface string) ([]byte, error) {
 		return nil, err
 	}
 	keys := p.KeysFor(surface)
-	mapped := mapValue(value, keys)
+	mapped := mapValue(value, keys, p.IncludeCanonical)
 	out, err := json.Marshal(mapped)
 	if err != nil {
 		return nil, err
@@ -209,30 +209,57 @@ func MapJSON(raw []byte, p *CompiledProfile, surface string) ([]byte, error) {
 	return out, nil
 }
 
-func mapValue(value any, keys map[string]string) any {
+func mapValue(value any, keys map[string]string, includeCanonical bool) any {
 	switch v := value.(type) {
 	case map[string]any:
+		// SQL result sets need the canonical companions appended to every row,
+		// not just to the column-name array.
+		if columns, ok := v["columns"]; ok {
+			if rows, ok := v["rows"]; ok {
+				mappedColumns, companions := mapSQLColumns(columns, keys, includeCanonical)
+				out := make(map[string]any, len(v))
+				for key, child := range v {
+					switch key {
+					case "columns":
+						out[key] = mappedColumns
+					case "rows":
+						out[key] = appendSQLCompanions(rows, companions)
+					default:
+						out[mapKey(key, keys)] = mapValue(child, keys, includeCanonical)
+					}
+				}
+				return out
+			}
+		}
 		out := make(map[string]any, len(v))
 		for key, child := range v {
 			switch key {
 			case "labels", "attributes", "resource_attributes", "metric":
-				out[mapKey(key, keys)] = mapLabelMap(child, keys)
+				out[mapKey(key, keys)] = mapLabelMap(child, keys, includeCanonical)
 			case "columns":
-				out[mapKey(key, keys)] = mapColumns(child, keys)
+				out[mapKey(key, keys)] = mapColumns(child, keys, includeCanonical)
 			case "partitions", "intents", "assets", "recentEvents", "nodes", "rows",
 				"data", "result", "results", "series":
-				out[mapKey(key, keys)] = mapValue(child, keys)
+				out[mapKey(key, keys)] = mapValue(child, keys, includeCanonical)
 			case "body", "payload", "metadata":
 				out[mapKey(key, keys)] = child
 			default:
-				out[mapKey(key, keys)] = mapValue(child, keys)
+				out[mapKey(key, keys)] = mapValue(child, keys, includeCanonical)
+			}
+			if includeCanonical {
+				if display, ok := keys[key]; ok {
+					canonicalKey := "canonical_" + key
+					if _, exists := out[canonicalKey]; !exists {
+						out[canonicalKey] = out[display]
+					}
+				}
 			}
 		}
 		return out
 	case []any:
 		out := make([]any, len(v))
 		for i, child := range v {
-			out[i] = mapValue(child, keys)
+			out[i] = mapValue(child, keys, includeCanonical)
 		}
 		return out
 	default:
@@ -240,31 +267,95 @@ func mapValue(value any, keys map[string]string) any {
 	}
 }
 
-func mapLabelMap(value any, keys map[string]string) any {
+func mapLabelMap(value any, keys map[string]string, includeCanonical bool) any {
 	obj, ok := value.(map[string]any)
 	if !ok {
-		return mapValue(value, keys)
+		return mapValue(value, keys, includeCanonical)
 	}
 	out := make(map[string]any, len(obj))
 	for key, child := range obj {
-		out[mapKey(key, keys)] = child
+		if display, ok := keys[key]; ok {
+			out[display] = child
+			if includeCanonical {
+				canonicalKey := "canonical_" + key
+				if _, exists := out[canonicalKey]; !exists {
+					out[canonicalKey] = child
+				}
+			}
+			continue
+		}
+		out[key] = child
 	}
 	return out
 }
 
-func mapColumns(value any, keys map[string]string) any {
+type sqlCompanion struct {
+	index int
+	name  string
+}
+
+func mapSQLColumns(value any, keys map[string]string, includeCanonical bool) (any, []sqlCompanion) {
 	list, ok := value.([]any)
+	if !ok {
+		return value, nil
+	}
+	out := make([]any, 0, len(list))
+	var companions []sqlCompanion
+	for _, child := range list {
+		name, ok := child.(string)
+		if !ok {
+			out = append(out, child)
+			continue
+		}
+		if display, ok := keys[name]; ok {
+			companions = append(companions, sqlCompanion{index: len(out), name: "canonical_" + name})
+			out = append(out, display)
+			continue
+		}
+		out = append(out, name)
+	}
+	if includeCanonical {
+		for _, companion := range companions {
+			out = append(out, companion.name)
+		}
+	}
+	if !includeCanonical {
+		companions = nil
+	}
+	return out, companions
+}
+
+func appendSQLCompanions(value any, companions []sqlCompanion) any {
+	if len(companions) == 0 {
+		return value
+	}
+	rows, ok := value.([]any)
 	if !ok {
 		return value
 	}
-	out := make([]any, len(list))
-	for i, child := range list {
-		if name, ok := child.(string); ok {
-			out[i] = mapKey(name, keys)
+	out := make([]any, len(rows))
+	for i, raw := range rows {
+		row, ok := raw.([]any)
+		if !ok {
+			out[i] = raw
 			continue
 		}
-		out[i] = child
+		extended := make([]any, len(row), len(row)+len(companions))
+		copy(extended, row)
+		for _, companion := range companions {
+			var value any
+			if companion.index < len(row) {
+				value = row[companion.index]
+			}
+			extended = append(extended, value)
+		}
+		out[i] = extended
 	}
+	return out
+}
+
+func mapColumns(value any, keys map[string]string, includeCanonical bool) any {
+	out, _ := mapSQLColumns(value, keys, includeCanonical)
 	return out
 }
 
@@ -273,6 +364,21 @@ func mapKey(key string, keys map[string]string) string {
 		return mapped
 	}
 	return key
+}
+
+// SurfaceForPath derives the per-surface override name from an API path.
+func SurfaceForPath(path string) string {
+	switch {
+	case strings.Contains(path, "/sql"):
+		return "sql"
+	case strings.HasPrefix(path, "/api/v1") || strings.Contains(path, "/metrics"):
+		return "metrics"
+	case strings.HasPrefix(path, "/loki") || strings.Contains(path, "/logs"):
+		return "logs"
+	case strings.HasPrefix(path, "/api/v2") || strings.Contains(path, "/traces"):
+		return "traces"
+	}
+	return ""
 }
 
 // CanonicalKeys returns the sorted list of keys that a profile renames.
