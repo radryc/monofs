@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -21,7 +22,7 @@ import (
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -83,8 +84,9 @@ func (m kvsGuardianVersionMeta) stored() *guardian.Record {
 }
 
 type kvsGuardianVersionBackend struct {
-	router *Router
-	store  *guardian.Store
+	router    *Router
+	store     *guardian.Store
+	authToken string
 
 	mu      sync.Mutex
 	conns   map[string]*grpc.ClientConn
@@ -97,7 +99,14 @@ type kvsGuardianCandidate struct {
 }
 
 func newKVSGuardianVersionBackend(router *Router, store *guardian.Store) *kvsGuardianVersionBackend {
-	return &kvsGuardianVersionBackend{router: router, store: store}
+	token := strings.TrimSpace(os.Getenv("KVS_AUTH_TOKEN"))
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("MONOFS_CLUSTER_TOKEN"))
+	}
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("MONOFS_TOKEN"))
+	}
+	return &kvsGuardianVersionBackend{router: router, store: store, authToken: token}
 }
 
 // candidates returns healthy KVS-enabled nodes ordered with the current leader
@@ -169,8 +178,12 @@ func (b *kvsGuardianVersionBackend) clientFor(candidate kvsGuardianCandidate) (k
 	if client := b.clients[candidate.address]; client != nil {
 		return client, nil
 	}
+	transportOpt, err := b.router.config.Transport.DialOption()
+	if err != nil {
+		return nil, fmt.Errorf("configure transport for KVS node %s: %w", candidate.address, err)
+	}
 	conn, err := grpc.NewClient(candidate.address, append([]grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpcx.IPv4DialerOption(),
 		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 	}, b.router.internalDialOptions()...)...)
@@ -193,6 +206,9 @@ func (b *kvsGuardianVersionBackend) clientFor(candidate kvsGuardianCandidate) (k
 // transport failures. Non-transport errors (CAS conflicts, not-found) are
 // returned unchanged so callers can handle them.
 func (b *kvsGuardianVersionBackend) withClient(ctx context.Context, fn func(kvsv1.KVStoreClient) error) error {
+	if b.authToken != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+b.authToken)
+	}
 	candidates := b.candidates()
 	if len(candidates) == 0 {
 		return fmt.Errorf("no healthy KVS node available")

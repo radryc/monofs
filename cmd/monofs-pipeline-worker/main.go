@@ -17,10 +17,10 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/internal/worker"
 	"github.com/radryc/monofs/internal/worker/executor"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
@@ -87,8 +87,19 @@ func main() {
 		"concurrency", *concurrency,
 	)
 
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		logger.Error("load transport config", "error", err)
+		os.Exit(1)
+	}
+	transportOpt, err := tlsTransport.DialOption()
+	if err != nil {
+		logger.Error("configure transport", "error", err)
+		os.Exit(1)
+	}
+
 	conn, err := grpc.NewClient(*routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64*1024*1024)),
 		grpc.WithConnectParams(grpc.ConnectParams{

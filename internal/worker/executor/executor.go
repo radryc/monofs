@@ -237,7 +237,7 @@ func (e *Executor) Execute(ctx context.Context, req *ExecuteRequest) (*ExecuteRe
 	}
 	cmd := exec.CommandContext(execCtx, req.Arguments[0], req.Arguments[1:]...)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), req.EnvironmentVariables...)
+	cmd.Env = append(filteredHostEnv(), req.EnvironmentVariables...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -403,3 +403,53 @@ func (e *Executor) Status() map[string]interface{} {
 		"max_jobs":     e.cfg.MaxJobs,
 	}
 }
+
+// allowedHostEnvVars is an allowlist, not a denylist: worker credentials
+// (AWS_*, MONOFS_*, TOKEN, PASSWORD, KEY, ...) must never be inherited by an
+// executed build action, including variables added in the future.
+var allowedHostEnvVars = map[string]bool{
+	"PATH":          true,
+	"HOME":          true,
+	"TMPDIR":        true,
+	"TEMP":          true,
+	"TMP":           true,
+	"LANG":          true,
+	"LC_ALL":        true,
+	"USER":          true,
+	"LOGNAME":       true,
+	"SHELL":         true,
+	"SSL_CERT_FILE": true,
+	"SSL_CERT_DIR":  true,
+
+	// Build tooling needs module caches and proxy configuration. These are
+	// locations/endpoints, not credentials.
+	"HTTP_PROXY":    true,
+	"HTTPS_PROXY":   true,
+	"NO_PROXY":      true,
+	"ALL_PROXY":     true,
+	"http_proxy":    true,
+	"https_proxy":   true,
+	"no_proxy":      true,
+	"all_proxy":     true,
+	"GOMODCACHE":    true,
+	"GOPATH":        true,
+	"GOCACHE":       true,
+	"GOFLAGS":       true,
+	"BUILDKIT_HOST": true,
+}
+
+// FilteredHostEnv returns host environment variables matching the safe
+// allowlist so worker secrets are not leaked to executed build actions.
+func FilteredHostEnv() []string {
+	var env []string
+	for _, entry := range os.Environ() {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && allowedHostEnvVars[key] {
+			env = append(env, entry)
+		}
+	}
+	return env
+}
+
+// filteredHostEnv is kept as the package-local name used by the executor.
+func filteredHostEnv() []string { return FilteredHostEnv() }

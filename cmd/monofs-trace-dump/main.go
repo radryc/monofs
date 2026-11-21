@@ -15,8 +15,8 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/storage/logengine"
+	"github.com/radryc/monofs/internal/transport"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const defaultTimeout = 30 * time.Second
@@ -75,7 +75,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
 	defer cancel()
 
-	spans, err := dumpTraces(ctx, cfg, window)
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: transport configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	spans, err := dumpTraces(ctx, tlsTransport, cfg, window)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -294,9 +300,13 @@ func parseTimeSpec(spec string, now time.Time, loc *time.Location) (time.Time, e
 	return time.Time{}, fmt.Errorf("unsupported time format %q", spec)
 }
 
-func dumpTraces(ctx context.Context, cfg config, window timeWindow) ([]logengine.SpanRecord, error) {
+func dumpTraces(ctx context.Context, tr transport.Config, cfg config, window timeWindow) ([]logengine.SpanRecord, error) {
+	transportOpt, err := tr.DialOption()
+	if err != nil {
+		return nil, fmt.Errorf("configure transport: %w", err)
+	}
 	conn, err := grpc.DialContext(ctx, cfg.addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpc.WithBlock(),
 	)
 	if err != nil {

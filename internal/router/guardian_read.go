@@ -19,6 +19,18 @@ import (
 // of treating the path as absent.
 var errGuardianContentUnreachable = errors.New("guardian content is temporarily unreadable")
 
+// guardianContentMissingGrace bounds how long a committed version may be
+// unreadable before a read retires it. Ingest and cross-node replication are
+// routinely a little behind the version commit, and a read can also see a stale
+// node view that hides the replica holding the content. Retiring the version on
+// the first miss turned that lag into a real delete: the next reader saw an
+// absent file, Guardian fell back to "Compiled"/"removed intent", and the state
+// only came back when the following reconcile rewrote it. Ten minutes is far
+// beyond any plausible ingest or replication window, so a genuine content loss
+// is still repaired while a transient miss never is.
+// A var (rather than a const) so tests can shrink the window.
+var guardianContentMissingGrace = 10 * time.Minute
+
 // ReadGuardianPath returns a consistent content+version pair. The content is
 // read from a healthy replica and verified against the authoritative version
 // record, so a stale replica cannot be returned as current.
@@ -61,6 +73,22 @@ func (r *Router) ReadGuardianPath(ctx context.Context, req *pb.ReadGuardianPathR
 
 	content, ok, conclusive := r.readGuardianContentVerified(ctx, mapped, current.ContentSHA256)
 	if !ok {
+		// The version store keeps recently committed content in a bounded
+		// in-memory cache. Prefer it over the nodes only when a replica was
+		// unreachable: an investigative read that got a conclusive answer
+		// (content present but mismatched, or absent on every replica) must
+		// still follow the repair/transient path below.
+		if !conclusive && len(current.Content) > 0 {
+			sum := sha256.Sum256(current.Content)
+			if current.ContentSHA256 == "" || strings.EqualFold(hex.EncodeToString(sum[:]), current.ContentSHA256) {
+				guardianVersionStoreRecoveriesTotal.WithLabelValues("content-cache").Inc()
+				return &pb.ReadGuardianPathResponse{
+					Found:   true,
+					Content: current.Content,
+					Version: current.ToProto(),
+				}, nil
+			}
+		}
 		// The version record and node content disagree (a write applied
 		// content but its version commit was lost, or replicas diverged).
 		// Serve the content that is actually present together with the current
@@ -80,10 +108,19 @@ func (r *Router) ReadGuardianPath(ctx context.Context, req *pb.ReadGuardianPathR
 			// retries.
 			return nil, status.Errorf(codes.Unavailable, "guardian content for %q is temporarily unreadable", logicalPath)
 		}
-		// At least one replica answered and none has the content. The version
-		// record is stale; tombstone it so the next CAS write with expected
-		// version "absent" can recreate the file instead of conflicting
-		// forever on a version that can never be read.
+		// All reachable replicas answered without the content. That is still
+		// usually transient: the write that committed this version may not be
+		// visible on every replica yet, or a stale node view may hide the
+		// replica that has it. A read must never turn that into a delete, so a
+		// recent version is reported as transient and only a version that has
+		// been unreadable well past any ingest/replication window is retired.
+		if age := time.Since(time.Unix(current.CommittedAt, 0)); age < guardianContentMissingGrace {
+			guardianVersionStoreRecoveriesTotal.WithLabelValues("content-missing-transient").Inc()
+			return nil, status.Errorf(codes.Unavailable, "guardian content for %q is temporarily unreadable", logicalPath)
+		}
+		// The version is old and unreadable everywhere. Retire it so the next
+		// CAS write with expected version "absent" can recreate the file
+		// instead of conflicting forever on a version that can never be read.
 		if err := r.tombstoneMissingGuardianVersionLocked(mapped); err != nil {
 			return nil, status.Errorf(codes.Unavailable, "guardian version repair for %q failed: %v", logicalPath, err)
 		}

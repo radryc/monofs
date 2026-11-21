@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/internal/router/pipeline"
+	"github.com/radryc/monofs/internal/worker/executor"
 )
 
 // BazelHandler executes pipeline steps that use runs-on: bazel.
@@ -53,7 +54,7 @@ func (h *BazelHandler) executeStep(ctx context.Context, step StepData, logWriter
 	}
 
 	// Build environment with cache/executor config.
-	env := os.Environ()
+	env := executor.FilteredHostEnv()
 	if h.cacheAddr != "" {
 		env = append(env, "MONOFS_CACHE_ADDR="+h.cacheAddr)
 	}

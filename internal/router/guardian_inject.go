@@ -14,7 +14,6 @@ import (
 	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type guardianNodeTarget struct {
@@ -349,8 +348,12 @@ func (r *Router) guardianNodeClient(target guardianNodeTarget) (pb.MonoFSClient,
 		return target.client, func() {}, nil
 	}
 
+	transportOpt, err := r.config.Transport.DialOption()
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure transport for %s: %w", target.address, err)
+	}
 	conn, err := grpc.NewClient(target.address, append([]grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpcx.IPv4DialerOption(),
 		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 	}, r.internalDialOptions()...)...)

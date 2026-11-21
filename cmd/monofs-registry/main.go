@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/radryc/monofs/internal/diagnostics"
 	"github.com/radryc/monofs/internal/registry"
+	"github.com/radryc/monofs/internal/transport"
 )
 
 var (
@@ -36,9 +38,15 @@ func main() {
 		upstreamPassword = flag.String("upstream-password", os.Getenv("MONOFS_REGISTRY_UPSTREAM_PASSWORD"), "Password for upstream registry auth")
 		upstreamCooldown = flag.Duration("upstream-cooldown", 10*time.Minute, "Time before re-checking upstream for updates")
 
-		diagnosticsAddr = flag.String("diagnostics-addr", ":5001", "Listen address for Prometheus /metrics and pprof endpoints (empty disables)")
+		diagnosticsAddr = flag.String("diagnostics-addr", ":5001", "Listen address for Prometheus /metrics (pprof only when MONOFS_DIAGNOSTICS_PPROF=true; empty disables)")
 	)
 	flag.Parse()
+
+	tlsTransport, transportErr := transport.Load()
+	if transportErr != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", transportErr)
+		os.Exit(1)
+	}
 
 	level := slog.LevelInfo
 	switch *logLevel {
@@ -81,6 +89,7 @@ func main() {
 			Token:      *token,
 			DataNS:     *dataNS,
 			Logger:     logger,
+			Transport:  tlsTransport,
 		})
 		if err == nil {
 			break
@@ -117,8 +126,8 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("monofs-registry listening", "addr", *listen)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Info("monofs-registry listening", "addr", *listen, "scheme", tlsTransport.Scheme())
+		if err := tlsTransport.ListenAndServe(httpServer); err != nil && err != http.ErrServerClosed {
 			logger.Error("http server error", "error", err)
 			os.Exit(1)
 		}

@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
 	"google.golang.org/grpc"
@@ -30,6 +31,7 @@ type telemetryTestNodeServer struct {
 	sqlResults    []byte
 	aggregateRows []byte
 	sqlCalls      int
+	sqlErr        error
 
 	streamGateOnce sync.Once
 	streamBlocked  chan struct{}
@@ -130,6 +132,16 @@ func (s *telemetryTestNodeServer) StreamQueryLogs(_ *pb.QueryLogsRequest, stream
 	return streamTelemetryResults(results, stream.Send)
 }
 
+func (s *telemetryTestNodeServer) QueryPartial(context.Context, *pb.QueryPartialRequest) (*pb.QueryPartialResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sqlCalls++
+	if s.sqlErr != nil {
+		return nil, s.sqlErr
+	}
+	return &pb.QueryPartialResponse{ResultsJson: string(append([]byte(nil), s.sqlResults...))}, nil
+}
+
 func (s *telemetryTestNodeServer) QueryDuckDBSQL(context.Context, *pb.QueryDuckDBSQLRequest) (*pb.QueryDuckDBSQLResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,7 +218,11 @@ func newTelemetryNodeClient(t *testing.T, serverImpl *telemetryTestNodeServer) (
 func newTelemetryRouterHarness(t *testing.T, nodeIDs ...string) (*Router, map[string]*telemetryTestNodeServer, func()) {
 	t.Helper()
 
-	router := NewRouter(DefaultRouterConfig(), nil)
+	cfg := DefaultRouterConfig()
+	// These tests exercise routing, not authorization; the dedicated security
+	// tests cover the fail-closed SQL scope.
+	cfg.RequireSQLPolicy = false
+	router := NewRouter(cfg, nil)
 	servers := make(map[string]*telemetryTestNodeServer, len(nodeIDs))
 	cleanups := make([]func(), 0, len(nodeIDs))
 
@@ -652,5 +668,95 @@ func TestAggregateTelemetryMergesShardPartials(t *testing.T) {
 	}
 	if got := rows[0].Values["max_ts"].String(); got != "200" {
 		t.Fatalf("max = %s, want 200", got)
+	}
+}
+
+func TestQuerySQLFederatesAndMerges(t *testing.T) {
+	router, servers, cleanup := newTelemetryRouterHarness(t, "node-a", "node-b")
+	defer cleanup()
+
+	servers["node-a"].sqlResults = []byte(`{"columns":["k0","p0"],"types":["VARCHAR","BIGINT"],"rows":[["api",3]],"truncated":false}`)
+	servers["node-b"].sqlResults = []byte(`{"columns":["k0","p0"],"types":["VARCHAR","BIGINT"],"rows":[["api",2],["db",1]],"truncated":false}`)
+
+	from := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	resp, err := router.QuerySQL(context.Background(), &pb.QuerySQLRequest{
+		Dataset:      "logs",
+		Query:        "SELECT service, count(*) AS n FROM logs GROUP BY service",
+		FromUnixNano: from.UnixNano(),
+		ToUnixNano:   from.Add(time.Hour).UnixNano(),
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("QuerySQL() error = %v", err)
+	}
+	var result struct {
+		Columns  []string `json:"columns"`
+		Rows     [][]any  `json:"rows"`
+		RowCount int      `json:"row_count"`
+		Partial  bool     `json:"partial"`
+		Coverage struct {
+			Complete bool `json:"complete"`
+		} `json:"coverage"`
+		Backends []struct {
+			ID string `json:"id"`
+		} `json:"backends"`
+	}
+	if err := json.Unmarshal([]byte(resp.GetResultsJson()), &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if len(result.Rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(result.Rows))
+	}
+	got := map[string]float64{}
+	for _, row := range result.Rows {
+		got[row[0].(string)] = row[1].(float64)
+	}
+	if got["api"] != 5 || got["db"] != 1 {
+		t.Fatalf("merged counts = %#v, want api=5 db=1", got)
+	}
+	if !result.Coverage.Complete || result.Partial {
+		t.Fatalf("coverage = %+v partial=%v", result.Coverage, result.Partial)
+	}
+	if len(result.Backends) != 2 {
+		t.Fatalf("backends = %d, want 2", len(result.Backends))
+	}
+}
+
+func TestQuerySQLExcludingShardFailsClosed(t *testing.T) {
+	router, servers, cleanup := newTelemetryRouterHarness(t, "node-a", "node-b")
+	defer cleanup()
+	servers["node-a"].sqlResults = []byte(`{"columns":["k0","p0"],"types":["VARCHAR","BIGINT"],"rows":[["api",3]],"truncated":false}`)
+	servers["node-b"].sqlResults = []byte(`{"columns":["k0","p0"],"types":["VARCHAR","BIGINT"],"rows":[["api",2]],"truncated":false}`)
+
+	from := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	req := &pb.QuerySQLRequest{
+		Dataset:      "logs",
+		Query:        "SELECT count(*) AS n FROM logs",
+		FromUnixNano: from.UnixNano(),
+		ToUnixNano:   from.Add(time.Hour).UnixNano(),
+		Backends: &pb.BackendSelector{
+			Exclude: []*pb.BackendMatcher{{Ids: []string{"node-a"}}},
+		},
+	}
+	if _, err := router.QuerySQL(context.Background(), req); err == nil {
+		t.Fatal("expected coverage_gap when excluding a shard")
+	}
+
+	req.AllowPartial = true
+	resp, err := router.QuerySQL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("QuerySQL(partial) error = %v", err)
+	}
+	var result struct {
+		Partial  bool `json:"partial"`
+		Coverage struct {
+			Complete bool `json:"complete"`
+		} `json:"coverage"`
+	}
+	if err := json.Unmarshal([]byte(resp.GetResultsJson()), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Coverage.Complete || !result.Partial {
+		t.Fatalf("expected partial coverage, got %+v", result)
 	}
 }

@@ -43,8 +43,10 @@ import (
 	"github.com/radryc/monofs/internal/fetcher"
 	"github.com/radryc/monofs/internal/storage"
 	"github.com/radryc/monofs/internal/storage/blob"
+	"github.com/radryc/monofs/internal/storage/blob/layout"
 	storagegit "github.com/radryc/monofs/internal/storage/git"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/internal/transport"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -127,8 +129,14 @@ func main() {
 	prefetchWorkers := flag.Int("prefetch-workers", 0, "Number of background prefetch workers")
 	encryptionKeyHex := flag.String("encryption-key", "", "32-byte hex-encoded encryption key for packager archives")
 	enableGit := flag.Bool("enable-git", false, "Enable optional Git backend")
-	diagnosticsAddr := flag.String("diagnostics-addr", ":9201", "Listen address for Prometheus /metrics and pprof endpoints (empty disables)")
+	diagnosticsAddr := flag.String("diagnostics-addr", ":9201", "Listen address for Prometheus /metrics (pprof only when MONOFS_DIAGNOSTICS_PPROF=true; empty disables)")
 	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
+	blobLayout := flag.String("blob-layout", "", "Blob layout: v2 (default, content-addressed sharded packs) or legacy (per-object archives)")
+	blobCompactor := flag.Bool("blob-compactor", false, "Run the background v2 pack compactor")
+	blobCompactorInterval := flag.Duration("blob-compactor-interval", 5*time.Minute, "Interval between v2 compaction cycles")
+	blobCompactorGrace := flag.Duration("blob-compactor-grace", time.Hour, "Grace period before retired packs are deleted")
+	blobCompactorMaxShards := flag.Int("blob-compactor-max-shards", layout.ShardCount, "Shards compacted per cycle")
+	blobCompactorTargetBytes := flag.Int64("blob-compactor-target-bytes", 512*1024*1024, "Target live bytes per compacted pack")
 	flag.Parse()
 
 	// Load config: file → env → flags (flags win)
@@ -142,6 +150,12 @@ func main() {
 	cfg, err := loadConfigFile(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -311,6 +325,34 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Blob layout: flag > env > v2. The backend reads this env during
+	// Initialize, so resolve it before constructing the backend.
+	layoutMode := strings.ToLower(strings.TrimSpace(*blobLayout))
+	if layoutMode == "" {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("MONOFS_BLOB_LAYOUT_V2"))) {
+		case "false", "0", "no", "off":
+			layoutMode = "legacy"
+		default:
+			layoutMode = "v2"
+		}
+	}
+	if layoutMode == "v2" {
+		_ = os.Setenv("MONOFS_BLOB_LAYOUT_V2", "true")
+	} else {
+		_ = os.Setenv("MONOFS_BLOB_LAYOUT_V2", "false")
+	}
+
+	compactorEnabled := *blobCompactor
+	if v := strings.TrimSpace(os.Getenv("MONOFS_BLOB_COMPACT_ENABLED")); v != "" {
+		compactorEnabled = v == "true" || v == "1"
+	}
+	compactorInterval := *blobCompactorInterval
+	if v := strings.TrimSpace(os.Getenv("MONOFS_BLOB_COMPACT_INTERVAL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			compactorInterval = d
+		}
+	}
+
 	// Create backend registry
 	registry := fetcher.NewRegistry()
 
@@ -347,7 +389,53 @@ func main() {
 		"storage_type", cfg.Storage.Type,
 		"storage_path", cfg.Storage.LocalPath,
 		"archives", blobBackend.ArchiveCount(),
+		"layout", blobBackend.LayoutMode(),
 	)
+
+	if compactorEnabled && blobBackend.LayoutMode() == "v2" && cfg.Storage.Type == "s3" {
+		compactorCfg := layout.CompactionConfig{
+			TargetBytes:      *blobCompactorTargetBytes,
+			MaxPacksPerShard: 2,
+			DeadRatio:        0.30,
+			GracePeriod:      *blobCompactorGrace,
+			MaxShardsPerRun:  *blobCompactorMaxShards,
+			MaxBytesPerRun:   8 * 1024 * 1024 * 1024,
+			RetryLimit:       5,
+		}
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(30 * time.Second):
+			}
+			ticker := time.NewTicker(compactorInterval)
+			defer ticker.Stop()
+			for {
+				res, err := blobBackend.RunCompactor(ctx, compactorCfg)
+				if err != nil {
+					logger.Warn("blob compaction failed", "error", err)
+				} else if res.ShardsScanned > 0 {
+					logger.Info("blob compaction",
+						"shards", res.ShardsScanned,
+						"plans", res.PlansApplied,
+						"retired", res.PacksRetired,
+						"deleted", res.PacksDeleted,
+						"bytes_rewritten", res.BytesRewritten,
+					)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+		logger.Info("blob compactor enabled",
+			"interval", compactorInterval,
+			"grace", *blobCompactorGrace,
+			"max_shards", *blobCompactorMaxShards,
+		)
+	}
 
 	// Register encryption-key guard diagnostics endpoints.
 	diagMux.HandleFunc("/key-status", func(w http.ResponseWriter, r *http.Request) {
@@ -428,7 +516,13 @@ func main() {
 	})
 
 	// Create gRPC server
+	transportServerOpt, err := tlsTransport.ServerOption()
+	if err != nil {
+		logger.Error("failed to configure transport security", "error", err)
+		os.Exit(1)
+	}
 	grpcServer := grpc.NewServer(
+		transportServerOpt,
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.MaxRecvMsgSize(100*1024*1024),
 		grpc.MaxSendMsgSize(100*1024*1024),

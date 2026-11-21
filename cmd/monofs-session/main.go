@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,8 +15,8 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
+	"github.com/radryc/monofs/internal/transport"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -26,9 +27,14 @@ const (
 
 // SessionRequest is sent to the FUSE client
 type SessionRequest struct {
-	Action                  string   `json:"action"` // start, add, rm, status, branch, log, commit, pull, discard, push, push-blobs, diff
+	Action                  string   `json:"action"` // start, add, rm, status, branch, log, commit, pull, discard, push, push-blobs, diff, list, read, stat, write, mkdir
 	Path                    string   `json:"path,omitempty"`
 	Paths                   []string `json:"paths,omitempty"`
+	Content                 []byte   `json:"content,omitempty"`        // write payload (base64 in JSON)
+	Mode                    uint32   `json:"mode,omitempty"`           // write/mkdir permissions
+	Offset                  int64    `json:"offset,omitempty"`         // read offset
+	Size                    int64    `json:"size,omitempty"`           // read length; 0 = to EOF
+	CreateParents           bool     `json:"create_parents,omitempty"` // write: create a missing top-level user dir
 	BranchOp                string   `json:"branch_op,omitempty"`
 	BranchName              string   `json:"branch_name,omitempty"`
 	ShowBlobs               bool     `json:"show_blobs,omitempty"`
@@ -81,6 +87,20 @@ type SessionResponse struct {
 	UpstreamLogList   []UpstreamLogInfo   `json:"upstream_log_list,omitempty"`
 	TagList           []UpstreamTagInfo   `json:"tag_list,omitempty"`
 	BlameLines        []UpstreamBlameInfo `json:"blame_lines,omitempty"`
+	Content           []byte              `json:"content,omitempty"` // read payload (base64 in JSON)
+	Stat              *FileStat           `json:"stat,omitempty"`
+	Entries           []FileStat          `json:"entries,omitempty"`
+}
+
+// FileStat describes one file or directory returned by the filesystem API.
+type FileStat struct {
+	Path          string `json:"path"`
+	Name          string `json:"name,omitempty"`
+	Mode          uint32 `json:"mode"`
+	Size          int64  `json:"size"`
+	Mtime         int64  `json:"mtime,omitempty"`
+	IsDir         bool   `json:"is_dir,omitempty"`
+	SymlinkTarget string `json:"symlink_target,omitempty"`
 }
 
 // UpstreamLogInfo is one commit in an upstream branch's history.
@@ -188,6 +208,7 @@ type BranchMappingInfo struct {
 // SessionCommand handles write session management via Unix socket
 type SessionCommand struct {
 	socketPath string
+	transport  transport.Config
 }
 
 func defaultSessionSocketPath() string {
@@ -228,7 +249,13 @@ func main() {
 		socketPath = defaultSessionSocketPath()
 	}
 
-	cmd := &SessionCommand{socketPath: socketPath}
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: transport configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	cmd := &SessionCommand{socketPath: socketPath, transport: tlsTransport}
 
 	// Get command from args
 	if err := cmd.Execute(args); err != nil {
@@ -276,6 +303,16 @@ func (sc *SessionCommand) Execute(args []string) error {
 		return sc.setupBlobs(args[1:])
 	case "diff":
 		return sc.showDiff(args[1:])
+	case "list", "ls":
+		return sc.listPath(args[1:])
+	case "stat":
+		return sc.statPath(args[1:])
+	case "read", "cat":
+		return sc.readFile(args[1:])
+	case "write":
+		return sc.writeFile(args[1:])
+	case "mkdir":
+		return sc.mkdirPath(args[1:])
 	case "blobs-info":
 		return sc.showBlobsInfo(args[1:])
 	case "push":
@@ -308,6 +345,13 @@ Commands:
 		pull         Re-ingest included workspace repositories from their upstream sources
 		push         Send pending local virtual commits upstream (--push-mode squash|preserve)
 		conflicts    List unresolved merge conflicts from a pull
+
+	Filesystem (works with --headless or a writable mount):
+		list [path]  List a directory (alias: ls)
+		stat <path>  Show file metadata
+		read <path>  Read a file to stdout or --output (aliases: cat)
+		write <path> Write a file from --file, --content, or stdin
+		mkdir <path> Create a directory
 
 	Workspace state:
 		branch       Show, create, switch, or delete logical branches (branch delete <name>)
@@ -349,6 +393,14 @@ Examples:
 	# Stage source changes before commit
 	monofs-session add github.com/acme/service-a/file.go
 	monofs-session add github.com/acme/service-a github.com/acme/lib
+
+	# Inspect and edit the workspace directly (works with --headless)
+	monofs-session list github.com/acme/service-a
+	monofs-session stat github.com/acme/service-a/file.go
+	monofs-session read github.com/acme/service-a/file.go
+	monofs-session write github.com/acme/service-a/file.go --content 'package main'
+	monofs-session write .deps/lib.go --parents --content 'package lib'
+	monofs-session mkdir github.com/acme/service-a/internal
 
 	# Remove a file or directory and stage the delete
 	monofs-session rm github.com/acme/service-a/file.go
@@ -498,10 +550,11 @@ func (sc *SessionCommand) sendRequest(req SessionRequest) (*SessionResponse, err
 
 func socketTimeoutForAction(action string) time.Duration {
 	switch action {
-	case "commit", "push", "push-blobs", "pull":
+	case "commit", "push", "push-blobs", "pull", "read", "write":
 		// Push keeps the socket open until upload, backend verification,
 		// overlay cleanup finish, publish may push multiple repos, and pull
-		// may re-ingest multiple repos.
+		// may re-ingest multiple repos. File reads and writes can carry
+		// large payloads over the socket.
 		return pushSocketTimeout
 	default:
 		return defaultSocketTimeout
@@ -530,6 +583,235 @@ func validatePushMode(mode string) error {
 // normalizePushMode canonicalizes a push-mode flag value.
 func normalizePushMode(mode string) string {
 	return strings.ToLower(strings.TrimSpace(mode))
+}
+
+// parseInterspersed parses flag sets that may appear before or after the
+// positional path. The standard flag package stops at the first non-flag
+// argument, which makes `write path --content text` silently ignore flags.
+func parseInterspersed(fs *flag.FlagSet, args []string, valueFlags map[string]bool) error {
+	ordered := make([]string, 0, len(args))
+	positional := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			ordered = append(ordered, arg)
+			name := strings.TrimLeft(arg, "-")
+			if strings.Contains(name, "=") {
+				continue
+			}
+			if valueFlags[name] && i+1 < len(args) {
+				ordered = append(ordered, args[i+1])
+				i++
+			}
+			continue
+		}
+		positional = append(positional, arg)
+	}
+	return fs.Parse(append(ordered, positional...))
+}
+
+func (sc *SessionCommand) listPath(args []string) error {
+	listCmd := flag.NewFlagSet("list", flag.ExitOnError)
+	jsonOut := listCmd.Bool("json", false, "Emit entries as JSON")
+	if err := parseInterspersed(listCmd, args, nil); err != nil {
+		return err
+	}
+	target := "."
+	if listCmd.NArg() > 0 {
+		target = listCmd.Arg(0)
+	}
+
+	resp, err := sc.sendRequest(SessionRequest{Action: "list", Path: target})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	if *jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(resp.Entries)
+	}
+	if len(resp.Entries) == 0 {
+		fmt.Println("(empty)")
+		return nil
+	}
+	for _, entry := range resp.Entries {
+		suffix := ""
+		if entry.IsDir {
+			suffix = "/"
+		}
+		size := ""
+		if !entry.IsDir && entry.Size > 0 {
+			size = fmt.Sprintf("  (%d bytes)", entry.Size)
+		}
+		fmt.Printf("%s%s%s\n", entry.Name, suffix, size)
+	}
+	return nil
+}
+
+func (sc *SessionCommand) statPath(args []string) error {
+	statCmd := flag.NewFlagSet("stat", flag.ExitOnError)
+	jsonOut := statCmd.Bool("json", false, "Emit metadata as JSON")
+	if err := parseInterspersed(statCmd, args, nil); err != nil {
+		return err
+	}
+	if statCmd.NArg() < 1 {
+		return fmt.Errorf("usage: monofs-session stat <path>")
+	}
+	target := statCmd.Arg(0)
+
+	resp, err := sc.sendRequest(SessionRequest{Action: "stat", Path: target})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	stat := resp.Stat
+	if stat == nil {
+		return fmt.Errorf("no metadata returned for %q", target)
+	}
+	if *jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(stat)
+	}
+	mtime := "-"
+	if stat.Mtime > 0 {
+		mtime = time.Unix(stat.Mtime, 0).Format(time.RFC3339)
+	}
+	line := fmt.Sprintf("%s %d %s %s", os.FileMode(stat.Mode), stat.Size, mtime, stat.Path)
+	if stat.SymlinkTarget != "" {
+		line += " -> " + stat.SymlinkTarget
+	}
+	fmt.Println(line)
+	return nil
+}
+
+func (sc *SessionCommand) readFile(args []string) error {
+	readCmd := flag.NewFlagSet("read", flag.ExitOnError)
+	output := readCmd.String("output", "-", "Write to a file instead of stdout ('-' for stdout)")
+	offset := readCmd.Int64("offset", 0, "Byte offset to start reading")
+	size := readCmd.Int64("size", 0, "Number of bytes to read (0 = to EOF)")
+	maxBytes := readCmd.Int64("max-bytes", 0, "Cap the response size (0 = unlimited)")
+	if err := parseInterspersed(readCmd, args, map[string]bool{
+		"output": true, "offset": true, "size": true, "max-bytes": true,
+	}); err != nil {
+		return err
+	}
+	if readCmd.NArg() < 1 {
+		return fmt.Errorf("usage: monofs-session read <path> [--output file]")
+	}
+	target := readCmd.Arg(0)
+
+	requestedSize := *size
+	if *maxBytes > 0 && (requestedSize <= 0 || *maxBytes < requestedSize) {
+		requestedSize = *maxBytes
+	}
+
+	resp, err := sc.sendRequest(SessionRequest{
+		Action: "read",
+		Path:   target,
+		Offset: *offset,
+		Size:   requestedSize,
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("%s", resp.Error)
+	}
+
+	if *output == "" || *output == "-" {
+		_, err := os.Stdout.Write(resp.Content)
+		return err
+	}
+	if err := os.WriteFile(*output, resp.Content, 0644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "wrote %d bytes to %s\n", len(resp.Content), *output)
+	return nil
+}
+
+func (sc *SessionCommand) writeFile(args []string) error {
+	writeCmd := flag.NewFlagSet("write", flag.ExitOnError)
+	fromFile := writeCmd.String("file", "", "Read content from a file ('-' for stdin)")
+	content := writeCmd.String("content", "", "Literal content to write")
+	mode := writeCmd.Uint("mode", 0, "File permissions in octal (e.g. 0644)")
+	parents := writeCmd.Bool("parents", false, "Create a missing top-level workspace directory")
+	if err := parseInterspersed(writeCmd, args, map[string]bool{
+		"file": true, "content": true, "mode": true,
+	}); err != nil {
+		return err
+	}
+	if writeCmd.NArg() < 1 {
+		return fmt.Errorf("usage: monofs-session write <path> [--file src | --content text]")
+	}
+	target := writeCmd.Arg(0)
+
+	if *fromFile != "" && *content != "" {
+		return fmt.Errorf("use either --file or --content, not both")
+	}
+
+	var data []byte
+	var err error
+	switch {
+	case *fromFile == "-":
+		data, err = io.ReadAll(os.Stdin)
+	case *fromFile != "":
+		data, err = os.ReadFile(*fromFile)
+	case *content != "":
+		data = []byte(*content)
+	default:
+		data, err = io.ReadAll(os.Stdin)
+	}
+	if err != nil {
+		return fmt.Errorf("read write payload: %w", err)
+	}
+
+	resp, err := sc.sendRequest(SessionRequest{
+		Action:        "write",
+		Path:          target,
+		Content:       data,
+		Mode:          uint32(*mode),
+		CreateParents: *parents,
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	fmt.Println(resp.Message)
+	return nil
+}
+
+func (sc *SessionCommand) mkdirPath(args []string) error {
+	mkdirCmd := flag.NewFlagSet("mkdir", flag.ExitOnError)
+	mode := mkdirCmd.Uint("mode", 0, "Directory permissions in octal (e.g. 0755)")
+	if err := parseInterspersed(mkdirCmd, args, map[string]bool{"mode": true}); err != nil {
+		return err
+	}
+	if mkdirCmd.NArg() < 1 {
+		return fmt.Errorf("usage: monofs-session mkdir <path>")
+	}
+	target := mkdirCmd.Arg(0)
+
+	resp, err := sc.sendRequest(SessionRequest{Action: "mkdir", Path: target, Mode: uint32(*mode)})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	fmt.Println(resp.Message)
+	return nil
 }
 
 func (sc *SessionCommand) showDiff(args []string) error {
@@ -1564,8 +1846,12 @@ func (sc *SessionCommand) searchCode(args []string) error {
 	}
 
 	// Connect to search service
+	transportOpt, err := sc.transport.DialOption()
+	if err != nil {
+		return fmt.Errorf("configure transport for search service: %w", err)
+	}
 	conn, err := grpc.DialContext(ctx, *searchAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpc.WithBlock(),
 	)
 	if err != nil {

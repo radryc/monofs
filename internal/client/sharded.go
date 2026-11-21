@@ -20,8 +20,8 @@ import (
 	"github.com/radryc/monofs/internal/fsstat"
 	"github.com/radryc/monofs/internal/monopath"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/transport"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -59,6 +59,7 @@ type ShardedClient struct {
 	version           string
 	registered        bool
 	token             string
+	transport         transport.Config
 	heartbeatInterval time.Duration
 	stopHeartbeat     chan struct{}
 	operationsCount   int64 // atomic counter
@@ -91,6 +92,10 @@ type ShardedClientConfig struct {
 	// Token is the bearer token presented to cluster services (storage
 	// nodes verify it and enforce the repo-managed access policy).
 	Token string
+
+	// Transport carries the resolved STRATA_TLS_* contract for router and
+	// node connections. The zero value is plaintext.
+	Transport transport.Config
 }
 
 // NewShardedClient creates a new sharded client connected to the router.
@@ -126,13 +131,18 @@ func NewShardedClient(ctx context.Context, cfg ShardedClientConfig) (*ShardedCli
 		mountPoint:           cfg.MountPoint,
 		writable:             cfg.Writable,
 		token:                cfg.Token,
+		transport:            cfg.Transport,
 		version:              cfg.Version,
 		heartbeatInterval:    30 * time.Second, // Default, may be overridden by router
 	}
 
 	// Connect to router
+	transportOpt, err := sc.transport.DialOption()
+	if err != nil {
+		return nil, fmt.Errorf("configure transport for router: %w", err)
+	}
 	routerDialOpts := append([]grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 	}, bearerDialOptions(cfg.Token)...)
 	routerConn, err := grpc.NewClient(cfg.RouterAddr, routerDialOpts...)
 	if err != nil {
@@ -204,6 +214,7 @@ func NewDisconnectedClient(cfg ShardedClientConfig) *ShardedClient {
 		mountPoint:           cfg.MountPoint,
 		writable:             cfg.Writable,
 		token:                cfg.Token,
+		transport:            cfg.Transport,
 		version:              cfg.Version,
 		heartbeatInterval:    30 * time.Second,
 	}
@@ -252,8 +263,18 @@ func (sc *ShardedClient) attemptConnection() {
 	}
 
 	// Try to connect to router
+	transportOpt, err := sc.transport.DialOption()
+	if err != nil {
+		sc.mu.Lock()
+		sc.lastError = fmt.Errorf("configure transport for router: %w", err)
+		sc.mu.Unlock()
+		if sc.logger != nil {
+			sc.logger.Debug("failed to configure router transport", "error", err)
+		}
+		return
+	}
 	routerConn, err := grpc.NewClient(sc.routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 	)
 	if err != nil {
 		sc.mu.Lock()
@@ -442,8 +463,15 @@ func (sc *ShardedClient) refreshClusterInfo(ctx context.Context) error {
 					"address", node.Address,
 					"healthy", node.Healthy)
 			}
+			transportOpt, err := sc.transport.DialOption()
+			if err != nil {
+				if sc.logger != nil {
+					sc.logger.Warn("failed to configure node transport", "error", err)
+				}
+				continue
+			}
 			nodeDialOpts := append([]grpc.DialOption{
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				transportOpt,
 			}, bearerDialOptions(sc.token)...)
 			conn, err := grpc.NewClient(node.Address, nodeDialOpts...)
 			if err != nil {

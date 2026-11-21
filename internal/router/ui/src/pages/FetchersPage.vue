@@ -131,6 +131,29 @@ const observabilityFetchers = computed(() => {
   return [...list].sort((a, b) => a.address.localeCompare(b.address))
 })
 
+const layoutModes = computed(() => {
+  const modes = new Set<string>()
+  for (const f of observability.value?.fetchers ?? []) {
+    if (f.blob?.layout) modes.add(f.blob.layout)
+  }
+  return [...modes].sort()
+})
+
+const layoutLabel = computed(() => (layoutModes.value.length ? layoutModes.value.join(' + ') : 'unknown'))
+
+const s3LookupHits = computed(() => observability.value?.totals?.cloud_lookup_hits ?? 0)
+const s3LookupMisses = computed(() => observability.value?.totals?.cloud_lookup_misses ?? 0)
+const s3LookupErrors = computed(() => observability.value?.totals?.cloud_lookup_errors ?? 0)
+const totalS3Lookups = computed(() => s3LookupHits.value + s3LookupMisses.value + s3LookupErrors.value)
+
+const compactorHealthy = computed(() => !(observability.value?.totals?.compactor_last_error))
+
+function layoutClass(mode?: string): string {
+  if (mode === 'v2') return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+  if (mode === 'legacy') return 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+  return 'bg-slate-600/20 text-slate-300 border-slate-500/30'
+}
+
 const storageObjectSearchQuery = ref('')
 const storageObjectTypeFilter = ref('')
 const storageObjectPageSize = 50
@@ -524,6 +547,106 @@ const storageObjectsHealthy = computed(() => storageObjects.value?.healthy ?? fa
               <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber(entry.blob?.cloud_index_entries ?? 0) }}</td>
               <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber((entry.blob?.cloud_lookup_hits ?? 0) + (entry.blob?.cloud_lookup_misses ?? 0)) }}</td>
               <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber(entry.blob?.cloud_downloads_total ?? 0) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </DataCard>
+
+    <!-- Blob layout, lookup path, batching and compaction -->
+    <DataCard v-if="observability" class="mb-6" :loading="fetchersLoading">
+      <template #header>
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-sm font-semibold text-slate-200">Blob Layout &amp; Compaction</h2>
+            <p class="text-xs text-slate-400 mt-0.5">
+              Read path, ingest batching and background compaction. Counters are summed across fetchers and reset when a fetcher restarts.
+            </p>
+          </div>
+          <span class="text-xs px-2 py-1 rounded-lg border" :class="layoutClass(layoutModes[0])">
+            {{ layoutLabel }}
+          </span>
+        </div>
+      </template>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 p-5 text-xs">
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Reads resolved through the legacy one-file-per-blob (_loose) path. The v2 layout resolves reads through the shard manifest and pack index, so this normally stays at zero.">
+          <div class="text-slate-400">Legacy Direct Hits</div>
+          <div class="text-lg font-semibold text-emerald-300">{{ formatNumber(observability.totals.direct_lookup_hits ?? 0) }}</div>
+          <div class="text-slate-500">expected 0 on v2</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Blob reads that missed the local cache and had to consult S3: v2 manifest/index lookups, legacy sidecar-index lookups, and lookup errors. Normal in v2 — the total only grows on local cache misses.">
+          <div class="text-slate-400">S3 Read-Through Lookups</div>
+          <div class="text-lg font-semibold" :class="s3LookupErrors > 0 ? 'text-amber-300' : 'text-slate-300'">{{ formatNumber(totalS3Lookups) }}</div>
+          <div class="text-slate-500">{{ formatNumber(s3LookupHits) }} hit · {{ formatNumber(s3LookupMisses) }} miss</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Pack files stored on fetcher disks (summed across all fetchers). Includes packs superseded by compaction and packs held by fetchers that never run the compactor, so this tracks disk usage, not the active pack count in S3.">
+          <div class="text-slate-400">Local Cached Packs</div>
+          <div class="text-lg font-semibold text-slate-200">{{ formatNumber(observability.totals.v2_packs ?? 0) }}</div>
+          <div class="text-slate-500">{{ formatNumber(observability.totals.v2_manifests ?? 0) }} shard manifests read</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Blob bytes buffered by the ingest batcher, not yet written to a pack. A pack flushes at 512 MiB, 8192 blobs, or 2 s of buffering, so zero at rest is normal.">
+          <div class="text-slate-400">Unflushed Ingest</div>
+          <div class="text-lg font-semibold text-sky-300">{{ formatBytes(observability.totals.batch_pending_bytes ?? 0) }}</div>
+          <div class="text-slate-500">{{ formatNumber(observability.totals.batch_open_shards ?? 0) }} shards buffered</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Background compaction cycles (one every 5 minutes by default) and the cumulative number of shard manifests they examined.">
+          <div class="text-slate-400">Compaction Cycles</div>
+          <div class="text-lg font-semibold text-slate-200">{{ formatNumber(observability.totals.compactor_runs_total ?? 0) }}</div>
+          <div class="text-slate-500">{{ formatNumber(observability.totals.compactor_shards_total ?? 0) }} shard scans</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Shards where sealed packs were merged into one new pack. The source packs are retired from the active set and deleted after the grace period (1 hour by default).">
+          <div class="text-slate-400">Pack Merges</div>
+          <div class="text-lg font-semibold text-violet-300">{{ formatNumber(observability.totals.compactor_plans_total ?? 0) }}</div>
+          <div class="text-slate-500">{{ formatNumber(observability.totals.compactor_packs_retired_total ?? 0) }} source packs retired</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="Retired packs removed from S3 and local disk after the grace period. The second value is the cumulative uncompressed input bytes rewritten by merges, not net storage growth.">
+          <div class="text-slate-400">Packs Reclaimed</div>
+          <div class="text-lg font-semibold text-slate-300">{{ formatNumber(observability.totals.compactor_packs_deleted_total ?? 0) }}</div>
+          <div class="text-slate-500">{{ formatBytes(observability.totals.compactor_bytes_rewritten_total ?? 0) }} rewritten</div>
+        </div>
+        <div class="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4 space-y-1.5" title="When background compaction last finished on any fetcher, and the last error it reported (if any).">
+          <div class="text-slate-400">Last Compaction</div>
+          <div class="text-lg font-semibold" :class="compactorHealthy ? 'text-emerald-300' : 'text-rose-300'">
+            {{ observability.totals.compactor_last_run_unix ? new Date(observability.totals.compactor_last_run_unix * 1000).toLocaleTimeString() : '-' }}
+          </div>
+          <div class="text-slate-500 truncate" :title="observability.totals.compactor_last_error || 'no errors'">
+            {{ observability.totals.compactor_last_error || 'no errors' }}
+          </div>
+        </div>
+      </div>
+      <div v-if="observabilityFetchers.length" class="overflow-x-auto border-t border-slate-700/30">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-800/30 text-slate-400">
+            <tr>
+              <th class="text-left font-medium px-4 py-2">Fetcher</th>
+              <th class="text-left font-medium px-3 py-2">Layout</th>
+              <th class="text-right font-medium px-3 py-2">Legacy Direct</th>
+              <th class="text-right font-medium px-3 py-2">S3 Lookups</th>
+              <th class="text-right font-medium px-3 py-2">Local Packs</th>
+              <th class="text-right font-medium px-3 py-2">Compaction Cycles</th>
+              <th class="text-left font-medium px-3 py-2">Last Error</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800">
+            <tr v-for="entry in observabilityFetchers" :key="entry.address" class="hover:bg-slate-800/20">
+              <td class="px-4 py-2">
+                <div class="flex items-center gap-2">
+                  <NodeBadge :healthy="entry.healthy" />
+                  <span class="font-mono text-slate-300">{{ entry.address }}</span>
+                </div>
+              </td>
+              <td class="px-3 py-2">
+                <span class="text-[11px] px-2 py-0.5 rounded-full border" :class="layoutClass(entry.blob?.layout)">
+                  {{ entry.blob?.layout || 'unknown' }}
+                </span>
+              </td>
+              <td class="text-right px-3 py-2 text-emerald-300">{{ formatNumber(entry.blob?.direct_lookup_hits ?? 0) }}</td>
+              <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber((entry.blob?.cloud_lookup_hits ?? 0) + (entry.blob?.cloud_lookup_misses ?? 0) + (entry.blob?.cloud_lookup_errors ?? 0)) }}</td>
+              <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber(entry.blob?.v2_packs ?? 0) }}</td>
+              <td class="text-right px-3 py-2 text-slate-400">{{ formatNumber(entry.blob?.compactor_runs_total ?? 0) }}</td>
+              <td class="px-3 py-2 text-rose-300 truncate max-w-[260px]" :title="entry.blob?.compactor_last_error || ''">
+                {{ entry.blob?.compactor_last_error || '-' }}
+              </td>
             </tr>
           </tbody>
         </table>

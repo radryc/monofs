@@ -159,12 +159,35 @@ func (bb *BlobBackend) FetchBlob(ctx context.Context, req *storage.FetchRequest)
 	}, nil
 }
 
-// findBlobInCloud locates a blob through the S3 sidecar index, downloads its
-// archive into the local cache, indexes it, and returns the local reference.
+// findBlobInCloud locates a blob through a deterministic content-addressed
+// probe first, then the S3 sidecar index as a fallback. Loose archives are
+// named "_loose/<content-id>.pack", so the common case is a single HEAD and
+// never lists the bucket or scans sidecars.
 func (bb *BlobBackend) findBlobInCloud(ctx context.Context, storageID, blobHash string) (archiveRef, bool, error) {
 	if !bb.hasCloudDownload() {
 		return archiveRef{}, false, nil
 	}
+
+	if bb.v2ReadEnabled() {
+		if ref, ok, err := bb.v2FindBlob(ctx, blobHash); err == nil && ok {
+			bb.cloudLookupHits.Add(1)
+			if bb.otel.lookups != nil {
+				bb.otel.lookups.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "hit")))
+			}
+			return ref, true, nil
+		}
+	}
+
+	if archivePath, ok := bb.directLooseArchivePath(blobHash); ok {
+		bb.directLookupHits.Add(1)
+		bb.cloudLookupHits.Add(1)
+		if bb.otel.lookups != nil {
+			bb.otel.lookups.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", "hit")))
+		}
+		return bb.loadCloudArchive(blobHash, archivePath)
+	}
+	bb.directLookupMisses.Add(1)
+
 	if err := bb.ensureCloudBlobIndex(ctx, storageID); err != nil {
 		bb.cloudLookupErrors.Add(1)
 		if bb.otel.lookups != nil {
@@ -189,22 +212,69 @@ func (bb *BlobBackend) findBlobInCloud(ctx context.Context, storageID, blobHash 
 	}
 
 	archivePath := filepath.Join(bb.config.CacheDir, "archives", filepath.FromSlash(archiveKey))
+	return bb.loadCloudArchive(blobHash, archivePath)
+}
+
+// directLooseArchivePath resolves the deterministic loose-archive path for a
+// content ID. Loose archives are written as "_loose/<content-id>.pack", so a
+// local stat or a single cloud HEAD is enough; no listing is needed.
+func (bb *BlobBackend) directLooseArchivePath(contentID string) (string, bool) {
+	id := strings.TrimSpace(contentID)
+	if id == "" || strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
+		return "", false
+	}
+	archivePath := filepath.Join(bb.config.CacheDir, "archives", "_loose", id+".pack")
+	if _, err := os.Stat(archivePath); err == nil {
+		return archivePath, true
+	}
+	if bb.headCloudObject == nil {
+		return "", false
+	}
+	if _, ok := bb.headCloudObject(bb.cloudKey(archivePath)); !ok {
+		return "", false
+	}
+	return archivePath, true
+}
+
+// loadCloudArchive ensures the archive is local, indexes it, and returns the
+// reference for blobHash.
+func (bb *BlobBackend) loadCloudArchive(blobHash, archivePath string) (archiveRef, bool, error) {
+	bb.mu.RLock()
+	ref, exists := bb.blobIndex[blobHash]
+	if !exists {
+		if bare := normalizeV2Entry(blobHash); bare != "" {
+			ref, exists = bb.blobIndex[bare]
+		}
+	}
+	bb.mu.RUnlock()
+	if exists {
+		if _, err := os.Stat(ref.archivePath); err == nil {
+			return ref, true, nil
+		}
+	}
+
 	if _, err := os.Stat(archivePath); err != nil {
 		if err := bb.downloadFromCloud(archivePath); err != nil {
-			return archiveRef{}, false, fmt.Errorf("download archive %s: %w", archiveKey, err)
+			return archiveRef{}, false, fmt.Errorf("download archive %s: %w", filepath.Base(archivePath), err)
 		}
 	}
 	if _, err := bb.indexArchive(archivePath); err != nil {
-		return archiveRef{}, false, fmt.Errorf("index downloaded archive %s: %w", archiveKey, err)
+		return archiveRef{}, false, fmt.Errorf("index downloaded archive %s: %w", filepath.Base(archivePath), err)
 	}
 
 	bb.mu.Lock()
 	bb.archivePaths[archivePath] = true
-	sid := strings.SplitN(archiveKey, "/", 2)[0]
-	if sid != "" {
-		bb.storageIDs[sid] = true
+	if rel, relErr := filepath.Rel(filepath.Join(bb.config.CacheDir, "archives"), archivePath); relErr == nil {
+		if sid := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]; sid != "" && sid != "." {
+			bb.storageIDs[sid] = true
+		}
 	}
-	ref, exists := bb.blobIndex[blobHash]
+	ref, exists = bb.blobIndex[blobHash]
+	if !exists {
+		if bare := normalizeV2Entry(blobHash); bare != "" {
+			ref, exists = bb.blobIndex[bare]
+		}
+	}
 	bb.mu.Unlock()
 	if exists {
 		return ref, true, nil

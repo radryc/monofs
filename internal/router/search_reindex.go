@@ -21,7 +21,7 @@ func (r *Router) triggerSearchReindex(storageID, displayPath, source, ref, reaso
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		ctx, cancel := context.WithTimeout(r.withSearchAuthorization(context.Background()), 30*time.Minute)
 		defer cancel()
 
 		resp, err := client.IndexRepository(ctx, &pb.IndexRequest{

@@ -162,6 +162,22 @@ func (b *HybridBackend) QueryDuckDBSQL(ctx context.Context, dataset, query strin
 	return base.QueryDuckDBSQL(ctx, dataset, query, from, to, limit, scope)
 }
 
+func (b *HybridBackend) QueryPartial(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope) (logengine.DuckDBSQLResult, error) {
+	if strings.EqualFold(strings.TrimSpace(dataset), "traces") {
+		if sqlStore, ok := b.traces.(interface {
+			QueryPartial(context.Context, string, string, time.Time, time.Time, int, logengine.QueryScope) (logengine.DuckDBSQLResult, error)
+		}); ok {
+			return sqlStore.QueryPartial(ctx, dataset, query, from, to, limit, scope)
+		}
+		return logengine.DuckDBSQLResult{}, fmt.Errorf("trace SQL is not supported by the configured trace backend")
+	}
+	base, err := b.baseOrErr()
+	if err != nil {
+		return logengine.DuckDBSQLResult{}, err
+	}
+	return base.QueryPartial(ctx, dataset, query, from, to, limit, scope)
+}
+
 func (b *HybridBackend) Stats(ctx context.Context) (logengine.LogEngineStats, error) {
 	if b.base == nil {
 		return logengine.LogEngineStats{}, nil

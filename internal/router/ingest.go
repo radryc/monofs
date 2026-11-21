@@ -20,7 +20,6 @@ import (
 	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func min(a, b int) int {
@@ -438,9 +437,15 @@ initComplete:
 
 		// Ensure we have a gRPC client connection
 		if state.client == nil {
+			transportOpt, transportErr := r.config.Transport.DialOption()
+			if transportErr != nil {
+				r.mu.Unlock()
+				r.logger.Error("failed to configure node transport", "node_id", node.ID, "error", transportErr)
+				continue
+			}
 			conn, err := grpc.NewClient(state.info.Address,
 				append([]grpc.DialOption{
-					grpc.WithTransportCredentials(insecure.NewCredentials()),
+					transportOpt,
 					grpcx.IPv4DialerOption(),
 					grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 				}, r.internalDialOptions()...)...,
@@ -525,9 +530,14 @@ initComplete:
 
 		// Ensure connection exists
 		if state.client == nil {
+			transportOpt, transportErr := r.config.Transport.DialOption()
+			if transportErr != nil {
+				r.logger.Error("failed to configure node transport", "node_id", node.ID, "error", transportErr)
+				continue
+			}
 			conn, err := grpc.NewClient(state.info.Address,
 				append([]grpc.DialOption{
-					grpc.WithTransportCredentials(insecure.NewCredentials()),
+					transportOpt,
 					grpcx.IPv4DialerOption(),
 					grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 				}, r.internalDialOptions()...)...,

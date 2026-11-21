@@ -9,16 +9,18 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -35,6 +37,10 @@ type ClientConfig struct {
 	DataNS            string
 	Logger            *slog.Logger
 	ReplicationFactor int // Number of nodes to replicate writes to (0 or 1 = primary only, 2+ = primary + replicas)
+
+	// Transport carries the resolved STRATA_TLS_* contract for router and
+	// node connections. The zero value is plaintext.
+	Transport transport.Config
 }
 
 type Client struct {
@@ -45,6 +51,7 @@ type Client struct {
 	logger            *slog.Logger
 	rpcTimeout        time.Duration
 	replicationFactor int
+	transport         transport.Config
 
 	mu          sync.Mutex
 	routerConn  *grpc.ClientConn
@@ -59,6 +66,34 @@ type Client struct {
 	stopHeartbeat chan struct{}
 	stopOnce      sync.Once
 	heartbeatWG   sync.WaitGroup
+}
+
+// tokenDialOptions attaches the cluster token to every router and node RPC.
+// Without it an enforcing router rejects GetClusterInfo with Unauthenticated
+// and the registry never starts serving /v2/, which surfaces to docker push as
+// an EOF.
+func tokenDialOptions(token string) []grpc.DialOption {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	attach := func(ctx context.Context) context.Context {
+		// x-monofs-internal lets storage nodes treat the registry as a
+		// control-plane client; authorization covers the router and any
+		// break-glass verifier on the node.
+		return metadata.AppendToOutgoingContext(ctx,
+			"authorization", "Bearer "+token,
+			"x-monofs-internal", token,
+		)
+	}
+	return []grpc.DialOption{
+		grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			return invoker(attach(ctx), method, req, reply, cc, opts...)
+		}),
+		grpc.WithChainStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			return streamer(attach(ctx), desc, cc, method, opts...)
+		}),
+	}
 }
 
 func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
@@ -77,14 +112,20 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
+	transportOpt, err := cfg.Transport.DialOption()
+	if err != nil {
+		return nil, fmt.Errorf("configure transport for monofs router: %w", err)
+	}
 	conn, err := grpc.NewClient(
 		cfg.RouterAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpcx.IPv4DialerOption(),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(1024*1024*1024),
-			grpc.MaxCallSendMsgSize(1024*1024*1024),
-		),
+		append([]grpc.DialOption{
+			transportOpt,
+			grpcx.IPv4DialerOption(),
+			grpc.WithDefaultCallOptions(
+				grpc.MaxCallRecvMsgSize(1024*1024*1024),
+				grpc.MaxCallSendMsgSize(1024*1024*1024),
+			),
+		}, tokenDialOptions(cfg.Token)...)...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connect to monofs router: %w", err)
@@ -103,6 +144,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		logger:            logger,
 		rpcTimeout:        defaultRPCTimeout,
 		replicationFactor: rf,
+		transport:         cfg.Transport,
 		routerConn:        conn,
 		router:            pb.NewMonoFSRouterClient(conn),
 		nodeConns:         map[string]*grpc.ClientConn{},
@@ -488,6 +530,60 @@ func (c *Client) ListDir(ctx context.Context, path string) ([]string, error) {
 	return nil, fmt.Errorf("list %s: no nodes", path)
 }
 
+// ListDirAll merges directory listings across every healthy node. Registry
+// metadata files are sharded per node, so a single-node listing is incomplete
+// and makes repos appear to have no tags. Read paths that enumerate (tags,
+// catalog) must use this instead of ListDir.
+func (c *Client) ListDirAll(ctx context.Context, path string) ([]string, error) {
+	nodes, err := c.healthyNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	fullPath := c.dataPath(path)
+	seen := make(map[string]struct{})
+	var lastErr error
+	anySuccess := false
+	for _, node := range nodes {
+		callCtx, cancel := context.WithTimeout(ctx, c.rpcTimeout)
+		stream, err := node.client.ReadDir(callCtx, &pb.ReadDirRequest{Path: fullPath})
+		if err != nil {
+			cancel()
+			if status.Code(err) != codes.NotFound {
+				lastErr = err
+			}
+			continue
+		}
+		complete := true
+		for {
+			entry, recvErr := stream.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			if recvErr != nil {
+				lastErr = recvErr
+				complete = false
+				break
+			}
+			if name := entry.GetName(); name != "" {
+				seen[name] = struct{}{}
+			}
+		}
+		cancel()
+		if complete {
+			anySuccess = true
+		}
+	}
+	if !anySuccess && lastErr != nil {
+		return nil, lastErr
+	}
+	entries := make([]string, 0, len(seen))
+	for name := range seen {
+		entries = append(entries, name)
+	}
+	sort.Strings(entries)
+	return entries, nil
+}
+
 // CreateDir ensures a directory path exists.
 func (c *Client) CreateDir(ctx context.Context, path string) error {
 	// Directory creation is handled implicitly by IngestFileBatch during writes.
@@ -553,14 +649,21 @@ func (c *Client) refreshNodes(ctx context.Context) error {
 			delete(c.nodeClients, nodeID)
 			delete(c.nodeAddrs, nodeID)
 		}
+		transportOpt, transportErr := c.transport.DialOption()
+		if transportErr != nil {
+			c.logger.Warn("failed to configure node transport", "node_id", nodeID, "error", transportErr)
+			continue
+		}
 		nodeConn, dialErr := grpc.NewClient(
 			nodeAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpcx.IPv4DialerOption(),
-			grpc.WithDefaultCallOptions(
-				grpc.MaxCallRecvMsgSize(1024*1024*1024),
-				grpc.MaxCallSendMsgSize(1024*1024*1024),
-			),
+			append([]grpc.DialOption{
+				transportOpt,
+				grpcx.IPv4DialerOption(),
+				grpc.WithDefaultCallOptions(
+					grpc.MaxCallRecvMsgSize(1024*1024*1024),
+					grpc.MaxCallSendMsgSize(1024*1024*1024),
+				),
+			}, tokenDialOptions(c.token)...)...,
 		)
 		if dialErr != nil {
 			continue

@@ -11,7 +11,6 @@ import (
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -111,8 +110,12 @@ func (s *Server) refreshTopology() error {
 
 	// Connect to router if not connected
 	if s.routerConn == nil {
+		transportOpt, err := s.transport.DialOption()
+		if err != nil {
+			return fmt.Errorf("configure transport for router: %w", err)
+		}
 		conn, err := grpc.NewClient(s.routerAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			transportOpt,
 			grpcx.IPv4DialerOption(),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(100*1024*1024)),
 		)
@@ -166,8 +169,15 @@ func (s *Server) refreshTopology() error {
 			nodeAddr = node.GetAddress()
 		}
 
+		transportOpt, err := s.transport.DialOption()
+		if err != nil {
+			s.logger.Warn("failed to configure peer transport",
+				"node_id", node.GetNodeId(),
+				"error", err)
+			continue
+		}
 		conn, err := grpc.NewClient(nodeAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			transportOpt,
 			grpcx.IPv4DialerOption(),
 		)
 		if err != nil {

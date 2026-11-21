@@ -107,6 +107,14 @@ services:
       - "--workers=2"
       - "--queue-size=20"
       - "--router-addr=router-a:9090"
+    environment:
+      # Shared service-to-service bearer token. Search requires authentication
+      # by default and the router presents this token on re-index/delete calls.
+      - MONOFS_TOKEN=${MONOFS_TOKEN:-}
+      - MONOFS_CLUSTER_TOKEN=${MONOFS_CLUSTER_TOKEN:-}
+      # LOCAL DEVELOPMENT ONLY: keeps the shipped compose stack bootable
+      # without a token/IdP. Never enable this in production.
+      - MONOFS_INSECURE_DEV_DISABLE_AUTH=true
     volumes:
       - search-index-data:/data
     networks:
@@ -177,6 +185,12 @@ services:
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
       - MONOFS_TOKEN=${MONOFS_TOKEN:-}
+      - MONOFS_CLUSTER_TOKEN=${MONOFS_CLUSTER_TOKEN:-}
+      # LOCAL DEVELOPMENT ONLY: the shipped compose file is intentionally
+      # usable without provisioning an identity provider. This disables all
+      # UI/API authentication and must never be enabled in production; remove
+      # it (and configure OIDC or MONOFS_TOKEN) for any real deployment.
+      - MONOFS_INSECURE_DEV_DISABLE_AUTH=true
     networks:
       - monofs-net
     depends_on:
@@ -222,6 +236,12 @@ services:
     environment:
       - MONOFS_ENCRYPTION_KEY=${MONOFS_ENCRYPTION_KEY}
       - MONOFS_TOKEN=${MONOFS_TOKEN:-}
+      - MONOFS_CLUSTER_TOKEN=${MONOFS_CLUSTER_TOKEN:-}
+      # LOCAL DEVELOPMENT ONLY: the shipped compose file is intentionally
+      # usable without provisioning an identity provider. This disables all
+      # UI/API authentication and must never be enabled in production; remove
+      # it (and configure OIDC or MONOFS_TOKEN) for any real deployment.
+      - MONOFS_INSECURE_DEV_DISABLE_AUTH=true
     networks:
       - monofs-net
     depends_on:
@@ -272,6 +292,11 @@ services:
       - "--enable-prediction"
       - "--db-sync=true"
       - "--debug"
+    environment:
+      # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
+      # Provision KVS_AUTH_TOKEN in production (do not use this flag).
+      - KVS_ALLOW_UNAUTHENTICATED=true
+      - KVS_FORWARD_TLS_ALLOW_PLAINTEXT=true
     volumes:
       - node-a-data:/data
     networks:
@@ -317,6 +342,11 @@ services:
       - "--enable-prediction"
       - "--db-sync=true"
       - "--debug"
+    environment:
+      # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
+      # Provision KVS_AUTH_TOKEN in production (do not use this flag).
+      - KVS_ALLOW_UNAUTHENTICATED=true
+      - KVS_FORWARD_TLS_ALLOW_PLAINTEXT=true
     volumes:
       - node-b-data:/data
     networks:
@@ -362,6 +392,11 @@ services:
       - "--enable-prediction"
       - "--db-sync=true"
       - "--debug"
+    environment:
+      # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
+      # Provision KVS_AUTH_TOKEN in production (do not use this flag).
+      - KVS_ALLOW_UNAUTHENTICATED=true
+      - KVS_FORWARD_TLS_ALLOW_PLAINTEXT=true
     volumes:
       - node-c-data:/data
     networks:
@@ -407,6 +442,11 @@ services:
       - "--enable-prediction"
       - "--db-sync=true"
       - "--debug"
+    environment:
+      # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
+      # Provision KVS_AUTH_TOKEN in production (do not use this flag).
+      - KVS_ALLOW_UNAUTHENTICATED=true
+      - KVS_FORWARD_TLS_ALLOW_PLAINTEXT=true
     volumes:
       - node-d-data:/data
     networks:
@@ -452,6 +492,11 @@ services:
       - "--enable-prediction"
       - "--db-sync=true"
       - "--debug"
+    environment:
+      # LOCAL DEVELOPMENT ONLY: embedded KVS auth is disabled here.
+      # Provision KVS_AUTH_TOKEN in production (do not use this flag).
+      - KVS_ALLOW_UNAUTHENTICATED=true
+      - KVS_FORWARD_TLS_ALLOW_PLAINTEXT=true
     volumes:
       - node-e-data:/data
     networks:
@@ -490,7 +535,6 @@ services:
       - monofs-net
     depends_on:
       - haproxy
-    privileged: true
     cap_add:
       - SYS_ADMIN
     devices:
@@ -522,7 +566,6 @@ services:
       - monofs-net
     depends_on:
       - haproxy
-    privileged: true
     cap_add:
       - SYS_ADMIN
     devices:
@@ -554,7 +597,6 @@ services:
       - monofs-net
     depends_on:
       - haproxy
-    privileged: true
     cap_add:
       - SYS_ADMIN
     devices:

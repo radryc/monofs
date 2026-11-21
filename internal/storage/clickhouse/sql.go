@@ -17,11 +17,13 @@ import (
 )
 
 const (
-	defaultSQLRows = 1_000
-	maxSQLRows     = 5_000
-	maxSQLRange    = 7 * 24 * time.Hour
-	maxSQLBytes    = 8 << 20
-	maxSQLValueLen = 16 * 1024
+	defaultSQLRows  = 1_000
+	maxSQLRows      = 5_000
+	maxSQLRange     = 7 * 24 * time.Hour
+	maxSQLBytes     = 8 << 20
+	maxSQLValueLen  = 16 * 1024
+	maxPartialRows  = 200_000
+	maxPartialBytes = 64 << 20
 )
 
 var reSQLStart = regexp.MustCompile(`(?is)^\s*(select|with)\b`)
@@ -32,6 +34,16 @@ var reSQLStart = regexp.MustCompile(`(?is)^\s*(select|with)\b`)
 // `metrics`, and `traces` views, and the caller's partition scope is applied
 // inside the view before the statement runs.
 func (s *TraceStore) QueryDuckDBSQL(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope) (logengine.DuckDBSQLResult, error) {
+	return s.querySQL(ctx, dataset, query, from, to, limit, scope, defaultSQLRows, maxSQLBytes, false)
+}
+
+// QueryPartial executes a generated pushdown and returns typed partial rows.
+// Truncation is an error: a partial aggregate must never be silently cut.
+func (s *TraceStore) QueryPartial(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope) (logengine.DuckDBSQLResult, error) {
+	return s.querySQL(ctx, dataset, query, from, to, limit, scope, maxPartialRows, maxPartialBytes, true)
+}
+
+func (s *TraceStore) querySQL(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope, maxRows, maxBytes int, errorOnTruncate bool) (logengine.DuckDBSQLResult, error) {
 	started := time.Now()
 	result := logengine.DuckDBSQLResult{Dataset: strings.ToLower(strings.TrimSpace(dataset)), Rows: [][]any{}}
 
@@ -44,10 +56,10 @@ func (s *TraceStore) QueryDuckDBSQL(ctx context.Context, dataset, query string, 
 	}
 	result.Dataset = dataset
 	if limit <= 0 {
-		limit = defaultSQLRows
+		limit = maxRows
 	}
-	if limit > maxSQLRows {
-		limit = maxSQLRows
+	if limit > maxRows {
+		limit = maxRows
 	}
 	if to.IsZero() {
 		to = time.Now().UTC()
@@ -87,8 +99,10 @@ func (s *TraceStore) QueryDuckDBSQL(ctx context.Context, dataset, query string, 
 	}
 
 	result.Columns = make([]string, len(payload.Meta))
+	result.Types = make([]string, len(payload.Meta))
 	for i, column := range payload.Meta {
 		result.Columns[i] = column.Name
+		result.Types[i] = column.Type
 	}
 	encodedBytes := 0
 	for _, rawRow := range payload.Data {
@@ -112,12 +126,15 @@ func (s *TraceStore) QueryDuckDBSQL(ctx context.Context, dataset, query string, 
 			row[i] = value
 			rowBytes += len(fmt.Sprint(value)) + 8
 		}
-		if encodedBytes+rowBytes > maxSQLBytes {
+		if encodedBytes+rowBytes > maxBytes {
 			result.Truncated = true
 			break
 		}
 		encodedBytes += rowBytes
 		result.Rows = append(result.Rows, row)
+	}
+	if errorOnTruncate && result.Truncated {
+		return result, fmt.Errorf("partial result exceeded the shard budget; narrow the query")
 	}
 	result.RowCount = len(result.Rows)
 	result.DurationMs = time.Since(started).Milliseconds()

@@ -194,7 +194,7 @@ func (r *Router) deleteSearchIndex(ctx context.Context, storageID string) {
 		return
 	}
 
-	deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	deleteCtx, cancel := context.WithTimeout(r.withSearchAuthorization(ctx), 30*time.Second)
 	defer cancel()
 
 	resp, err := client.DeleteIndex(deleteCtx, &pb.DeleteIndexRequest{

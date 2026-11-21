@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/radryc/monofs/internal/transport"
 )
 
 func TestNewShardedClientConfig(t *testing.T) {
@@ -20,6 +22,7 @@ func TestNewShardedClientConfig(t *testing.T) {
 		logger,
 		true,
 		"test-token",
+		transport.Config{},
 	)
 
 	if cfg.RouterAddr != "router.example:9090" {

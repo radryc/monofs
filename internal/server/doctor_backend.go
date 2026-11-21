@@ -28,6 +28,7 @@ type DoctorBackend interface {
 	QueryTraces(ctx context.Context, traceID, service string, from, to time.Time, limit int) ([]logengine.SpanRecord, error)
 	Aggregate(ctx context.Context, query logengine.AggregateQuery) ([]logengine.AggregateRow, error)
 	QueryDuckDBSQL(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope) (logengine.DuckDBSQLResult, error)
+	QueryPartial(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope logengine.QueryScope) (logengine.DuckDBSQLResult, error)
 	Stats(ctx context.Context) (logengine.LogEngineStats, error)
 }
 
@@ -231,4 +232,22 @@ func telemetryQueryStatus(prefix string, err error) error {
 	default:
 		return status.Errorf(codes.Internal, "%s: %v", prefix, err)
 	}
+}
+
+// telemetryQueryError logs the underlying storage error before mapping it to a
+// gRPC status. The router only sees the status code, so without this a
+// node-side query failure shows up as an opaque INTERNAL or a bare "no node
+// responded". Cancellations and budget errors are caused by the caller (the
+// router shedding a straggler or a query that is too broad), so they stay at
+// debug level.
+func (s *Server) telemetryQueryError(ctx context.Context, prefix string, err error) error {
+	code := status.Code(err)
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded),
+		code == codes.Canceled, code == codes.DeadlineExceeded, code == codes.ResourceExhausted:
+		s.logger.DebugContext(ctx, prefix, "error", err)
+	default:
+		s.logger.WarnContext(ctx, prefix, "error", err)
+	}
+	return telemetryQueryStatus(prefix, err)
 }

@@ -1,6 +1,10 @@
 package blob
 
 import (
+	"os"
+	"strings"
+	"time"
+
 	"github.com/radryc/monofs/internal/storage"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
@@ -44,6 +48,39 @@ type BlobObservability struct {
 	CacheInvalidationsTotal int64  `json:"cache_invalidations_total"`
 	Archives                int    `json:"archives"`
 	Blobs                   int    `json:"blobs"`
+
+	// Layout and lookup mode.
+	Layout             string `json:"layout"`
+	DirectLookupHits   int64  `json:"direct_lookup_hits"`
+	DirectLookupMisses int64  `json:"direct_lookup_misses"`
+	V2Manifests        int64  `json:"v2_manifests"`
+	V2Packs            int64  `json:"v2_packs"`
+
+	// Ingest batching.
+	BatchPendingBytes int64 `json:"batch_pending_bytes"`
+	BatchOpenShards   int64 `json:"batch_open_shards"`
+
+	// Compaction.
+	CompactorRunsTotal           int64  `json:"compactor_runs_total"`
+	CompactorShardsTotal         int64  `json:"compactor_shards_total"`
+	CompactorPlansTotal          int64  `json:"compactor_plans_total"`
+	CompactorPacksRetiredTotal   int64  `json:"compactor_packs_retired_total"`
+	CompactorPacksDeletedTotal   int64  `json:"compactor_packs_deleted_total"`
+	CompactorBytesRewrittenTotal int64  `json:"compactor_bytes_rewritten_total"`
+	CompactorLastRunUnix         int64  `json:"compactor_last_run_unix"`
+	CompactorLastError           string `json:"compactor_last_error,omitempty"`
+}
+
+// resolveBlobLayoutMode returns the configured blob layout. v2 is the default;
+// set MONOFS_BLOB_LAYOUT_V2 to a false value to opt back into the legacy
+// per-object archive layout.
+func resolveBlobLayoutMode() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MONOFS_BLOB_LAYOUT_V2"))) {
+	case "false", "0", "no", "off":
+		return "legacy"
+	default:
+		return "v2"
+	}
 }
 
 func (bb *BlobBackend) initOTelMetrics() {
@@ -99,6 +136,8 @@ func (bb *BlobBackend) Observability() BlobObservability {
 	entries := len(bb.cloudBlobIndex)
 	bb.cloudIndexMu.Unlock()
 
+	v2Packs, v2Manifests := bb.v2Counts()
+
 	return BlobObservability{
 		WALPath:                 walPath,
 		WALPending:              pending,
@@ -118,7 +157,66 @@ func (bb *BlobBackend) Observability() BlobObservability {
 		CacheInvalidationsTotal: bb.cacheInvalidationsTotal.Load(),
 		Archives:                archives,
 		Blobs:                   blobs,
+
+		Layout:             bb.LayoutMode(),
+		DirectLookupHits:   bb.directLookupHits.Load(),
+		DirectLookupMisses: bb.directLookupMisses.Load(),
+		V2Manifests:        v2Manifests,
+		V2Packs:            v2Packs,
+
+		BatchPendingBytes: bb.batchPendingBytes.Load(),
+		BatchOpenShards:   bb.batchOpenShards.Load(),
+
+		CompactorRunsTotal:           bb.compactorRunsTotal.Load(),
+		CompactorShardsTotal:         bb.compactorShardsTotal.Load(),
+		CompactorPlansTotal:          bb.compactorPlansTotal.Load(),
+		CompactorPacksRetiredTotal:   bb.compactorPacksRetiredTotal.Load(),
+		CompactorPacksDeletedTotal:   bb.compactorPacksDeletedTotal.Load(),
+		CompactorBytesRewrittenTotal: bb.compactorBytesRewrittenTotal.Load(),
+		CompactorLastRunUnix:         bb.compactorLastRunUnix.Load(),
+		CompactorLastError:           compactorLastError(bb),
 	}
+}
+
+func compactorLastError(bb *BlobBackend) string {
+	if v := bb.compactorLastError.Load(); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// LayoutMode returns the effective blob layout: "v2" when the backend has a
+// v2-capable object store, "legacy" otherwise. Reporting the effective mode
+// keeps the fetcher UI honest for deployments without a v2 object store.
+func (bb *BlobBackend) LayoutMode() string {
+	if bb.layoutMode == "v2" && bb.v2Objects != nil {
+		return "v2"
+	}
+	return "legacy"
+}
+
+// SetBatchStats updates the ingest-batching gauges shown on the fetcher UI.
+func (bb *BlobBackend) SetBatchStats(pendingBytes, openShards int64) {
+	bb.batchPendingBytes.Store(pendingBytes)
+	bb.batchOpenShards.Store(openShards)
+}
+
+// RecordCompactorRun records the outcome of one compaction cycle.
+func (bb *BlobBackend) RecordCompactorRun(shards, plans, retired, deleted, bytesRewritten int64, err error) {
+	bb.compactorRunsTotal.Add(1)
+	bb.compactorShardsTotal.Add(shards)
+	bb.compactorPlansTotal.Add(plans)
+	bb.compactorPacksRetiredTotal.Add(retired)
+	bb.compactorPacksDeletedTotal.Add(deleted)
+	bb.compactorBytesRewrittenTotal.Add(bytesRewritten)
+	bb.compactorLastRunUnix.Store(time.Now().UTC().Unix())
+	if err != nil {
+		bb.compactorLastError.Store(err.Error())
+		return
+	}
+	bb.compactorLastError.Store("")
 }
 
 // Stats returns backend statistics. CachedItems is the number of indexed

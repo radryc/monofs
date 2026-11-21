@@ -59,6 +59,15 @@ type QueryQuota struct {
 	MaxSamples        int64   `json:"max_samples,omitempty" yaml:"maxSamples,omitempty"`
 	MaxSeries         int64   `json:"max_series,omitempty" yaml:"maxSeries,omitempty"`
 	MaxPartitions     int     `json:"max_partitions,omitempty" yaml:"maxPartitions,omitempty"`
+
+	// Federated SQL limits.
+	MaxShards        int      `json:"max_shards,omitempty" yaml:"maxShards,omitempty"`
+	MaxBackends      int      `json:"max_backends,omitempty" yaml:"maxBackends,omitempty"`
+	MaxRows          int64    `json:"max_rows,omitempty" yaml:"maxRows,omitempty"`
+	MaxBytesScanned  int64    `json:"max_bytes_scanned,omitempty" yaml:"maxBytesScanned,omitempty"`
+	AllowedBackends  []string `json:"allowed_backends,omitempty" yaml:"allowedBackends,omitempty"`
+	AllowedSignals   []string `json:"allowed_signals,omitempty" yaml:"allowedSignals,omitempty"`
+	MaxQueriesPerDay int64    `json:"max_queries_per_day,omitempty" yaml:"maxQueriesPerDay,omitempty"`
 }
 
 type RulesQuota struct {
@@ -134,6 +143,8 @@ func cloneQuery(in *QueryQuota) *QueryQuota {
 		return nil
 	}
 	out := *in
+	out.AllowedBackends = append([]string(nil), in.AllowedBackends...)
+	out.AllowedSignals = append([]string(nil), in.AllowedSignals...)
 	return &out
 }
 
@@ -271,6 +282,27 @@ func mergeQuery(dst, src *QueryQuota) {
 	if src.MaxPartitions != 0 {
 		dst.MaxPartitions = src.MaxPartitions
 	}
+	if src.MaxShards != 0 {
+		dst.MaxShards = src.MaxShards
+	}
+	if src.MaxBackends != 0 {
+		dst.MaxBackends = src.MaxBackends
+	}
+	if src.MaxRows != 0 {
+		dst.MaxRows = src.MaxRows
+	}
+	if src.MaxBytesScanned != 0 {
+		dst.MaxBytesScanned = src.MaxBytesScanned
+	}
+	if src.MaxQueriesPerDay != 0 {
+		dst.MaxQueriesPerDay = src.MaxQueriesPerDay
+	}
+	if len(src.AllowedBackends) > 0 {
+		dst.AllowedBackends = append([]string(nil), src.AllowedBackends...)
+	}
+	if len(src.AllowedSignals) > 0 {
+		dst.AllowedSignals = append([]string(nil), src.AllowedSignals...)
+	}
 }
 
 func mergeRules(dst, src *RulesQuota) {
@@ -402,8 +434,25 @@ func ValidateQuota(q Quota) error {
 	}
 	if q.Query != nil {
 		if q.Query.RequestsPerSecond < 0 || q.Query.MaxConcurrent < 0 || q.Query.BudgetPerSecond < 0 ||
-			q.Query.MaxSamples < 0 || q.Query.MaxSeries < 0 || q.Query.MaxPartitions < 0 {
+			q.Query.MaxSamples < 0 || q.Query.MaxSeries < 0 || q.Query.MaxPartitions < 0 ||
+			q.Query.MaxShards < 0 || q.Query.MaxBackends < 0 || q.Query.MaxRows < 0 ||
+			q.Query.MaxBytesScanned < 0 || q.Query.MaxQueriesPerDay < 0 {
 			return fmt.Errorf("query limits must be >= 0")
+		}
+		for _, backend := range q.Query.AllowedBackends {
+			if strings.TrimSpace(backend) == "" {
+				return fmt.Errorf("query.allowedBackends contains an empty entry")
+			}
+			if !knownBackend(backend) {
+				return fmt.Errorf("query.allowedBackends: unknown backend %q", backend)
+			}
+		}
+		for _, signal := range q.Query.AllowedSignals {
+			switch signal {
+			case "logs", "traces", "metrics":
+			default:
+				return fmt.Errorf("query.allowedSignals: unknown signal %q", signal)
+			}
 		}
 		if q.Query.MaxRange != "" {
 			if _, err := ParseQuotaDuration(q.Query.MaxRange); err != nil {

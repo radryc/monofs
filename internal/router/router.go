@@ -24,15 +24,18 @@ import (
 	"github.com/radryc/monofs/internal/router/pipeline"
 	"github.com/radryc/monofs/internal/router/workspacepolicy"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/sqlfederation"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"github.com/radryc/monofs/pkg/repowatch"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // RouterConfig holds configuration for the Router service.
@@ -75,6 +78,10 @@ type RouterConfig struct {
 	// Policy gate (Phase 3)
 	PolicyGateEnabled bool
 	PolicyConfigPath  string
+	// RequireSQLPolicy makes the SQL RPCs fail closed: they need a loaded
+	// access policy even when read enforcement is in observe mode. Disable
+	// only for development clusters.
+	RequireSQLPolicy bool
 
 	// Auto-push (Phase 3)
 	AutoPushEnabled  bool
@@ -133,6 +140,12 @@ type RouterConfig struct {
 	// treat control-plane traffic as internal when read enforcement is on.
 	InternalToken string
 
+	// SearchToken is presented as a bearer token on router -> search calls
+	// (re-indexing, deletion, UI search). Search requires authentication by
+	// default; an empty token means no credential is attached and calls fail
+	// closed on an enforcing search service.
+	SearchToken string
+
 	// Telemetry query fan-out limits. The router fans log/metric/trace queries
 	// out to every healthy node; these bounds stop one slow or wedged node from
 	// stalling the whole query while still returning results from the rest.
@@ -144,6 +157,11 @@ type RouterConfig struct {
 	// every node because trace chunks are shard-local. "clickhouse" reads from
 	// one node because all nodes share the same ClickHouse table.
 	SpanEngine string
+
+	// Transport carries the resolved STRATA_TLS_* contract used for every
+	// dial the router makes to nodes, fetchers, search, and peer services.
+	// The zero value is plaintext.
+	Transport transport.Config
 }
 
 // RouterPeer identifies another router instance to aggregate UI data from.
@@ -151,6 +169,14 @@ type RouterPeer struct {
 	Name string
 	URL  string
 }
+
+// defaultQueryNodeStragglerGrace is how long the router keeps waiting for the
+// remaining replicas after the first one starts returning telemetry records.
+// Telemetry chunks are only partly shared between nodes, so cutting stragglers
+// off too early drops records. Node query starts have been measured at
+// 0.2-1.2s under load, so 1s was too tight; 3s still bounds tail latency well
+// below the idle timeout and typical caller deadlines.
+const defaultQueryNodeStragglerGrace = 3 * time.Second
 
 // DefaultRouterConfig returns default router configuration.
 func DefaultRouterConfig() RouterConfig {
@@ -176,9 +202,10 @@ func DefaultRouterConfig() RouterConfig {
 		AutoRefreshStateDir:            ".monofs-repowatch",
 		AutoRefreshLeaseName:           "monofs-repowatch",
 		QueryNodeStartTimeout:          30 * time.Second,
-		QueryNodeStragglerGrace:        time.Second,
+		QueryNodeStragglerGrace:        defaultQueryNodeStragglerGrace,
 		QueryNodeIdleTimeout:           10 * time.Second,
 		SpanEngine:                     "logengine",
+		RequireSQLPolicy:               true,
 	}
 }
 
@@ -240,6 +267,9 @@ type Router struct {
 	searchClient pb.MonoFSSearchClient
 	searchConn   *grpc.ClientConn
 	searchAddr   string
+	// searchTokenValue is the bearer credential attached to router -> search
+	// RPCs. Stored atomically so dial/interceptor paths never take r.mu.
+	searchTokenValue atomic.Value
 
 	// Search re-index debounce (guardian partitions)
 	searchReindexDebounceMu sync.Mutex
@@ -346,6 +376,9 @@ type Router struct {
 	// Access policy (repo-managed ACL) for UI/API read filtering.
 	accessPolicyMu sync.RWMutex
 	accessPolicy   *accessPolicyState
+
+	placementMu       sync.RWMutex
+	placementResolver sqlfederation.BackendResolver
 
 	// Ownership gate (Phase 3 VCS governance)
 	ownershipResolverFull *authz.OwnershipResolver // concrete resolver (OwnersOf, Governed)
@@ -574,7 +607,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 		cfg.QueryNodeStartTimeout = 30 * time.Second
 	}
 	if cfg.QueryNodeStragglerGrace <= 0 {
-		cfg.QueryNodeStragglerGrace = time.Second
+		cfg.QueryNodeStragglerGrace = defaultQueryNodeStragglerGrace
 	}
 	if cfg.QueryNodeIdleTimeout <= 0 {
 		cfg.QueryNodeIdleTimeout = 10 * time.Second
@@ -654,6 +687,7 @@ func NewRouter(cfg RouterConfig, logger *slog.Logger) *Router {
 	// goroutine when Kubernetes is configured.
 	r.startGuardianCoordinatorLease(logger)
 	r.internalTokenValue.Store(strings.TrimSpace(cfg.InternalToken))
+	r.searchTokenValue.Store(strings.TrimSpace(cfg.SearchToken))
 	r.version.Store(1)
 	r.namespaceGeneration.Store(1)
 
@@ -836,12 +870,19 @@ func (r *Router) SetSearchClient(addr string) error {
 		return nil
 	}
 
-	// Try initial connection
-	conn, err := grpc.NewClient(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	// Try initial connection. Search requires bearer authentication by
+	// default, so attach the configured router credential.
+	transportOpt, err := r.config.Transport.DialOption()
+	if err != nil {
+		return fmt.Errorf("configure transport for search: %w", err)
+	}
+	dialOpts := []grpc.DialOption{
+		transportOpt,
 		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
-	)
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256 * 1024 * 1024)),
+	}
+	dialOpts = append(dialOpts, r.searchDialOptions()...)
+	conn, err := grpc.NewClient(addr, dialOpts...)
 	if err != nil {
 		r.logger.Warn("failed to connect to search service, will retry in background",
 			"addr", addr,
@@ -893,11 +934,20 @@ func (r *Router) retrySearchConnection(addr string) {
 			return
 		}
 
-		conn, err := grpc.NewClient(addr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt, err := r.config.Transport.DialOption()
+		if err != nil {
+			r.logger.Warn("retry search connection: bad transport config",
+				"addr", addr,
+				"error", err)
+			continue
+		}
+		dialOpts := []grpc.DialOption{
+			transportOpt,
 			grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
-			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256*1024*1024)),
-		)
+			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256 * 1024 * 1024)),
+		}
+		dialOpts = append(dialOpts, r.searchDialOptions()...)
+		conn, err := grpc.NewClient(addr, dialOpts...)
 		if err != nil {
 			r.logger.Debug("retry search connection failed",
 				"addr", addr,
@@ -938,6 +988,7 @@ func (r *Router) SetFetcherClient(addrs []string) error {
 
 	config := fetcher.DefaultClientConfig()
 	config.FetcherAddresses = normalized
+	config.Transport = r.config.Transport
 
 	client, err := fetcher.NewClient(config, r.logger)
 	if err != nil {
@@ -1030,6 +1081,7 @@ func (r *Router) startFetcherReconnectLoop(addrs []string) {
 			case <-ticker.C:
 				config := fetcher.DefaultClientConfig()
 				config.FetcherAddresses = expectedAddrs
+				config.Transport = r.config.Transport
 
 				client, err := fetcher.NewClient(config, r.logger)
 				if err != nil {
@@ -1075,10 +1127,16 @@ func (r *Router) RegisterNode(nodeID, address string, weight uint32) error {
 	defer r.mu.Unlock()
 
 	// Connect to the node to verify it's reachable
+	transportOpt, err := r.config.Transport.DialOption()
+	if err != nil {
+		return fmt.Errorf("configure transport for node %s: %w", nodeID, err)
+	}
 	conn, err := grpc.NewClient(address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpcx.IPv4DialerOption(),
-		grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
+		append([]grpc.DialOption{
+			transportOpt,
+			grpcx.IPv4DialerOption(),
+			grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
+		}, r.internalDialOptions()...)...,
 	)
 	if err != nil {
 		return fmt.Errorf("connect to node %s: %w", nodeID, err)
@@ -1582,14 +1640,12 @@ func (r *Router) QueryDuckDBSQL(ctx context.Context, req *pb.QueryDuckDBSQLReque
 	default:
 		return nil, fmt.Errorf("unsupported SQL dataset %q", req.GetDataset())
 	}
-	if partitions, restricted := r.queryScope(ctx, signal); restricted {
-		if req.GetVisiblePartitionsSet() {
-			req.VisiblePartitions = intersectPartitions(req.GetVisiblePartitions(), partitions)
-		} else {
-			req.VisiblePartitions = partitions
-		}
-		req.VisiblePartitionsSet = true
+	partitions, restricted, err := r.querySQLScope(ctx, signal, req.GetVisiblePartitions(), req.GetVisiblePartitionsSet())
+	if err != nil {
+		return nil, err
 	}
+	req.VisiblePartitions = partitions
+	req.VisiblePartitionsSet = restricted
 
 	type nodeClient struct {
 		id      string
@@ -2024,18 +2080,44 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 	// Leave room to merge and return partial results before the caller's own
 	// deadline. Without this, a short client deadline (Doctor uses 15s) would
 	// cancel the RPC before the router can shed a straggler.
+	budgetLimited := false
 	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining*8/10 < startTimeout {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			// The caller's budget is already gone (typically a retry or a later
+			// page after an earlier attempt consumed it). Starting a fan-out now
+			// would only log a skip for every node, so report the real cause.
+			return fmt.Errorf("%s: query deadline expired before fan-out", mergeErrPrefix)
+		}
+		if remaining*8/10 < startTimeout {
 			startTimeout = remaining * 8 / 10
+			budgetLimited = true
 		}
 	}
 	stragglerGrace := r.config.QueryNodeStragglerGrace
 	if stragglerGrace <= 0 {
-		stragglerGrace = time.Second
+		stragglerGrace = defaultQueryNodeStragglerGrace
 	}
 	idleTimeout := r.config.QueryNodeIdleTimeout
 	if idleTimeout <= 0 {
 		idleTimeout = 10 * time.Second
+	}
+
+	// skipNode records a replica that did not join the merge. A short caller
+	// budget or an already-cancelled request is not a node fault, so those stay
+	// at debug level; only real stalls deserve a warning.
+	skipNode := func(nodeID, reason string) {
+		if budgetLimited || ctx.Err() != nil {
+			r.logger.Debug("telemetry query skipped node",
+				"operation", mergeErrPrefix,
+				"node", nodeID,
+				"reason", reason)
+			return
+		}
+		r.logger.Warn("telemetry query skipped slow node",
+			"operation", mergeErrPrefix,
+			"node", nodeID,
+			"reason", reason)
 	}
 
 	nodeCtxs := make([]context.Context, len(targets))
@@ -2248,6 +2330,9 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 					}
 				}
 			case <-graceC:
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				for i := range targets {
 					if responded[i] {
 						continue
@@ -2255,13 +2340,13 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 					responded[i] = true
 					received++
 					nodeCancels[i]()
-					r.logger.Warn("telemetry query skipped slow node",
-						"operation", mergeErrPrefix,
-						"node", targets[i].id,
-						"reason", "straggler grace exceeded")
+					skipNode(targets[i].id, "straggler grace exceeded")
 				}
 				graceC = nil
 			case <-startTimer.C:
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				for i := range targets {
 					if responded[i] {
 						continue
@@ -2269,10 +2354,7 @@ func (r *Router) fanoutQueryItems(ctx context.Context, limit int, mergeErrPrefix
 					responded[i] = true
 					received++
 					nodeCancels[i]()
-					r.logger.Warn("telemetry query skipped slow node",
-						"operation", mergeErrPrefix,
-						"node", targets[i].id,
-						"reason", "start timeout exceeded")
+					skipNode(targets[i].id, "start timeout exceeded")
 				}
 			case <-ctx.Done():
 				return ctx.Err()
@@ -2456,15 +2538,15 @@ loop:
 				cancel()
 			}
 		case <-graceC:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			for i := range targets {
 				if itemNodes[i] || doneNodes[i] {
 					continue
 				}
 				nodeCancels[i]()
-				r.logger.Warn("telemetry query skipped slow node",
-					"operation", mergeErrPrefix,
-					"node", targets[i].id,
-					"reason", "straggler grace exceeded")
+				skipNode(targets[i].id, "straggler grace exceeded")
 			}
 			graceC = nil
 		case <-ctx.Done():
@@ -2926,9 +3008,14 @@ func (r *Router) checkAllNodes() {
 		}
 
 		if state.client == nil && state.conn == nil {
+			transportOpt, transportErr := r.config.Transport.DialOption()
+			if transportErr != nil {
+				r.logger.Warn("failed to configure node transport", "node_id", nodeID, "error", transportErr)
+				continue
+			}
 			conn, err := grpc.NewClient(state.info.Address,
 				append([]grpc.DialOption{
-					grpc.WithTransportCredentials(insecure.NewCredentials()),
+					transportOpt,
 					grpcx.IPv4DialerOption(),
 					grpc.WithStatsHandler(telemetry.NewGRPCClientStatsHandler()),
 				}, r.internalDialOptions()...)...,
@@ -4529,6 +4616,21 @@ func (r *Router) RegisterClient(ctx context.Context, req *pb.RegisterClientReque
 		}, nil
 	}
 
+	// Registration establishes a principal and, for guardian clients, the
+	// token used for later managed-path writes. The caller-supplied principal
+	// and role are therefore security-sensitive: derive them from the verified
+	// bearer identity and only let break-glass/admin callers assert another
+	// principal (for example Guardian's "guardiand" control-plane id).
+	caller, _ := authz.IdentityFromContext(ctx)
+	if caller.IsAnonymous() {
+		return nil, status.Error(codes.PermissionDenied, "client registration requires an authenticated identity")
+	}
+	callerPrincipalID := strings.TrimSpace(caller.PrincipalID())
+	if callerPrincipalID == "" {
+		return nil, status.Error(codes.PermissionDenied, "client registration requires a verified principal")
+	}
+	callerIsAdmin := r.accessAdmin(caller)
+
 	r.clientsMu.Lock()
 	defer r.clientsMu.Unlock()
 
@@ -4540,13 +4642,29 @@ func (r *Router) RegisterClient(ctx context.Context, req *pb.RegisterClientReque
 				Message: "guardian_config with auth_token is required",
 			}, nil
 		}
-		principalID := strings.TrimSpace(req.GuardianConfig.GetPrincipalId())
-		if principalID == "" {
-			principalID = req.ClientId
+		principalID := callerPrincipalID
+		requestedPrincipalID := strings.TrimSpace(req.GuardianConfig.GetPrincipalId())
+		switch {
+		case requestedPrincipalID == "" || requestedPrincipalID == principalID:
+			// Use the verified identity.
+		case callerIsAdmin:
+			// Break-glass/admin identities may assert known control-plane
+			// principals (Guardian's registrations and the seeded
+			// control-plane id).
+			principalID = requestedPrincipalID
+		case requestedPrincipalID == GuardianControlPlanePrincipalID:
+			return nil, status.Errorf(codes.PermissionDenied,
+				"principal %q may only be asserted by a break-glass or admin identity", requestedPrincipalID)
 		}
-		role := strings.TrimSpace(req.GuardianConfig.GetRole())
-		if role == "" {
-			role = inferGuardianPrincipalRole(principalID)
+		// A caller-supplied role is untrusted. Only admins may choose it;
+		// everyone else is registered as a viewer.
+		role := string(authz.RoleViewer)
+		if callerIsAdmin {
+			if requestedRole := strings.TrimSpace(req.GuardianConfig.GetRole()); requestedRole != "" {
+				role = requestedRole
+			} else {
+				role = inferGuardianPrincipalRole(principalID)
+			}
 		}
 		displayName := strings.TrimSpace(req.GuardianConfig.GetDisplayName())
 		if displayName == "" {

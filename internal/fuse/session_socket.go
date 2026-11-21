@@ -37,6 +37,7 @@ type SessionSocketHandler struct {
 	refresher   WorkspaceRefresher
 	upstream    UpstreamReader // optional, nil if not configured
 	diffReader  DiffReader     // optional, for reading original file content
+	fs          *WorkspaceFS   // optional, headless filesystem API
 	attrCache   *cache.Cache   // optional, for invalidation after push
 	rootNode    *MonoNode      // optional, for kernel dentry cache invalidation
 	listener    net.Listener
@@ -167,9 +168,14 @@ type BlobFileInfo struct {
 
 // SessionRequest is received from CLI
 type SessionRequest struct {
-	Action                  string   `json:"action"`         // start, add, rm, status, branch, log, commit, pull, discard, push, push-blobs, blobs-info, diff
-	Path                    string   `json:"path,omitempty"` // optional file path filter (for diff / blame)
+	Action                  string   `json:"action"`         // start, add, rm, status, branch, log, commit, pull, discard, push, push-blobs, blobs-info, diff, list, read, stat, write, mkdir
+	Path                    string   `json:"path,omitempty"` // optional file path filter (for diff / blame) or FS target
 	Paths                   []string `json:"paths,omitempty"`
+	Content                 []byte   `json:"content,omitempty"`        // write payload (base64 in JSON)
+	Mode                    uint32   `json:"mode,omitempty"`           // write/mkdir permissions
+	Offset                  int64    `json:"offset,omitempty"`         // read offset
+	Size                    int64    `json:"size,omitempty"`           // read length; 0 = to EOF
+	CreateParents           bool     `json:"create_parents,omitempty"` // write: create a missing top-level user dir
 	BranchOp                string   `json:"branch_op,omitempty"`
 	BranchName              string   `json:"branch_name,omitempty"`
 	ShowBlobs               bool     `json:"show_blobs,omitempty"`
@@ -213,6 +219,9 @@ type SessionResponse struct {
 	UpstreamLogList   []UpstreamLogInfo   `json:"upstream_log_list,omitempty"`
 	TagList           []UpstreamTagInfo   `json:"tag_list,omitempty"`
 	BlameLines        []UpstreamBlameInfo `json:"blame_lines,omitempty"`
+	Content           []byte              `json:"content,omitempty"` // read payload (base64 in JSON)
+	Stat              *FileStat           `json:"stat,omitempty"`
+	Entries           []FileStat          `json:"entries,omitempty"`
 }
 
 // UpstreamLogInfo is one commit in an upstream branch's history.
@@ -369,6 +378,12 @@ func (h *SessionSocketHandler) SetDiffReader(dr DiffReader) {
 	h.diffReader = dr
 }
 
+// SetWorkspaceFS attaches the headless filesystem backend used by the
+// list/read/stat/write/mkdir socket verbs.
+func (h *SessionSocketHandler) SetWorkspaceFS(fs *WorkspaceFS) {
+	h.fs = fs
+}
+
 // SetAttrCache attaches a metadata cache so push can invalidate stale
 // dependency entries after ingestion.
 func (h *SessionSocketHandler) SetAttrCache(c *cache.Cache) {
@@ -519,6 +534,13 @@ func (h *SessionSocketHandler) buildActions() map[string]sessionAction {
 		"push-blobs": func(*SessionRequest) SessionResponse { return h.handleUploadDeps() },
 		"blobs-info": func(*SessionRequest) SessionResponse { return h.handleBlobsInfo() },
 		"diff":       func(req *SessionRequest) SessionResponse { return h.handleDiff(req.Path, req.ShowBlobs) },
+		"list":       func(req *SessionRequest) SessionResponse { return h.handleFSList(req.Path) },
+		"read":       func(req *SessionRequest) SessionResponse { return h.handleFSRead(req.Path, req.Offset, req.Size) },
+		"stat":       func(req *SessionRequest) SessionResponse { return h.handleFSStat(req.Path) },
+		"write": func(req *SessionRequest) SessionResponse {
+			return h.handleFSWrite(req.Path, req.Content, req.Mode, req.CreateParents)
+		},
+		"mkdir": func(req *SessionRequest) SessionResponse { return h.handleFSMkdir(req.Path, req.Mode) },
 	}
 }
 

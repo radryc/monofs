@@ -11,13 +11,14 @@ When a document disagrees with the implementation, fix the document.
 | [logical-flows.md](logical-flows.md) | Engineers, SRE, security reviewers | What happens end-to-end for ingestion, reads, writes, publish/push, search, registry, pipelines, telemetry, and authentication. |
 | [security-architecture.md](security-architecture.md) | Security, platform, reviewers | Assets, threat model, trust boundaries, current controls, and the optional telemetry-encryption model. |
 | [duckdb-logquery.md](duckdb-logquery.md) | Operators, query authors | The DuckDB query sidecar, its SQL views, limits, and ClickHouse parity. |
+| [blob-layout-v2.md](blob-layout-v2.md) | Storage, platform, operators | Sharded v2 blob pack layout, manifest CAS, batching, compaction, and legacy fallback. |
 
 ## One-page architecture
 
 ```mermaid
 flowchart LR
     subgraph Clients
-        FUSE[monofs-client<br/>FUSE mount]
+        FUSE[monofs-client<br/>FUSE or headless]
         SESSION[monofs-session<br/>overlay/session CLI]
         SDK[internal/client<br/>ShardedClient]
         UI[Router web UI]
@@ -82,7 +83,7 @@ MonoFS separates three things that are often one filesystem:
 
 Telemetry is a separate storage plane. `monofs-server` keeps logs, metrics, and traces in local Parquet chunks by default, or routes all three signals to shared ClickHouse tables with `--spanengine=clickhouse`. An optional `monofs-logquery` DuckDB sidecar serves SQL queries against either engine.
 
-The writable client path is **not** a server-side POSIX write implementation. `monofs-client` writes into a local overlay (NutsDB plus ordinary files), records local virtual commits, and `monofs-session` publishes or pushes the result through the router and fetcher to a Git remote. The server's `Create`/`Write` RPCs exist but are not implemented; the active write model is overlay + bundle sync.
+The writable client path is **not** a server-side POSIX write implementation. `monofs-client` writes into a local overlay (NutsDB plus ordinary files), records local virtual commits, and `monofs-session` publishes or pushes the result through the router and fetcher to a Git remote. The server's `Create`/`Write` RPCs exist but are not implemented; the active write model is overlay + bundle sync. `monofs-client --headless` runs the same overlay and session without mounting FUSE, and exposes `list`/`stat`/`read`/`write`/`mkdir` over the session socket; see [architecture.md](architecture.md#71-fuse-client).
 
 ## Source-of-truth notes
 

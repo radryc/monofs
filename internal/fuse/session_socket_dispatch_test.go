@@ -1,6 +1,7 @@
 package fuse
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	pb "github.com/radryc/monofs/api/proto"
 )
 
 func TestSessionSocketActionTableCoversAllVerbs(t *testing.T) {
@@ -17,6 +20,7 @@ func TestSessionSocketActionTableCoversAllVerbs(t *testing.T) {
 		"start", "add", "rm", "status", "branch", "refs", "log", "tags",
 		"blame", "commit", "pull", "refresh", "discard", "push",
 		"conflicts", "push-blobs", "blobs-info", "diff",
+		"list", "read", "stat", "write", "mkdir",
 	}
 	for _, verb := range verbs {
 		if _, ok := handler.resolveAction(verb); !ok {
@@ -98,6 +102,67 @@ func TestSessionSocketHandleConnectionMalformedJSON(t *testing.T) {
 	response := serveOneRequest(t, handler, `{not json`)
 	if response.Success || response.Error != "invalid request" {
 		t.Fatalf("response = %+v", response)
+	}
+}
+
+func TestSessionSocketFileActions(t *testing.T) {
+	backend := newFakeFSClient()
+	backend.dirs["github.com/acme/repo"] = []*pb.DirEntry{}
+	fs, _ := newTestWorkspaceFS(t, backend, false)
+	handler := &SessionSocketHandler{fs: fs, logger: testLogger(), ctx: context.Background()}
+
+	resp := serveOneRequest(t, handler, `{"action":"write","path":"github.com/acme/repo/a.go","content":"aGVsbG8K"}`)
+	if !resp.Success {
+		t.Fatalf("write response = %+v", resp)
+	}
+	if resp.Stat == nil || resp.Stat.IsDir || resp.Stat.Size != int64(len("hello\n")) {
+		t.Fatalf("write stat = %+v", resp.Stat)
+	}
+
+	resp = serveOneRequest(t, handler, `{"action":"stat","path":"github.com/acme/repo/a.go"}`)
+	if !resp.Success || resp.Stat == nil || resp.Stat.Size != int64(len("hello\n")) {
+		t.Fatalf("stat response = %+v", resp)
+	}
+
+	resp = serveOneRequest(t, handler, `{"action":"read","path":"github.com/acme/repo/a.go"}`)
+	if !resp.Success {
+		t.Fatalf("read response = %+v", resp)
+	}
+	if string(resp.Content) != "hello\n" {
+		t.Fatalf("read content = %q", resp.Content)
+	}
+
+	resp = serveOneRequest(t, handler, `{"action":"mkdir","path":"github.com/acme/repo/internal","mode":493}`)
+	if !resp.Success || resp.Stat == nil || !resp.Stat.IsDir {
+		t.Fatalf("mkdir response = %+v", resp)
+	}
+
+	resp = serveOneRequest(t, handler, `{"action":"list","path":"github.com/acme/repo"}`)
+	if !resp.Success {
+		t.Fatalf("list response = %+v", resp)
+	}
+	names := make(map[string]bool, len(resp.Entries))
+	for _, entry := range resp.Entries {
+		names[entry.Name] = true
+	}
+	if !names["a.go"] || !names["internal"] {
+		t.Fatalf("list entries = %+v", resp.Entries)
+	}
+
+	resp = serveOneRequest(t, handler, `{"action":"read","path":"github.com/acme/repo/missing.go"}`)
+	if resp.Success {
+		t.Fatalf("read missing path succeeded: %+v", resp)
+	}
+}
+
+func TestSessionSocketFileActionsUnavailable(t *testing.T) {
+	handler := &SessionSocketHandler{logger: testLogger()}
+	resp := serveOneRequest(t, handler, `{"action":"list","path":"."}`)
+	if resp.Success {
+		t.Fatal("list without a workspace filesystem succeeded")
+	}
+	if resp.Error == "" {
+		t.Fatal("expected an explanatory error")
 	}
 }
 

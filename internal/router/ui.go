@@ -342,20 +342,47 @@ func (r *Router) handleIngest(w http.ResponseWriter, req *http.Request) {
 	fetchConfig := make(map[string]string)
 	// Form parsing for nested configs would go here if needed
 
-	// Start ingestion asynchronously to avoid blocking HTTP request
-	go func() {
-		stream := &mockIngestStream{ctx: detachedIngestContext(req)}
+	ingestReq := &pb.IngestRequest{
+		Source:          source,
+		Ref:             ref,
+		SourceId:        sourceID,
+		IngestionType:   parseIngestionTypeString(ingestionType),
+		FetchType:       parseFetchTypeString(fetchType),
+		ReplicateData:   replicateData,
+		IngestionConfig: ingestionConfig,
+		FetchConfig:     fetchConfig,
+	}
 
-		err := r.IngestRepository(&pb.IngestRequest{
-			Source:          source,
-			Ref:             ref,
-			SourceId:        sourceID,
-			IngestionType:   parseIngestionTypeString(ingestionType),
-			FetchType:       parseFetchTypeString(fetchType),
-			ReplicateData:   replicateData,
-			IngestionConfig: ingestionConfig,
-			FetchConfig:     fetchConfig,
-		}, stream)
+	// Authorize before returning "started": IngestRepository runs in a
+	// goroutine, so a denial there would only reach the router log and the UI
+	// would falsely report success. This mirrors the display-path derivation
+	// inside IngestRepository; the authoritative check still runs there.
+	displayPath := sourceID
+	if displayPath == "" {
+		displayPath = normalizeRepoID(source)
+	}
+	if err := r.authorizeIngest(req.Context(), ingestReq, displayPath); err != nil {
+		r.logger.Warn("ingest rejected before start",
+			"source", source,
+			"display_path", displayPath,
+			"error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Start ingestion asynchronously to avoid blocking HTTP request. The
+	// detached context is created before returning so the goroutine does not
+	// race with the request's cancellation.
+	ingestCtx := detachedIngestContext(req)
+	go func() {
+		stream := &mockIngestStream{ctx: ingestCtx}
+
+		err := r.IngestRepository(ingestReq, stream)
 
 		if err != nil {
 			r.logger.Error("async ingestion failed",
@@ -596,6 +623,7 @@ func (r *Router) handleRepositoriesList(w http.ResponseWriter, req *http.Request
 	}
 
 	if repos, ok := data.(*RepositoriesData); ok {
+		r.mergePeerRepositories(req, repos)
 		r.repoCacheMu.Lock()
 		r.repoCache = repos
 		r.repoCacheAt = time.Now()
@@ -605,6 +633,83 @@ func (r *Router) handleRepositoriesList(w http.ResponseWriter, req *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+// mergePeerRepositories fills per-repository ingest counts from peer routers.
+// The async ingest snapshot lives only on the router that accepted the POST;
+// without this merge the UI reports "0 files" whenever the load balancer
+// answers from the other router, even though the files are on the nodes.
+func (r *Router) mergePeerRepositories(req *http.Request, data *RepositoriesData) {
+	if data == nil || req.Header.Get("X-MonoFS-Peer-Merge") != "" {
+		return
+	}
+	r.mu.RLock()
+	peers := append([]RouterPeer(nil), r.config.PeerRouters...)
+	r.mu.RUnlock()
+	if len(peers) == 0 {
+		return
+	}
+	index := make(map[string]int, len(data.Repositories))
+	for i, repo := range data.Repositories {
+		if id, ok := repo["storage_id"].(string); ok && id != "" {
+			index[id] = i
+		}
+	}
+	authorization := strings.TrimSpace(req.Header.Get("Authorization"))
+	for _, peer := range peers {
+		base := strings.TrimRight(strings.TrimSpace(peer.URL), "/")
+		if base == "" || base == "http://"+req.Host || base == "https://"+req.Host {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+		peerReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/repositories", nil)
+		if err != nil {
+			cancel()
+			continue
+		}
+		peerReq.Header.Set("X-MonoFS-Peer-Merge", "1")
+		if authorization != "" {
+			peerReq.Header.Set("Authorization", authorization)
+		}
+		resp, err := http.DefaultClient.Do(peerReq)
+		if err != nil {
+			cancel()
+			continue
+		}
+		var peerData RepositoriesData
+		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&peerData)
+		_ = resp.Body.Close()
+		cancel()
+		if decodeErr != nil {
+			continue
+		}
+		for _, peerRepo := range peerData.Repositories {
+			id, _ := peerRepo["storage_id"].(string)
+			if id == "" {
+				continue
+			}
+			i, ok := index[id]
+			if !ok {
+				data.Repositories = append(data.Repositories, peerRepo)
+				index[id] = len(data.Repositories) - 1
+				continue
+			}
+			local := data.Repositories[i]
+			peerCount, _ := peerRepo["files_count"].(float64)
+			localCount, _ := local["files_count"].(float64)
+			if peerCount > localCount {
+				local["files_count"] = peerCount
+			}
+			for _, key := range []string{"in_progress", "stage", "message", "total_files"} {
+				if _, ok := local[key]; ok {
+					continue
+				}
+				if value, ok := peerRepo[key]; ok {
+					local[key] = value
+				}
+			}
+		}
+	}
 }
 
 func (r *Router) handleRouters(w http.ResponseWriter, req *http.Request) {
@@ -915,12 +1020,17 @@ func (r *Router) handleGuardianClientsAPI(w http.ResponseWriter, req *http.Reque
 	r.mu.RLock()
 	peerToken := strings.TrimSpace(r.peerRouterToken)
 	r.mu.RUnlock()
+	peerClient, peerClientErr := r.config.Transport.HTTPClient(&http.Client{Timeout: 2 * time.Second})
+	if peerClientErr != nil {
+		r.logger.Warn("failed to configure peer http transport", "error", peerClientErr)
+		peerClient = &http.Client{Timeout: 2 * time.Second}
+	}
 	for _, peer := range r.config.PeerRouters {
-		peerURL, err := normalizeRouterURL(peer.URL)
+		peerURL, err := r.peerURL(peer.URL)
 		if err != nil {
 			continue
 		}
-		peerClients := fetchPeerGuardianClients(peerURL, peer.Name, peerToken)
+		peerClients := fetchPeerGuardianClients(peerClient, peerURL, peer.Name, peerToken)
 		clients = append(clients, peerClients...)
 	}
 
@@ -948,12 +1058,17 @@ func (r *Router) handleClientsAPI(w http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
 	peerToken := strings.TrimSpace(r.peerRouterToken)
 	r.mu.RUnlock()
+	peerClient, peerClientErr := r.config.Transport.HTTPClient(&http.Client{Timeout: 2 * time.Second})
+	if peerClientErr != nil {
+		r.logger.Warn("failed to configure peer http transport", "error", peerClientErr)
+		peerClient = &http.Client{Timeout: 2 * time.Second}
+	}
 	for _, peer := range r.config.PeerRouters {
-		peerURL, err := normalizeRouterURL(peer.URL)
+		peerURL, err := r.peerURL(peer.URL)
 		if err != nil {
 			continue
 		}
-		peerClients := fetchPeerClients(peerURL, peerToken)
+		peerClients := fetchPeerClients(peerClient, peerURL, peerToken)
 		if peerClients != nil {
 			resp.Clients = append(resp.Clients, peerClients...)
 		}
@@ -1274,6 +1389,23 @@ type fetcherObservabilityTotals struct {
 	CloudDownloadBytes      int64 `json:"cloud_download_bytes"`
 	ArchiveDeletesTotal     int64 `json:"archive_deletes_total"`
 	CacheInvalidationsTotal int64 `json:"cache_invalidations_total"`
+
+	DirectLookupHits   int64 `json:"direct_lookup_hits"`
+	DirectLookupMisses int64 `json:"direct_lookup_misses"`
+	V2Manifests        int64 `json:"v2_manifests"`
+	V2Packs            int64 `json:"v2_packs"`
+
+	BatchPendingBytes int64 `json:"batch_pending_bytes"`
+	BatchOpenShards   int64 `json:"batch_open_shards"`
+
+	CompactorRunsTotal           int64  `json:"compactor_runs_total"`
+	CompactorShardsTotal         int64  `json:"compactor_shards_total"`
+	CompactorPlansTotal          int64  `json:"compactor_plans_total"`
+	CompactorPacksRetiredTotal   int64  `json:"compactor_packs_retired_total"`
+	CompactorPacksDeletedTotal   int64  `json:"compactor_packs_deleted_total"`
+	CompactorBytesRewrittenTotal int64  `json:"compactor_bytes_rewritten_total"`
+	CompactorLastRunUnix         int64  `json:"compactor_last_run_unix"`
+	CompactorLastError           string `json:"compactor_last_error,omitempty"`
 }
 
 // handleFetcherObservability aggregates WAL and S3 read-through state from
@@ -1338,6 +1470,24 @@ func (r *Router) handleFetcherObservability(w http.ResponseWriter, req *http.Req
 		totals.CloudDownloadBytes += entry.Blob.CloudDownloadBytes
 		totals.ArchiveDeletesTotal += entry.Blob.ArchiveDeletesTotal
 		totals.CacheInvalidationsTotal += entry.Blob.CacheInvalidationsTotal
+		totals.DirectLookupHits += entry.Blob.DirectLookupHits
+		totals.DirectLookupMisses += entry.Blob.DirectLookupMisses
+		totals.V2Manifests += entry.Blob.V2Manifests
+		totals.V2Packs += entry.Blob.V2Packs
+		totals.BatchPendingBytes += entry.Blob.BatchPendingBytes
+		totals.BatchOpenShards += entry.Blob.BatchOpenShards
+		totals.CompactorRunsTotal += entry.Blob.CompactorRunsTotal
+		totals.CompactorShardsTotal += entry.Blob.CompactorShardsTotal
+		totals.CompactorPlansTotal += entry.Blob.CompactorPlansTotal
+		totals.CompactorPacksRetiredTotal += entry.Blob.CompactorPacksRetiredTotal
+		totals.CompactorPacksDeletedTotal += entry.Blob.CompactorPacksDeletedTotal
+		totals.CompactorBytesRewrittenTotal += entry.Blob.CompactorBytesRewrittenTotal
+		if entry.Blob.CompactorLastRunUnix > totals.CompactorLastRunUnix {
+			totals.CompactorLastRunUnix = entry.Blob.CompactorLastRunUnix
+		}
+		if entry.Blob.CompactorLastError != "" {
+			totals.CompactorLastError = entry.Blob.CompactorLastError
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1626,7 +1776,7 @@ func (r *Router) handleRegistryStats(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	body, _, err := r.proxyRegistryGET(req.Context(), "http://"+addr+"/api/v1/stats")
+	body, _, err := r.proxyRegistryGET(req.Context(), r.config.Transport.HTTPURL(addr)+"/api/v1/stats")
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
@@ -1653,7 +1803,7 @@ func (r *Router) handleRegistryRepos(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	u := "http://" + addr + "/api/v1/repos"
+	u := r.config.Transport.HTTPURL(addr) + "/api/v1/repos"
 	if q := req.URL.RawQuery; q != "" {
 		u += "?" + q
 	}
@@ -1691,7 +1841,7 @@ func (r *Router) handleRegistryRepoDetail(w http.ResponseWriter, req *http.Reque
 		return
 	}
 
-	u := "http://" + addr + "/api/v1/repos/" + repo
+	u := r.config.Transport.HTTPURL(addr) + "/api/v1/repos/" + repo
 	if q := req.URL.RawQuery; q != "" {
 		u += "?" + q
 	}
@@ -1728,7 +1878,11 @@ func (r *Router) proxyRegistryGET(parentCtx context.Context, endpoint string) ([
 		req.Header.Set("Authorization", "Bearer "+bearerToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client, err := r.config.Transport.HTTPClient(http.DefaultClient)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2444,7 +2598,7 @@ func (r *Router) collectPprofTargets(req *http.Request) []pprofTarget {
 		})
 	}
 	for _, peer := range r.config.PeerRouters {
-		peerURL, err := normalizeRouterURL(peer.URL)
+		peerURL, err := r.peerURL(peer.URL)
 		if err != nil {
 			continue
 		}
@@ -2783,7 +2937,7 @@ func diagnosticsEndpoint(raw string) (baseURL string, address string) {
 
 // fetchPeerClients fetches FUSE clients from a peer router's /api/local-clients endpoint.
 // Returns nil on any error (best-effort aggregation).
-func fetchPeerClients(peerURL, bearerToken string) []*pb.ClientInfo {
+func fetchPeerClients(client *http.Client, peerURL, bearerToken string) []*pb.ClientInfo {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -2794,7 +2948,6 @@ func fetchPeerClients(peerURL, bearerToken string) []*pb.ClientInfo {
 	if token := strings.TrimSpace(bearerToken); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
-	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(request)
 	if err != nil {
 		return nil
@@ -2850,7 +3003,7 @@ func dedupeGuardianClients(clients []guardianClientJSON) []guardianClientJSON {
 }
 
 // fetchPeerGuardianClients fetches guardian clients from a peer router.
-func fetchPeerGuardianClients(peerURL, peerName, bearerToken string) []guardianClientJSON {
+func fetchPeerGuardianClients(client *http.Client, peerURL, peerName, bearerToken string) []guardianClientJSON {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -2861,7 +3014,6 @@ func fetchPeerGuardianClients(peerURL, peerName, bearerToken string) []guardianC
 	if token := strings.TrimSpace(bearerToken); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
-	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(request)
 	if err != nil {
 		return nil

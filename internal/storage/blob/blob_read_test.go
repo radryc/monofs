@@ -3,10 +3,14 @@ package blob
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/radryc/monofs/internal/storage"
 )
 
 func TestPathWithinDir(t *testing.T) {
@@ -177,4 +181,86 @@ func FuzzApplyFetchRange(f *testing.F) {
 			t.Fatalf("result grew from %d to %d bytes", len(data), len(got))
 		}
 	})
+}
+
+func TestDirectLooseArchivePathLocal(t *testing.T) {
+	backend := newTestBlobBackend(t)
+	id := "sha256:" + strings.Repeat("a", 64)
+	path := filepath.Join(backend.config.CacheDir, "archives", "_loose", id+".pack")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("pack"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := backend.directLooseArchivePath(id)
+	if !ok || got != path {
+		t.Fatalf("directLooseArchivePath = %q, %v; want %q, true", got, ok, path)
+	}
+}
+
+func TestDirectLooseArchivePathCloudHead(t *testing.T) {
+	backend := newTestBlobBackend(t)
+	id := "sha256:" + strings.Repeat("b", 64)
+	wantKey := "_loose/" + id + ".pack"
+	var gotKey string
+	backend.headCloudObject = func(key string) (cloudObjectInfo, bool) {
+		gotKey = key
+		if key == wantKey {
+			return cloudObjectInfo{Size: 1}, true
+		}
+		return cloudObjectInfo{}, false
+	}
+	path, ok := backend.directLooseArchivePath(id)
+	if !ok {
+		t.Fatal("expected a cloud HEAD hit")
+	}
+	if gotKey != wantKey {
+		t.Fatalf("HEAD key = %q, want %q", gotKey, wantKey)
+	}
+	if filepath.Base(path) != id+".pack" {
+		t.Fatalf("path = %q", path)
+	}
+}
+
+func TestDirectLooseArchivePathMiss(t *testing.T) {
+	backend := newTestBlobBackend(t)
+	backend.headCloudObject = func(string) (cloudObjectInfo, bool) { return cloudObjectInfo{}, false }
+	if _, ok := backend.directLooseArchivePath("sha256:" + strings.Repeat("c", 64)); ok {
+		t.Fatal("unexpected direct hit")
+	}
+}
+
+func TestFindBlobInCloudDirectPathSkipsListing(t *testing.T) {
+	backend := newTestBlobBackend(t)
+	id := "sha256:" + strings.Repeat("d", 64)
+	content := []byte("registry-metadata")
+	if err := backend.StoreBlob(id, content); err != nil {
+		t.Fatalf("StoreBlob: %v", err)
+	}
+
+	// Make the cloud path available, but fail the test if it lists or downloads.
+	backend.openCloudReader = func(string) (io.ReadCloser, error) {
+		return nil, fmt.Errorf("direct path must not download")
+	}
+	backend.headCloudObject = func(string) (cloudObjectInfo, bool) { return cloudObjectInfo{}, false }
+	backend.listCloudObjects = func(context.Context, string, int) ([]storage.StorageObject, error) {
+		t.Fatal("direct content-addressed path must not list the bucket")
+		return nil, nil
+	}
+	backend.mu.Lock()
+	backend.blobIndex = map[string]archiveRef{}
+	backend.mu.Unlock()
+
+	if _, ok, err := backend.findBlobInCloud(context.Background(), "_loose", id); err != nil || !ok {
+		t.Fatalf("findBlobInCloud direct path: ok=%v err=%v", ok, err)
+	}
+
+	got, err := backend.FetchBlob(context.Background(), &storage.FetchRequest{ContentID: id})
+	if err != nil {
+		t.Fatalf("FetchBlob: %v", err)
+	}
+	if string(got.Content) != string(content) {
+		t.Fatalf("content = %q, want %q", got.Content, content)
+	}
 }

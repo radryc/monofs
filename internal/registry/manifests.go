@@ -213,7 +213,7 @@ func (t *TagStore) ListTags(ctx context.Context, repo string) ([]string, error) 
 	t.mu.RUnlock()
 
 	path := repo + "/_tags"
-	entries, err := t.client.ListDir(ctx, path)
+	entries, err := t.client.ListDirAll(ctx, path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -252,7 +252,7 @@ func (t *TagStore) ListRepos(ctx context.Context) ([]string, error) {
 	defer t.mu.Unlock()
 
 	// Populate cache: try directory listing first, then catalog file
-	entries, err := t.client.ListDir(ctx, "")
+	entries, err := t.client.ListDirAll(ctx, "")
 	if err == nil && len(entries) > 0 {
 		for _, entry := range entries {
 			if !strings.HasPrefix(entry, "_") {

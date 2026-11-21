@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -65,6 +66,14 @@ type LogEngine struct {
 	nativeMaxLimit     int
 	nativeMaxRange     time.Duration
 	duckQueueThreshold int
+
+	// statsCache memoizes the expensive chunk-listing done by Stats. GetNodeInfo
+	// calls Stats on every router health probe (every 5s per router), so listing
+	// every chunk three times per probe is pure load. A short TTL keeps the
+	// reported counts current enough for the node-info UI.
+	statsMu      sync.Mutex
+	statsCache   LogEngineStats
+	statsCacheAt time.Time
 }
 
 // Config holds configuration for the LogEngine.
@@ -593,7 +602,20 @@ func (e *LogEngine) runRetentionOnce(ctx context.Context, maxAge time.Duration) 
 // store. A bucket is an hourly directory (new partition/date/hour layout or
 // the legacy year/month/day/hour layout); flat chunks count as their own
 // bucket so older data is not hidden.
+// logEngineStatsTTL bounds how stale the node-info chunk counts may be. Health
+// probes call Stats several times per second across replicas, so the listing is
+// cached briefly instead of walking every chunk on each call.
+const logEngineStatsTTL = 5 * time.Second
+
 func (e *LogEngine) Stats(ctx context.Context) (LogEngineStats, error) {
+	e.statsMu.Lock()
+	if !e.statsCacheAt.IsZero() && time.Since(e.statsCacheAt) < logEngineStatsTTL {
+		cached := e.statsCache
+		e.statsMu.Unlock()
+		return cached, nil
+	}
+	e.statsMu.Unlock()
+
 	logChunks, _ := e.store.ListChunkPaths(ctx, SignalLogs, time.Time{}, time.Time{})
 	metricChunks, _ := e.store.ListChunkPaths(ctx, SignalMetrics, time.Time{}, time.Time{})
 	traceChunks, _ := e.store.ListChunkPaths(ctx, SignalTraces, time.Time{}, time.Time{})
@@ -602,7 +624,7 @@ func (e *LogEngine) Stats(ctx context.Context) (LogEngineStats, error) {
 	metricBuckets, metricCompacted := countChunkBuckets(metricChunks)
 	traceBuckets, traceCompacted := countChunkBuckets(traceChunks)
 
-	return LogEngineStats{
+	stats := LogEngineStats{
 		LogChunks:              int64(len(logChunks)),
 		MetricChunks:           int64(len(metricChunks)),
 		TraceChunks:            int64(len(traceChunks)),
@@ -612,7 +634,18 @@ func (e *LogEngine) Stats(ctx context.Context) (LogEngineStats, error) {
 		LogCompactedBuckets:    logCompacted,
 		MetricCompactedBuckets: metricCompacted,
 		TraceCompactedBuckets:  traceCompacted,
-	}, nil
+	}
+
+	// Do not memoize a listing that was cut short by a cancelled probe context;
+	// it would report a truncated chunk count for the whole TTL.
+	if err := ctx.Err(); err == nil {
+		e.statsMu.Lock()
+		e.statsCache = stats
+		e.statsCacheAt = time.Now()
+		e.statsMu.Unlock()
+	}
+
+	return stats, nil
 }
 
 // countChunkBuckets returns the number of stored and compacted hourly buckets

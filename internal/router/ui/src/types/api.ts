@@ -270,6 +270,21 @@ export interface BlobObservability {
   cloud_download_bytes: number
   archive_deletes_total: number
   cache_invalidations_total: number
+  layout: string
+  direct_lookup_hits: number
+  direct_lookup_misses: number
+  v2_manifests: number
+  v2_packs: number
+  batch_pending_bytes: number
+  batch_open_shards: number
+  compactor_runs_total: number
+  compactor_shards_total: number
+  compactor_plans_total: number
+  compactor_packs_retired_total: number
+  compactor_packs_deleted_total: number
+  compactor_bytes_rewritten_total: number
+  compactor_last_run_unix: number
+  compactor_last_error?: string
 }
 
 export interface FetcherObservabilityEntry {
@@ -294,6 +309,20 @@ export interface FetcherObservabilityTotals {
   cloud_download_bytes: number
   archive_deletes_total: number
   cache_invalidations_total: number
+  direct_lookup_hits: number
+  direct_lookup_misses: number
+  v2_manifests: number
+  v2_packs: number
+  batch_pending_bytes: number
+  batch_open_shards: number
+  compactor_runs_total: number
+  compactor_shards_total: number
+  compactor_plans_total: number
+  compactor_packs_retired_total: number
+  compactor_packs_deleted_total: number
+  compactor_bytes_rewritten_total: number
+  compactor_last_run_unix: number
+  compactor_last_error?: string
 }
 
 export interface FetcherObservabilityResponse {

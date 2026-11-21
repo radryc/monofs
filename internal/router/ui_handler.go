@@ -483,7 +483,11 @@ func (r *Router) buildRoutersData() *RoutersData {
 		}
 	}
 
-	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	client, clientErr := r.config.Transport.HTTPClient(&http.Client{Timeout: 1500 * time.Millisecond})
+	if clientErr != nil {
+		r.logger.Warn("failed to configure peer http transport", "error", clientErr)
+		client = &http.Client{Timeout: 1500 * time.Millisecond}
+	}
 	r.mu.RLock()
 	peerToken := strings.TrimSpace(r.peerRouterToken)
 	r.mu.RUnlock()
@@ -499,7 +503,7 @@ func (r *Router) buildRoutersData() *RoutersData {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			normalizedURL, err := normalizeRouterURL(peer.URL)
+			normalizedURL, err := r.peerURL(peer.URL)
 			if err != nil {
 				mu.Lock()
 				snapshots = append(snapshots, RouterSnapshot{
@@ -542,6 +546,16 @@ func (r *Router) buildRoutersData() *RoutersData {
 		Routers:     snapshots,
 		GeneratedAt: time.Now().Unix(),
 	}
+}
+
+// peerURL normalizes a configured peer router URL and upgrades it to https
+// when the transport contract enables TLS.
+func (r *Router) peerURL(raw string) (string, error) {
+	normalized, err := normalizeRouterURL(raw)
+	if err != nil {
+		return "", err
+	}
+	return r.config.Transport.HTTPURL(normalized), nil
 }
 
 func normalizeRouterURL(raw string) (string, error) {

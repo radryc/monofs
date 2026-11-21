@@ -21,7 +21,15 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/radryc/monofs/pkg/authz"
 )
+
+// guardianAdminContext returns a verified break-glass identity for tests that
+// exercise registration paths requiring an authenticated caller.
+func guardianAdminContext() context.Context {
+	return authz.ContextWithIdentity(context.Background(), authz.Identity{ClientID: "break-glass-admin"})
+}
 
 func TestGuardianReadRepairsContentVersionMismatch(t *testing.T) {
 	router, _, node, cleanup := newGuardianRouterTestHarness(t)
@@ -90,7 +98,7 @@ func TestGuardianReadRepairsContentVersionMismatch(t *testing.T) {
 	}
 }
 
-func TestGuardianReadTombstonesVersionWhenContentIsMissing(t *testing.T) {
+func TestGuardianReadDoesNotRetireRecentVersionWhenContentIsTemporarilyMissing(t *testing.T) {
 	router, _, node, cleanup := newGuardianRouterTestHarness(t)
 	defer cleanup()
 
@@ -106,8 +114,10 @@ func TestGuardianReadTombstonesVersionWhenContentIsMissing(t *testing.T) {
 		t.Fatalf("UpsertGuardianPaths() error = %v", err)
 	}
 
-	// Simulate content loss after a replica/router failover: the version record
-	// survives but the bytes are gone from every node.
+	// Simulate replication/ingest lag: the version record is committed but no
+	// replica has the bytes yet. A read must report the miss as transient and
+	// must not delete the version (that made Guardian drop and rewrite the
+	// state file on every reconcile).
 	mapped, err := mapGuardianLogicalPath(logicalPath)
 	if err != nil {
 		t.Fatalf("mapGuardianLogicalPath() error = %v", err)
@@ -120,12 +130,29 @@ func TestGuardianReadTombstonesVersionWhenContentIsMissing(t *testing.T) {
 	delete(node.fileMode, mapped.RelativePath)
 	node.mu.Unlock()
 
+	if _, err := router.ReadGuardianPath(ctx, &pb.ReadGuardianPathRequest{
+		GuardianToken: "secret-token",
+		LogicalPath:   logicalPath,
+	}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("ReadGuardianPath() error = %v, want Unavailable while the version is recent", err)
+	}
+	current, exists, err := router.guardianVersions.CurrentVersionWithError(logicalPath)
+	if err != nil || !exists || current == nil || current.Tombstone {
+		t.Fatalf("recent version was retired by a read: exists=%v record=%+v err=%v", exists, current, err)
+	}
+
+	// Once the version is older than the grace window and is still unreadable,
+	// a read retires it so the next CAS create can recreate the file.
+	grace := guardianContentMissingGrace
+	guardianContentMissingGrace = 0
+	t.Cleanup(func() { guardianContentMissingGrace = grace })
+
 	readResp, err := router.ReadGuardianPath(ctx, &pb.ReadGuardianPathRequest{
 		GuardianToken: "secret-token",
 		LogicalPath:   logicalPath,
 	})
 	if err != nil {
-		t.Fatalf("ReadGuardianPath() error = %v (want Found=false instead of Unavailable)", err)
+		t.Fatalf("ReadGuardianPath() after grace error = %v (want Found=false instead of Unavailable)", err)
 	}
 	if readResp.GetFound() {
 		t.Fatal("expected Found=false after the content disappeared")
@@ -261,7 +288,7 @@ func TestDoctorPathsWriteReadAndHistory(t *testing.T) {
 	router, nodeClient, _, cleanup := newGuardianRouterTestHarness(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	ctx := guardianAdminContext()
 	resp, err := router.RegisterClient(ctx, &pb.RegisterClientRequest{
 		ClientId: "doctor-query-1",
 		GuardianConfig: &pb.GuardianConfig{
@@ -425,10 +452,11 @@ func TestRegisterGuardianClientWithoutBaseURL(t *testing.T) {
 	router := NewRouter(cfg, nil)
 	defer router.Close()
 
-	resp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+	resp, err := router.RegisterClient(guardianAdminContext(), &pb.RegisterClientRequest{
 		ClientId: "guardian-pusher-local",
 		GuardianConfig: &pb.GuardianConfig{
-			AuthToken: "secret-token",
+			AuthToken:   "secret-token",
+			PrincipalId: "guardian-pusher-local",
 		},
 	})
 	if err != nil {
@@ -459,7 +487,7 @@ func TestRegisterGuardianClientUsesConfiguredPrincipal(t *testing.T) {
 	router := NewRouter(cfg, nil)
 	defer router.Close()
 
-	resp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+	resp, err := router.RegisterClient(guardianAdminContext(), &pb.RegisterClientRequest{
 		ClientId: "guardian-pusher-docker-12345",
 		GuardianConfig: &pb.GuardianConfig{
 			AuthToken:   "secret-token",
@@ -503,7 +531,7 @@ func TestClientHeartbeatRefreshesGuardianClientHeartbeat(t *testing.T) {
 	defer router.Close()
 
 	const clientID = "guardian-pusher-local"
-	resp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+	resp, err := router.RegisterClient(guardianAdminContext(), &pb.RegisterClientRequest{
 		ClientId: clientID,
 		GuardianConfig: &pb.GuardianConfig{
 			AuthToken: "secret-token",
@@ -595,7 +623,7 @@ func TestAuthenticateGuardianMutationUsesRequestedPrincipal(t *testing.T) {
 			},
 		},
 	} {
-		resp, err := router.RegisterClient(context.Background(), req)
+		resp, err := router.RegisterClient(guardianAdminContext(), req)
 		if err != nil {
 			t.Fatalf("RegisterClient(%s) error = %v", req.GetClientId(), err)
 		}
@@ -1495,7 +1523,7 @@ func newGuardianRouterTestHarness(t *testing.T) (*Router, pb.MonoFSClient, *guar
 		status: NodeActive,
 	}
 
-	registerResp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+	registerResp, err := router.RegisterClient(guardianAdminContext(), &pb.RegisterClientRequest{
 		ClientId: "guardian-cli",
 		GuardianConfig: &pb.GuardianConfig{
 			BaseUrl:   "http://guardian.local",
@@ -1547,7 +1575,7 @@ func newGuardianMultiNodeRouterTestHarness(t *testing.T, kvsStatuses map[string]
 		stops = append(stops, stopNode)
 	}
 
-	registerResp, err := router.RegisterClient(context.Background(), &pb.RegisterClientRequest{
+	registerResp, err := router.RegisterClient(guardianAdminContext(), &pb.RegisterClientRequest{
 		ClientId: "guardian-cli",
 		GuardianConfig: &pb.GuardianConfig{
 			BaseUrl:   "http://guardian.local",

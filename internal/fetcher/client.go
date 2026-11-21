@@ -14,9 +14,9 @@ import (
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/sharding"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/grpcx"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -81,6 +81,10 @@ type ClientConfig struct {
 
 	// MaxRetries per request across fetchers.
 	MaxRetries int
+
+	// Transport carries the resolved STRATA_TLS_* contract for fetcher
+	// connections. The zero value is plaintext.
+	Transport transport.Config
 }
 
 func DefaultClientConfig() ClientConfig {
@@ -139,8 +143,12 @@ func NewClient(config ClientConfig, logger *slog.Logger) (*Client, error) {
 }
 
 func (c *Client) connectFetcher(address string) (*fetcherConn, error) {
+	transportOpt, err := c.config.Transport.DialOption()
+	if err != nil {
+		return nil, fmt.Errorf("configure transport for fetcher %s: %w", address, err)
+	}
 	conn, err := grpc.NewClient(address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpcx.IPv4DialerOption(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                30 * time.Second,

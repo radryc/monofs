@@ -426,3 +426,37 @@ func TestOIDCTokenCacheEviction(t *testing.T) {
 		t.Fatalf("cache size %d exceeds limit 2", size)
 	}
 }
+
+func TestOIDCVerifyRejectsEmptySubjectAndClientID(t *testing.T) {
+	idp := newTestIDP(t)
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	v := newTestVerifier(t, idp, base)
+
+	// Token with empty Subject and no client_id/azp must be rejected.
+	raw := idp.sign(t, jwt.Claims{
+		Issuer:   testIssuer,
+		Audience: jwt.Audience{testAudience},
+		Expiry:   jwt.NewNumericDate(base.Add(time.Hour)),
+	}, map[string]any{
+		"email": "anon@example.com",
+	})
+	if _, err := v.Verify(context.Background(), raw); err == nil {
+		t.Fatal("expected error when both sub and client_id are empty")
+	}
+
+	// Token with empty Subject but non-empty client_id should succeed.
+	rawClient := idp.sign(t, jwt.Claims{
+		Issuer:   testIssuer,
+		Audience: jwt.Audience{testAudience},
+		Expiry:   jwt.NewNumericDate(base.Add(time.Hour)),
+	}, map[string]any{
+		"client_id": "machine-1",
+	})
+	id, err := v.Verify(context.Background(), rawClient)
+	if err != nil {
+		t.Fatalf("expected machine token with client_id to succeed, got: %v", err)
+	}
+	if id.ClientID != "machine-1" {
+		t.Fatalf("expected ClientID=machine-1, got %q", id.ClientID)
+	}
+}

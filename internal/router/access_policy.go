@@ -14,6 +14,8 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // accessPolicyState holds the router's compiled access policy. It is nil when
@@ -86,7 +88,7 @@ func (r *Router) policyInstance() *policy.Policy {
 
 // accessAdmin reports whether the identity bypasses policy filtering.
 func (r *Router) accessAdmin(id authz.Identity) bool {
-	if id.Subject == "break-glass-admin" {
+	if id.Subject == "break-glass-admin" || id.ClientID == "break-glass-admin" || r.isBreakGlassAdmin(id) {
 		return true
 	}
 	p := r.policyInstance()
@@ -354,6 +356,61 @@ func (r *Router) queryScope(ctx context.Context, signal policy.Signal) ([]string
 		return nil, false
 	}
 	return names, true
+}
+
+// querySQLScope computes the partition scope for telemetry SQL. Unlike
+// queryScope (which follows observe mode), SQL always needs a loaded policy:
+// it is a read surface that can aggregate across every shard, so it fails
+// closed when the policy is missing. Admins bypass filtering; metrics keep the
+// existing policy behavior.
+func (r *Router) querySQLScope(ctx context.Context, signal policy.Signal, requested []string, requestedSet bool) ([]string, bool, error) {
+	st := r.accessPolicySnapshot()
+	id, _ := authz.IdentityFromContext(ctx)
+	if r.accessAdmin(id) {
+		parts, restricted := mergeSQLScope(nil, false, requested, requestedSet)
+		return parts, restricted, nil
+	}
+	if st == nil {
+		if !r.config.RequireSQLPolicy {
+			parts, restricted := mergeSQLScope(nil, false, requested, requestedSet)
+			return parts, restricted, nil
+		}
+		return nil, false, status.Error(codes.PermissionDenied, "telemetry SQL requires an access policy")
+	}
+	p := st.loader.Get()
+	if p == nil {
+		if !r.config.RequireSQLPolicy {
+			parts, restricted := mergeSQLScope(nil, false, requested, requestedSet)
+			return parts, restricted, nil
+		}
+		return nil, false, status.Error(codes.PermissionDenied, "access policy is not available")
+	}
+	names, all := p.VisiblePartitions(id)
+	if all && p.CanReadSQL(id, "*") {
+		parts, restricted := mergeSQLScope(nil, false, requested, requestedSet)
+		return parts, restricted, nil
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if p.CanReadSQL(id, name) {
+			out = append(out, name)
+		}
+	}
+	parts, restricted := mergeSQLScope(out, true, requested, requestedSet)
+	return parts, restricted, nil
+}
+
+func mergeSQLScope(routerParts []string, routerRestricted bool, requested []string, requestedSet bool) ([]string, bool) {
+	if routerRestricted {
+		if requestedSet {
+			return intersectPartitions(requested, routerParts), true
+		}
+		return routerParts, true
+	}
+	if requestedSet {
+		return requested, true
+	}
+	return nil, false
 }
 
 // AccessEnforce reports whether access-policy enforcement is active. It is

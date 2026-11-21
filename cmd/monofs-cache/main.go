@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/internal/bazel/cache"
+	"github.com/radryc/monofs/internal/transport"
 )
 
 var (
@@ -46,6 +47,12 @@ func main() {
 	if *showVersion {
 		fmt.Printf("monofs-cache version=%s commit=%s build_time=%s\n", Version, Commit, BuildTime)
 		return
+	}
+
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Logging
@@ -104,8 +111,8 @@ func main() {
 		httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	logger.Info("listening", "addr", addr)
-	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	logger.Info("listening", "addr", addr, "scheme", tlsTransport.Scheme())
+	if err := tlsTransport.ListenAndServe(httpSrv); err != nil && err != http.ErrServerClosed {
 		logger.Error("server error", "error", err)
 		os.Exit(1)
 	}

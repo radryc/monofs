@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/radryc/monofs/internal/diagnostics"
 	"github.com/radryc/monofs/internal/search"
 	"github.com/radryc/monofs/internal/telemetry"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -43,7 +45,7 @@ func main() {
 	queueSize := flag.Int("queue-size", 100, "Size of indexing job queue")
 	routerAddr := flag.String("router-addr", "", "Router address for cluster access (optional, enables fetching from storage nodes)")
 	indexGuardian := flag.Bool("index-guardian", strings.EqualFold(os.Getenv("MONOFS_SEARCH_INDEX_GUARDIAN"), "true"), "Index Guardian-managed partitions (default false: no clonable upstream)")
-	diagnosticsAddr := flag.String("diagnostics-addr", ":9101", "Listen address for Prometheus /metrics and pprof endpoints (empty disables)")
+	diagnosticsAddr := flag.String("diagnostics-addr", ":9101", "Listen address for Prometheus /metrics (pprof only when MONOFS_DIAGNOSTICS_PPROF=true; empty disables)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 
@@ -53,7 +55,7 @@ func main() {
 	oidcIssuer := flag.String("oidc-issuer", "", "OIDC issuer for bearer token verification (enables OIDC when set with --oidc-audience)")
 	oidcAudience := flag.String("oidc-audience", "", "OIDC audience for bearer token verification")
 	oidcJWKSURL := flag.String("oidc-jwks-url", "", "Explicit JWKS URL (defaults to OIDC discovery on the issuer)")
-	breakGlassToken := flag.String("break-glass-token", "", "Break-glass admin bearer token (resolves to client id break-glass-admin)")
+	breakGlassToken := flag.String("break-glass-token", searchClusterToken(), "Break-glass admin bearer token (resolves to client id break-glass-admin; defaults to MONOFS_CLUSTER_TOKEN or MONOFS_TOKEN)")
 	accessPolicyURL := flag.String("access-policy-url", "", "URL of the compiled access policy bundle (e.g. the router /api/access/policy endpoint)")
 	accessPolicyFile := flag.String("access-policy-file", "", "Path to a compiled access policy bundle (dev)")
 	accessPolicyToken := flag.String("access-policy-token", "", "Bearer token for --access-policy-url")
@@ -64,6 +66,11 @@ func main() {
 	if *showVersion {
 		fmt.Printf("monofs-search %s (commit: %s, built: %s)\n", Version, Commit, BuildTime)
 		os.Exit(0)
+	}
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", err)
+		os.Exit(1)
 	}
 	telemetryCfg, err := telemetry.LoadConfig("monofs-search")
 	if err != nil {
@@ -132,14 +139,22 @@ func main() {
 	if bg := strings.TrimSpace(*breakGlassToken); bg != "" {
 		verifiers = append(verifiers, authz.NewBreakGlassVerifier(bg, "break-glass-admin"))
 	}
-	var verifier authz.TokenVerifier = authz.NoopVerifier{}
+	// Authentication is mandatory by default. Refuse to start without a
+	// verifier rather than silently accepting anonymous calls; development
+	// environments must opt out explicitly.
+	requireToken := !envBool("MONOFS_INSECURE_DEV_DISABLE_AUTH", false) && envBool("MONOFS_GRPC_REQUIRE_TOKEN", true)
+	if requireToken && len(verifiers) == 0 {
+		logger.Error("no authentication configured: set --break-glass-token or MONOFS_TOKEN, configure OIDC, or use MONOFS_INSECURE_DEV_DISABLE_AUTH=true for local development")
+		os.Exit(1)
+	}
+	var verifier authz.TokenVerifier
 	switch len(verifiers) {
 	case 1:
 		verifier = verifiers[0]
 	case 2:
 		verifier = authz.NewChainVerifier(verifiers...)
 	}
-	authenticator := authz.NewAuthenticator(verifier, logger, false)
+	authenticator := authz.NewAuthenticator(verifier, logger, requireToken)
 
 	var policyLoader *policy.Loader
 	if u := strings.TrimSpace(*accessPolicyURL); u != "" {
@@ -168,6 +183,7 @@ func main() {
 		AccessPolicy:  policyLoader,
 		EnforceRead:   *accessEnforce,
 		InternalToken: strings.TrimSpace(*token),
+		Transport:     tlsTransport,
 	}
 
 	svc, err := search.NewService(cfg)
@@ -178,7 +194,13 @@ func main() {
 	defer svc.Close()
 
 	// Create gRPC server
+	transportServerOpt, err := tlsTransport.ServerOption()
+	if err != nil {
+		logger.Error("failed to configure transport security", "error", err)
+		os.Exit(1)
+	}
 	grpcServer := grpc.NewServer(
+		transportServerOpt,
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.MaxRecvMsgSize(100*1024*1024), // 100MB max message size
 		grpc.MaxSendMsgSize(100*1024*1024),
@@ -241,4 +263,26 @@ func internalAwareInterceptor(authenticator *authz.Authenticator, internalToken 
 		}
 		return base(ctx, req, info, handler)
 	}
+}
+
+// searchClusterToken returns the service-to-service bearer token accepted by
+// the search service. It mirrors the router's credential selection so both
+// sides authenticate without an insecure fallback.
+func searchClusterToken() string {
+	if token := strings.TrimSpace(os.Getenv("MONOFS_CLUSTER_TOKEN")); token != "" {
+		return token
+	}
+	return strings.TrimSpace(os.Getenv("MONOFS_TOKEN"))
+}
+
+func envBool(key string, def bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
 }

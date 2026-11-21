@@ -18,12 +18,15 @@ const (
 	maxDuckDBSQLFiles     = 10_000
 	maxDuckDBSQLValueSize = 16 * 1024
 	maxDuckDBSQLBytes     = 8 << 20
+	maxDuckDBPartialRows  = 200_000
+	maxDuckDBPartialBytes = 64 << 20
 )
 
 // DuckDBSQLResult is the row-oriented result of an ad-hoc DuckDB query.
 type DuckDBSQLResult struct {
 	Dataset    string   `json:"dataset"`
 	Columns    []string `json:"columns"`
+	Types      []string `json:"types,omitempty"`
 	Rows       [][]any  `json:"rows"`
 	RowCount   int      `json:"row_count"`
 	Truncated  bool     `json:"truncated"`
@@ -39,6 +42,16 @@ var (
 // `traces`; the caller's QueryScope is applied inside the view before the
 // user's SQL is evaluated.
 func (e *LogEngine) QueryDuckDBSQL(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope QueryScope) (DuckDBSQLResult, error) {
+	return e.queryDuckDBSQL(ctx, dataset, query, from, to, limit, scope, defaultDuckDBSQLRows, maxDuckDBSQLBytes, false)
+}
+
+// QueryPartial executes a generated pushdown and returns typed partial rows.
+// Truncation is an error: a partial aggregate must never be silently cut.
+func (e *LogEngine) QueryPartial(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope QueryScope) (DuckDBSQLResult, error) {
+	return e.queryDuckDBSQL(ctx, dataset, query, from, to, limit, scope, maxDuckDBPartialRows, maxDuckDBPartialBytes, true)
+}
+
+func (e *LogEngine) queryDuckDBSQL(ctx context.Context, dataset, query string, from, to time.Time, limit int, scope QueryScope, maxRows, maxBytes int, errorOnTruncate bool) (DuckDBSQLResult, error) {
 	started := time.Now()
 	result := DuckDBSQLResult{Dataset: strings.ToLower(strings.TrimSpace(dataset)), Rows: [][]any{}}
 	if e == nil || e.duck == nil {
@@ -53,10 +66,10 @@ func (e *LogEngine) QueryDuckDBSQL(ctx context.Context, dataset, query string, f
 		return result, err
 	}
 	if limit <= 0 {
-		limit = defaultDuckDBSQLRows
+		limit = maxRows
 	}
-	if limit > maxDuckDBSQLRows {
-		limit = maxDuckDBSQLRows
+	if limit > maxRows {
+		limit = maxRows
 	}
 	if to.IsZero() {
 		to = time.Now().UTC()
@@ -90,6 +103,12 @@ func (e *LogEngine) QueryDuckDBSQL(ctx context.Context, dataset, query string, f
 		return result, fmt.Errorf("duckdb sql columns: %w", err)
 	}
 	result.Columns = columns
+	if columnTypes, err := rows.ColumnTypes(); err == nil {
+		result.Types = make([]string, len(columnTypes))
+		for i, columnType := range columnTypes {
+			result.Types[i] = columnType.DatabaseTypeName()
+		}
+	}
 	encodedBytes := 0
 	for rows.Next() {
 		if len(result.Rows) >= limit {
@@ -109,7 +128,7 @@ func (e *LogEngine) QueryDuckDBSQL(ctx context.Context, dataset, query string, f
 			values[i] = normalizeDuckDBSQLValue(value)
 			rowBytes += len(fmt.Sprint(values[i])) + 8
 		}
-		if encodedBytes+rowBytes > maxDuckDBSQLBytes {
+		if encodedBytes+rowBytes > maxBytes {
 			result.Truncated = true
 			break
 		}
@@ -118,6 +137,9 @@ func (e *LogEngine) QueryDuckDBSQL(ctx context.Context, dataset, query string, f
 	}
 	if err := rows.Err(); err != nil {
 		return result, fmt.Errorf("duckdb sql rows: %w", err)
+	}
+	if errorOnTruncate && result.Truncated {
+		return result, fmt.Errorf("partial result exceeded the shard budget; narrow the query")
 	}
 	result.RowCount = len(result.Rows)
 	result.DurationMs = time.Since(started).Milliseconds()
@@ -339,6 +361,9 @@ func normalizeDuckDBSQLValue(value any) any {
 	case sql.RawBytes:
 		return truncateDuckDBSQLString(string(typed))
 	default:
+		if stringer, ok := value.(fmt.Stringer); ok {
+			return truncateDuckDBSQLString(stringer.String())
+		}
 		return value
 	}
 }

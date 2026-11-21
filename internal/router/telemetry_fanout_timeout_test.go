@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -136,5 +137,30 @@ func TestQueryLogsFailsWhenNoNodeRespondsWithinStartTimeout(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("QueryLogs() took %s, want the start timeout to bound it", elapsed)
+	}
+}
+
+// An expired caller deadline used to start a fan-out with a near-zero start
+// budget, log a skip for every node, and return a misleading "no node
+// responded" error. Report the real cause immediately instead.
+func TestQueryLogsFailsFastWhenDeadlineAlreadyExpired(t *testing.T) {
+	router, _, cleanup := newTelemetryRouterHarness(t, "node-a", "node-b")
+	defer cleanup()
+	router.config.QueryNodeStartTimeout = 5 * time.Second
+	router.config.QueryNodeStragglerGrace = 3 * time.Second
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	start := time.Now()
+	_, err := router.QueryLogs(ctx, &pb.QueryLogsRequest{Query: `{service="x"}`, Limit: 10})
+	if err == nil {
+		t.Fatal("QueryLogs() error = nil, want an expired-deadline error")
+	}
+	if !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("QueryLogs() error = %v, want it to name the expired deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("QueryLogs() took %s, want it to fail immediately", elapsed)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/radryc/monofs/internal/router/pipeline"
+	"github.com/radryc/monofs/internal/worker/executor"
 )
 
 type BuilderHandler struct {
@@ -57,7 +58,7 @@ func (h *BuilderHandler) executeShell(ctx context.Context, cmdStr string, logWri
 
 	cmd := exec.CommandContext(ctx, shell[0], append(shell[1:], cmdStr)...)
 	cmd.Dir = h.mountPath
-	cmd.Env = os.Environ()
+	cmd.Env = executor.FilteredHostEnv()
 	cmd.Stdout = io.MultiWriter(logWriter, &stepLogBuffer{})
 	cmd.Stderr = io.MultiWriter(logWriter, &stepLogBuffer{})
 
@@ -161,7 +162,7 @@ func (h *DockerHandler) Execute(ctx context.Context, task *TaskData, logWriter i
 			continue
 		}
 		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", step.Run)
-		cmd.Env = os.Environ()
+		cmd.Env = executor.FilteredHostEnv()
 		cmd.Stdout = logWriter
 		cmd.Stderr = logWriter
 
@@ -193,7 +194,7 @@ func (h *DeployerHandler) Execute(ctx context.Context, task *TaskData, logWriter
 		}
 		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", step.Run)
 		cmd.Dir = h.mountPath
-		cmd.Env = os.Environ()
+		cmd.Env = executor.FilteredHostEnv()
 		cmd.Stdout = logWriter
 		cmd.Stderr = logWriter
 

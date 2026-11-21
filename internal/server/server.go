@@ -22,6 +22,7 @@ import (
 	"github.com/radryc/monofs/internal/metastore"
 	"github.com/radryc/monofs/internal/sharding"
 	"github.com/radryc/monofs/internal/storage/workspacestore"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/internal/workspaceledger"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
@@ -52,6 +53,10 @@ type Server struct {
 	// AccessControl enforces the repo-managed access policy on read RPCs
 	// (nil when disabled).
 	access *AccessControl
+
+	// internalToken gates the node-local SQL RPCs (QueryDuckDBSQL and
+	// QueryPartial). Empty means SQL RPCs are disabled.
+	internalToken string
 
 	// Cache for intermediate directories (path -> exists)
 	intermediateDirCache sync.Map
@@ -95,6 +100,10 @@ type Server struct {
 	// Phase 1B/6: node-owned ledger (WAL-backed when initialization succeeds).
 	workspaceStore *workspacestore.Store
 	ledger         *workspaceledger.Ledger
+
+	// transport carries the resolved STRATA_TLS_* contract for outgoing
+	// connections. The zero value is plaintext.
+	transport transport.Config
 }
 
 type repoInfo struct {
@@ -456,6 +465,7 @@ func (s *Server) ConfigureFetcher(fetcherAddrs []string) error {
 
 	config := fetcher.DefaultClientConfig()
 	config.FetcherAddresses = fetcherAddrs
+	config.Transport = s.transport
 
 	client, err := fetcher.NewClient(config, s.logger)
 	if err != nil {

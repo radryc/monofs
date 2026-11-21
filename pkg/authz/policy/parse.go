@@ -43,7 +43,10 @@ type Subject struct {
 	Partitions []string
 	Logs       []string
 	Traces     []string
+	SQL        []string
 	MonoFS     []string
+	Backends   []string
+	Shards     *ShardSelector
 	Role       string
 	Deny       []string
 }
@@ -69,16 +72,30 @@ type rawQuotas struct {
 }
 
 type rawSelector struct {
-	Labels map[string]string `yaml:"labels"`
+	Labels     map[string]string `yaml:"labels"`
+	Attributes map[string]string `yaml:"attributes"`
 }
 
 type rawSubject struct {
-	Partitions []string `yaml:"partitions"`
-	Logs       []string `yaml:"logs"`
-	Traces     []string `yaml:"traces"`
-	MonoFS     []string `yaml:"monofs"`
-	Role       string   `yaml:"role"`
-	Deny       []string `yaml:"deny"`
+	Partitions []string          `yaml:"partitions"`
+	Logs       []string          `yaml:"logs"`
+	Traces     []string          `yaml:"traces"`
+	SQL        []string          `yaml:"sql"`
+	MonoFS     []string          `yaml:"monofs"`
+	Backends   []string          `yaml:"backends"`
+	Shards     *rawShardSelector `yaml:"shards"`
+	Role       string            `yaml:"role"`
+	Deny       []string          `yaml:"deny"`
+}
+
+type rawShardSelector struct {
+	Include []rawAttributeMatcher `yaml:"include"`
+	Exclude []rawAttributeMatcher `yaml:"exclude"`
+}
+
+type rawAttributeMatcher struct {
+	Attributes map[string]string `yaml:"attributes"`
+	Labels     map[string]string `yaml:"labels"`
 }
 
 // ParseFile parses a single access policy document without resolving imports.
@@ -116,16 +133,34 @@ func ParseFile(data []byte) (*File, error) {
 	if len(doc.Selectors) > 0 {
 		file.Selectors = make(map[string]Selector, len(doc.Selectors))
 		for name, sel := range doc.Selectors {
-			if len(sel.Labels) == 0 {
-				return nil, fmt.Errorf("policy: selector %q has no labels", name)
+			attrs := mergeAttributes(sel.Labels, sel.Attributes)
+			if len(attrs) == 0 {
+				return nil, fmt.Errorf("policy: selector %q has no labels or attributes", name)
 			}
-			file.Selectors[name] = Selector{Labels: sel.Labels}
+			file.Selectors[name] = Selector{Labels: attrs}
 		}
 	}
 	file.Groups = convertSubjects(doc.Groups)
 	file.Users = convertSubjects(doc.Users)
 	file.Clients = convertSubjects(doc.Clients)
 	return file, nil
+}
+
+func convertShardSelector(in *rawShardSelector) *ShardSelector {
+	if in == nil {
+		return nil
+	}
+	out := &ShardSelector{}
+	for _, m := range in.Include {
+		out.Include = append(out.Include, AttributeMatcher{Attributes: mergeAttributes(m.Labels, m.Attributes)})
+	}
+	for _, m := range in.Exclude {
+		out.Exclude = append(out.Exclude, AttributeMatcher{Attributes: mergeAttributes(m.Labels, m.Attributes)})
+	}
+	if len(out.Include) == 0 && len(out.Exclude) == 0 {
+		return nil
+	}
+	return out
 }
 
 func convertSubjects(in map[string]rawSubject) map[string]Subject {
@@ -138,7 +173,10 @@ func convertSubjects(in map[string]rawSubject) map[string]Subject {
 			Partitions: sub.Partitions,
 			Logs:       sub.Logs,
 			Traces:     sub.Traces,
+			SQL:        sub.SQL,
 			MonoFS:     sub.MonoFS,
+			Backends:   sub.Backends,
+			Shards:     convertShardSelector(sub.Shards),
 			Role:       sub.Role,
 			Deny:       sub.Deny,
 		}

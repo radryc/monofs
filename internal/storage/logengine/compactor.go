@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -93,6 +94,13 @@ type Compactor struct {
 	outputChunks  uint64
 	deletedChunks uint64
 	records       uint64
+
+	// stats is a lock-free snapshot of the counters above, refreshed whenever
+	// they change. Stats must never take mu: CompactRange holds mu for the whole
+	// run, and GetNodeInfo (router health probes) reads CompactionStats. Taking
+	// the mutex there made health checks block for minutes and flap every
+	// compaction cycle.
+	stats atomic.Pointer[CompactionStats]
 }
 
 // CompactionStats is a snapshot for the node info API and UI.
@@ -109,7 +117,25 @@ type CompactionStats struct {
 }
 
 func newCompactor(store *CachedStore, ingester *Ingester, query *QueryEngine) *Compactor {
-	return &Compactor{store: store, ingester: ingester, query: query}
+	c := &Compactor{store: store, ingester: ingester, query: query}
+	c.stats.Store(&CompactionStats{TargetBytes: defaultCompactionMaxBytes})
+	return c
+}
+
+// publishStatsLocked refreshes the lock-free snapshot. Callers must hold c.mu,
+// or be the only goroutine touching the counters.
+func (c *Compactor) publishStatsLocked() {
+	c.stats.Store(&CompactionStats{
+		Running:       c.running,
+		LastRun:       c.lastRun,
+		LastResult:    c.lastResult,
+		Runs:          c.runs,
+		InputChunks:   c.inputChunks,
+		OutputChunks:  c.outputChunks,
+		DeletedChunks: c.deletedChunks,
+		Records:       c.records,
+		TargetBytes:   defaultCompactionMaxBytes,
+	})
 }
 
 // CompactRange compacts the raw chunks overlapping [from, to]. Chunks that were
@@ -148,6 +174,7 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 	defer c.mu.Unlock()
 	c.compactionLevel = 1
 	c.running = true
+	c.publishStatsLocked()
 	defer func() {
 		c.running = false
 		c.compactionLevel = 0
@@ -160,6 +187,7 @@ func (c *Compactor) CompactRange(ctx context.Context, signal Signal, from, to ti
 			c.deletedChunks += uint64(result.DeletedChunks)
 			c.records += uint64(result.Records)
 		}
+		c.publishStatsLocked()
 	}()
 
 	c.compactionGroup = fmt.Sprintf("%d", time.Now().UTC().UnixNano())
@@ -859,21 +887,14 @@ func compactionOptions(signal Signal) CompactionOptions {
 	}
 }
 
-// Stats returns a snapshot of the compactor state.
+// Stats returns a snapshot of the compactor state. It is safe to call while a
+// compaction is running and never blocks on it.
 func (c *Compactor) Stats() CompactionStats {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return CompactionStats{
-		Running:       c.running,
-		LastRun:       c.lastRun,
-		LastResult:    c.lastResult,
-		Runs:          c.runs,
-		InputChunks:   c.inputChunks,
-		OutputChunks:  c.outputChunks,
-		DeletedChunks: c.deletedChunks,
-		Records:       c.records,
-		TargetBytes:   defaultCompactionMaxBytes,
+	snapshot := c.stats.Load()
+	if snapshot == nil {
+		return CompactionStats{TargetBytes: defaultCompactionMaxBytes}
 	}
+	return *snapshot
 }
 
 // CompactionStats returns the local compactor status.

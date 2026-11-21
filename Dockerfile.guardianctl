@@ -6,6 +6,8 @@ ARG KVS_REPO_URL=https://github.com/radryc/kvs.git
 ARG KVS_REF=caadee8dd6d809ba9e40cccb2e27e5ea44d068aa
 ARG CFG_REPO_URL=https://github.com/radryc/cfg.git
 ARG CFG_REF=cc88020cecc3fac5f1548cba12bec1fd2c1c958f
+ARG SQLAGREGATOR_REPO_URL=https://github.com/radryc/sqlagregator.git
+ARG SQLAGREGATOR_REF=5a682db7ac1c74b275c6823b70d8e106018989f7
 
 RUN git init /src/kvs && \
     git -C /src/kvs remote add origin "$KVS_REPO_URL" && \
@@ -14,7 +16,11 @@ RUN git init /src/kvs && \
     git init /src/cfg && \
     git -C /src/cfg remote add origin "$CFG_REPO_URL" && \
     git -C /src/cfg fetch --depth 1 origin "$CFG_REF" && \
-    git -C /src/cfg checkout --detach FETCH_HEAD
+    git -C /src/cfg checkout --detach FETCH_HEAD && \
+    git init /src/sqlagregator && \
+    git -C /src/sqlagregator remote add origin "$SQLAGREGATOR_REPO_URL" && \
+    git -C /src/sqlagregator fetch --depth 1 origin "$SQLAGREGATOR_REF" && \
+    git -C /src/sqlagregator checkout --detach FETCH_HEAD
 
 WORKDIR /src/monofs
 COPY go.mod go.sum ./

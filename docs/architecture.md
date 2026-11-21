@@ -114,29 +114,31 @@ flowchart TB
 | Router | `cmd/monofs-router` | gRPC `:9090`, HTTP `:8080`, native TCP optional | Guardian principals/versions, workspace jobs/bundles/WAL, auto-refresh schedule, browser sessions (all local to each router) | Topology, HRW placement, ingestion orchestration, workspace sync, Guardian API, Doctor fan-out, pipeline orchestration, registry/UI proxy, access policy |
 | Storage node | `cmd/monofs-server` | gRPC `:9000`, diagnostics `:9100` | Pebble DB (`--db-path`), Git cache, optional KVS data, Doctor log engine, workspace ledger | File metadata, directory index, KVS/CFG content backends, replication metadata, failover cache, predictor, forwarding proxy |
 | Fetcher | `cmd/monofs-fetcher` | gRPC `:9200`, diagnostics `:9201` | Local archive cache; optional S3/GCS; Git clone cache; in-memory staged workspace bundles | Content-addressed blob archives, Git blob fetch, workspace publish/push/refresh, upstream log/tags/blame |
-| FUSE client | `cmd/monofs-client` | Unix socket under overlay | Overlay session DB, local files, metadata cache, persistent client ID | Mount, read path, overlay writes, local virtual commits, session control |
-| Session CLI | `cmd/monofs-session` | none (connects to client socket) | none | `add`, `commit`, `push`, `pull`, `branch`, `diff`, `blobs-info`, etc. |
+| FUSE client | `cmd/monofs-client` | Unix socket under overlay | Overlay session DB, local files, metadata cache, persistent client ID | Mount, read path, overlay writes, local virtual commits, session control; `--headless` serves list/read/stat/write/mkdir over the socket without FUSE |
+| Session CLI | `cmd/monofs-session` | none (connects to client socket) | none | `add`, `commit`, `push`, `pull`, `branch`, `diff`, `blobs-info`, `list`, `read`, `stat`, `write`, `mkdir`, etc. |
 | Search | `cmd/monofs-search` | gRPC `:9100`, diagnostics `:9101` | Zoekt index and clone cache | Index repositories from MonoFS or Git; query code; symbol extraction |
-| Registry | `cmd/monofs-registry` | HTTP `:5000` | MonoFS namespace `docker-registry` | OCI Distribution API; pull-through proxy; manifests/tags/blobs |
+| Registry | `cmd/monofs-registry` | HTTP `:5000`, diagnostics `:5001` | MonoFS namespace `docker-registry` | OCI Distribution API; pull-through proxy; manifests/tags/blobs |
 | Pipeline worker | `cmd/monofs-pipeline-worker` | optional executor HTTP port | none (task state in Guardian queue) | Execute builder/docker/deployer/bazel jobs; report results |
 | Bazel cache | `cmd/monofs-cache` | HTTP `:9092` | local disk (`--dir`) | Bazel AC/CAS remote cache |
 | Admin CLI | `cmd/monofs-admin` | none | none | Ingest, delete, status, rebalance, failover, drain, whitelist, index rebuild |
 | Bazel CLI | `cmd/monofs-bazelctl` | none | workspace manifest/lock | Generate Bazel workspace, dependency graph, migration states |
 | Load test | `cmd/monofs-loadtest` | none | temp files in mount | Filesystem load generation |
+| Load generator | `cmd/monofs-loadgen` | optional metrics HTTP | none | gRPC load generator (`read`, `meta`, `ingest`, `mixed`, `cleanup`) |
 | Trace dump | `cmd/monofs-trace-dump` | none | none | Query Doctor traces from router or server |
 | Log compactor | `cmd/monofs-logengine-compact` | none | Doctor log directory | Offline compaction |
+| Log query sidecar | `cmd/monofs-logquery` | gRPC `:9101` | reads local logengine dir | DuckDB SQL query sidecar for logs, metrics, traces, and SQL console |
 | FUSE device plugin | `cmd/k8s-fuse-device-plugin` | kubelet device plugin socket | none | Advertise `/dev/fuse` as a Kubernetes resource |
 | Kernel module | `monofs-kmod/` | none | none | Out-of-tree filesystem client speaking the native protocol |
 | Native build tool | `tools/monofs-native-build` | none | output marker | Bazel genrule fallback for non-migrated repos |
 
 ### 3.1 API surface
 
-`api/proto/` defines five gRPC services and 117 RPCs:
+`api/proto/` defines five gRPC services and 125 RPCs:
 
 | Service | RPCs | Purpose |
 |---|---:|---|
-| `monofs.MonoFSRouter` | 53 | Topology, ingestion, Guardian, Doctor, whitelist, workspace sync, ledger, upstream reads |
-| `monofs.MonoFS` | 37 | Filesystem metadata/data, auth, ingestion, failover, indexing, Doctor, ledger |
+| `monofs.MonoFSRouter` | 57 | Topology, ingestion, Guardian, Doctor, whitelist, workspace sync, ledger, upstream reads, federated SQL |
+| `monofs.MonoFS` | 41 | Filesystem metadata/data, auth, ingestion, failover, indexing, Doctor, ledger |
 | `monofs.BlobFetcher` | 9 | Blob/archive fetch, prefetch, cache check, store, delete |
 | `monofs.RepoSyncWorker` | 10 | Workspace bundle staging, publish/push, refresh probe, upstream reads |
 | `monofs.MonoFSSearch` | 8 | Index, search, status, rebuild, delete, stats |
@@ -147,7 +149,7 @@ The protobuf contract is broad but weakly typed at the telemetry boundary: Docto
 
 ### 4.1 Startup
 
-`cmd/monofs-router/main.go` registers Git/file ingestion backends in a process-global registry, initializes telemetry, parses roughly 70 flags, constructs `router.NewRouter`, optionally enables the ownership gate, configures search/fetcher/registry/peer credentials, registers static nodes, starts health checks and the access-policy loader, builds auth verifiers, and serves three listeners.
+`cmd/monofs-router/main.go` registers Git/file ingestion backends in a process-global registry, initializes telemetry, parses roughly 95 flags, constructs `router.NewRouter`, optionally enables the ownership gate, configures search/fetcher/registry/peer credentials, registers static nodes, starts health checks and the access-policy loader, builds auth verifiers, and serves three listeners.
 
 `router.NewRouter` does substantial work before serving:
 
@@ -180,6 +182,8 @@ otelhttp -> publicExempt -> Authenticator.HTTPMiddleware -> Router.ServeHTTP -> 
 ```
 
 `Router.ServeHTTP` also supports a `/monofs/` prefix strip for sub-path deployments.
+
+Transport security for the router, storage nodes, fetcher, search, registry, and the Go clients is resolved from the shared `STRATA_TLS_*` contract by `internal/transport` (`github.com/radryc/tlsx`). `off` is the default and keeps gRPC and HTTP plaintext; `optional` terminates TLS/mTLS on gRPC when a certificate/key exist and keeps HTTP plaintext; `required` serves TLS/mTLS on gRPC and HTTP and verifies client certificates unless `STRATA_TLS_REQUIRE_CLIENT_CERT=false`. The native gateway and the diagnostics listeners are not wrapped by this layer.
 
 ### 4.3 Routing and topology
 
@@ -236,7 +240,7 @@ Guardian is not a separate binary in this repository. It is a set of logical pat
 
 The router maps logical Guardian paths to physical repository paths (`guardian/<partition>`, `doctor/...`, `guardian-system`), authenticates Guardian principals by token, authorizes mutations by role, writes inline files to KVS or storage nodes, and maintains a version store and change subscriptions.
 
-Guardian principals are persisted in `guardian_principals.json` (tokens hashed with unsalted SHA-256) and can be seeded from `MONOFS_TOKEN`. Roles are `control-plane`, `cli`, `pipeline`, `pusher`, and `doctor`; role inference defaults unknown IDs to `control-plane`.
+Guardian principals are persisted in `guardian_principals.json` (tokens hashed with unsalted SHA-256) and can be seeded from `MONOFS_TOKEN`. Roles are `control-plane`, `cli`, `pipeline`, `pusher`, and `doctor`. Admin-initiated registrations that omit a role infer `control-plane` for unknown IDs; non-admin callers register themselves as `viewer`.
 
 ### 4.7 Doctor telemetry
 
@@ -244,7 +248,7 @@ Doctor is the observability namespace:
 
 - Services export OTLP traces/metrics/logs (or direct ingest) to storage nodes or the router.
 - Storage nodes use `internal/storage/logengine` to write Parquet chunks, manifests, text indexes, and series indexes, or `internal/storage/clickhouse` to write shared ClickHouse tables when `--spanengine=clickhouse`.
-- The router fans out `QueryLogs`, `QueryMetrics`, `QueryTraces`, `StreamQuery*`, and `StreamMetricSeries` to nodes, merges results, and proxies ingest. In ClickHouse mode the router still fans out but the tables are shared, so the SQL console executes on one healthy node to avoid duplicate results.
+- The router fans out `QueryLogs`, `QueryMetrics`, `QueryTraces`, `StreamQuery*`, and `StreamMetricSeries` to nodes, merges results, and proxies ingest. In ClickHouse mode the tables are shared, so `QueryDuckDBSQL` (the Doctor SQL console) executes on one healthy node to avoid duplicate results; the separate federated `QuerySQL` path instead requires explicit partition placements and returns `Unimplemented` without them (see [8.6](#86-federated-sql)).
 - `internal/storage/logquery` parses a log query language; `monofs-logquery` exposes the same data through DuckDB SQL views.
 - `monofs-logengine-compact` compacts ranges offline.
 
@@ -264,6 +268,8 @@ The pipeline store is split: configs/tasks/results are persistent Guardian paths
 
 `internal/router/ui` is a Vue 3 + Vite + Tailwind SPA embedded into the router binary. It covers dashboard, repositories, ingest, search, fetchers, registry, pipelines, CI/CD, Bazel adoption, cluster, replication, performance, clients, dependencies, and indexer views. The UI calls the router's HTTP API directly with `fetch`; no generated API client is used.
 
+The repository list merges ingest counts from peer routers (`--peer-routers`) with a loop-guard header and a 2-second timeout, and the HTTP ingest handler pre-authorizes the display path and returns `403` synchronously instead of logging a denial after the UI has already reported success.
+
 ## 5. Metadata plane: `monofs-server`
 
 ### 5.1 Storage engine and buckets
@@ -276,6 +282,9 @@ Each node stores metadata in Pebble through `internal/metastore`. Buckets are ke
 | `repos` | `storageID` | JSON `repoInfo` |
 | `pathindex` | `storageID:filePath` | metadata hash key (redundant with deterministic hash) |
 | `repolookup` | `displayPath` | `storageID` |
+| `repoprefixes` | intermediate display-path prefix | reference count |
+| `repochidren` | `parent\0child` | reference count for namespace children |
+| `schema` | `repo_namespace_index` | namespace-index version marker |
 | `dirmeta` | `storageID:dirPath` | canonical directory metadata |
 | `direntry` | `sha256(storageID\0dirPath)\0name` | binary directory entry |
 | `ownedfiles` | `storageID:filePath` | `"1"` |
@@ -338,15 +347,19 @@ The node's Doctor backend wraps `internal/storage/logengine`, configured with a 
 
 ### 6.2 Blob backend
 
-`internal/storage/blob/backend.go` implements a content-addressed store on top of `github.com/radryc/packager`:
+`internal/storage/blob/` implements a content-addressed store on top of `github.com/radryc/packager`.
+
+By default (`--blob-layout=v2`, opt out with `--blob-layout=legacy` or `MONOFS_BLOB_LAYOUT_V2=false`), blobs are stored in 256 sharded packs with versioned manifests (`internal/storage/blob/layout/` and `v2.go`):
 
 ```text
-<CacheDir>/archives/<storageID>/chunk-0000.pack
-<CacheDir>/archives/_loose/<blobHash>.pack
-<CacheDir>/archives/_batch/batch-<unixNano>-0000.pack
+packs/v2/sha256/<shard>/<packID>.pack
+packs/v2/sha256/<shard>/<packID>.pack.idx
+packs/v2/sha256/<shard>/MANIFEST.json
 ```
 
-Archives are encrypted with a 32-byte key (ChaCha20-Poly1305 in the packager pipeline) and compressed. A process-local `blobIndex` maps content hash to archive path and entry path. It is rebuilt by scanning local `.pack` files at startup; cloud-only archives with no local index entry are not discoverable.
+Reads resolve a digest in O(1) bounded GETs via the shard `MANIFEST.json` and `.idx` files without object-store listings, falling back to the legacy layout (`_loose/<blobHash>.pack`, `_batch/`, `archives/<storageID>/chunk-0000.pack`) on miss. An optional background compactor (`--blob-compactor`) merges small or dead-heavy packs per shard using compare-and-swap on `MANIFEST.json`. See [blob-layout-v2.md](blob-layout-v2.md) for details.
+
+Archives are encrypted with a 32-byte key (ChaCha20-Poly1305 in the packager pipeline) and compressed. For legacy archives, a process-local `blobIndex` maps content hash to archive path and entry path and is rebuilt by scanning local `.pack` files at startup.
 
 Cloud replication is asynchronous. The backup scanner only checks that an object exists via HEAD; it does not compare size or checksum.
 
@@ -389,7 +402,7 @@ Key models:
 - `SessionManager` owns one current write session, stored under `<overlay>/sessions/<id>/` with `overlay.db` (NutsDB) and ordinary files.
 - `OverlayManager` merges backend listings with overlay files, tombstones, and user root dirs.
 - `CommitManager` builds local virtual commits and pushes `workspacebundle.SourceCommitBundle`.
-- `SessionSocketHandler` is the JSON-over-Unix-socket control plane used by `monofs-session`.
+- `SessionSocketHandler` is the JSON-over-Unix-socket control plane used by `monofs-session`. With `monofs-client --headless` it also fronts `WorkspaceFS` (list/read/stat/write/mkdir), so the same overlay and commit machinery is available without a FUSE mount.
 - `WorkspaceManifest`, `RepoFilter`, and `WorkspaceGitProjection` implement the virtual monorepo and a synthetic Git repository.
 
 ### 7.2 Read path
@@ -406,7 +419,7 @@ Backend files are always materialized in full at open, regardless of requested r
 
 ### 7.3 Write path
 
-Writable mounts create a session automatically. Writes go to ordinary files under the session directory; `Flush` records a `ChangeModify`/`ChangeCreate` in NutsDB. NutsDB is opened with `SyncEnable=false`. A crash between `write(2)` and `close(2)` leaves a file on disk with no DB entry, and `RebuildFromDisk` only runs when the DB is completely empty.
+Writable mounts (and `monofs-client --headless`) create a session automatically. Writes go to ordinary files under the session directory; `Flush` records a `ChangeModify`/`ChangeCreate` in NutsDB. NutsDB is opened with `SyncEnable=false`. A crash between `write(2)` and `close(2)` leaves a file on disk with no DB entry, and `RebuildFromDisk` only runs when the DB is completely empty.
 
 `monofs-session add/commit/push` stages content snapshots, builds local virtual commits grouped by repository, advances committed entries to a hidden `ChangeBaseline` state, and pushes via the router/fetcher.
 
@@ -427,8 +440,9 @@ Writable mounts create a session automatically. Writes go to ordinary files unde
 
 - OCI Distribution HTTP API with manifests, tags, blobs, chunked uploads, pull-through proxy, stats, and repo listing.
 - Data is stored in a MonoFS namespace (`docker-registry` by default): `_blobs/sha256/<hex>`, `<repo>/_tags/<tag>`, `_catalog`.
-- The HTTP server has no authentication, no TLS, and no timeouts.
+- The HTTP API has no application authentication and no HTTP timeouts; TLS is available when `STRATA_TLS_MODE=required` (optional mode keeps HTTP plaintext).
 - Blobs are global by digest; uploads are in-memory sessions writing temp files; manifests are stored as blobs.
+- Registry router/node gRPC clients attach the cluster token as `authorization: Bearer` plus `x-monofs-internal`, so an enforcing router still serves `/v2/`. Without it `GetClusterInfo` fails `Unauthenticated` and `docker push` surfaces an EOF.
 
 ### 8.3 Pipeline worker
 
@@ -452,8 +466,17 @@ Writable mounts create a session automatically. Writes go to ordinary files unde
 - `internal/bazel` generates `MODULE.bazel`, `WORKSPACE`, `.bazelrc`, `BUILD.bazel`, and `.bazelversion`.
 - `deps` discovers go.mod imports, writes a lockfile, builds a dependency resolver, and detects cycles.
 - `gazelle` invokes Gazelle or a simple fallback to generate BUILD files.
-- `cache` is a standalone Bazel AC/CAS HTTP server (not wired into the Makefile/Docker deployment).
+- `cache` is a standalone Bazel AC/CAS HTTP server (built by `make build-cache`; not wired into the Docker Compose deployment).
 - `migration` tracks fallback genrules and state transitions.
+
+### 8.6 Federated SQL
+
+`QuerySQL` executes one restricted SELECT through the `sqlagregator` coordinator (`internal/sqlfederation`). Two routing modes exist:
+
+- **No partition policy.** `BuildCatalog` treats every healthy node as a disjoint shard of the dataset view and `NodeBackend` executes a generated pushdown through `QueryPartial`. This path requires disjoint node shards, so it returns `Unimplemented` when telemetry reads are shared through ClickHouse.
+- **Partition policy.** `Route` intersects the caller's visible partitions with the policy, resolves each shard to one placement, and the router's `BackendResolver` builds the driver. Because placements are explicit backends rather than replicas, this path stays available with shared ClickHouse.
+
+The router registers resolvers for `monofs_local` (node shards), `omni` (CloudWatch Omni), `bigquery`, `clickhouse`, and `cloudwatch_logs_insights`. The ClickHouse resolver caches one HTTP driver per endpoint and is configured with `--clickhouse-url`, `--clickhouse-database`, `--clickhouse-user`, `--clickhouse-password`, `--clickhouse-timeout`, and `--clickhouse-max-rows` (or `MONOFS_CLICKHOUSE_*`). Dialect differences live in `sqlagregator/internal/dialect`: ClickHouse renders attribute bindings as map subscripts (`attributes['guardian.partition']`) and Logs Insights renders the time window with `FROM_UNIXTIME(...)` because `@timestamp` is a string there.
 
 ## 9. Data model and addressing
 
@@ -487,7 +510,7 @@ A repository is registered by `storageID` and mapped from `displayPath`. It reco
 
 ## 10. Deployment topology
 
-The checked-in `docker-compose.yml` describes a 14-service development cluster:
+The checked-in base `docker-compose.yml` defines 19 services: 14 core services plus five DuckDB logquery sidecars.
 
 | Service | Image target | Exposure | Notes |
 |---|---|---|---|
@@ -495,11 +518,12 @@ The checked-in `docker-compose.yml` describes a 14-service development cluster:
 | `search-index` | main `search` | internal `:9100`/`:9101` | no compose dependency on router |
 | `haproxy` | external `../lb` build | host `9090`, `8080` | plain TCP/HTTP; stats not published |
 | `router-a`, `router-b` | main `router` | via HAProxy | no state volume; independent local state |
-| `node-a` ... `node-e` | main `server` | host `9001`-`9005` directly | `/data` volume; `node-a` bootstraps KVS raft |
-| `client`, `client2`, `client3` | main `client` | SSH `2222`-`2224` | privileged, SYS_ADMIN, `/dev/fuse`, known `monofs` password |
+| `node-a` ... `node-e` | main `server` | `127.0.0.1:9001`-`9005` | `/data` volume; `node-a` bootstraps KVS raft |
+| `logquery-a` ... `logquery-e` | `Dockerfile.logquery` | internal `:9101` | read-only mount of the matching node's `/data`; serves the DuckDB sidecar |
+| `client`, `client2`, `client3` | main `client` | SSH `127.0.0.1:2222`-`2224` | privileged, SYS_ADMIN, `/dev/fuse`, known `monofs` password |
 | `minio` (S3 overlay) | MinIO | host `19000`/`19001` | default `minioadmin` credentials; bucket made public-read |
 
-The `Dockerfile` is a 19-stage multi-target build for UI, Go builders, and runtime images. `Dockerfile.search` duplicates the search image with a different base and healthcheck. `Dockerfile.pipeline-worker` and `Dockerfile.guardianctl` require an external `guardian` build context that is not in this repository.
+The `Dockerfile` is a 19-stage multi-target build for UI, Go builders, and runtime images. `sqlagregator` is a sibling build context (`--build-context sqlagregator=<repo>`), so local dialect/SQL changes are copied into the image instead of fetched from a pinned Git ref. `Dockerfile.search` duplicates the search image with a different base and healthcheck. `Dockerfile.pipeline-worker` and `Dockerfile.guardianctl` require an external `guardian` build context that is not in this repository.
 
 Deployment guarantees verified in the current tree:
 
@@ -507,7 +531,7 @@ Deployment guarantees verified in the current tree:
 - **[fixed]** Routers required auth config that Compose did not pass; `MONOFS_TOKEN` is now required.
 - **[fixed]** The fetcher entrypoint passed `monofs-fetcher` as a positional argument, so later flags (including `--config`) were ignored.
 - **[fixed]** Node ports bypassed the router/HAProxy boundary; host mappings are now loopback-only.
-- **[fixed]** CI built the wrong Docker target and did not build most binaries; the matrix now builds server/router/search and `make build` covers all binaries.
+- **[fixed]** CI built the wrong Docker target and did not build most binaries; the matrix now builds server/router/search/logquery and `make build` covers the core binaries (with separate targets for `monofs-logquery` and `monofs-server-duckdb`).
 - **[fixed]** `go.sum` was deleted on release; the workflow/action are removed. KVS/CFG pins still differ between images.
 
 ## 11. Consistency, durability, and failure model
@@ -542,10 +566,10 @@ Deployment guarantees verified in the current tree:
 
 | Binary | Main inputs |
 |---|---|
-| Router | ~70 flags; `MONOFS_TOKEN`, OIDC variables, access-policy URL/file/token, authz grants JSON, encryption key, peer/registry tokens, state dirs |
+| Router | ~95 flags; `MONOFS_TOKEN`, OIDC variables, access-policy URL/file/token, authz grants JSON, encryption key, peer/registry tokens, state dirs, federated SQL backend credentials (`MONOFS_CLICKHOUSE_*`, `MONOFS_BIGQUERY_*`, `MONOFS_OMNI_*`) |
 | Server | node ID, address, DB/Git paths, fetcher addresses, KVS peers/raft, access policy, OIDC, internal token, log engine, span engine (`logengine`/`clickhouse`), telemetry encryption, router for forwarding |
 | Fetcher | JSON config (`/etc/monofs/fetcher.json`), env, flags; encryption key; S3/GCS settings; cache limits |
-| Client | router, mount, cache, overlay, writable, virtual monorepo, token, external addresses |
+| Client | router, mount (optional with `--headless`/`--no-mount`), cache, overlay, writable, virtual monorepo, token, external addresses |
 | Search | port, index/cache dirs, router address, token, OIDC, authz enforce, guardian index flag |
 | Registry | listen address, router address, token, data namespace, upstream mappings, credentials (parsed but unused) |
 | Worker | router, guardian token, worker type, executor port |
@@ -567,7 +591,7 @@ Deployment guarantees verified in the current tree:
 - Prometheus metrics are registered in router, server, fetcher, search, registry, pipeline worker, and log engine.
 - OTLP traces/metrics/logs use `internal/telemetry`; the default is insecure and the endpoint scheme is stripped.
 - Doctor stores logs/metrics/traces in the log engine; the router fans queries out to nodes.
-- Diagnostics HTTP servers expose `/metrics` and full pprof without authentication.
+- Diagnostics HTTP servers expose `/metrics` without authentication; pprof routes are registered only when `MONOFS_DIAGNOSTICS_PPROF=true`, and are then also unauthenticated.
 
 ### 13.2 Authentication and authorization
 
@@ -611,7 +635,7 @@ This is a coarse map of the main areas.
 | Workspace write-back | `internal/router/workspace_*.go`, `internal/router/autopush.go`, `internal/router/autorefresh.go`, `internal/fetcher/workspace_*.go` |
 | Guardian | `internal/router/guardian_*.go`, `pipeline_kvs.go`, `internal/router/pipeline/` |
 | Storage node | `internal/server/fs.go`, `directory.go`, `direntry.go`, `server.go`, `proxy.go`, `failover.go`, `predictor.go` |
-| Storage backends | `internal/storage/blob/backend.go`, `internal/storage/workspacestore/`, `internal/metastore/store.go` |
+| Storage backends | `internal/storage/blob/`, `internal/storage/workspacestore/`, `internal/metastore/store.go` |
 | FUSE | `internal/fuse/*.go` (ops, session, overlay, commit, workspace) |
 | Client | `internal/client/sharded.go`, `workspace_*.go`, `internal/fetcher/client.go` |
 | Auth library | `pkg/authz/`, `pkg/authz/policy/` |

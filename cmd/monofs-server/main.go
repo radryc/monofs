@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	kvsv1 "github.com/radryc/kvs/api/proto/kvs/v1"
 	kvsgrpc "github.com/radryc/kvs/pkg/grpcserver"
 	"github.com/radryc/kvs/pkg/kvsapi"
 	"github.com/radryc/kvs/pkg/raftstore"
@@ -28,6 +29,7 @@ import (
 	"github.com/radryc/monofs/internal/storage/logengine"
 	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/internal/telemetrycrypto"
+	"github.com/radryc/monofs/internal/transport"
 	"github.com/radryc/monofs/pkg/authz"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -141,6 +143,8 @@ func main() {
 	kvsRaftAdvertiseAddr := flag.String("kvs-raft-advertise-addr", "", "Advertised Raft address for the embedded KVS store (defaults to --kvs-raft-addr)")
 	kvsBootstrap := flag.Bool("kvs-bootstrap", false, "Bootstrap this node as the initial embedded KVS raft cluster member")
 	kvsMaxHotVersions := flag.Int("kvs-max-hot-versions", 5, "Maximum number of hot versions retained in the embedded KVS store")
+	kvsAuthToken := flag.String("kvs-auth-token", strings.TrimSpace(os.Getenv("KVS_AUTH_TOKEN")), "Bearer token required by the embedded KVS gRPC service (env KVS_AUTH_TOKEN)")
+	kvsAllowUnauthenticated := flag.Bool("kvs-allow-unauthenticated", strings.EqualFold(strings.TrimSpace(os.Getenv("KVS_ALLOW_UNAUTHENTICATED")), "true"), "Serve the embedded KVS without authentication (development only; insecure)")
 	var kvsPeers stringSlice
 	flag.Var(&kvsPeers, "kvs-peer", "Embedded KVS peer in the form nodeID,apiAddress,raftAddress (repeatable)")
 
@@ -196,6 +200,13 @@ func main() {
 	if *nodeID == "" {
 		fmt.Fprintln(os.Stderr, "Error: --node-id is required")
 		flag.Usage()
+		os.Exit(1)
+	}
+	// Resolve transport security once; the gRPC listener, the fetcher client,
+	// and server-side forwarding all use this configuration.
+	tlsTransport, err := transport.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load transport config: %v\n", err)
 		os.Exit(1)
 	}
 	telemetryCfg, err := telemetry.LoadConfig("monofs-server")
@@ -300,7 +311,99 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create gRPC server with raised message limits for inline dep blobs
+	if *kvsBootstrap && *kvsRaftAddr == "" {
+		logger.Error("invalid kvs configuration", "error", "--kvs-bootstrap requires --kvs-raft-addr")
+		os.Exit(1)
+	}
+	if strings.TrimSpace(*kvsRaftAdvertiseAddr) != "" && *kvsRaftAddr == "" {
+		logger.Error("invalid kvs configuration", "error", "--kvs-raft-advertise-addr requires --kvs-raft-addr")
+		os.Exit(1)
+	}
+
+	// Create fetcher client early so KVS can use it as a blob offloader.
+	var kvsOffloader kvsapi.FetcherOffloader
+	if len(fetcherAddrs) > 0 {
+		kvsClientCfg := fetcher.DefaultClientConfig()
+		kvsClientCfg.FetcherAddresses = []string(fetcherAddrs)
+		kvsClientCfg.Transport = tlsTransport
+		if fc, fcErr := fetcher.NewClient(kvsClientCfg, logger); fcErr != nil {
+			logger.Warn("failed to create fetcher client for KVS offloading, archived blobs will stay local",
+				"error", fcErr)
+		} else {
+			kvsOffloader = &kvsOffloaderAdapter{client: fc}
+			logger.Info("KVS fetcher offloader configured",
+				"fetcher_count", len(fetcherAddrs))
+		}
+	}
+
+	// Initialize the embedded KVS store before the gRPC server so its
+	// authentication interceptors can be installed at construction time.
+	var kvsStore *raftstore.Store
+	var kvsService kvsv1.KVStoreServer
+	var kvsServerOpts []grpc.ServerOption
+	// kvsHandlesTransport is set when the KVS constructor installed the
+	// transport credentials for the whole gRPC server, so the storage service
+	// does not add a second grpc.Creds option.
+	kvsHandlesTransport := false
+	if strings.TrimSpace(*kvsDataDir) != "" {
+		peerDefs, peerErr := parseKVSPeers(kvsPeers)
+		if peerErr != nil {
+			logger.Error("failed to parse kvs peers", "error", peerErr)
+			os.Exit(1)
+		}
+		apiAddr := strings.TrimSpace(*kvsAPIAddr)
+		if apiAddr == "" {
+			apiAddr = *addr
+		}
+		kvsStore, err = raftstore.Open(raftstore.Config{
+			NodeID:         *nodeID,
+			DataDir:        *kvsDataDir,
+			RaftAddress:    strings.TrimSpace(*kvsRaftAddr),
+			RaftAdvertise:  strings.TrimSpace(*kvsRaftAdvertiseAddr),
+			APIAddress:     apiAddr,
+			Peers:          peerDefs,
+			Bootstrap:      *kvsBootstrap,
+			MaxHotVersions: *kvsMaxHotVersions,
+			LogOutput:      os.Stdout,
+			Offloader:      kvsOffloader,
+		})
+		if err != nil {
+			logger.Error("failed to create embedded kvs store", "error", err)
+			os.Exit(1)
+		}
+		switch {
+		case strings.TrimSpace(*kvsAuthToken) != "":
+			if tlsTransport.Required() {
+				// Required mode: KVS installs the shared TLS/mTLS server
+				// options alongside bearer auth.
+				kvsService, kvsServerOpts, err = kvsgrpc.NewWithAuthAndTLS(kvsStore, kvsgrpc.Config{AuthToken: strings.TrimSpace(*kvsAuthToken)})
+				kvsHandlesTransport = true
+			} else {
+				kvsService, kvsServerOpts, err = kvsgrpc.NewWithAuth(kvsStore, kvsgrpc.Config{AuthToken: strings.TrimSpace(*kvsAuthToken)})
+			}
+			if err != nil {
+				logger.Error("failed to configure embedded kvs authentication", "error", err)
+				os.Exit(1)
+			}
+		case *kvsAllowUnauthenticated:
+			logger.Warn("embedded kvs authentication disabled via --kvs-allow-unauthenticated; do not use in production")
+			kvsService = kvsgrpc.New(kvsStore, kvsgrpc.Config{})
+		default:
+			logger.Error("embedded kvs requires authentication: set --kvs-auth-token or KVS_AUTH_TOKEN (or --kvs-allow-unauthenticated for local development)")
+			os.Exit(1)
+		}
+		logger.Info("embedded kvs store initialized",
+			"data_dir", *kvsDataDir,
+			"api_addr", apiAddr,
+			"raft_addr", strings.TrimSpace(*kvsRaftAddr),
+			"peer_count", len(peerDefs),
+			"bootstrap", *kvsBootstrap,
+			"authenticated", strings.TrimSpace(*kvsAuthToken) != "")
+	}
+
+	// Create gRPC server with raised message limits for inline dep blobs.
+	// When the embedded KVS installed TLS options, they cover every service on
+	// this server, so adding our own grpc.Creds would be a duplicate.
 	serverOpts := []grpc.ServerOption{
 		grpc.StatsHandler(telemetry.NewGRPCServerStatsHandler()),
 		grpc.MaxRecvMsgSize(1024 * 1024 * 1024), // 1 GB
@@ -318,6 +421,15 @@ func main() {
 			grpc.ChainStreamInterceptor(accessControl.StreamInterceptor()),
 		)
 	}
+	if !kvsHandlesTransport {
+		transportServerOpt, transportErr := tlsTransport.ServerOption()
+		if transportErr != nil {
+			logger.Error("failed to configure transport security", "error", transportErr)
+			os.Exit(1)
+		}
+		serverOpts = append(serverOpts, transportServerOpt)
+	}
+	serverOpts = append(serverOpts, kvsServerOpts...)
 	grpcServer := grpc.NewServer(serverOpts...)
 
 	// Create server with NutsDB backend
@@ -326,69 +438,19 @@ func main() {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)
 	}
+	srv.SetInternalToken(strings.TrimSpace(*internalToken))
+	if strings.TrimSpace(*internalToken) == "" {
+		logger.Warn("telemetry SQL RPCs are disabled: set --internal-token or MONOFS_TOKEN")
+	}
+	srv.SetTransport(tlsTransport)
 	srv.SetAccessControl(accessControl)
 
-	if *kvsBootstrap && *kvsRaftAddr == "" {
-		logger.Error("invalid kvs configuration", "error", "--kvs-bootstrap requires --kvs-raft-addr")
-		os.Exit(1)
-	}
-	if strings.TrimSpace(*kvsRaftAdvertiseAddr) != "" && *kvsRaftAddr == "" {
-		logger.Error("invalid kvs configuration", "error", "--kvs-raft-advertise-addr requires --kvs-raft-addr")
-		os.Exit(1)
-	}
-
-	// Create fetcher client early so KVS can use it as a blob offloader.
-	var kvsOffloader kvsapi.FetcherOffloader
-	if len(fetcherAddrs) > 0 {
-		kvsClientCfg := fetcher.DefaultClientConfig()
-		kvsClientCfg.FetcherAddresses = []string(fetcherAddrs)
-		if fc, fcErr := fetcher.NewClient(kvsClientCfg, logger); fcErr != nil {
-			logger.Warn("failed to create fetcher client for KVS offloading, archived blobs will stay local",
-				"error", fcErr)
-		} else {
-			kvsOffloader = &kvsOffloaderAdapter{client: fc}
-			logger.Info("KVS fetcher offloader configured",
-				"fetcher_count", len(fetcherAddrs))
-		}
-	}
-
-	if strings.TrimSpace(*kvsDataDir) != "" {
-		peerDefs, err := parseKVSPeers(kvsPeers)
-		if err != nil {
-			logger.Error("failed to parse kvs peers", "error", err)
-			os.Exit(1)
-		}
-		apiAddr := strings.TrimSpace(*kvsAPIAddr)
-		if apiAddr == "" {
-			apiAddr = *addr
-		}
-		kvsStore, err := raftstore.Open(raftstore.Config{
-			NodeID:         *nodeID,
-			DataDir:        *kvsDataDir,
-			RaftAddress:    strings.TrimSpace(*kvsRaftAddr),
-			RaftAdvertise:  strings.TrimSpace(*kvsRaftAdvertiseAddr),
-			APIAddress:     apiAddr,
-			Peers:          peerDefs,
-			Bootstrap:      *kvsBootstrap,
-			MaxHotVersions: *kvsMaxHotVersions,
-			LogOutput:      os.Stdout,
-			Offloader:      kvsOffloader,
-		})
-		if err != nil {
-			logger.Error("failed to create embedded kvs store", "error", err)
-			os.Exit(1)
-		}
+	if kvsStore != nil {
 		srv.SetKVSStore(kvsStore)
-		kvsgrpc.Register(grpcServer, kvsStore, kvsgrpc.Config{})
+		kvsv1.RegisterKVStoreServer(grpcServer, kvsService)
 		kvsStore.StartPurge(context.Background(), 5*time.Minute)
 		logger.Info("embedded kvs enabled",
-			"data_dir", *kvsDataDir,
-			"api_addr", apiAddr,
-			"raft_addr", strings.TrimSpace(*kvsRaftAddr),
-			"raft_advertise_addr", strings.TrimSpace(*kvsRaftAdvertiseAddr),
-			"peer_count", len(peerDefs),
-			"bootstrap", *kvsBootstrap,
-			"offloader", kvsOffloader != nil)
+			"authenticated", strings.TrimSpace(*kvsAuthToken) != "")
 	}
 
 	// Configure fetcher client and prediction if enabled
@@ -605,7 +667,8 @@ func main() {
 	// Enable reflection for debugging with grpcurl
 	reflection.Register(grpcServer)
 
-	// Start diagnostics HTTP server (metrics + pprof), separate from gRPC.
+	// Start diagnostics HTTP server (metrics; pprof only when
+	// MONOFS_DIAGNOSTICS_PPROF=true), separate from gRPC.
 	diagServer := diagnostics.StartServer(logger, "monofs-server", strings.TrimSpace(*metricsAddr))
 	defer diagnostics.ShutdownServer(logger, "monofs-server", diagServer)
 
@@ -630,7 +693,7 @@ func main() {
 
 	// Attempt graceful failover if router address is configured
 	if *routerAddr != "" {
-		if err := requestFailover(*routerAddr, *nodeID, logger); err != nil {
+		if err := requestFailover(tlsTransport, *routerAddr, *nodeID, logger); err != nil {
 			logger.Warn("failover request failed", "error", err)
 		} else {
 			logger.Info("failover completed successfully")
@@ -662,14 +725,18 @@ func newMetricsHandler() http.Handler {
 	return diagnostics.NewHandler()
 }
 
-func requestFailover(routerAddr, nodeID string, logger *slog.Logger) error {
+func requestFailover(tr transport.Config, routerAddr, nodeID string, logger *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	logger.Info("connecting to router for failover", "router", routerAddr)
 
+	transportOpt, err := tr.DialOption()
+	if err != nil {
+		return fmt.Errorf("configure transport for router: %w", err)
+	}
 	conn, err := grpc.DialContext(ctx, routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		transportOpt,
 		grpc.WithBlock())
 	if err != nil {
 		return fmt.Errorf("failed to connect to router: %w", err)
