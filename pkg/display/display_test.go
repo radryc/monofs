@@ -190,3 +190,24 @@ func TestMapJSONSQLKeepCanonical(t *testing.T) {
 		t.Fatalf("rows = %v", got.Rows)
 	}
 }
+
+func TestTranslateQueryUsesAssignments(t *testing.T) {
+	b := &Bundle{Assignments: []Assignment{{
+		Repo:      "payments-repo",
+		Partition: "payments",
+		Profile:   "payments-display",
+		Keys:      map[string]string{"partition": "eng_service", "intent": "deployment"},
+	}}}
+	out := b.TranslateQuery(map[string][]string{"eng_service": {"payments"}})
+	if got := out["partition"]; len(got) != 1 || got[0] != "payments" {
+		t.Fatalf("translated partition = %v", out)
+	}
+	// A display key that points at a different partition is not an alias for
+	// this assignment and must be left alone.
+	if out := b.TranslateQuery(map[string][]string{"eng_service": {"other"}}); out["partition"] != nil {
+		t.Fatalf("unassigned alias was translated: %v", out)
+	}
+	if profile, ok := b.AssignmentFor("payments"); !ok || profile.Keys["partition"] != "eng_service" {
+		t.Fatalf("assignment lookup failed: %+v", profile)
+	}
+}
