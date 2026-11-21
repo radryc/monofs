@@ -12,6 +12,8 @@ ARG KVS_REPO_URL=https://github.com/radryc/kvs.git
 ARG KVS_REF=1cf406ad1da680ae06e3db84aa3a5aa3e95585b3
 ARG CFG_REPO_URL=https://github.com/radryc/cfg.git
 ARG CFG_REF=1772380a1c25a39e0fe06cd0c4265c5b45fb5930
+ARG SQLAGREGATOR_REPO_URL=https://github.com/radryc/sqlagregator.git
+ARG SQLAGREGATOR_REF=5a682db7ac1c74b275c6823b70d8e106018989f7
 
 COPY go.mod go.sum ./
 RUN git init /kvs && \
@@ -21,7 +23,11 @@ RUN git init /kvs && \
     git init /cfg && \
     git -C /cfg remote add origin "$CFG_REPO_URL" && \
     git -C /cfg fetch --depth 1 origin "$CFG_REF" && \
-    git -C /cfg checkout --detach FETCH_HEAD
+    git -C /cfg checkout --detach FETCH_HEAD && \
+    git init /sqlagregator && \
+    git -C /sqlagregator remote add origin "$SQLAGREGATOR_REPO_URL" && \
+    git -C /sqlagregator fetch --depth 1 origin "$SQLAGREGATOR_REF" && \
+    git -C /sqlagregator checkout --detach FETCH_HEAD
 
 COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -tags duckdb -buildvcs=false -trimpath \
