@@ -229,3 +229,94 @@ func TestRepoTokensSlug(t *testing.T) {
 		}
 	}
 }
+
+func TestGitHubProviderReportsCheck(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", req.Method)
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("authorization = %q", got)
+		}
+		if !strings.HasSuffix(req.URL.Path, "/repos/org/repo/statuses/abc123") {
+			t.Errorf("path = %q", req.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body["state"] != "failure" {
+			t.Errorf("state = %q", body["state"])
+		}
+		if body["context"] != "monofs/partition-pipeline" {
+			t.Errorf("context = %q", body["context"])
+		}
+		if body["target_url"] != "https://monofs.example/runs/1" {
+			t.Errorf("target_url = %q", body["target_url"])
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	prov := &GitHubProvider{Token: "test-token", APIBase: server.URL}
+	err := prov.ReportCheck(context.Background(), CheckRequest{
+		RepoCloneURL: "https://github.com/org/repo.git",
+		SHA:          "abc123",
+		Name:         "monofs/partition-pipeline",
+		State:        CheckStateFailure,
+		Description:  "pipeline failed",
+		DetailsURL:   "https://monofs.example/runs/1",
+	})
+	if err != nil {
+		t.Fatalf("ReportCheck: %v", err)
+	}
+}
+
+func TestGitHubProviderReportCheckWithoutTokenIsNoop(t *testing.T) {
+	prov := &GitHubProvider{}
+	if err := prov.ReportCheck(context.Background(), CheckRequest{
+		RepoCloneURL: "https://github.com/org/repo.git",
+		SHA:          "abc123",
+		Name:         "monofs/partition-pipeline",
+		State:        CheckStateSuccess,
+	}); err != nil {
+		t.Fatalf("ReportCheck: %v", err)
+	}
+}
+
+func TestGitLabProviderReportsCheck(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", req.Method)
+		}
+		if got := req.Header.Get("PRIVATE-TOKEN"); got != "test-token" {
+			t.Errorf("private-token = %q", got)
+		}
+		if !strings.Contains(req.URL.Path, "/api/v4/projects/org/repo/statuses/abc123") {
+			t.Errorf("path = %q", req.URL.Path)
+		}
+		if err := req.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if req.PostForm.Get("state") != "success" {
+			t.Errorf("state = %q", req.PostForm.Get("state"))
+		}
+		if req.PostForm.Get("name") != "monofs/partition-pipeline" {
+			t.Errorf("name = %q", req.PostForm.Get("name"))
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	prov := &GitLabProvider{Token: "test-token", BaseURL: server.URL}
+	err := prov.ReportCheck(context.Background(), CheckRequest{
+		RepoCloneURL: "https://gitlab.com/org/repo.git",
+		SHA:          "abc123",
+		Name:         "monofs/partition-pipeline",
+		State:        CheckStateSuccess,
+		Description:  "pipeline succeeded",
+	})
+	if err != nil {
+		t.Fatalf("ReportCheck: %v", err)
+	}
+}

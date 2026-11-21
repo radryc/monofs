@@ -18,7 +18,31 @@ import (
 type PullRequestProvider interface {
 	Create(ctx context.Context, req CreatePRRequest) (*CreatePRResult, error)
 	RequestReviewers(ctx context.Context, req ReviewersRequest) error
+	ReportCheck(ctx context.Context, req CheckRequest) error
 	ProviderName() string
+}
+
+// CheckState is the commit-status state understood by both forges.
+type CheckState string
+
+const (
+	CheckStatePending CheckState = "pending"
+	CheckStateSuccess CheckState = "success"
+	CheckStateFailure CheckState = "failure"
+	CheckStateError   CheckState = "error"
+)
+
+// CheckRequest reports the outcome of a MonoFS pipeline run against a commit so
+// the forge can gate merging on it. Without a token the report is a no-op, which
+// keeps offline and token-less deployments working.
+type CheckRequest struct {
+	RepoCloneURL string
+	SHA          string
+	// Name is the check context, for example "monofs/partition-pipeline".
+	Name        string
+	State       CheckState
+	Description string
+	DetailsURL  string
 }
 
 type CreatePRRequest struct {
@@ -243,6 +267,60 @@ func (p *GitHubProvider) RequestReviewers(ctx context.Context, req ReviewersRequ
 	return nil
 }
 
+// ReportCheck posts a commit status for a published review branch. GitHub
+// exposes these as required checks, so a red MonoFS pipeline blocks merge.
+// Without a token it is a no-op.
+func (p *GitHubProvider) ReportCheck(ctx context.Context, req CheckRequest) error {
+	if p.Token == "" || strings.TrimSpace(req.SHA) == "" || strings.TrimSpace(req.Name) == "" {
+		return nil
+	}
+	owner, repo := parseOwnerRepo(req.RepoCloneURL)
+	if owner == "" || repo == "" {
+		return fmt.Errorf("cannot parse owner/repo from %s", req.RepoCloneURL)
+	}
+	apiBase := p.APIBase
+	if apiBase == "" {
+		apiBase = "https://api.github.com"
+	}
+	payload, err := json.Marshal(map[string]string{
+		"state":       string(req.State),
+		"context":     req.Name,
+		"description": truncateDescription(req.Description),
+		"target_url":  req.DetailsURL,
+	})
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/repos/%s/%s/statuses/%s", apiBase, owner, repo, url.PathEscape(req.SHA)),
+		bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+p.Token)
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := prHTTPClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("github commit status API returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func truncateDescription(value string) string {
+	const max = 140 // GitHub rejects longer commit-status descriptions.
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[:max-1] + "…"
+}
+
 // GitLabProvider creates merge requests through the GitLab REST API.
 // Without a token it fabricates a merge-request URL instead.
 type GitLabProvider struct {
@@ -364,6 +442,57 @@ func (p *GitLabProvider) RequestReviewers(ctx context.Context, req ReviewersRequ
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("gitlab merge request update API returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// ReportCheck posts a commit status for a merge request head. GitLab exposes
+// these as external status checks; without a token it is a no-op.
+func (p *GitLabProvider) ReportCheck(ctx context.Context, req CheckRequest) error {
+	if p.Token == "" || strings.TrimSpace(req.SHA) == "" || strings.TrimSpace(req.Name) == "" {
+		return nil
+	}
+	owner, repo := parseOwnerRepo(req.RepoCloneURL)
+	if owner == "" || repo == "" {
+		return fmt.Errorf("cannot parse owner/repo from %s", req.RepoCloneURL)
+	}
+	baseURL := p.BaseURL
+	if baseURL == "" {
+		baseURL = "https://gitlab.com"
+	}
+	state := "failed"
+	switch req.State {
+	case CheckStatePending:
+		state = "pending"
+	case CheckStateSuccess:
+		state = "success"
+	case CheckStateFailure, CheckStateError:
+		state = "failed"
+	}
+
+	projectPath := url.PathEscape(strings.TrimSuffix(strings.TrimPrefix(owner+"/"+repo, "/"), ".git"))
+	form := url.Values{}
+	form.Set("state", state)
+	form.Set("name", req.Name)
+	form.Set("description", truncateDescription(req.Description))
+	form.Set("target_url", req.DetailsURL)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/api/v4/projects/%s/statuses/%s", baseURL, projectPath, url.PathEscape(req.SHA)),
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("PRIVATE-TOKEN", p.Token)
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := prHTTPClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("gitlab commit status API returned %d", resp.StatusCode)
 	}
 	return nil
 }

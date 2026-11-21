@@ -6,12 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
-	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/router/pipeline"
+	"github.com/radryc/monofs/internal/router/workspacepr"
 )
 
 const pipelinePrincipalID = "monofs-pipeline"
@@ -72,11 +73,6 @@ func (r *Router) initPipeline(logger *slog.Logger) {
 		r.enqueueUpstreamRefresh(repoURL)
 	})
 	r.pipelineWebhookHandler = wh
-
-	r.pipelineStatusReporter = pipeline.NewStatusReporter(
-		os.Getenv("MONOFS_GITHUB_TOKEN"),
-		os.Getenv("MONOFS_GITLAB_TOKEN"),
-	)
 
 	if err := r.loadPipelinesFromKVS(logger); err != nil {
 		logger.Warn("initial pipeline load failed", "error", err)
@@ -169,28 +165,40 @@ func (r *Router) onPipelineRunFinished(run *pipeline.PipelineRun, logger *slog.L
 }
 
 func (r *Router) reportPipelineStatus(run *pipeline.PipelineRun, logger *slog.Logger) {
-	if r.pipelineStatusReporter == nil {
+	if run == nil || strings.TrimSpace(run.RepoURL) == "" || strings.TrimSpace(run.CommitSHA) == "" {
 		return
 	}
-	if run.RepoFullName == "" || run.CommitSHA == "" {
-		return
+	state := workspacepr.CheckStateFailure
+	switch run.State {
+	case pipeline.RunPending, pipeline.RunRunning:
+		state = workspacepr.CheckStatePending
+	case pipeline.RunSucceeded:
+		state = workspacepr.CheckStateSuccess
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	r.reportCheck(ctx, logger, run.RepoURL, run.CommitSHA, "monofs/"+run.PipelineName, state,
+		"MonoFS pipeline "+run.PipelineName+": "+string(run.State), "")
+}
 
-	status := pipeline.CommitStatus{
-		State:       pipeline.RunStateToCommitState(run.State),
-		Description: "MonoFS pipeline " + run.PipelineName + ": " + string(run.State),
-		Context:     "monofs/" + run.PipelineName,
-	}
-
-	var err error
-	if strings.Contains(strings.ToLower(run.RepoURL), "gitlab") {
-		err = r.pipelineStatusReporter.ReportGitLab(url.PathEscape(run.RepoFullName), run.CommitSHA, status)
-	} else {
-		err = r.pipelineStatusReporter.ReportGitHub(run.RepoFullName, run.CommitSHA, status)
-	}
+// reportCheck posts a commit status to the repository's forge. It resolves
+// per-repo tokens, supports self-hosted GitLab, and never fails a pipeline.
+func (r *Router) reportCheck(ctx context.Context, logger *slog.Logger, repoURL, sha, name string, state workspacepr.CheckState, description, detailsURL string) {
+	githubToken, gitlabToken := workspacepr.TokensForRepo(repoURL)
+	provider, err := workspacepr.DetectProvider(repoURL, os.Getenv("MONOFS_GITLAB_BASE_URL"), githubToken, gitlabToken)
 	if err != nil {
-		logger.Warn("pipeline commit status report failed",
-			"run_id", run.RunID, "repo", run.RepoFullName, "error", err)
+		logger.Warn("check provider unavailable", "repo", repoURL, "error", err)
+		return
+	}
+	if err := provider.ReportCheck(ctx, workspacepr.CheckRequest{
+		RepoCloneURL: repoURL,
+		SHA:          sha,
+		Name:         name,
+		State:        state,
+		Description:  description,
+		DetailsURL:   detailsURL,
+	}); err != nil {
+		logger.Warn("check report failed", "repo", repoURL, "check", name, "error", err)
 	}
 }
 

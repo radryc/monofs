@@ -751,6 +751,10 @@ message PublishWorkspaceRequest {
     string author_name = 4;
     string author_email = 5;
     string requested_branch_strategy = 6;
+    // Optional pull/merge request title and body. When empty, MonoFS derives
+    // both from the commit message and the published operations.
+    string pull_request_title = 7;
+    string pull_request_body = 8;
 }
 
 message PushWorkspaceCommitsRequest {

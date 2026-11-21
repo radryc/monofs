@@ -388,7 +388,6 @@ type Router struct {
 	pipelineOrchestrator   *pipeline.Orchestrator
 	pipelineWebhookHandler *pipeline.WebhookHandler
 	pipelineTaskQueue      *pipeline.TaskQueue
-	pipelineStatusReporter *pipeline.StatusReporter
 }
 
 var fetcherReconnectInterval = 5 * time.Second

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/monofs/internal/router/workspacepr"
@@ -27,17 +28,21 @@ func (r *Router) attachPullRequest(ctx context.Context, repoResult *pb.Workspace
 
 // attachPublishPullRequest opens a pull request for a repository that was
 // pushed to a review branch by the workspace publish flow. Guardian's repo
-// association uses this path: it publishes an adoption branch and MonoFS opens
-// the MR/PR for review.
-func (r *Router) attachPublishPullRequest(ctx context.Context, repoResult *pb.WorkspaceSyncRepositoryResult, repo workspacebundle.RepositoryBundle, commitMessage, jobID string) {
+// association and Forge use this path: they publish a review branch and MonoFS
+// opens the MR/PR for review. A caller-supplied title and body, when present,
+// replace the generated ones; MonoFS traceability lines are always appended.
+func (r *Router) attachPublishPullRequest(ctx context.Context, repoResult *pb.WorkspaceSyncRepositoryResult, repo workspacebundle.RepositoryBundle, commitMessage, pullRequestTitle, pullRequestBody, jobID string) {
 	if repoResult == nil {
 		return
 	}
-	title := strings.TrimSpace(commitMessage)
+	title := strings.TrimSpace(pullRequestTitle)
+	if title == "" {
+		title = strings.TrimSpace(commitMessage)
+	}
 	if title == "" {
 		title = fmt.Sprintf("MonoFS publish (%s)", repo.DisplayPath)
 	}
-	body := publishPullRequestBody(repo, jobID)
+	body := publishPullRequestBody(repo, pullRequestBody, jobID)
 	reviewPaths := changedPathsFromRepositoryBundle(repo)
 	r.openPullRequest(ctx, repoResult, title, body, reviewPaths)
 }
@@ -93,9 +98,31 @@ func (r *Router) openPullRequest(ctx context.Context, repoResult *pb.WorkspaceSy
 		// Review the change by the maintainers of the touched subtrees
 		// (OWNERS/CODEOWNERS), best-effort.
 		r.requestPullReviewers(ctx, provider, repoResult, result, reviewPaths)
+		r.reportPendingPullCheck(ctx, repoResult, result)
 	} else {
 		repoResult.Message = strings.TrimSpace(strings.TrimSuffix(repoResult.GetMessage(), "\n") + "; open pull request: " + result.WebURL)
 	}
+}
+
+// PartitionPipelineCheckContext is the commit-status context reported for
+// Guardian partition review branches. Branch protection should require it.
+const PartitionPipelineCheckContext = "monofs/partition-pipeline"
+
+// reportPendingPullCheck marks the review branch as pending so the forge shows
+// the gate before the pipeline finishes. Best-effort: a missing token, an
+// unknown provider, or a forge error never fails the publish.
+func (r *Router) reportPendingPullCheck(ctx context.Context, repoResult *pb.WorkspaceSyncRepositoryResult, result *workspacepr.CreatePRResult) {
+	if result == nil || !result.Created {
+		return
+	}
+	sha := strings.TrimSpace(repoResult.GetPushedCommit())
+	if sha == "" {
+		return
+	}
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	r.reportCheck(checkCtx, r.logger, repoResult.GetRepoUrl(), sha, PartitionPipelineCheckContext,
+		workspacepr.CheckStatePending, "MonoFS partition pipeline: queued", "")
 }
 
 // requestPullReviewers asks the forge to review an opened pull request by the
@@ -207,8 +234,12 @@ func pullRequestBody(bundle *workspacebundle.SourceCommitBundle, jobID string, r
 	return title, body.String()
 }
 
-func publishPullRequestBody(repo workspacebundle.RepositoryBundle, jobID string) string {
+func publishPullRequestBody(repo workspacebundle.RepositoryBundle, customBody, jobID string) string {
 	var body strings.Builder
+	if custom := strings.TrimSpace(customBody); custom != "" {
+		body.WriteString(custom)
+		body.WriteString("\n\n")
+	}
 	body.WriteString("Pushed from a MonoFS workspace publish (Guardian repository association).\n\n")
 	body.WriteString(fmt.Sprintf("Repository: %s\n", repo.DisplayPath))
 	if len(repo.Operations) > 0 {

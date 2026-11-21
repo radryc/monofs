@@ -204,7 +204,7 @@ func (r *Router) runWorkspacePublishJob(ctx context.Context, entry *workspaceSyn
 			// pull request so the change is reviewed before it reaches the base
 			// branch. Best-effort: failures never fail the push.
 			if repo, ok := repositoryBundleByStorageID(bundleEntry.bundle, repoResult.GetStorageId()); ok {
-				r.attachPublishPullRequest(ctx, repoResult, repo, req.GetLogicalCommitMessage(), entry.snapshot().GetJobId())
+				r.attachPublishPullRequest(ctx, repoResult, repo, req.GetLogicalCommitMessage(), req.GetPullRequestTitle(), req.GetPullRequestBody(), entry.snapshot().GetJobId())
 				if repoResult.GetPullRequestUrl() != "" {
 					if err := r.updateWorkspaceSyncRepository(entry, repoResult); err != nil {
 						return err
