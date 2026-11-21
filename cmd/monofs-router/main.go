@@ -27,6 +27,7 @@ import (
 	gitstorage "github.com/radryc/monofs/internal/storage/git"
 	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/internal/transport"
+	"github.com/radryc/monofs/pkg/audit"
 	"github.com/radryc/monofs/pkg/authz"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
@@ -592,6 +593,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	auditEmitter, auditErr := audit.NewServiceEmitter(audit.ConfigFromEnv("monofs-router"))
+	if auditErr != nil {
+		logger.Error("failed to configure audit emitter", "error", auditErr)
+		os.Exit(1)
+	}
+	if auditEmitter != nil {
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := auditEmitter.Close(closeCtx); err != nil {
+				logger.Error("audit emitter close failed", "error", err)
+			}
+		}()
+		logger.Info("audit emitter enabled", "wal", auditEmitter.WALPath())
+	}
+
 	grpcServer := grpc.NewServer(
 		transportServerOpt,
 		grpc.MaxRecvMsgSize(1024*1024*1024),
@@ -601,6 +618,8 @@ func main() {
 		grpc.ChainUnaryInterceptor(router.MetricsUnaryInterceptor()),
 		grpc.ChainStreamInterceptor(grpcAuthenticator.StreamServerInterceptor()),
 		grpc.ChainStreamInterceptor(router.MetricsStreamInterceptor()),
+		grpc.ChainUnaryInterceptor(router.AuditUnaryInterceptor(auditEmitter)),
+		grpc.ChainStreamInterceptor(router.AuditStreamInterceptor(auditEmitter)),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second, // Allow pings every 5s (prevents too_many_pings)
 			PermitWithoutStream: true,            // Allow pings even when no streams active

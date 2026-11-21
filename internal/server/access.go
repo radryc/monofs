@@ -41,7 +41,7 @@ type AccessControl struct {
 	enforce       bool
 	loader        *policy.Loader
 	logger        *slog.Logger
-	auditEmitter  atomic.Pointer[audit.WALSpoolEmitter]
+	auditEmitter  atomic.Value // audit.Emitter
 }
 
 // AccessControlOptions configures the node-side access control.
@@ -109,9 +109,9 @@ func (s *Server) SetAccessControl(ac *AccessControl) { s.access = ac }
 // Call it before EnableForwarding and ConfigureFetcher.
 func (s *Server) SetTransport(cfg transport.Config) { s.transport = cfg }
 
-// SetAuditEmitter attaches an optional WAL-backed audit emitter to AccessControl.
-func (a *AccessControl) SetAuditEmitter(emitter *audit.WALSpoolEmitter) {
-	if a == nil {
+// SetAuditEmitter attaches an optional audit emitter to AccessControl.
+func (a *AccessControl) SetAuditEmitter(emitter audit.Emitter) {
+	if a == nil || emitter == nil {
 		return
 	}
 	a.auditEmitter.Store(emitter)
@@ -121,7 +121,7 @@ func (a *AccessControl) emitAudit(ctx context.Context, id authz.Identity, action
 	if a == nil {
 		return nil
 	}
-	emitter := a.auditEmitter.Load()
+	emitter, _ := a.auditEmitter.Load().(audit.Emitter)
 	if emitter == nil {
 		return nil
 	}

@@ -30,6 +30,7 @@ import (
 	"github.com/radryc/monofs/internal/telemetry"
 	"github.com/radryc/monofs/internal/telemetrycrypto"
 	"github.com/radryc/monofs/internal/transport"
+	"github.com/radryc/monofs/pkg/audit"
 	"github.com/radryc/monofs/pkg/authz"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -296,8 +297,27 @@ func main() {
 		Enforce:       *accessEnforce,
 		Logger:        logger,
 	})
+	auditEmitter, auditErr := audit.NewServiceEmitter(audit.ConfigFromEnv("monofs-server"))
+	if auditErr != nil {
+		logger.Error("failed to configure audit emitter", "error", auditErr)
+		os.Exit(1)
+	}
+	if auditEmitter != nil {
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := auditEmitter.Close(closeCtx); err != nil {
+				logger.Error("audit emitter close failed", "error", err)
+			}
+		}()
+		logger.Info("audit emitter enabled", "wal", auditEmitter.WALPath())
+	}
+
 	if accessControl != nil {
 		go accessControl.Run(context.Background())
+		if auditEmitter != nil {
+			accessControl.SetAuditEmitter(auditEmitter)
+		}
 		logger.Info("access policy enabled",
 			"url", strings.TrimSpace(*accessPolicyURL),
 			"file", strings.TrimSpace(*accessPolicyFile),
