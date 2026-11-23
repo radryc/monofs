@@ -43,10 +43,28 @@ DuckDB's prebuilt bindings do not support Alpine/musl.
 monofs-logquery \
   --addr=:9101 \
   --logengine-dir=/var/lib/monofs/doctor \
+  --query-mode=auto \
   --duckdb-memory-limit=2GB \
   --duckdb-threads=4 \
   --duckdb-temp-dir=/var/cache/monofs/duckdb
 ```
+
+Key flags (`cmd/monofs-logquery/main.go`):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--query-mode` | `auto` | Query engine: `auto`, `native`, or `duckdb`. `auto` routes small/fast queries to the native scanner and the rest to DuckDB. |
+| `--native-max-limit` | `500` | Auto mode: largest result limit still routed to the native scanner. |
+| `--native-max-range` | `6h` | Auto mode: largest time range still routed to the native scanner. |
+| `--duckdb-queue-threshold` | `2` | Auto mode: when the DuckDB queue is above this depth, eligible small queries prefer native. |
+| `--duckdb-max-conns` | `2` | Maximum DuckDB connections (`database/sql` pool). |
+| `--duckdb-max-concurrent-queries` | `1` | Maximum concurrently executing DuckDB queries. |
+| `--max-metric-series` | `200000` | Maximum distinct metric series merged by a series scan. |
+| `--isolate-sql-queries` | `false` | Run SQL-console queries in a short-lived child process instead of the shared pool. |
+| `--isolate-sql-timeout` | `2m` | Timeout for an isolated SQL query. |
+| `--self-test` | `false` | Open DuckDB, run a validation query, and exit (container healthcheck / post-deploy). |
+| `--sql` | - | Run an ad-hoc DuckDB SQL query and exit. |
+| `--fallback` | `true` | Fall back to the native scanner when DuckDB cannot run a query; SQL/schema errors still return. |
 
 Then start the storage server with:
 

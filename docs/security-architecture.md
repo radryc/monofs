@@ -53,13 +53,13 @@ of an older tree.
 
 | Boundary | Current enforcement | Problem |
 |---|---|---|
-| Network → router gRPC `:9090` | Optional bearer interceptor in observe mode; per-method checks; mTLS optional | Most RPCs have no authentication or authorization |
+| Network → router gRPC `:9090` | Bearer token required by default; per-method checks; mTLS optional | Any authenticated identity can call control RPCs that lack handler-level authorization |
 | Network → router HTTP `:8080` | OIDC/bearer middleware; public path exemption; TLS when required | Coarse authorization; any authenticated user can mutate admin state |
 | Network → native gateway | Shared mount token (when configured) | No per-principal authorization or read-only enforcement; plaintext TCP |
 | Network → storage node gRPC `:9000` | Optional policy source; otherwise none; mTLS optional | Compose publishes nodes on loopback, still bypassing router policy |
 | Network → fetcher gRPC `:9200` | No application authentication; mTLS optional | Read/write/delete content, stage/publish/push workspaces |
 | Network → registry `:5000` | No application authentication; TLS when required | Pull, push, overwrite, delete images |
-| Network → search `:9100` | Observe-only authenticator; mTLS optional | Unfiltered code search; delete/index operations |
+| Network → search `:9100` | Bearer token required by default; mTLS optional | Any authenticated identity can search everything; read filtering is opt-in, and delete/index are destructive |
 | Network → pipeline executor | Bearer/`X-Monofs-Executor-Token`; mTLS optional | Any authenticated caller can still execute arbitrary commands |
 | Network → Bazel cache `:9092` | No application authentication; TLS when required | Cache poisoning/read/write |
 | Router → node/search | Shared `x-monofs-internal` token; plaintext unless mTLS is required | Token leak compromises policy bypass |
@@ -74,7 +74,7 @@ of an older tree.
 
 **Human browser sessions.** OIDC Authorization Code + PKCE (S256), random state, HttpOnly/SameSite=Lax cookie. On callback, the router verifies the ID token signature against JWKS with an asymmetric algorithm allowlist, issuer, audience, and expiry. It then stores the **raw ID token** in the `monofs_session` cookie. There is no nonce, no refresh, no server-side revocation, and the opaque `SessionStore` is not used by the login flow.
 
-**Bearer tokens for APIs.** `pkg/authz.Authenticator` reads `Authorization: Bearer` and runs a verifier chain (OIDC, static/break-glass, noop). The router constructs its gRPC authenticator with `RequireToken=false`; search does the same; storage nodes install the interceptor only when a policy file/URL exists.
+**Bearer tokens for APIs.** `pkg/authz.Authenticator` reads `Authorization: Bearer` and runs a verifier chain (OIDC, static/break-glass, noop). Router and search gRPC construct the authenticator with `RequireToken=true` by default (`MONOFS_GRPC_REQUIRE_TOKEN=true`); observe mode requires explicitly setting it to `false`. The router also disables enforcement with `--insecure-dev-disable-auth` / `MONOFS_INSECURE_DEV_DISABLE_AUTH=true`. Storage nodes install the interceptor only when a policy file/URL exists, so node gRPC remains unauthenticated by default.
 
 **Machine tokens.** `pkg/authz` supports client credentials and a static break-glass verifier. `MONOFS_TOKEN` maps to `Identity{ClientID:"break-glass-admin"}`. There is no token minting, scoping, rotation, or expiry for internal tokens.
 
@@ -112,6 +112,7 @@ The native gateway remains raw TCP, and diagnostics servers are not wrapped. HAP
 - Browser session cookies contain the raw ID token.
 - The persistent session file, if used, is JSON and trusts any unexpired identity on disk.
 - Registry upstream username/password flags are parsed but never used.
+- The Compose MinIO overlay requires operator-supplied `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`; it ships no default `minioadmin` credentials.
 - No secret redaction helper exists for URLs/errors/logs.
 
 ### 4.5 Data protection and tenancy
@@ -131,14 +132,14 @@ The native gateway remains raw TCP, and diagnostics servers are not wrapped. HAP
 - Metrics are missing for access-policy allow/deny, Guardian auth failures, whitelist changes, deletions, failover assignments, and ownership-gate decisions.
 - Auth outcome metrics are not emitted for HTTP in browser-OIDC mode because the token authenticator is replaced, not layered.
 - Cluster gauges are only refreshed when the UI status endpoint is polled.
-- Doctor stores telemetry but there is no security audit log with actor/action/resource/decision.
+- **Security audit trail exists but is opt-in.** `pkg/audit` writes a hash-chained, disk-backed WAL and can ship batches to ClickHouse `audit.events`. It is enabled only with `AUDIT_ENABLED=true` (default off). The router audits mutating gRPC RPCs through `AuditUnaryInterceptor`/`AuditStreamInterceptor`; storage-node `AccessControl` audits authentication and read allow/deny decisions. Router mutations use `EmitDurable` (fail-closed); other emit sites honor `AUDIT_MODE=strict`/`AUDIT_FAIL_CLOSED=true`, though the node access controls log emission errors rather than failing reads. Coverage gaps remain: router HTTP mutations, fetcher, registry, and search are not audited.
 - Delete/partial-failure behavior often reports success, which undermines incident reconstruction.
 
 ### 4.7 Runtime and supply chain
 
 - Server/router/registry/fuse-plugin images run as root.
-- Client containers run privileged with `SYS_ADMIN`, `/dev/fuse`, unconfined AppArmor, SSH enabled, a known `monofs` password, and passwordless sudo.
-- MinIO uses `minioadmin/minioadmin` and makes the bucket publicly readable.
+- Client containers run with `cap_add: SYS_ADMIN`, `/dev/fuse`, and unconfined AppArmor, but not `privileged`. SSH password authentication is disabled (and root login is disabled); no passwordless sudoers rule is installed. The mount and `/dev/fuse` still give the container host-device reach.
+- The Compose MinIO overlay requires `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` from the environment (no `minioadmin` default), but its init job still applies `mc policy set download` to the `monofs` bucket, leaving it publicly readable.
 - Node gRPC ports `9001`-`9005` are published on loopback; they are no longer reachable on external interfaces but still bypass the router/HAProxy path locally.
 - CI checks out `radryc/kvs`/`cfg` default branches while Docker pins different SHAs.
 - `go.sum` was deleted on release and Docker builds disabled checksum verification. **Fixed in the working tree**; see the remediation decisions.
@@ -150,13 +151,13 @@ The native gateway remains raw TCP, and diagnostics servers are not wrapped. HAP
 
 | Component | Authentication | Authorization | Transport | Secrets | Audit |
 |---|---|---|---|---|---|
-| Router gRPC | Observe-only bearer | Per-method; many RPCs none | Plaintext default; mTLS optional | `MONOFS_TOKEN`, OIDC secret | Partial metrics |
+| Router gRPC | Bearer required by default | Per-method; many RPCs none | Plaintext default; mTLS optional | `MONOFS_TOKEN`, OIDC secret | Partial metrics; gRPC mutations audited when enabled |
 | Router HTTP | OIDC/bearer | Any authenticated user for many mutations; repo ACL reads | Plaintext default; TLS when required | Session cookie, OIDC secret | Partial |
 | Router native | Shared mount token (when enabled) | None | Plaintext TCP | `MONOFS_TOKEN`/`--native-auth-token` | Native metrics only |
 | Storage node | Optional policy source; internal token | Read policy only; no ingest/delete authz | Plaintext default; mTLS optional | Internal token, policy token | Partial |
 | Fetcher | None | None | Plaintext default; mTLS optional | Git tokens, encryption key | Counters only |
 | FUSE client | None locally | OS file permissions + mount owner | Plaintext default; TLS optional | Client token in memory | Local metrics |
-| Search | Observe-only token | Post-query filter; off by default | Plaintext default; mTLS optional | Internal token, Git token | Partial |
+| Search | Bearer required by default | Post-query filter; off by default | Plaintext default; mTLS optional | Internal token, Git token | Partial |
 | Registry | None | None | HTTP plaintext default; TLS when required | Guardian token | Process counters |
 | Pipeline worker | Guardian token on queue | Task claim; no executor auth | Plaintext default; mTLS optional | Worker env/cloud creds | Task results only |
 | Pipeline executor | Bearer/dedicated token required | None (any authenticated caller can execute) | Plaintext default; TLS optional | Inherits worker env | None |
@@ -169,9 +170,9 @@ The native gateway remains raw TCP, and diagnostics servers are not wrapped. HAP
 
 ### 6.1 Critical
 
-#### C1. Router gRPC control plane is unauthenticated in practice
+#### C1. Router gRPC control plane has no per-RPC authorization
 
-`cmd/monofs-router/main.go` builds the gRPC authenticator with `RequireToken=false`. `pkg/authz/interceptor.go` documents that observe mode never rejects a request. Destructive and control RPCs have no handler-level authorization:
+Router gRPC authenticates callers by default: `cmd/monofs-router/main.go` computes `grpcRequireToken` from `MONOFS_GRPC_REQUIRE_TOKEN` (default true) and the dev escape hatch, and refuses to start with enforcement on and no verifier. The remaining problem is authorization, not authentication: once a caller has any accepted token, these destructive and control RPCs have no handler-level role/scope check:
 
 - `DeleteRepository` (`internal/router/delete.go`)
 - `DrainCluster` / `UndrainCluster` (`drain.go`)
@@ -182,7 +183,7 @@ The native gateway remains raw TCP, and diagnostics servers are not wrapped. HAP
 - `GetWorkspaceSyncJob` / `ListWorkspaceSyncJobs` / `CancelWorkspaceSyncJob`
 - `QueryLedger`, `GetUpstream*`, `GetClusterStats`, `GetNodeStats`
 
-Anyone who can reach `:9090` can delete data, disable failover behavior, unregister clients, read telemetry/upstream data, and start workspace writes.
+Any accepted identity (any OIDC/break-glass/service token, or an anonymous caller when `MONOFS_GRPC_REQUIRE_TOKEN=false`/`--insecure-dev-disable-auth` is set) can delete data, disable failover behavior, unregister clients, read telemetry/upstream data, and start workspace writes.
 
 #### C2. Guardian principal registration is self-service and cannot be revoked
 
@@ -204,9 +205,9 @@ Anyone who can reach `:9090` can delete data, disable failover behavior, unregis
 
 `POST /execute` accepts arbitrary `arguments`, environment variables, input/output files, working directory, and timeout. It now requires a bearer/`X-Monofs-Executor-Token` credential and bounds the request body, but still runs `exec.CommandContext` with the worker's full environment, no sandbox and no resource limits; transport TLS applies only when `STRATA_TLS_MODE=required`. **Status:** authentication implemented; sandboxing/limits remain open.
 
-#### C7. Client containers are privileged SSH boxes with a known password
+#### C7. Client containers are SSH boxes with host-device access
 
-The client image enables SSH password authentication for `monofs:monofs`, grants passwordless sudo, and Compose runs it with `privileged: true`, `SYS_ADMIN`, `/dev/fuse`, and unconfined AppArmor. Anyone reaching ports 2222-2224 can log in, become root, access the mount and host devices, and potentially reach the cluster network.
+The client image disables SSH password authentication and root login, and Compose does not set `privileged: true` or install a passwordless sudoers rule. It still runs with `cap_add: SYS_ADMIN`, `/dev/fuse`, and unconfined AppArmor, and publishes SSH on loopback ports 2222-2224. A client with a key (or local `docker exec` access) can use the mount and FUSE device and reach the cluster network.
 
 #### C8. Release process removed dependency integrity
 
@@ -231,9 +232,9 @@ The release workflow used to delete every `go.sum` and Docker builds disabled ch
 - Ingest, delete, replication, discovery, ledger, and Doctor RPCs have no authorization.
 - Forwarded RPCs drop the caller's bearer/`x-client-id`.
 
-#### H4. Search is unauthenticated and unfiltered by default
+#### H4. Search requires a token but is unfiltered by default
 
-The authenticator is `requireToken=false`; `applyReadPolicy` returns all hits when no policy is configured, when enforcement is off, or when the caller is anonymous in observe mode. `Search` does not require a storage ID and supports repository filters. `DeleteIndex` with an empty/unknown storage ID removes every `.zoekt` shard. `IndexRepository` accepts arbitrary `StorageID`/`DisplayPath`/source, enabling local path deletion and Git SSRF.
+Search requires a bearer token by default, but any accepted identity gets unfiltered results: `applyReadPolicy` returns all hits when no policy is configured, when enforcement is off, or when auth is explicitly put back into observe mode. `Search` does not require a storage ID and supports repository filters. `DeleteIndex` with an empty/unknown storage ID removes every `.zoekt` shard. `IndexRepository` accepts arbitrary `StorageID`/`DisplayPath`/source, enabling local path deletion and Git SSRF.
 
 #### H5. Registry has no application authentication
 
@@ -328,7 +329,7 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 #### H18. Supply chain and deployment defaults
 
 - Compose publishes node ports on loopback and both networks are ordinary bridges; the “DMZ” is conceptual.
-- MinIO default credentials and public-read bucket.
+- MinIO credentials are required from the environment, but the init job still makes the bucket publicly readable.
 - Server/router/registry/plugin images run as root.
 - CI checks out unpinned sibling repos; Docker pins different SHAs. `go.sum` deletion is fixed, but the pinning/signing work remains.
 - Base images/tools are unpinned.
@@ -365,7 +366,7 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 
 ### 6.4 Low / hardening
 
-- `monofs-admin` destructive commands have no token flag, so they cannot work if gRPC auth is later enforced.
+- `monofs-admin ingest` accepts `--token` (defaults to `MONOFS_TOKEN`) and attaches it as a bearer token. The other gRPC commands (`status`, `delete`, `drain`, `undrain`, `failover`, whitelist, …) have no token flag and send no bearer token, so they fail `Unauthenticated` against the default router configuration unless `MONOFS_GRPC_REQUIRE_TOKEN=false`/dev auth is used.
 - `Authenticate` accepts any token and returns a 24-hour session.
 - `--insecure-dev-disable-auth` is a single env-var kill switch.
 - Client cache deletion is destructive (`--cache` directory removed unless `--keep-cache`).
@@ -398,7 +399,7 @@ Publish applies a deny-list for `.env`, keys, `secrets/`, etc. Source push does 
 Before running MonoFS outside a trusted lab:
 
 - [ ] TLS/mTLS enabled (`STRATA_TLS_MODE=required`), including the native gateway and diagnostics; no plaintext internal traffic.
-- [ ] Router gRPC `RequireToken=true`; every destructive RPC authorized.
+- [ ] Router/search gRPC keep `RequireToken=true` (no `MONOFS_GRPC_REQUIRE_TOKEN=false`, no dev auth); every destructive RPC authorized, not just authenticated.
 - [ ] Guardian principal registration requires admin/control-plane credentials.
 - [ ] Native gateway disabled or authenticated and network-restricted.
 - [ ] Fetcher, search, registry, pipeline executor, and Bazel cache on private networks with auth.
@@ -411,7 +412,7 @@ Before running MonoFS outside a trusted lab:
 - [ ] `go.sum` present; checksums enforced; pinned images/dependencies; signed releases.
 - [ ] Policy source configured and enforcement enabled; startup fails if missing.
 - [ ] Admin role checks on UI/API mutations; CSRF/CSP/security headers.
-- [ ] Audit logging and metrics for security decisions.
+- [ ] `AUDIT_ENABLED=true` with a durable `AUDIT_WAL_DIR` and a ClickHouse sink; metrics for security decisions.
 - [ ] Backups and restore tests for Pebble, workspace WAL, blob archives, and KVS.
 
 ## 9. Open questions and residual risks

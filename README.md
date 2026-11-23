@@ -47,7 +47,8 @@ updated with the code.
 
 ```text
 api/proto/            gRPC contracts: router, node, fetcher, search
-cmd/                  all binaries
+cmd/                  all binaries (core services plus monofs-loadgen,
+                      monofs-pipeline-worker, monofs-trace-dump, admin/client tooling)
 internal/router/      control plane, Guardian, workspaces, pipelines, UI
 internal/server/      storage node
 internal/fetcher/     BlobFetcher + RepoSyncWorker services
@@ -57,7 +58,9 @@ internal/client/      sharded cluster client
 internal/search/      Zoekt indexing and query
 internal/registry/    OCI registry and pull-through proxy
 internal/worker/      pipeline worker and executor
+pkg/audit/            hash-chained audit WAL, emitter, ClickHouse audit.events sink
 pkg/authz/            identity, OIDC, policy, grants, OWNERS/CODEOWNERS
+pkg/display/          presentation-only display-key mapping
 monofs-kmod/          out-of-tree kernel client for the native protocol
 ```
 
@@ -69,6 +72,13 @@ make proto            # regenerate protobuf
 make test-unit        # go test ./internal/...
 make deploy           # docker compose build/up (requires MONOFS_ENCRYPTION_KEY and MONOFS_TOKEN)
 ```
+
+Router and search gRPC require a bearer token by default (`MONOFS_GRPC_REQUIRE_TOKEN=true`).
+Callers must send `authorization: Bearer <token>`; `MONOFS_TOKEN` is the shared
+break-glass/service token in the checked-in stack. Set
+`MONOFS_GRPC_REQUIRE_TOKEN=false` to return to observe mode, or start the router
+with `--insecure-dev-disable-auth` (`MONOFS_INSECURE_DEV_DISABLE_AUTH=true`) for
+local development. The Compose harness sets the latter for routers and search.
 
 The main `Dockerfile` is a multi-stage build for the UI and all runtime images. The checked-in Compose topology is a development harness; review [docs/architecture.md](docs/architecture.md#10-deployment-topology) and [docs/security-architecture.md](docs/security-architecture.md) before using it outside a trusted lab.
 
