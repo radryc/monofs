@@ -92,7 +92,7 @@ Read existing files from repositories to test the full read path including fetch
 
 ```bash
 # Read files from all repositories
-./bin/monofs-loadtest --mount /mnt \
+./bin/monofs-loadtest --mount /mnt/monofs \
   --read-existing \
   --read-ratio 0.9 \
   --list-ratio 0.1 \
@@ -101,7 +101,7 @@ Read existing files from repositories to test the full read path including fetch
   --concurrency 20
 
 # Read files from a specific repository
-./bin/monofs-loadtest --mount /mnt \
+./bin/monofs-loadtest --mount /mnt/monofs \
   --read-existing \
   --repo-path "github.com/kubernetes/kubernetes" \
   --read-only \
@@ -113,7 +113,7 @@ Read existing files from repositories to test the full read path including fetch
 100% reads on existing repository files (no writes, no test directory created):
 
 ```bash
-./bin/monofs-loadtest --mount /mnt \
+./bin/monofs-loadtest --mount /mnt/monofs \
   --read-only \
   --repo-path "github.com/golang/go" \
   --concurrency 30 \
@@ -179,17 +179,17 @@ Throughput:
 When using with Docker containers:
 
 ```bash
-# SSH into a client container
-ssh root@localhost -p 2222
+# SSH into a client container as the monofs user
+ssh monofs@localhost -p 2222
 
-# Run load test (assuming filesystem is mounted at /mnt/monofs)
-/app/monofs-loadtest --mount /mnt/monofs --duration 2m
+# Run the installed binary against the auto-mounted workspace
+/usr/local/bin/monofs-loadtest --mount /mnt/monofs --duration 2m
 ```
 
 Or execute directly:
 
 ```bash
-docker-compose exec client /app/monofs-loadtest --mount /mnt/monofs --duration 30s
+docker-compose exec client /usr/local/bin/monofs-loadtest --mount /mnt/monofs --duration 30s
 ```
 
 ## Understanding Results
@@ -237,8 +237,8 @@ Run during node failover to measure impact:
 # Terminal 1: Start load test
 ./bin/monofs-loadtest --mount /mnt/monofs --duration 10m --verbose
 
-# Terminal 2: Trigger failover
-docker-compose stop node1
+# Terminal 2: Stop storage nodes to trigger failover
+docker-compose stop node-a node-b node-c node-d node-e
 ```
 
 ### Capacity Planning

@@ -1,45 +1,43 @@
 # MonoFS CI/CD Pipeline System
 
-Pipeline-as-code for monorepos. Configure, run, and observe CI/CD pipelines directly from your MonoFS workspace — no external CI service required.
+Pipeline-as-code for monorepos. Configure, run, and observe CI/CD pipelines directly from the MonoFS cluster — no external CI service required.
 
 ## Where pipelines live
 
-Pipelines are YAML files in `.monofs/pipelines/*.yml` — committed through `monofs-session` like any other file. The router auto-discovers them from the monofs workspace — no separate registration needed, no FUSE mount on the router.
+Pipeline configs are YAML objects in the Guardian KVS under `/.pipelines/`.
+The router loads that prefix at startup and watches it for changes
+(`internal/router/pipeline_router.go`). There is no workspace directory scan,
+no local-file loader, and no per-directory discovery.
+
+The repository convention is to author them under `.monofs/pipelines/`, and the
+checked-in examples live in `.monofs/pipelines/examples/`, but the router does
+not read those workspace files directly.
 
 ```
-workspace/                              # monorepo root
-├── .monofs/pipelines/
-│   ├── full-cicd.yml                   # root-level: runs on any change
-│   └── release.yml                     # root-level: tag-triggered
-├── packages/
-│   ├── server/
-│   │   └── .monofs/pipelines/
-│   │       └── ci.yml                  # scoped to packages/server/
-│   ├── frontend/
-│   │   └── .monofs/pipelines/
-│   │       └── ci.yml                  # scoped to packages/frontend/
-│   └── shared/
-│       └── .monofs/pipelines/
-│           └── test.yml                # scoped to packages/shared/
-├── infra/
-│   └── .monofs/pipelines/
-│       └── deploy.yml                  # scoped to infra/
-└── docs/
-    └── .monofs/pipelines/
-        └── spellcheck.yml              # scoped to docs/
+Guardian logical namespace
+└── /.pipelines/
+    ├── full-cicd.yml
+    ├── release.yml
+    └── ci.yml
 ```
 
-### Scoping rules
+### Registration and scoping
 
-- **Root-level** (`.monofs/pipelines/` at repo root) → triggers on every matching event
-- **Package-level** (e.g., `packages/server/.monofs/pipelines/`) → set `source_dir: packages/server` in the YAML to auto-scope:
+1. Write the YAML object at `/.pipelines/<name>.yml` in Guardian (the logical
+   path maps to the `guardian-system` storage namespace).
+2. The router validates it and registers it. Changes are picked up live through
+   Guardian Watch; no restart is required.
+3. Scope a pipeline with the trigger filters in the YAML (`on.push.paths`,
+   `paths-ignore`, branches, tags). **`source_dir` is not a user field** — the
+   config struct marks it `yaml:"-"` — so writing it in a pipeline file has no
+   effect, and per-directory auto-scoping is not implemented.
 
 ```yaml
 name: server-ci
-source_dir: packages/server     # only triggers when packages/server/** changes
 on:
   push:
     branches: [main]
+    paths: ["packages/server/**"]
 jobs:
   build:
     runs-on: builder
@@ -47,69 +45,23 @@ jobs:
       - run: make build-server
 ```
 
-You can also override with explicit `on.push.paths` filters in the YAML.
-
 ### Common patterns
 
-**Single pipeline for the whole repo.** One `.yml` file at `.monofs/pipelines/ci.yml` covers everything:
+**Single pipeline for the whole repo.** One object at `/.pipelines/ci.yml` covers
+everything.
 
-```
-workspace/
-└── .monofs/pipelines/
-    └── ci.yml          # triggers on any change in the repo
-```
-
-**Multiple pipelines at root.** Several `.yml` files in the same directory — each is a separate pipeline with its own name, triggers, and jobs:
-
-```
-workspace/
-└── .monofs/pipelines/
-    ├── build-test.yml  # pipeline "build-test"
-    ├── deploy.yml      # pipeline "deploy"
-    └── release.yml     # pipeline "release"
-```
-
-**Per-package pipelines in subdirectories.** Create `_any_` subdirectory with its own `.monofs/pipelines/`. The pipeline auto-scopes: set `source_dir` to the relative path and it only triggers when files within that directory change:
-
-```
-workspace/
-├── .monofs/pipelines/       # root: runs on any change
-│   └── release.yml
-├── packages/server/
-│   └── .monofs/pipelines/   # only packages/server/** changes
-│       └── ci.yml
-├── packages/frontend/
-│   └── .monofs/pipelines/   # only packages/frontend/** changes
-│       ├── ci.yml
-│       └── e2e.yml
-└── infra/
-    └── .monofs/pipelines/   # only infra/** changes
-        └── deploy.yml
-```
-
-There is no limit on how many `.monofs/pipelines/` directories you create, and each can contain any number of `.yml` files. Every pipeline configuration is discovered and loaded automatically — no registration or restart required.
-
-### How pipelines reach the router
-
-1. Create/update any `.monofs/pipelines/*.yml` file(s) in your mounted workspace
-2. Commit with `monofs-session commit -m "update pipelines"`
-3. The router auto-loads all pipeline configs from `/.pipelines/` in the Guardian namespace
-4. Subdirectory pipelines get their `source_dir` set automatically; root-level pipelines match every change
-5. Changes are picked up live via Guardian Watch — no restart needed
+**Multiple pipelines at root.** Several objects in the same prefix — each is a
+separate pipeline with its own name, triggers, and jobs.
 
 ### Removing a pipeline
 
-Remove the file from the workspace and commit:
+Delete the object from Guardian:
 
-```bash
-rm .monofs/pipelines/old-ci.yml
-monofs-session commit -m "remove old CI pipeline"
-```
-
-Or use the API directly:
 ```bash
 curl -X DELETE http://router:8080/api/pipelines/old-ci
 ```
+
+The router unregisters it from the in-memory orchestration state.
 
 ## Pipeline lifecycle
 
@@ -207,25 +159,20 @@ Worker: `deployer` — has `guardianctl`, `kubectl`, RBAC.
 
 ## Quick start
 
-### 1. Create a pipeline
+### 1. Author the pipeline
 
 ```bash
-mkdir -p .monofs/pipelines
-cp .monofs/pipelines/examples/build-test.yml .monofs/pipelines/
+cp .monofs/pipelines/examples/build-test.yml /tmp/build-test.yml
 ```
 
-### 2. Commit through monofs-session
+Edit it for your repository, then register the object at
+`/.pipelines/build-test.yml` in Guardian (through the Guardian path API or your
+Guardian tooling). The router loads and watches `/.pipelines/`.
+
+### 2. Trigger and watch
 
 ```bash
-monofs-session commit -m "add build-test CI pipeline"
-```
-
-The router picks up the new pipeline automatically from `/.pipelines/`.
-
-### 3. Trigger and watch
-
-```bash
-guardianctl pipeline list             # see the auto-discovered pipeline
+guardianctl pipeline list             # see registered pipelines
 guardianctl pipeline run build-test   # trigger manually (or push via webhook)
 ```
 
@@ -248,7 +195,7 @@ Open `http://localhost:8080/cicd` — live pipeline status, stage DAG, job logs.
 | Field | Required | Example |
 |-------|----------|---------|
 | `needs` | no | `[build, test]` — upstream jobs |
-| `runs-on` | yes | `builder`, `docker`, `deployer`, `lambda` |
+| `runs-on` | yes | `builder`, `docker`, `deployer`, `bazel`, `lambda` |
 | `if` | no | `"affected != ''"`, `"push_to_branch == 'main'"` |
 | `strategy.matrix` | no | `{ package: [server, router] }` |
 | `timeout-minutes` | no | `15` (default 10) |
@@ -282,6 +229,7 @@ Outputs: `affected.packages` — JSON array of changed package names.
 | `builder` | Build, test, lint | Go toolchain, Make, FUSE mount |
 | `docker` | Image build/push | Docker socket, privileged |
 | `deployer` | Deploy, rollout | guardianctl, kubectl, RBAC |
+| `bazel` | Bazel build/test | Bazel/Bazelisk, BEP parsing |
 | `lambda` | Short tasks | Invoked via AWS SDK |
 
 ### Concurrency control
@@ -320,23 +268,26 @@ The `affected` action computes the transitive closure of changed packages from g
 
 | File | What it does |
 |------|-------------|
-| [`build-test.yml`](./examples/build-test.yml) | Build → unit test + vet + fmt check |
-| [`image-build.yml`](./examples/image-build.yml) | Detect changes → build → Docker build |
-| [`image-push.yml`](./examples/image-push.yml) | Docker build → push to registry |
-| [`deploy.yml`](./examples/deploy.yml) | Deploy storage → Guardian → workers → services |
-| [`full-cicd.yml`](./examples/full-cicd.yml) | **All stages merged**: detect → build → test → lint → containerize → push → deploy → notify |
-| [`pr-checks.yml`](./examples/pr-checks.yml) | Fast PR feedback: lint + test + build (only affected) |
-| [`release.yml`](./examples/release.yml) | Tag-triggered: full build → push all images → staging deploy → smoke test → production deploy |
-| [`monorepo-matrix.yml`](./examples/monorepo-matrix.yml) | Cross-platform matrix: linux/amd64 + linux/arm64 |
-| [`nightly.yml`](./examples/nightly.yml) | Scheduled full build + test + benchmark + security scan + nightly images |
+| [`build-test.yml`](./../../.monofs/pipelines/examples/build-test.yml) | Build → unit test + vet + fmt check |
+| [`image-build.yml`](./../../.monofs/pipelines/examples/image-build.yml) | Detect changes → build → Docker build |
+| [`image-push.yml`](./../../.monofs/pipelines/examples/image-push.yml) | Docker build → push to registry |
+| [`deploy.yml`](./../../.monofs/pipelines/examples/deploy.yml) | Deploy storage → Guardian → workers → services |
+| [`full-cicd.yml`](./../../.monofs/pipelines/examples/full-cicd.yml) | **All stages merged**: detect → build → test → lint → containerize → push → deploy → notify |
+| [`pr-checks.yml`](./../../.monofs/pipelines/examples/pr-checks.yml) | Fast PR feedback: lint + test + build (only affected) |
+| [`release.yml`](./../../.monofs/pipelines/examples/release.yml) | Tag-triggered: full build → push all images → staging deploy → smoke test → production deploy |
+| [`monorepo-matrix.yml`](./../../.monofs/pipelines/examples/monorepo-matrix.yml) | Cross-platform matrix: linux/amd64 + linux/arm64 |
+| [`nightly.yml`](./../../.monofs/pipelines/examples/nightly.yml) | Scheduled full build + test + benchmark + security scan + nightly images |
 
-### Package-level examples (scoped to their directory)
+### Package-level examples (path-filtered)
 
-| File | Scope | What it does |
-|------|-------|-------------|
-| [`packages/server/.monofs/pipelines/ci.yml`](./examples/packages/server/.monofs/pipelines/ci.yml) | `packages/server/**` | build-server → test-unit |
-| [`packages/frontend/.monofs/pipelines/ci.yml`](./examples/packages/frontend/.monofs/pipelines/ci.yml) | `packages/frontend/**` | npm ci → lint → test → build |
-| [`infra/.monofs/pipelines/deploy.yml`](./examples/infra/.monofs/pipelines/deploy.yml) | `infra/**` | terraform plan → apply |
+These examples demonstrate `on.push.paths` filters; the directory they live in
+does not scope them automatically.
+
+| File | Example path filter | What it does |
+|------|-------------|-------------|
+| [`packages/server/.monofs/pipelines/ci.yml`](./../../.monofs/pipelines/examples/packages/server/.monofs/pipelines/ci.yml) | `packages/server/**` | build-server → test-unit |
+| [`packages/frontend/.monofs/pipelines/ci.yml`](./../../.monofs/pipelines/examples/packages/frontend/.monofs/pipelines/ci.yml) | `packages/frontend/**` | npm ci → lint → test → build |
+| [`infra/.monofs/pipelines/deploy.yml`](./../../.monofs/pipelines/examples/infra/.monofs/pipelines/deploy.yml) | `infra/**` | terraform plan → apply |
 
 ## Webhook integration
 
@@ -369,7 +320,7 @@ guardianctl deploy pipeline-workers         # deploy worker infrastructure
 guardianctl worker list                     # active workers
 ```
 
-Pipeline configs are managed through `monofs-session commit` — not through guardianctl.
+Pipeline configs are Guardian KVS objects under `/.pipelines/`; the examples here are authoring templates, not auto-loaded files.
 
 ## Architecture
 
@@ -388,9 +339,9 @@ GitHub/GitLab webhook ──► Router (pipeline orchestrator)
 
 - **No Redis** — tasks flow through existing Raft KVS + Guardian Watch
 - **No external runners** — workers are k8s pods/Lambda functions
-- **No separate CI config** — pipeline YAML lives in `.monofs/pipelines/`, committed via `monofs-session`
-- **Auto-scoped** — per-package pipelines only trigger for changes in their `source_dir`
-- **Auto-discovered** — router reads configs from `/.pipelines/`, picks up changes live via Guardian Watch
+- **No separate CI config** — pipeline YAML lives in Guardian KVS under `/.pipelines/` (author them under `.monofs/pipelines/` as a convention)
+- **Path-scoped** — use `on.push.paths`/`paths-ignore`; `source_dir` is not a user field and per-directory auto-scoping is not implemented
+- **Loaded from Guardian** — the router reads `/.pipelines/` and picks up changes live via Guardian Watch
 - **Guardian deploys workers** — `guardianctl deploy pipeline-workers`
 
 ## Deploying workers

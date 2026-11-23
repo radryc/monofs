@@ -87,6 +87,21 @@ Writes are accumulated per shard and flushed on the first of:
   the same writer.
 - `MaxShards` bounds memory: if more shards are active, flush the oldest.
 
+## Durable uploads (WAL)
+
+Cloud uploads are asynchronous, so the backend records each archive in a
+disk-backed upload WAL **before** it queues the S3/GCS copy. The WAL lives at
+`<cache-dir>/archives/upload.wal.json`; pending paths are replayed at startup,
+which closes the window where an archive was created but the process died
+before the object-store upload completed.
+
+`BlobBackend.Observability()` exposes the WAL and read-through state
+(`wal_path`, `wal_pending`, `wal_recorded_total`, `wal_replayed_total`,
+`wal_upload_failures_total`, cloud index/download counters). The router's
+`GET /api/fetchers/observability` aggregates it across fetchers, and the
+`/fetchers` UI renders the "Durable Uploads & S3 Read-Through" and "Blob Layout
+& Compaction" cards from that endpoint.
+
 ## Compaction
 
 Runs as its own component (not on the request path), round-robin over 256 shards.
@@ -147,8 +162,9 @@ Safety invariants:
 | v2 write path (streamed batch) | `StoreBlobBatchWriter` | implemented; groups by shard and flushes at 512 MiB / 8192 objects / 2 s |
 | v2 read path | `BlobBackend.v2FindBlob` | implemented; manifest + index cached for 30 s |
 | Legacy fallback | `BlobBackend.findBlobInCloud` | v2 → `_loose/<id>.pack` HEAD → legacy index |
-| Compactor | `BlobBackend.RunCompactor` + fetcher loop | implemented |
-| UI | `/fetchers` "Blob Layout & Compaction" card | implemented |
+| Compactor | `BlobBackend.RunCompactor` + fetcher loop | implemented (opt-in; not enabled by Compose) |
+| Upload WAL | `internal/storage/blob/upload_wal.go`, `BlobBackend` | implemented; pending S3 uploads replay on startup |
+| UI / API | `/api/fetchers/observability`, `/fetchers` cards | implemented |
 
 ## Configuration
 
@@ -178,8 +194,10 @@ MONOFS_BLOB_COMPACT_INTERVAL=5m
 
 The `monofs` partition (reconciled read-only) and the bootstrap storage
 manifests used by `guardianctl dev init` both pin
-`MONOFS_BLOB_LAYOUT_V2=true`. Compaction runs on `fetcher-a` only, so the CAS
-makes duplicate runs safe while the demo avoids doing the work twice.
+`MONOFS_BLOB_LAYOUT_V2=true`. No checked-in Compose service enables
+`--blob-compactor`/`MONOFS_BLOB_COMPACT_ENABLED`, so background compaction is
+opt-in per fetcher. If several fetchers run it, the manifest CAS makes duplicate
+runs safe.
 
 ## S3 conditional writes
 

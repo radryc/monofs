@@ -28,6 +28,7 @@
 | 20 | Doctor ingest/query | `Ingest*`, `Query*` | services, router, nodes, log engine |
 | 21 | Node failure/failover | health check -> failover | router, nodes, client |
 | 22 | Deploy/build | `Makefile`, Compose, Dockerfiles | CI, Docker, cluster |
+| 23 | Security audit | router mutation interceptor, node read/auth checks | router, nodes, audit WAL, ClickHouse |
 
 ## 2. Startup and shutdown
 
@@ -445,7 +446,7 @@ server -> Authenticator interceptor -> ChainVerifier -> Identity
 server -> per-handler authorization (if coded)
 ```
 
-Router gRPC uses `RequireToken=false`, so missing/invalid tokens become anonymous. Storage nodes install the interceptor only when a policy source exists. The search service is also `requireToken=false`.
+Router and search gRPC require a bearer token by default (`MONOFS_GRPC_REQUIRE_TOKEN=true`; the router also honors `--insecure-dev-disable-auth`/`MONOFS_INSECURE_DEV_DISABLE_AUTH`). Setting `MONOFS_GRPC_REQUIRE_TOKEN=false` returns them to observe mode, where missing/invalid tokens become anonymous. Storage nodes install their interceptor only when a policy source exists.
 
 ### 7.3 Internal cluster token
 
@@ -500,7 +501,8 @@ Asset paths (no dot-prefixed segment) keep up to 50 versions in a Pebble-backed 
 ### 9.1 Config and trigger
 
 ```text
-configs in /.pipelines/*.yml (or local)
+configs in Guardian KVS /.pipelines/*
+  -> router loads the prefix and watches it (no workspace scan, no local files)
   -> ParseConfig (YAML, unknown fields ignored)
   -> Validate (name, jobs, steps, runner type, DAG cycle)
   -> stored in configs map and Guardian KVS
@@ -706,4 +708,30 @@ docker compose up
   -> clients mount through HAProxy
 ```
 
-The supplied Compose topology is a development harness, not a production deployment: router auth is unconfigured, node ports are published directly, clients run privileged with a known SSH password, and several binaries have no build/deploy path. See [internal/README.md](internal/README.md).
+The supplied Compose topology is a development harness, not a production deployment: it sets `MONOFS_INSECURE_DEV_DISABLE_AUTH=true` for routers and search, node gRPC ports are published on loopback, and several binaries have no build/deploy path. Client containers use `SYS_ADMIN`, `/dev/fuse`, and unconfined AppArmor but are not privileged and do not accept SSH password logins.
+
+## 15. Security audit flow
+
+Auditing is off unless `AUDIT_ENABLED=true`.
+
+```text
+mutating router RPC
+  -> AuditUnaryInterceptor / AuditStreamInterceptor
+       -> auditActionForMethod (delete/admin/write)
+       -> handler runs; decision = allow, or deny + status code
+       -> Event{EmitDurable} -> hash-chained JSONL WAL
+            -> background flush -> ClickHouse audit.events
+  -> WAL write failure: Unavailable("audit_unavailable")
+
+node read / authentication
+  -> AccessControl.UnaryInterceptor / read checks
+       -> emitAudit(ActionAuth|ActionRead, allow|deny)
+       -> same WAL/emitter path
+```
+
+Details:
+
+- `AUDIT_WAL_DIR` defaults to `/var/lib/audit/wal`; each writer owns one WAL file. Events carry `prev_hash`/`hash`, sequence number, actor subject/client ID/groups, action, resource, decision, method, request ID, and source IP.
+- `AUDIT_SYNC_ON_WRITE=true` (default) fsyncs each record. Router mutations use `EmitDurable` and fail the request if the WAL rejects the event. Other emitters honor `AUDIT_MODE=strict`/`AUDIT_FAIL_CLOSED=true`; the node access-control hooks currently log emission errors instead of failing reads.
+- ClickHouse shipping starts only when `AUDIT_CH_URL` is set; the database defaults to `audit` and the table is `audit.events` (`AUDIT_CH_DATABASE`, `AUDIT_CH_USER`, `AUDIT_CH_PASSWORD`).
+- Coverage is intentionally split: the router audits mutations (reads are audited on the node), the node audits authentication and read decisions, and HTTP mutations plus fetcher/registry/search calls are not audited.

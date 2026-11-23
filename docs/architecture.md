@@ -165,9 +165,17 @@ The protobuf contract is broad but weakly typed at the telemetry boundary: Docto
 
 | Listener | Server | Authentication |
 |---|---|---|
-| gRPC `:9090` | `grpc.NewServer`, 1 GiB max messages, telemetry stats, keepalive enforcement | Identity interceptor in **observe mode** (`RequireToken=false`): missing/invalid tokens become anonymous. Per-method authorization only where explicitly coded. |
+| gRPC `:9090` | `grpc.NewServer`, 1 GiB max messages, telemetry stats, keepalive enforcement | Bearer authentication required by default (`MONOFS_GRPC_REQUIRE_TOKEN=true`); missing/invalid tokens are rejected. Per-method authorization only where explicitly coded. |
 | HTTP `:8080` | `net/http`, no read/write/idle timeouts | Browser OIDC session or bearer middleware; public health/metrics/static paths; `/api/` requires a non-anonymous identity. |
 | Native TCP `--native-addr` | `router.NativeGateway` | Shared token in `MountRequest.AuthToken` (defaults to `MONOFS_TOKEN`); startup fails if native is enabled without one. |
+
+Router and search gRPC both default to bearer-token enforcement
+(`cmd/monofs-router/main.go`, `cmd/monofs-search/main.go`). They fall back to
+observe mode only when `MONOFS_GRPC_REQUIRE_TOKEN=false`; the router's
+`--insecure-dev-disable-auth` flag (env `MONOFS_INSECURE_DEV_DISABLE_AUTH`) also
+disables gRPC enforcement. Search refuses to start without a verifier while
+enforcement is on. Storage nodes still install their access interceptor only
+when an access-policy source is configured.
 
 The HTTP chain in browser-OIDC mode is:
 
@@ -231,9 +239,12 @@ Guardian is not a separate binary in this repository. It is a set of logical pat
 ```text
 /partitions/<partition>/...       partition assets
 /.queues/<principal>/...          pipeline/worker task queues
+/.archive/<principal>/...         archived queue/task records
 /.scans/<pusher>/...              scan requests/results
 /.pipelines/...                   pipeline configs
 /.registry/...                    registry/probe metadata
+/.access/...                      access control-plane documents
+/.display/...                     display-key mapping data
 /doctor/...                       Doctor telemetry namespace
 /guardian-system/...              system-managed data
 ```
@@ -256,7 +267,7 @@ Doctor is the observability namespace:
 
 The router hosts a small CI system:
 
-- Configs are YAML in `/.pipelines/` (or local files) and are parsed by `internal/router/pipeline`.
+- Configs are YAML objects in the Guardian KVS under `/.pipelines/`; `internal/router/pipeline` parses them. The router loads that prefix at startup and watches it for changes (`pipeline_router.go`). There is no workspace directory scan or local-file load path.
 - Webhooks (GitHub/GitLab) and manual runs create `PipelineRun` values in memory.
 - Jobs are expanded (including matrices), written as tasks to `/.queues/pipeline/<run>/tasks/`, and claimed by `monofs-pipeline-worker` through Guardian change subscriptions.
 - Results are written to `.results/`, watched by the router, and advance the DAG.
@@ -269,6 +280,15 @@ The pipeline store is split: configs/tasks/results are persistent Guardian paths
 `internal/router/ui` is a Vue 3 + Vite + Tailwind SPA embedded into the router binary. It covers dashboard, repositories, ingest, search, fetchers, registry, pipelines, CI/CD, Bazel adoption, cluster, replication, performance, clients, dependencies, and indexer views. The UI calls the router's HTTP API directly with `fetch`; no generated API client is used.
 
 The repository list merges ingest counts from peer routers (`--peer-routers`) with a loop-guard header and a 2-second timeout, and the HTTP ingest handler pre-authorizes the display path and returns `403` synchronously instead of logging a denial after the UI has already reported success.
+
+### 4.10 Audit trail
+
+`pkg/audit` provides the shared audit path. It is **off unless `AUDIT_ENABLED=true`** (`ConfigFromEnv`):
+
+- `WALSpoolEmitter` appends JSONL records to a hash-chained WAL (default `/var/lib/audit/wal/<writer>.wal`). Each event carries the previous hash, sequence number, actor, action, resource, decision, and request/source metadata. `AUDIT_SYNC_ON_WRITE` defaults to true. Router mutations use `EmitDurable`, which is fail-closed; other emitters honor `AUDIT_MODE=strict` or `AUDIT_FAIL_CLOSED=true`.
+- `ServiceEmitter` runs a background batcher. When `AUDIT_CH_URL` is set it ships batches to ClickHouse `audit.events` (database defaults to `audit`).
+- The router installs `AuditUnaryInterceptor`/`AuditStreamInterceptor`, which audit mutating control-plane RPCs (delete/remove, drain/failover/unregister/whitelist/rebalance/promote, and upsert/ingest/publish/create/write/update/put/commit/push). A WAL failure returns `Unavailable: audit_unavailable`.
+- On storage nodes, `internal/server.AccessControl` emits authentication and read allow/deny events through the same emitter, but logs emission errors rather than failing the read. Router reads are not duplicated (the node audits them); fetcher, registry, and search are not wired.
 
 ## 5. Metadata plane: `monofs-server`
 
@@ -361,7 +381,7 @@ Reads resolve a digest in O(1) bounded GETs via the shard `MANIFEST.json` and `.
 
 Archives are encrypted with a 32-byte key (ChaCha20-Poly1305 in the packager pipeline) and compressed. For legacy archives, a process-local `blobIndex` maps content hash to archive path and entry path and is rebuilt by scanning local `.pack` files at startup.
 
-Cloud replication is asynchronous. The backup scanner only checks that an object exists via HEAD; it does not compare size or checksum.
+Cloud replication is asynchronous. Before an archive is queued for S3/GCS, the backend records it in a disk-backed upload WAL; startup replays pending entries so an archive created just before a crash is uploaded after restart (`internal/storage/blob/backend.go`). The backup scanner only checks that an object exists via HEAD; it does not compare size or checksum.
 
 ### 6.3 Git backend
 
@@ -434,7 +454,7 @@ Writable mounts (and `monofs-client --headless`) create a session automatically.
 - Index jobs are queued in memory and persisted as job/repo metadata.
 - Indexing reads a repository through the sharded client (or clones it when no router client is configured), filters binary and oversized files, and feeds documents to a Zoekt builder.
 - Search supports Zoekt query syntax, substring queries, file patterns, and symbol extraction.
-- Read-policy filtering is applied **after** search; the service's authenticator is constructed with `requireToken=false`.
+- Bearer authentication is required by default (`MONOFS_GRPC_REQUIRE_TOKEN=true`; observe mode only with `MONOFS_GRPC_REQUIRE_TOKEN=false` or `MONOFS_INSECURE_DEV_DISABLE_AUTH=true`). Read-policy filtering is applied **after** search; enforcement stays off unless `--access-enforce` is set.
 
 ### 8.2 Registry (`monofs-registry`)
 
@@ -520,15 +540,15 @@ The checked-in base `docker-compose.yml` defines 19 services: 14 core services p
 | `router-a`, `router-b` | main `router` | via HAProxy | no state volume; independent local state |
 | `node-a` ... `node-e` | main `server` | `127.0.0.1:9001`-`9005` | `/data` volume; `node-a` bootstraps KVS raft |
 | `logquery-a` ... `logquery-e` | `Dockerfile.logquery` | internal `:9101` | read-only mount of the matching node's `/data`; serves the DuckDB sidecar |
-| `client`, `client2`, `client3` | main `client` | SSH `127.0.0.1:2222`-`2224` | privileged, SYS_ADMIN, `/dev/fuse`, known `monofs` password |
-| `minio` (S3 overlay) | MinIO | host `19000`/`19001` | default `minioadmin` credentials; bucket made public-read |
+| `client`, `client2`, `client3` | main `client` | SSH `127.0.0.1:2222`-`2224` | `cap_add: SYS_ADMIN`, `/dev/fuse`, unconfined AppArmor; no privileged flag, no SSH password auth, no passwordless sudo |
+| `minio` (S3 overlay) | MinIO | host `19000`/`19001` | requires operator-supplied `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`; no default credentials; init job sets the bucket public-read |
 
 The `Dockerfile` is a 19-stage multi-target build for UI, Go builders, and runtime images. `sqlagregator` is a sibling build context (`--build-context sqlagregator=<repo>`), so local dialect/SQL changes are copied into the image instead of fetched from a pinned Git ref. `Dockerfile.search` duplicates the search image with a different base and healthcheck. `Dockerfile.pipeline-worker` and `Dockerfile.guardianctl` require an external `guardian` build context that is not in this repository.
 
 Deployment guarantees verified in the current tree:
 
 - **[fixed]** Compose used `context: ..` while the Dockerfile expects the repository root.
-- **[fixed]** Routers required auth config that Compose did not pass; `MONOFS_TOKEN` is now required.
+- **[fixed]** Compose now passes `MONOFS_TOKEN`; it also sets `MONOFS_INSECURE_DEV_DISABLE_AUTH=true` so the local lab boots without an IdP. Outside that harness, router/search gRPC require a bearer token by default.
 - **[fixed]** The fetcher entrypoint passed `monofs-fetcher` as a positional argument, so later flags (including `--config`) were ignored.
 - **[fixed]** Node ports bypassed the router/HAProxy boundary; host mappings are now loopback-only.
 - **[fixed]** CI built the wrong Docker target and did not build most binaries; the matrix now builds server/router/search/logquery and `make build` covers the core binaries (with separate targets for `monofs-logquery` and `monofs-server-duckdb`).
@@ -592,13 +612,14 @@ Deployment guarantees verified in the current tree:
 - OTLP traces/metrics/logs use `internal/telemetry`; the default is insecure and the endpoint scheme is stripped.
 - Doctor stores logs/metrics/traces in the log engine; the router fans queries out to nodes.
 - Diagnostics HTTP servers expose `/metrics` without authentication; pprof routes are registered only when `MONOFS_DIAGNOSTICS_PPROF=true`, and are then also unauthenticated.
+- `pkg/display` is a presentation-only display-key mapping library (`X-Strata-Display-Profile` / `displayProfile`); it renames canonical keys for rendering and does not change stored values, ACLs, or query execution.
 
 ### 13.2 Authentication and authorization
 
 The detailed model is in [security-architecture.md](security-architecture.md). In brief:
 
 - HTTP: browser OIDC (Authorization Code + PKCE) or bearer token; session cookie contains the raw ID token.
-- gRPC: bearer interceptor, but router and search are in observe mode and server enforcement requires a policy source.
+- gRPC: router and search require a bearer token by default; storage-node authentication and read enforcement are installed only when a policy source exists.
 - Guardian: opaque payload/header token mapped to a persisted principal and role.
 - Internal: `x-monofs-internal` shared token bypasses node/search read policy.
 - Authorization: one runtime policy (`authz/policy`), plus OWNERS/CODEOWNERS governance, per-handler role checks, and an in-memory ingestion whitelist.
@@ -635,10 +656,12 @@ This is a coarse map of the main areas.
 | Workspace write-back | `internal/router/workspace_*.go`, `internal/router/autopush.go`, `internal/router/autorefresh.go`, `internal/fetcher/workspace_*.go` |
 | Guardian | `internal/router/guardian_*.go`, `pipeline_kvs.go`, `internal/router/pipeline/` |
 | Storage node | `internal/server/fs.go`, `directory.go`, `direntry.go`, `server.go`, `proxy.go`, `failover.go`, `predictor.go` |
-| Storage backends | `internal/storage/blob/`, `internal/storage/workspacestore/`, `internal/metastore/store.go` |
+| Storage backends | `internal/storage/blob/` (including the upload WAL in `backend.go`), `internal/storage/workspacestore/`, `internal/metastore/store.go` |
 | FUSE | `internal/fuse/*.go` (ops, session, overlay, commit, workspace) |
 | Client | `internal/client/sharded.go`, `workspace_*.go`, `internal/fetcher/client.go` |
 | Auth library | `pkg/authz/`, `pkg/authz/policy/` |
+| Audit | `pkg/audit/`, `internal/router/audit_interceptor.go`, `internal/server/access.go` |
+| Display mapping | `pkg/display/` |
 | Search | `internal/search/` |
 | Registry | `internal/registry/` |
 | Git | `internal/git/`, `internal/gittoken/`, `internal/storage/git/` |

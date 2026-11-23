@@ -169,65 +169,100 @@ Shows detailed replication status and failover information:
 **When nodes have failed:**
 Shows detailed failover mappings and explains what happens during node failure.
 
+### Whitelist Command
+
+Manage the in-memory ingestion whitelist. The operation is selected with
+`--action`; `add` and `remove` require `--client-id`.
+
+```bash
+./bin/monofs-admin whitelist --router=localhost:9090 --action=list
+./bin/monofs-admin whitelist --router=localhost:9090 --action=add \
+  --client-id=ci-runner --label="CI runner"
+./bin/monofs-admin whitelist --router=localhost:9090 --action=remove --client-id=ci-runner
+./bin/monofs-admin whitelist --router=localhost:9090 --action=enable
+./bin/monofs-admin whitelist --router=localhost:9090 --action=disable
+```
+
+| Flag | Description | Default | Required |
+|------|-------------|---------|----------|
+| `--action` | `add`, `remove`, `list`, `enable`, or `disable` | `list` | No |
+| `--client-id` | Client ID to add/remove | - | For `add`/`remove` |
+| `--label` | Human-friendly label (used with `add`) | - | No |
+| `--router` | Router gRPC address | `localhost:9090` | No |
+
+The whitelist is in-memory and resets when the router restarts.
+
 ### Ingest Repository
 
-Ingest a Git repository into the MonoFS cluster. Automatically detects branch from GitHub URL format.
+Ingest a Git repository, file path, or S3 prefix into the MonoFS cluster.
 
 #### Basic Usage
 
 ```bash
-# Ingest from GitHub URL (auto-detect branch)
-./bin/monofs-admin ingest --url=https://github.com/radryc/prompusher/tree/main
+# Ingest a Git repository (ref defaults to main)
+./bin/monofs-admin ingest --source=https://github.com/radryc/prompusher
 
-# Ingest from develop branch
-./bin/monofs-admin ingest --url=https://github.com/prometheus/prometheus/tree/develop
+# Ingest a specific branch, tag, or commit
+./bin/monofs-admin ingest --source=https://github.com/prometheus/prometheus --ref=develop
 
-# Ingest with custom repository ID
+# Ingest with a custom source ID (display path)
 ./bin/monofs-admin ingest \
-  --url=https://github.com/golang/go/tree/master \
-  --repo-id=golang
+  --source=https://github.com/golang/go \
+  --ref=master \
+  --source-id=github.com/golang/go
 ```
 
-#### URL Format Support
-
-The CLI automatically parses GitHub URLs in these formats:
-
-- `https://github.com/owner/repo` - defaults to `main` branch
-- `https://github.com/owner/repo/tree/branch` - uses specified branch
-- `https://github.com/owner/repo/tree/feature/branch` - supports branches with slashes
-- `https://github.com/owner/repo.git` - defaults to `main` branch
+`--source` accepts a plain URL or the legacy GitHub `/tree/<branch>` form; when
+`--ref` is empty the branch from the URL is used, otherwise `main` for Git.
 
 #### Options
 
 | Flag | Description | Default | Required |
 |------|-------------|---------|----------|
-| `--url` | Git repository URL with optional `/tree/branch` | - | Yes |
-| `--repo-id` | Custom repository ID for lookup | Auto-generated | No |
+| `--source` | Git URL, file path, or S3 bucket | - | Yes |
+| `--ref` | Git branch/tag/SHA (or S3 prefix) | `main` for Git | No |
+| `--source-id` | Custom source/display ID | Auto-generated | No |
+| `--ingestion-type` | `git`, `s3`, or `file` | `git` | No |
+| `--fetch-type` | `blob` or `git` (other values fall back to `blob`) | `blob` | No |
+| `--replicate-data` | Replicate blob data to the fetch backend during ingest | `false` | No |
+| `--client-id` | Client ID for the ingestion whitelist | - | No |
+| `--token` | Bearer token for the ingest RPC (defaults to `$MONOFS_TOKEN`) | env | No |
 | `--router` | Router gRPC address | `localhost:9090` | No |
-| `--debug` | Enable debug logging | `false` | No |
+
+The ingest RPC has a 30-minute client timeout. Router and search gRPC require a
+bearer token by default, and `ingest` (plus `dogfood`, which reuses the same
+path) is the only admin command that attaches one. If `--token` is empty, pass
+the router's token via `MONOFS_TOKEN`, or run with
+`MONOFS_GRPC_REQUIRE_TOKEN=false`/`--insecure-dev-disable-auth` on a local lab.
+The other commands (`status`, `delete`, `drain`, …) send no bearer token and
+fail `Unauthenticated` against the default configuration.
 
 #### Examples
 
-**Production deployment:**
+**Production deployment with an explicit token:**
 ```bash
 ./bin/monofs-admin ingest \
   --router=prod-router.example.com:9090 \
-  --url=https://github.com/kubernetes/kubernetes/tree/release-1.29 \
-  --repo-id=k8s
+  --source=https://github.com/kubernetes/kubernetes \
+  --ref=release-1.29 \
+  --source-id=k8s \
+  --token="$MONOFS_ROUTER_TOKEN"
 ```
 
-**Debug mode:**
+**File ingestion:**
 ```bash
 ./bin/monofs-admin ingest \
-  --url=https://github.com/owner/repo/tree/main \
-  --debug
+  --source=/srv/configs \
+  --ingestion-type=file \
+  --source-id=configs
 ```
 
 **Output:**
 ```
-time=2026-01-28T10:15:30.000Z level=INFO msg="parsed repository URL" repo_url=https://github.com/radryc/prompusher.git branch=main custom_repo_id=
-time=2026-01-28T10:15:30.123Z level=INFO msg="ingesting repository" router=localhost:9090 repo_url=https://github.com/radryc/prompusher.git branch=main
-time=2026-01-28T10:16:45.456Z level=INFO msg="✅ ingestion successful" files_ingested=42 message="Repository ingested successfully"
+Ingesting source: https://github.com/radryc/prompusher (ref: main)
+Ingesting from router: localhost:9090
+...
+✅ Ingestion complete: 42 files
 ```
 
 ---
@@ -244,9 +279,6 @@ Display cluster health and node information.
 
 # Remote cluster
 ./bin/monofs-admin status --router=prod-router.example.com:9090
-
-# With debug logging
-./bin/monofs-admin status --debug
 ```
 
 #### Options
@@ -254,7 +286,6 @@ Display cluster health and node information.
 | Flag | Description | Default | Required |
 |------|-------------|---------|----------|
 | `--router` | Router gRPC address | `localhost:9090` | No |
-| `--debug` | Enable debug logging | `false` | No |
 
 #### Output Example
 
@@ -317,14 +348,20 @@ spec:
         - /app/monofs-admin
         - ingest
         - --router=$(ROUTER_ADDR)
-        - --url=https://github.com/owner/repo/tree/main
-        - --repo-id=myrepo
+        - --source=https://github.com/owner/repo
+        - --ref=main
+        - --source-id=myrepo
         env:
         - name: ROUTER_ADDR
           valueFrom:
             configMapKeyRef:
               name: monofs-admin-config
               key: ROUTER_ADDR
+        - name: MONOFS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: monofs-router-token
+              key: token
       restartPolicy: OnFailure
 ```
 
@@ -349,8 +386,15 @@ spec:
             - /app/monofs-admin
             - ingest
             - --router=monofs-router.monofs.svc.cluster.local:9090
-            - --url=https://github.com/myorg/config/tree/production
-            - --repo-id=prod-config
+            - --source=https://github.com/myorg/config
+            - --ref=production
+            - --source-id=prod-config
+            env:
+            - name: MONOFS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: monofs-router-token
+                  key: token
           restartPolicy: OnFailure
 ```
 
@@ -371,7 +415,7 @@ make build-admin
 go test ./cmd/monofs-admin/... -v
 
 # Test with local cluster
-./bin/monofs-admin ingest --url=https://github.com/test/repo/tree/main
+./bin/monofs-admin ingest --source=https://github.com/test/repo --ref=main
 ./bin/monofs-admin status
 ```
 
@@ -425,13 +469,14 @@ Error: ingest request failed: context deadline exceeded
 
 **Solution:**
 - Large repositories may take longer to ingest
-- The CLI has a 5-minute timeout - this should be sufficient for most repos
+- The ingest RPC has a 30-minute client timeout (`context.WithTimeout(..., 30*time.Minute)`)
 - Check router and backend logs for issues
 
 ---
 
 ## See Also
 
-- [Deployment Guide](../DEPLOYMENT.md)
-- [Kubernetes Setup](../k8s/README.md)
-- [Production Configuration](../k8s/PRODUCTION.md)
+- [Architecture](../../docs/architecture.md)
+- [Logical Flows](../../docs/logical-flows.md)
+- [Kubernetes deployment](https://github.com/radryc/strata/blob/main/docs/kubernetes.md)
+- [Local kind stack](https://github.com/radryc/strata/blob/main/docs/local-kind.md)
